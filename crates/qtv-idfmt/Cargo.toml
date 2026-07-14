@@ -1,0 +1,9 @@
+[package]
+name = "qtv-idfmt"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Single Bech32m formatting path for every identifier in the Quantova stack."
+
+[dependencies]
