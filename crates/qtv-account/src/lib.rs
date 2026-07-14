@@ -17,8 +17,17 @@
 
 use qtv_crypto::{ml_dsa, sha3};
 
-/// The scheme identifier for the machine lattice signature.
+/// The scheme identifier for the machine lattice signature, ml_dsa. This is the
+/// default scheme.
 pub const SCHEME_LATTICE: u8 = 1;
+
+/// The scheme identifier for the hash based signature, slh_dsa.
+pub const SCHEME_HASH: u8 = 2;
+
+/// The scheme identifier for the Falcon style signature, fn_dsa. It stays behind
+/// the fn-dsa feature and is off in every default build until its standard is
+/// final.
+pub const SCHEME_FALCON: u8 = 3;
 
 /// The length in bytes of a master seed.
 pub const MASTER_SEED_LEN: usize = 32;
