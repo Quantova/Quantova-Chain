@@ -1,7 +1,7 @@
 //! Coverage for transaction signing, verification, and the transaction id.
 
-use qtv_account::derive;
-use qtv_tx::{sign, verify, Body, Call, Wrapper, SCHEME_FALCON, SCHEME_LATTICE};
+use qtv_account::{derive, derive_with_scheme};
+use qtv_tx::{sign, verify, Body, Call, Wrapper, SCHEME_FALCON, SCHEME_HASH, SCHEME_LATTICE};
 
 /// A deterministic master seed pattern.
 fn master() -> [u8; 32] {
@@ -90,6 +90,21 @@ fn an_unknown_scheme_is_rejected() {
         wrapper.signature().to_vec(),
     );
     assert!(!verify(&forged, account.public_key()));
+}
+
+// Hash based signing is slow, so this keeps to one derive, one sign, and two
+// verifies. Run the suite in release if the debug run drags.
+#[test]
+fn hash_scheme_signs_and_verifies() {
+    let seed = master();
+    let account = derive_with_scheme(&seed, SCHEME_HASH, 0);
+    let target = derive_with_scheme(&seed, SCHEME_HASH, 1);
+    let call = Call::new(target.address(), vec![1, 2, 3, 4, 5]);
+    let body = Body::new(account.address(), 7, 21_000, 1_000_000, call);
+    let wrapper = sign(&account, &body);
+    assert_eq!(wrapper.scheme(), SCHEME_HASH);
+    assert!(verify(&wrapper, account.public_key()));
+    assert!(!verify(&wrapper, target.public_key()));
 }
 
 #[test]

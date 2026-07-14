@@ -1,6 +1,8 @@
 //! Coverage for the account derivation pipeline and the address tiers.
 
-use qtv_account::{address_for_key, derive, rotate, Tier, SCHEME_LATTICE};
+use qtv_account::{
+    address_for_key, derive, derive_with_scheme, rotate, Tier, SCHEME_HASH, SCHEME_LATTICE,
+};
 use qtv_idfmt::{parse_address, parse_secret, KEY_FLOOR};
 
 /// A deterministic master seed pattern.
@@ -64,6 +66,31 @@ fn compact_tier_is_shorter_and_both_hold_the_floor() {
     assert!(compact.len() < canonical.len());
     assert!(compact.len() >= KEY_FLOOR);
     assert!(canonical.len() >= KEY_FLOOR);
+}
+
+#[test]
+fn two_schemes_differ_only_in_scheme_yet_hide_it() {
+    let seed = master();
+    let lattice = derive_with_scheme(&seed, SCHEME_LATTICE, 0);
+    let hash = derive_with_scheme(&seed, SCHEME_HASH, 0);
+    assert_eq!(lattice.scheme(), SCHEME_LATTICE);
+    assert_eq!(hash.scheme(), SCHEME_HASH);
+    assert_ne!(lattice.address(), hash.address());
+    let lattice_payload = parse_address(&lattice.address()).unwrap();
+    let hash_payload = parse_address(&hash.address()).unwrap();
+    assert_eq!(lattice_payload.len(), hash_payload.len());
+    assert_ne!(lattice_payload, hash_payload);
+    assert!(lattice.address().starts_with("q1"));
+    assert!(hash.address().starts_with("q1"));
+}
+
+#[test]
+fn the_default_derive_takes_the_lattice_scheme() {
+    let seed = master();
+    assert_eq!(
+        derive(&seed, 0).address(),
+        derive_with_scheme(&seed, SCHEME_LATTICE, 0).address()
+    );
 }
 
 #[test]
