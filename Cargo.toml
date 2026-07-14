@@ -1,8 +1,18 @@
 [workspace]
 resolver = "2"
-members = ["crates/qtv-idfmt", "crates/qtv-codec", "crates/qtv-account", "crates/qtv-tx", "crates/qtv-block", "crates/qtv-state"]
+members = ["crates/qtv-idfmt", "crates/qtv-codec", "crates/qtv-account", "crates/qtv-tx", "crates/qtv-block", "crates/qtv-state", "crates/qtv-node"]
 
 [workspace.package]
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/Quantova/Quantova-Chain"
+
+# The hash based verifiable random function in qtv-crypto is heavy without
+# optimization, and the node drives it once per validator per height. Optimize
+# the crypto dependency in dev and test builds so the node loop and its tests run
+# in reasonable time, while our own crates stay debuggable.
+[profile.dev.package.qtv-crypto]
+opt-level = 3
+
+[profile.test.package.qtv-crypto]
+opt-level = 3
