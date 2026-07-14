@@ -1,7 +1,7 @@
 //! Coverage for transaction signing, verification, and the transaction id.
 
 use qtv_account::derive;
-use qtv_tx::{sign, verify, Body, Call, Wrapper, SCHEME_LATTICE};
+use qtv_tx::{sign, verify, Body, Call, Wrapper, SCHEME_FALCON, SCHEME_LATTICE};
 
 /// A deterministic master seed pattern.
 fn master() -> [u8; 32] {
@@ -47,7 +47,7 @@ fn tampered_body_is_rejected() {
     let body = sample_body();
     let wrapper = sign(&account, &body);
     let tampered = rebuild(&body, body.nonce(), vec![9, 9, 9]);
-    let forged = Wrapper::new(tampered, wrapper.scheme(), *wrapper.signature());
+    let forged = Wrapper::new(tampered, wrapper.scheme(), wrapper.signature().to_vec());
     assert!(!verify(&forged, account.public_key()));
 }
 
@@ -57,7 +57,7 @@ fn tampered_nonce_is_rejected() {
     let body = sample_body();
     let wrapper = sign(&account, &body);
     let tampered = rebuild(&body, body.nonce() + 1, body.call().args().to_vec());
-    let forged = Wrapper::new(tampered, wrapper.scheme(), *wrapper.signature());
+    let forged = Wrapper::new(tampered, wrapper.scheme(), wrapper.signature().to_vec());
     assert!(!verify(&forged, account.public_key()));
 }
 
@@ -65,7 +65,7 @@ fn tampered_nonce_is_rejected() {
 fn tampered_signature_is_rejected() {
     let account = derive(&master(), 0);
     let wrapper = sign(&account, &sample_body());
-    let mut signature = *wrapper.signature();
+    let mut signature = wrapper.signature().to_vec();
     signature[0] ^= 0xFF;
     let forged = Wrapper::new(wrapper.body().clone(), wrapper.scheme(), signature);
     assert!(!verify(&forged, account.public_key()));
@@ -86,8 +86,8 @@ fn an_unknown_scheme_is_rejected() {
     let wrapper = sign(&account, &sample_body());
     let forged = Wrapper::new(
         wrapper.body().clone(),
-        SCHEME_LATTICE + 1,
-        *wrapper.signature(),
+        SCHEME_FALCON + 1,
+        wrapper.signature().to_vec(),
     );
     assert!(!verify(&forged, account.public_key()));
 }

@@ -17,10 +17,11 @@ fn pattern(seed: u8) -> [u8; 32] {
 /// A machine lattice signature over a fixed message. The transaction root hashes
 /// the wrapper encodings and never verifies the signature, so one signature is
 /// enough to assemble the sample wrappers.
-fn sample_signature() -> ml_dsa::Signature {
+fn sample_signature() -> Vec<u8> {
     let (_public, secret) = ml_dsa::keygen(&[7u8; 32]);
     ml_dsa::sign(&secret, &[0u8; 32], &[], &[0u8; 32])
         .expect("an empty context stays within the length bound")
+        .to_vec()
 }
 
 /// A wrapper whose body carries the given nonce.
