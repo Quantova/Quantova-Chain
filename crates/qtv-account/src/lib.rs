@@ -1,7 +1,7 @@
 //! The account model for the Quantova stack.
 //!
 //! Every key carries a scheme identifier byte ahead of the key. Scheme one is
-//! the machine lattice signature and is the default, scheme two is the hash
+//! the module lattice signature and is the default, scheme two is the hash
 //! based signature, and scheme three is the Falcon style signature behind the
 //! fn-dsa feature. A thirty two byte master seed feeds a frozen pipeline. The
 //! pipeline folds the master seed, the scheme identifier and an index through
@@ -19,7 +19,7 @@
 
 use qtv_crypto::{ml_dsa, sha3, slh_dsa};
 
-/// The scheme identifier for the machine lattice signature, ml_dsa. This is the
+/// The scheme identifier for the module lattice signature, ml_dsa. This is the
 /// default scheme.
 pub const SCHEME_LATTICE: u8 = 1;
 

@@ -26,7 +26,7 @@ use qtv_account::Account;
 use qtv_codec::{to_bytes, Encode, Encoder};
 use qtv_crypto::{ml_dsa, sha3, slh_dsa};
 
-/// The scheme identifier for the machine lattice signature, the default scheme.
+/// The scheme identifier for the module lattice signature, the default scheme.
 pub const SCHEME_LATTICE: u8 = qtv_account::SCHEME_LATTICE;
 
 /// The scheme identifier for the hash based signature.
@@ -40,7 +40,7 @@ pub const SCHEME_FALCON: u8 = qtv_account::SCHEME_FALCON;
 /// transaction signature from any other signed message in the stack.
 pub const DOMAIN_TX: &[u8] = b"quantova.transaction.v1";
 
-/// The randomizer that drives deterministic machine lattice signing. A run of
+/// The randomizer that drives deterministic module lattice signing. A run of
 /// zero bytes selects the deterministic variant, so a body signs the same way
 /// every time.
 const SIGN_RANDOMIZER: [u8; 32] = [0u8; 32];

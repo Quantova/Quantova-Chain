@@ -14,7 +14,7 @@ fn pattern(seed: u8) -> [u8; 32] {
     out
 }
 
-/// A machine lattice signature over a fixed message. The transaction root hashes
+/// A module lattice signature over a fixed message. The transaction root hashes
 /// the wrapper encodings and never verifies the signature, so one signature is
 /// enough to assemble the sample wrappers.
 fn sample_signature() -> Vec<u8> {
