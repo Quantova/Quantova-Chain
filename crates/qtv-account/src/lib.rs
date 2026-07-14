@@ -1,11 +1,13 @@
 //! The account model for the Quantova stack.
 //!
-//! Every key carries a scheme identifier byte ahead of the key. Scheme
-//! identifier one is the machine lattice signature. A thirty two byte master
-//! seed feeds a frozen pipeline. The pipeline folds the master seed, the scheme
-//! identifier and an index through shake256 to reach a thirty two byte account
-//! seed, and that seed drives machine lattice key production in the crypto
-//! crate. The stored secret is that account seed and never the expanded key.
+//! Every key carries a scheme identifier byte ahead of the key. Scheme one is
+//! the machine lattice signature and is the default, scheme two is the hash
+//! based signature, and scheme three is the Falcon style signature behind the
+//! fn-dsa feature. A thirty two byte master seed feeds a frozen pipeline. The
+//! pipeline folds the master seed, the scheme identifier and an index through
+//! shake256 to reach a thirty two byte account seed, and that seed drives key
+//! production under the account scheme. The stored secret is that account seed
+//! and never the expanded key.
 //!
 //! An address is the address family render of the sha3 256 hash of the scheme
 //! identifier followed by the public key. The canonical tier keeps the full
@@ -15,7 +17,7 @@
 
 #![forbid(unsafe_code)]
 
-use qtv_crypto::{ml_dsa, sha3};
+use qtv_crypto::{ml_dsa, sha3, slh_dsa};
 
 /// The scheme identifier for the machine lattice signature, ml_dsa. This is the
 /// default scheme.
@@ -71,6 +73,31 @@ pub fn account_seed(master_seed: &[u8; MASTER_SEED_LEN], scheme: u8, index: u64)
     seed
 }
 
+/// The seed width slh_dsa consumes for each of its three seeds. The public key
+/// holds PK.seed and PK.root, so half its width is one seed.
+const HASH_SEED_LEN: usize = slh_dsa::PUBLIC_KEY_BYTES / 2;
+
+/// Derive the hash based signature key pair from an account seed. shake256
+/// expands the account seed into the three seeds slh_dsa keygen consumes, so a
+/// signer can rebuild the same secret key the address commits to. The secret key
+/// comes first, then the public key.
+pub fn hash_keypair(
+    seed: &[u8; SEED_LEN],
+) -> (
+    [u8; slh_dsa::SECRET_KEY_BYTES],
+    [u8; slh_dsa::PUBLIC_KEY_BYTES],
+) {
+    let mut material = [0u8; 3 * HASH_SEED_LEN];
+    sha3::shake256(seed, &mut material);
+    let mut sk_seed = [0u8; HASH_SEED_LEN];
+    let mut sk_prf = [0u8; HASH_SEED_LEN];
+    let mut pk_seed = [0u8; HASH_SEED_LEN];
+    sk_seed.copy_from_slice(&material[..HASH_SEED_LEN]);
+    sk_prf.copy_from_slice(&material[HASH_SEED_LEN..2 * HASH_SEED_LEN]);
+    pk_seed.copy_from_slice(&material[2 * HASH_SEED_LEN..]);
+    slh_dsa::keygen(&sk_seed, &sk_prf, &pk_seed)
+}
+
 /// The sha3 256 hash of the scheme identifier followed by the public key. This
 /// digest is the source of every address tier.
 fn address_hash(scheme: u8, public_key: &[u8]) -> [u8; 32] {
@@ -96,7 +123,7 @@ pub struct Account {
     scheme: u8,
     index: u64,
     seed: [u8; SEED_LEN],
-    public_key: ml_dsa::PublicKey,
+    public_key: Vec<u8>,
 }
 
 impl Account {
@@ -115,8 +142,8 @@ impl Account {
         &self.seed
     }
 
-    /// The machine lattice public key.
-    pub fn public_key(&self) -> &ml_dsa::PublicKey {
+    /// The public key bytes under the account scheme.
+    pub fn public_key(&self) -> &[u8] {
         &self.public_key
     }
 
@@ -136,13 +163,40 @@ impl Account {
     }
 }
 
-/// Derive an account from a master seed and an index under the machine lattice
-/// scheme. The account seed drives machine lattice key production, the expanded
-/// secret key is dropped, and the account keeps the seed and the public key.
+/// Derive an account from a master seed and an index under the default machine
+/// lattice scheme.
 pub fn derive(master_seed: &[u8; MASTER_SEED_LEN], index: u64) -> Account {
-    let scheme = SCHEME_LATTICE;
+    derive_with_scheme(master_seed, SCHEME_LATTICE, index)
+}
+
+/// Derive an account from a master seed and an index under a scheme identifier.
+/// The account seed drives key production under the scheme, the expanded secret
+/// key is dropped, and the account keeps the seed and the public key. Scheme one
+/// runs ml_dsa keygen, scheme two runs slh_dsa keygen over shake256 expanded
+/// seeds, and scheme three runs fn_dsa keygen behind the fn-dsa feature. An
+/// unknown scheme identifier is rejected.
+pub fn derive_with_scheme(master_seed: &[u8; MASTER_SEED_LEN], scheme: u8, index: u64) -> Account {
     let seed = account_seed(master_seed, scheme, index);
-    let (public_key, _expanded) = ml_dsa::keygen(&seed);
+    let public_key = match scheme {
+        SCHEME_LATTICE => {
+            let (public_key, _expanded) = ml_dsa::keygen(&seed);
+            public_key.to_vec()
+        }
+        SCHEME_HASH => {
+            let (_secret, public_key) = hash_keypair(&seed);
+            public_key.to_vec()
+        }
+        #[cfg(feature = "fn-dsa")]
+        SCHEME_FALCON => {
+            // The Falcon style scheme forwards to qtv_crypto::fn_dsa, which stays
+            // unpublished until its standard is final. The gated path tracks the
+            // module so it is ready when fn_dsa keygen lands.
+            #[allow(unused_imports)]
+            use qtv_crypto::fn_dsa;
+            unimplemented!("fn_dsa key derivation is gated until the standard is final")
+        }
+        _ => panic!("derive was handed an unknown scheme identifier"),
+    };
     Account {
         scheme,
         index,

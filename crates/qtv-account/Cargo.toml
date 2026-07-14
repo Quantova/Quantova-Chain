@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "The account model and key derivation pipeline for the Quantova stack."
 
+[features]
+default = []
+fn-dsa = ["qtv-crypto/fn-dsa"]
+
 [dependencies]
 qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", tag = "v0.1.0" }
 qtv-idfmt = { path = "../qtv-idfmt" }
