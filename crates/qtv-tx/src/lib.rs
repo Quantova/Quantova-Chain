@@ -9,24 +9,32 @@
 //! The bytes that are signed are the sha3 256 hash of the canonical body
 //! encoding followed by a fixed transaction domain tag. The domain tag keeps a
 //! transaction signature from ever standing in for another signed message. The
-//! machine lattice signature signs that digest, and the wrapper carries the
-//! scheme identifier of that signature alongside it.
+//! signature of the signing account scheme signs that digest, and the wrapper
+//! carries the scheme identifier of that signature alongside it.
 //!
-//! Signing folds the account seed back into a machine lattice key and signs the
-//! body digest. Verifying recomputes the digest under the same domain tag and
-//! checks the signature under the scheme identifier of the wrapper against the
-//! sender public key. The transaction id is the identifier format render under
-//! the transaction prefix of the sha3 256 hash of the canonical wrapper.
+//! Signing folds the account seed back into a key under the account scheme and
+//! signs the body digest. Verifying recomputes the digest under the same domain
+//! tag, reads the scheme identifier from the wrapper, and dispatches to ml_dsa
+//! for scheme one, slh_dsa for scheme two, and the fn-dsa gated fn_dsa for
+//! scheme three, rejecting any other value. The transaction id is the identifier
+//! format render under the transaction prefix of the sha3 256 hash of the
+//! canonical wrapper.
 
 #![forbid(unsafe_code)]
 
 use qtv_account::Account;
 use qtv_codec::{to_bytes, Encode, Encoder};
-use qtv_crypto::{ml_dsa, sha3};
+use qtv_crypto::{ml_dsa, sha3, slh_dsa};
 
-/// The scheme identifier for the machine lattice signature, the only scheme this
-/// transaction model verifies under.
+/// The scheme identifier for the machine lattice signature, the default scheme.
 pub const SCHEME_LATTICE: u8 = qtv_account::SCHEME_LATTICE;
+
+/// The scheme identifier for the hash based signature.
+pub const SCHEME_HASH: u8 = qtv_account::SCHEME_HASH;
+
+/// The scheme identifier for the Falcon style signature, behind the fn-dsa
+/// feature.
+pub const SCHEME_FALCON: u8 = qtv_account::SCHEME_FALCON;
 
 /// The fixed domain tag folded into every transaction digest. It separates a
 /// transaction signature from any other signed message in the stack.
@@ -36,6 +44,11 @@ pub const DOMAIN_TX: &[u8] = b"quantova.transaction.v1";
 /// zero bytes selects the deterministic variant, so a body signs the same way
 /// every time.
 const SIGN_RANDOMIZER: [u8; 32] = [0u8; 32];
+
+/// The additional randomness that drives deterministic hash based signing. A run
+/// of zero bytes fixes the signature, so a body signs the same way every time.
+const SIGN_RANDOMIZER_HASH: [u8; slh_dsa::PUBLIC_KEY_BYTES / 2] =
+    [0u8; slh_dsa::PUBLIC_KEY_BYTES / 2];
 
 /// A call names the target address and carries the encoded arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,17 +142,18 @@ impl Encode for Body {
 }
 
 /// A signed transaction. The wrapper pairs a body with the scheme identifier and
-/// the machine lattice signature that stands over the body digest.
+/// the signature that stands over the body digest. The signature width follows
+/// the scheme, so it is held as a byte string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wrapper {
     body: Body,
     scheme: u8,
-    signature: ml_dsa::Signature,
+    signature: Vec<u8>,
 }
 
 impl Wrapper {
     /// Assemble a wrapper from a body, a scheme identifier, and a signature.
-    pub fn new(body: Body, scheme: u8, signature: ml_dsa::Signature) -> Self {
+    pub fn new(body: Body, scheme: u8, signature: Vec<u8>) -> Self {
         Wrapper {
             body,
             scheme,
@@ -157,8 +171,8 @@ impl Wrapper {
         self.scheme
     }
 
-    /// The machine lattice signature over the body digest.
-    pub fn signature(&self) -> &ml_dsa::Signature {
+    /// The signature over the body digest.
+    pub fn signature(&self) -> &[u8] {
         &self.signature
     }
 
@@ -187,27 +201,70 @@ fn body_digest(body: &Body) -> [u8; 32] {
 }
 
 /// Sign a body with an account and return the wrapper. The account seed folds
-/// back into a machine lattice key, the body digest is taken under the domain
-/// tag, and the signature stands over that digest under the account scheme.
+/// back into a key under the account scheme, the body digest is taken under the
+/// domain tag, and the signature stands over that digest.
 pub fn sign(account: &Account, body: &Body) -> Wrapper {
     let digest = body_digest(body);
-    let (_public, secret) = ml_dsa::keygen(account.seed());
-    let signature = ml_dsa::sign(&secret, &digest, &[], &SIGN_RANDOMIZER)
-        .expect("an empty context stays within the length bound");
+    let scheme = account.scheme();
+    let signature = match scheme {
+        SCHEME_LATTICE => {
+            let (_public, secret) = ml_dsa::keygen(account.seed());
+            ml_dsa::sign(&secret, &digest, &[], &SIGN_RANDOMIZER)
+                .expect("an empty context stays within the length bound")
+                .to_vec()
+        }
+        SCHEME_HASH => {
+            let (secret, _public) = qtv_account::hash_keypair(account.seed());
+            slh_dsa::sign(&secret, &digest, &[], &SIGN_RANDOMIZER_HASH)
+                .expect("an empty context stays within the length bound")
+                .to_vec()
+        }
+        #[cfg(feature = "fn-dsa")]
+        SCHEME_FALCON => {
+            #[allow(unused_imports)]
+            use qtv_crypto::fn_dsa;
+            unimplemented!("fn_dsa signing is gated until the standard is final")
+        }
+        _ => panic!("sign was handed an unknown scheme identifier"),
+    };
     Wrapper {
         body: body.clone(),
-        scheme: account.scheme(),
+        scheme,
         signature,
     }
 }
 
-/// Verify a wrapper against a sender public key. The scheme identifier of the
-/// wrapper must name the machine lattice signature, the digest is recomputed
-/// under the same domain tag, and the signature must stand over that digest.
-pub fn verify(wrapper: &Wrapper, public_key: &ml_dsa::PublicKey) -> bool {
-    if wrapper.scheme != SCHEME_LATTICE {
-        return false;
-    }
+/// Verify a wrapper against a sender public key. The digest is recomputed under
+/// the same domain tag, the scheme identifier of the wrapper selects the
+/// signature to check, and any scheme identifier that names no scheme is
+/// rejected.
+pub fn verify(wrapper: &Wrapper, public_key: &[u8]) -> bool {
     let digest = body_digest(&wrapper.body);
-    ml_dsa::verify(public_key, &digest, &wrapper.signature, &[])
+    match wrapper.scheme {
+        SCHEME_LATTICE => {
+            let public_key: &ml_dsa::PublicKey = match public_key.try_into() {
+                Ok(key) => key,
+                Err(_) => return false,
+            };
+            let signature: &ml_dsa::Signature = match wrapper.signature.as_slice().try_into() {
+                Ok(signature) => signature,
+                Err(_) => return false,
+            };
+            ml_dsa::verify(public_key, &digest, signature, &[])
+        }
+        SCHEME_HASH => {
+            let public_key: &[u8; slh_dsa::PUBLIC_KEY_BYTES] = match public_key.try_into() {
+                Ok(key) => key,
+                Err(_) => return false,
+            };
+            slh_dsa::verify(public_key, &digest, &wrapper.signature, &[])
+        }
+        #[cfg(feature = "fn-dsa")]
+        SCHEME_FALCON => {
+            #[allow(unused_imports)]
+            use qtv_crypto::fn_dsa;
+            unimplemented!("fn_dsa verification is gated until the standard is final")
+        }
+        _ => false,
+    }
 }
