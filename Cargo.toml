@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/qtv-idfmt", "crates/qtv-codec", "crates/qtv-account", "crates/qtv-tx"]
+members = ["crates/qtv-idfmt", "crates/qtv-codec", "crates/qtv-account", "crates/qtv-tx", "crates/qtv-block"]
 
 [workspace.package]
 edition = "2021"
