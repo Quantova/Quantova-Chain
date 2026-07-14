@@ -1,0 +1,11 @@
+[package]
+name = "qtv-state"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The sparse Merkle state trie and its proofs for the Quantova stack."
+
+[dependencies]
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", tag = "v0.1.0" }
+qtv-codec = { path = "../qtv-codec" }
