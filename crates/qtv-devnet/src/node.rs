@@ -39,6 +39,10 @@ use crate::wire::Proposal;
 /// A chain height, the block number a node produces.
 pub type Height = u64;
 
+/// A view within a height. View zero holds the sampler elected leader; each
+/// timeout advances the view and rotates the leader to the next committee member.
+pub type View = u64;
+
 /// The domain tag folded into a node network identity seed, separating the
 /// transport identity key from any other key derived from the same id.
 const NET_ID_DOMAIN: &[u8; 8] = b"QTVNETID";
@@ -50,6 +54,20 @@ pub fn net_identity(id: u64) -> Identity {
     seed[..8].copy_from_slice(&id.to_le_bytes());
     seed[8..16].copy_from_slice(NET_ID_DOMAIN);
     Identity::from_seed(&seed)
+}
+
+/// The leader of a view, rotating the committee past the view-zero leader. View
+/// zero is the sampler elected leader; each later view rotates to the next
+/// committee member in id order, so a timeout routes around a silent or offline
+/// leader to a fresh one. This mirrors the view indexed leader rotation of the
+/// qtv-bft core, with the sampler election as the view-zero base.
+pub fn leader_for(selection: &Selection, view: View) -> u64 {
+    let members = &selection.members;
+    let base = members
+        .iter()
+        .position(|&id| id == selection.leader)
+        .unwrap_or(0);
+    members[(base + view as usize) % members.len()]
 }
 
 /// A reason a round step failed.
@@ -119,6 +137,7 @@ impl FinalizedBlock {
 /// The block a node has proposed or accepted for the current height, waiting for
 /// the attestations that finalize it.
 struct Staged {
+    view: View,
     header: Header,
     body: Vec<Wrapper>,
     block: ConsensusBlock,
@@ -136,6 +155,7 @@ pub struct DevNode {
     fee_params: FeeParams,
     beacon: Beacon,
     height: Height,
+    view: View,
     parent_header_hash: [u8; 32],
     parent_val: Parent,
     genesis_time: u64,
@@ -177,6 +197,7 @@ impl DevNode {
             fee_params: devnet.fee_params,
             beacon: genesis_beacon(),
             height: qtv_bft::params::MIN_HEIGHT,
+            view: 0,
             parent_header_hash: [0u8; 32],
             parent_val: Parent::Genesis,
             genesis_time: devnet.genesis_time,
@@ -261,7 +282,7 @@ impl DevNode {
     /// leader runs this, then gossips the returned proposal.
     pub fn build_proposal(&mut self, selection: &Selection) -> Proposal {
         let height = self.height;
-        let proposer = validator_address(selection.leader);
+        let proposer = validator_address(leader_for(selection, self.view));
         let candidates = self.mempool.candidates();
         let included = execute_ordered(&mut self.ledger, &candidates, &self.fee_params);
         let header = Header::new(
@@ -277,12 +298,14 @@ impl DevNode {
         let block = ConsensusBlock::new(height, header_value(&header.hash()), self.parent_val);
         let included_ids = included.iter().map(Wrapper::id).collect();
         self.staged = Some(Staged {
+            view: self.view,
             header: header.clone(),
             body: included.clone(),
             block,
             included_ids,
         });
         Proposal {
+            view: self.view,
             header,
             body: included,
         }
@@ -298,10 +321,11 @@ impl DevNode {
         proposal: &Proposal,
     ) -> Result<(), RoundError> {
         let header = &proposal.header;
-        if header.height() != self.height
+        if proposal.view != self.view
+            || header.height() != self.height
             || *header.parent_hash() != self.parent_header_hash
             || header.beacon_seed() != self.beacon.seed()
-            || header.proposer() != validator_address(selection.leader)
+            || header.proposer() != validator_address(leader_for(selection, proposal.view))
         {
             return Err(RoundError::ProposalRejected);
         }
@@ -315,6 +339,7 @@ impl DevNode {
         let block = ConsensusBlock::new(self.height, header_value(&header.hash()), self.parent_val);
         let included_ids = included.iter().map(Wrapper::id).collect();
         self.staged = Some(Staged {
+            view: proposal.view,
             header: header.clone(),
             body: proposal.body.clone(),
             block,
@@ -363,10 +388,11 @@ impl DevNode {
         self.parent_header_hash = chain_block.header_hash();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
         self.height += 1;
+        self.view = 0;
         self.mempool.remove_included(&staged.included_ids);
         self.chain.push(FinalizedBlock {
             block: chain_block,
-            leader: selection.leader,
+            leader: leader_for(selection, staged.view),
             attesters,
         });
         Ok(())
