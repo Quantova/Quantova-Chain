@@ -1,0 +1,72 @@
+//! A node that missed a stretch of finalized heights catches up by verified sync
+//! and ends byte identical to the nodes that never left.
+
+mod support;
+
+use qtv_node::fee::FeeParams;
+use qtv_node::node::GenesisAccount;
+
+use qtv_devnet::Devnet;
+
+use support::{config, encoded_chain, transfer, unique_base, user};
+
+#[test]
+fn a_node_that_missed_a_stretch_catches_up_and_matches() {
+    let base = unique_base("catch-up");
+    let params = FeeParams::devnet();
+    let alice = user(0);
+    let bob = user(1);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let mut devnet =
+        Devnet::over_duplex(config(&base, &[true, true, true, true], accounts)).expect("devnet");
+
+    // All four nodes finalize two heights together.
+    for nonce in 0..2u64 {
+        let tx = transfer(&alice, &bob.address(), 1_000, nonce, &params);
+        devnet.submit(0, tx).expect("admitted");
+        devnet.step().expect("finalized");
+    }
+    let lagging = devnet.len() - 1;
+    let height_before = devnet.node(lagging).height();
+
+    // The last node drops offline and misses a stretch of heights the online
+    // supermajority keeps finalizing.
+    devnet.set_active(lagging, false);
+    for nonce in 2..5u64 {
+        let tx = transfer(&alice, &bob.address(), 1_000, nonce, &params);
+        devnet.submit(0, tx).expect("admitted");
+        devnet.step().expect("finalized without the lagging node");
+    }
+    let tip = devnet.node(0).height();
+    assert!(
+        devnet.node(lagging).height() < tip,
+        "the lagging node should be behind the group"
+    );
+    assert_eq!(
+        devnet.node(lagging).height(),
+        height_before,
+        "the lagging node advanced nothing while offline"
+    );
+
+    // It comes back and catches up over the wire, verifying every finalized block
+    // before it accepts it, without finalizing a fresh height.
+    devnet.set_active(lagging, true);
+    devnet.sync().expect("catch up sync");
+
+    // It reached the group height, and the whole chain it holds is byte identical to
+    // a peer that never left.
+    assert_eq!(devnet.node(lagging).height(), tip);
+    assert_eq!(
+        encoded_chain(devnet.node(lagging)),
+        encoded_chain(devnet.node(0)),
+        "the synced chain diverged from the peer that never left"
+    );
+    assert_eq!(devnet.node(lagging).head_hash(), devnet.node(0).head_hash());
+    assert_eq!(
+        devnet.node(lagging).stored_blocks(),
+        devnet.node(0).stored_blocks(),
+        "the synced node did not persist the whole chain"
+    );
+    // A synced node is never slashed, and it slashes no one.
+    assert!(devnet.node(lagging).slashed().is_empty());
+}
