@@ -29,10 +29,13 @@ const PARENT_GENESIS: u8 = 0;
 /// The tag that marks a value parent link.
 const PARENT_VALUE: u8 = 1;
 
-/// A block proposal: the real chain header the committee attests over and the
-/// ordered body the header commits to.
+/// A block proposal: the view it is offered in, the real chain header the
+/// committee attests over, and the ordered body the header commits to. The view
+/// names which leader in the rotation proposed it, so a receiver checks the
+/// proposal against the leader of that view and never against a stale one.
 #[derive(Clone, Debug)]
 pub struct Proposal {
+    pub view: u64,
     pub header: Header,
     pub body: Vec<Wrapper>,
 }
@@ -89,6 +92,7 @@ impl Message {
             }
             Message::Proposal(proposal) => {
                 encoder.put_tag(TAG_PROPOSAL);
+                encoder.put_u64(proposal.view);
                 proposal.header.encode(&mut encoder);
                 encoder.put_u64(proposal.body.len() as u64);
                 for wrapper in &proposal.body {
@@ -110,13 +114,14 @@ impl Message {
         let message = match decoder.get_tag()? {
             TAG_TX => Message::Tx(decode_wrapper(&mut decoder)?),
             TAG_PROPOSAL => {
+                let view = decoder.get_u64()?;
                 let header = Header::decode(&mut decoder)?;
                 let count = decoder.get_u64()?;
                 let mut body = Vec::with_capacity(count as usize);
                 for _ in 0..count {
                     body.push(decode_wrapper(&mut decoder)?);
                 }
-                Message::Proposal(Proposal { header, body })
+                Message::Proposal(Proposal { view, header, body })
             }
             TAG_ATTEST => Message::Attest(Box::new(decode_attestation(&mut decoder)?)),
             tag => return Err(DecodeError::UnknownTag(tag)),

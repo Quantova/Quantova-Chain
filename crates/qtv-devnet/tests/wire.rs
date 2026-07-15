@@ -45,12 +45,14 @@ fn a_proposal_message_round_trips() {
         1_700_000_000_150,
     );
     let bytes = Message::Proposal(Proposal {
+        view: 2,
         header: header.clone(),
         body: body.clone(),
     })
     .encode();
     match Message::decode(&bytes).expect("decodes") {
         Message::Proposal(decoded) => {
+            assert_eq!(decoded.view, 2);
             assert_eq!(decoded.header, header);
             assert_eq!(decoded.body.len(), 1);
             assert_eq!(decoded.body[0].id(), body[0].id());
