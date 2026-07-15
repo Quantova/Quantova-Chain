@@ -19,7 +19,8 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use qtv_codec::{Decode, Decoder, Encode, Encoder, Error};
 use qtv_crypto::sha3;
@@ -53,8 +54,17 @@ fn leaf_hash(value: &[u8]) -> Hash {
     sha3::sha3_256(value)
 }
 
+// A count of inner node hashes, kept only in test builds so a test can assert
+// that a change rehashes a bounded set of nodes and not the whole trie.
+#[cfg(test)]
+thread_local! {
+    static NODE_HASHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// The sha3 256 hash of a left child followed by a right child.
 fn node_hash(left: &Hash, right: &Hash) -> Hash {
+    #[cfg(test)]
+    NODE_HASHES.with(|count| count.set(count.get() + 1));
     let mut input = [0u8; HASH_LEN * 2];
     input[..HASH_LEN].copy_from_slice(left);
     input[HASH_LEN..].copy_from_slice(right);
@@ -71,6 +81,130 @@ fn default_hashes() -> Vec<Hash> {
         defaults[level] = node_hash(&defaults[level + 1], &defaults[level + 1]);
     }
     defaults
+}
+
+/// The key that shares the top `level` bits of a prefix and sets the bit at
+/// `level` to one, the prefix of the right child of a node at that level.
+fn with_bit(key: &Key, level: usize) -> Key {
+    let mut out = *key;
+    out[level >> 3] |= 1u8 << (7 - (level & 7));
+    out
+}
+
+/// The largest key that shares the top `level` bits of a canonical prefix, the
+/// upper bound of the subtree rooted at that prefix. Every bit at `level` and
+/// below is set. At or past the leaf level there is no bit to set, so the prefix
+/// is its own bound.
+fn subtree_end(prefix: &Key, level: usize) -> Key {
+    let byte = level >> 3;
+    if byte >= KEY_LEN {
+        return *prefix;
+    }
+    let mut out = *prefix;
+    out[byte] |= 0xFFu8 >> (level & 7);
+    for slot in out.iter_mut().skip(byte + 1) {
+        *slot = 0xFF;
+    }
+    out
+}
+
+/// A node identifier: the level and the canonical prefix that shares the top
+/// `level` bits of every key in the subtree, with the bits at `level` and below
+/// set to zero. Every subtree has one identifier that no other subtree shares.
+type NodeId = (u16, Key);
+
+/// The hash of the subtree that holds a single leaf, climbing from the leaf hash
+/// at the bottom up to `from_level`. At each level the lone leaf sits on the side
+/// its key bit picks and the empty side takes the default of the level below.
+fn chain_hash(defaults: &[Hash], key: &Key, leaf: Hash, from_level: usize) -> Hash {
+    let mut hash = leaf;
+    let mut level = DEPTH;
+    while level > from_level {
+        level -= 1;
+        let default = defaults[level + 1];
+        hash = if key_bit(key, level) == 0 {
+            node_hash(&hash, &default)
+        } else {
+            node_hash(&default, &hash)
+        };
+    }
+    hash
+}
+
+/// The hash of a subtree that no changed leaf touches, read without descending
+/// into it. An empty subtree takes the default of its level, a subtree with a
+/// single leaf takes that leaf climbed to this level, and a subtree with two or
+/// more leaves takes its cached hash, which the last recompute fixed and no
+/// change since has moved.
+fn clean_hash(
+    leaves: &BTreeMap<Key, Vec<u8>>,
+    defaults: &[Hash],
+    nodes: &HashMap<NodeId, Hash>,
+    level: usize,
+    prefix: Key,
+) -> Hash {
+    let end = subtree_end(&prefix, level);
+    let mut range = leaves.range(prefix..=end);
+    match (range.next(), range.next()) {
+        (None, _) => defaults[level],
+        (Some((key, value)), None) => chain_hash(defaults, key, leaf_hash(value), level),
+        (Some(_), Some(_)) => *nodes
+            .get(&(level as u16, prefix))
+            .expect("a subtree with two or more leaves is a cached node"),
+    }
+}
+
+/// Recompute the hash of the subtree rooted at `prefix` and `level`, descending
+/// only where a changed key lies and reading every untouched sibling from the
+/// cache. The changed keys are sorted and all share the top `level` bits, so the
+/// split by the bit at this level keeps each side contiguous, matching the split
+/// the full recompute makes. Each recomputed node updates its cache entry: a
+/// subtree that now holds two or more leaves stores its hash, otherwise its entry
+/// is dropped, so the cache always holds exactly the branch nodes.
+fn recompute(
+    leaves: &BTreeMap<Key, Vec<u8>>,
+    defaults: &[Hash],
+    nodes: &mut HashMap<NodeId, Hash>,
+    level: usize,
+    prefix: Key,
+    changed: &[Key],
+) -> Hash {
+    if level == DEPTH {
+        return match leaves.get(&prefix) {
+            Some(value) => leaf_hash(value),
+            None => defaults[DEPTH],
+        };
+    }
+    let split = changed.partition_point(|key| key_bit(key, level) == 0);
+    let (changed_left, changed_right) = changed.split_at(split);
+    let right_prefix = with_bit(&prefix, level);
+    let left = if changed_left.is_empty() {
+        clean_hash(leaves, defaults, nodes, level + 1, prefix)
+    } else {
+        recompute(leaves, defaults, nodes, level + 1, prefix, changed_left)
+    };
+    let right = if changed_right.is_empty() {
+        clean_hash(leaves, defaults, nodes, level + 1, right_prefix)
+    } else {
+        recompute(
+            leaves,
+            defaults,
+            nodes,
+            level + 1,
+            right_prefix,
+            changed_right,
+        )
+    };
+    let hash = node_hash(&left, &right);
+    let end = subtree_end(&prefix, level);
+    let branch = leaves.range(prefix..=end).take(2).count() >= 2;
+    let id = (level as u16, prefix);
+    if branch {
+        nodes.insert(id, hash);
+    } else {
+        nodes.remove(&id);
+    }
+    hash
 }
 
 /// A proof for a key. It carries the value when the key is present or nothing
@@ -130,12 +264,27 @@ impl Decode for Proof {
     }
 }
 
+/// The incremental state of a trie root: the cached hash of every branch node,
+/// the last root, and the keys changed since that root was computed. It is held
+/// behind a cell so that reading the root can fold in the pending changes without
+/// a mutable handle, which keeps the read facing shape of the trie.
+#[derive(Debug, Clone)]
+struct RootCache {
+    nodes: HashMap<NodeId, Hash>,
+    root: Hash,
+    changed: BTreeSet<Key>,
+}
+
 /// A sparse Merkle trie over a fixed width key. It maps each key to a value and
-/// commits to the whole map through a single root.
+/// commits to the whole map through a single root. The root is kept incrementally:
+/// an insert records the changed key, and the next root recomputes only the paths
+/// from the changed leaves up to the root, reusing every untouched subtree hash,
+/// so a block costs the changed count times the depth rather than the whole state.
 #[derive(Debug, Clone)]
 pub struct Trie {
     leaves: BTreeMap<Key, Vec<u8>>,
     defaults: Vec<Hash>,
+    cache: RefCell<RootCache>,
 }
 
 impl Default for Trie {
@@ -147,15 +296,24 @@ impl Default for Trie {
 impl Trie {
     /// Start an empty trie.
     pub fn new() -> Self {
+        let defaults = default_hashes();
+        let cache = RootCache {
+            nodes: HashMap::new(),
+            root: defaults[0],
+            changed: BTreeSet::new(),
+        };
         Trie {
             leaves: BTreeMap::new(),
-            defaults: default_hashes(),
+            defaults,
+            cache: RefCell::new(cache),
         }
     }
 
-    /// Bind a key to a value, replacing any value the key already held.
+    /// Bind a key to a value, replacing any value the key already held. The key
+    /// is recorded as changed so the next root recomputes only its path.
     pub fn insert(&mut self, key: Key, value: Vec<u8>) {
         self.leaves.insert(key, value);
+        self.cache.get_mut().changed.insert(key);
     }
 
     /// The value a key holds, or nothing when the key is absent.
@@ -164,9 +322,27 @@ impl Trie {
     }
 
     /// The root of the trie, fixed by the set of key and value pairs it holds.
+    /// Only the paths from the keys changed since the last root are recomputed,
+    /// and every other subtree hash is read from the cache, so the root is bit
+    /// identical to a full recompute over the same leaves at a fraction of the
+    /// cost. With no pending change the cached root is returned unchanged.
     pub fn root(&self) -> Hash {
-        let entries = self.entries();
-        self.subtree(&entries, 0)
+        let mut cache = self.cache.borrow_mut();
+        if cache.changed.is_empty() {
+            return cache.root;
+        }
+        let changed: Vec<Key> = cache.changed.iter().copied().collect();
+        let root = recompute(
+            &self.leaves,
+            &self.defaults,
+            &mut cache.nodes,
+            0,
+            [0u8; KEY_LEN],
+            &changed,
+        );
+        cache.root = root;
+        cache.changed.clear();
+        root
     }
 
     /// A proof for a key against the current root. The proof carries the value
@@ -240,4 +416,246 @@ pub fn verify(key: &Key, proof: &Proof, root: &Hash) -> bool {
         };
     }
     &node == root
+}
+
+#[cfg(test)]
+mod incremental {
+    //! The incremental root must equal a full recompute over the same leaves for
+    //! every state and every change set, an unchanged block must leave the root
+    //! where it was, and a single change must rehash only the path from its leaf
+    //! to the root. These tests fix all three.
+
+    use super::*;
+
+    /// A small deterministic generator, splitmix64, so the change sets are varied
+    /// but the tests are reproducible without a dependency.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        fn key(&mut self) -> Key {
+            let mut key = [0u8; KEY_LEN];
+            for chunk in key.chunks_mut(8) {
+                let bytes = self.next().to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+            key
+        }
+
+        fn value(&mut self) -> Vec<u8> {
+            self.next().to_le_bytes().to_vec()
+        }
+    }
+
+    /// The root computed by a full recursive walk over every leaf, the original
+    /// commitment the incremental root must reproduce bit for bit. This is written
+    /// out on its own so it shares no state with the incremental path.
+    fn reference_root(leaves: &BTreeMap<Key, Vec<u8>>) -> Hash {
+        let defaults = default_hashes();
+        let entries: Vec<(Key, Hash)> = leaves
+            .iter()
+            .map(|(key, value)| (*key, leaf_hash(value)))
+            .collect();
+        fn walk(entries: &[(Key, Hash)], level: usize, defaults: &[Hash]) -> Hash {
+            if entries.is_empty() {
+                return defaults[level];
+            }
+            if level == DEPTH {
+                return entries[0].1;
+            }
+            let split = entries.partition_point(|entry| key_bit(&entry.0, level) == 0);
+            let (left, right) = entries.split_at(split);
+            node_hash(
+                &walk(left, level + 1, defaults),
+                &walk(right, level + 1, defaults),
+            )
+        }
+        walk(&entries, 0, &defaults)
+    }
+
+    /// The prefix that shares the top `level` bits of a key, the identifier a node
+    /// on the path of the key carries at that level.
+    fn ancestor_prefix(key: &Key, level: usize) -> Key {
+        let mut out = *key;
+        let byte = level >> 3;
+        if byte < KEY_LEN {
+            out[byte] &= !(0xFFu8 >> (level & 7));
+            for slot in out.iter_mut().skip(byte + 1) {
+                *slot = 0;
+            }
+        }
+        out
+    }
+
+    fn node_hashes() -> u64 {
+        NODE_HASHES.with(|count| count.get())
+    }
+
+    fn reset_node_hashes() {
+        NODE_HASHES.with(|count| count.set(0));
+    }
+
+    #[test]
+    fn incremental_root_equals_full_recompute_across_random_change_sets() {
+        let mut rng = Rng(0x0102_0304_0506_0708);
+        let mut trie = Trie::new();
+        let mut mirror: BTreeMap<Key, Vec<u8>> = BTreeMap::new();
+        let mut keys: Vec<Key> = Vec::new();
+
+        // A base state of a few hundred accounts.
+        for _ in 0..400 {
+            let key = rng.key();
+            let value = rng.value();
+            trie.insert(key, value.clone());
+            mirror.insert(key, value);
+            keys.push(key);
+        }
+        assert_eq!(trie.root(), reference_root(&mirror));
+
+        // Many blocks, each a random mix of fresh accounts and rewrites of
+        // existing ones. After each block the incremental root and a full
+        // recompute over the same leaves must be bit identical.
+        for _ in 0..200 {
+            let batch = (rng.next() % 40) as usize + 1;
+            for _ in 0..batch {
+                let fresh = keys.is_empty() || rng.next().is_multiple_of(2);
+                let key = if fresh {
+                    let key = rng.key();
+                    keys.push(key);
+                    key
+                } else {
+                    keys[(rng.next() as usize) % keys.len()]
+                };
+                let value = rng.value();
+                trie.insert(key, value.clone());
+                mirror.insert(key, value);
+            }
+            assert_eq!(trie.root(), reference_root(&mirror));
+        }
+    }
+
+    #[test]
+    fn a_block_that_changes_nothing_leaves_the_root_where_it_was() {
+        let mut rng = Rng(0x2222_3333_4444_5555);
+        let mut trie = Trie::new();
+        for _ in 0..250 {
+            trie.insert(rng.key(), rng.value());
+        }
+        let root = trie.root();
+
+        // Reading the root again with no pending change returns the same bytes and
+        // does not rehash a single node.
+        reset_node_hashes();
+        assert_eq!(trie.root(), root);
+        assert_eq!(node_hashes(), 0);
+
+        // Rewriting a key with the value it already holds recomputes its path but
+        // lands on the same root, since the leaves are unchanged.
+        let (key, value) = {
+            let (key, value) = trie.leaves.iter().next().unwrap();
+            (*key, value.clone())
+        };
+        trie.insert(key, value);
+        assert_eq!(trie.root(), root);
+    }
+
+    #[test]
+    fn a_single_change_rehashes_only_its_path_over_a_deep_tree() {
+        let mut rng = Rng(0x9999_8888_7777_6666);
+        let count = 20_000usize;
+        let mut trie = Trie::new();
+        let mut keys: Vec<Key> = Vec::with_capacity(count);
+        for _ in 0..count {
+            let key = rng.key();
+            trie.insert(key, rng.value());
+            keys.push(key);
+        }
+
+        // The cost of the first root over the whole state, the full recompute the
+        // incremental path must beat.
+        reset_node_hashes();
+        let _ = trie.root();
+        let full = node_hashes();
+        assert!(
+            full > count as u64,
+            "a full recompute walks the whole state"
+        );
+
+        // Change one existing account and read the root again. Record which cached
+        // nodes moved and how many hashes the update cost.
+        let target = keys[keys.len() / 3];
+        let before: HashMap<NodeId, Hash> = trie.cache.borrow().nodes.clone();
+        reset_node_hashes();
+        trie.insert(target, b"a new account record".to_vec());
+        let _ = trie.root();
+        let single = node_hashes();
+        let after = trie.cache.borrow().nodes.clone();
+
+        // Every cached node whose hash changed lies on the path of the changed
+        // key: its prefix is the key masked to its level. Nothing off the path
+        // moved.
+        for (id, hash) in &after {
+            let moved = before.get(id) != Some(hash);
+            if moved {
+                let (level, prefix) = *id;
+                assert_eq!(
+                    prefix,
+                    ancestor_prefix(&target, level as usize),
+                    "a moved node at level {level} is off the path of the changed key"
+                );
+            }
+        }
+        // No node dropped off the path either.
+        for id in before.keys() {
+            if !after.contains_key(id) {
+                let (level, prefix) = *id;
+                assert_eq!(prefix, ancestor_prefix(&target, level as usize));
+            }
+        }
+
+        // The update touches a bounded number of hashes, on the order of the tree
+        // depth, not the whole state. The path is at most the depth, plus the odd
+        // lone sibling climbed from its leaf, so a few multiples of the depth is a
+        // safe ceiling that still sits far under the full recompute.
+        assert!(
+            single <= 8 * DEPTH as u64,
+            "a single change cost {single} hashes, more than a path"
+        );
+        assert!(
+            single * 20 < full,
+            "a single change cost {single} hashes against a full recompute of {full}"
+        );
+    }
+
+    #[test]
+    fn a_new_account_added_to_a_large_state_matches_a_full_recompute() {
+        let mut rng = Rng(0xABCD_1234_5678_9F01);
+        let mut trie = Trie::new();
+        let mut mirror: BTreeMap<Key, Vec<u8>> = BTreeMap::new();
+        for _ in 0..5_000 {
+            let key = rng.key();
+            let value = rng.value();
+            trie.insert(key, value.clone());
+            mirror.insert(key, value);
+        }
+        let _ = trie.root();
+
+        let key = rng.key();
+        let value = rng.value();
+        trie.insert(key, value.clone());
+        mirror.insert(key, value);
+        assert_eq!(trie.root(), reference_root(&mirror));
+
+        // The proof for the new account verifies against the incremental root.
+        let root = trie.root();
+        let proof = trie.prove(&key);
+        assert!(verify(&key, &proof, &root));
+    }
 }
