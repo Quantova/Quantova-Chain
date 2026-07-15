@@ -28,6 +28,7 @@
 pub mod clock;
 pub mod config;
 pub mod devnet;
+pub mod network;
 pub mod node;
 pub mod transport;
 pub mod wire;
