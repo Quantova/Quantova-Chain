@@ -51,6 +51,21 @@ wall clock threads.
 - Restart from disk. A node reopens its block store and state store, rebuilds its
   ledger from the committed leaves, reconstructs the beacon and the parent link
   from its last finalized block, and rejoins at the next height.
+- Catch up sync over the qtv-net channels. A node behind the tip learns a peer is
+  ahead from its finalized status, asks that peer for the finalized blocks from its
+  own height forward, and receives each block carrying its finality certificate in
+  the certificate slot. The syncing node trusts nothing about the serving peer. For
+  every block it verifies the certificate the way a light client does, an entitled
+  supermajority of module lattice attestations over that exact block under the
+  committee commitment and the beacon it reconstructs as it advances, checks the
+  block links to the one before by parent hash, and re executes the body against
+  its own state to reproduce the state root. Only a block whose certificate, parent
+  link, and re executed state root all check out is committed and persisted through
+  qtv-store, so a forged or altered chain cannot be synced. Once caught up to the
+  tip the node rejoins live consensus and finalizes new heights with the group. The
+  finalized block now carries the whole certificate in its certificate slot rather
+  than only its digest, so the block a peer serves is the block a light client
+  verifies.
 - Asynchronous per node rounds on a logical clock. A slot is 150 milliseconds of
   logical time. Each node acts when a sealed record arrives or a view timeout
   fires. The leader of a view proposes within its slot; a node that sees no valid
@@ -94,10 +109,18 @@ network still needs are named here and are not built yet.
 - The full QUIC datagram transport, multiplexed streams, congestion control, and
   session key rotation, all of which sit above the qtv-net channel and are named
   in the qtv-net notes.
-- Catch up sync for a node that missed heights. A restarted node reloads the chain
-  it persisted, and a node that was offline for a stall rejoins at the height the
-  others held; but a node that fell behind on already finalized heights does not
-  fetch and verify them from a peer over the wire.
+- Continuous operation and its bounds. With catch up sync the nodes no longer have
+  to enter every height together. A lagging node fetches and verifies the finalized
+  heights it missed rather than stalling the group, and a fresh node joins from
+  genesis and syncs the whole finalized chain before it takes part. The assumption
+  relaxes to this. The nodes at a height still finalize it together, but a node
+  behind that height catches up by verified sync and then rejoins the round rather
+  than blocking it, so nodes may sit at different heights between rounds. What is
+  not yet built is a node that syncs while it also proposes and attests at the same
+  time. Catch up is a distinct phase a node runs to reach the tip before it rejoins
+  live consensus, not a background stream folded into the round. Dynamic membership,
+  where a peer joins or leaves mid run and the overlay is repaired around it, is
+  still the fixed loopback overlay named above and below.
 - Fork choice under deep reorgs. Each node follows the single finalized chain and
   does not resolve competing forks. The single stage per height keeps two blocks
   from finalizing at one height, so no fork forms; a full asynchronous view change
