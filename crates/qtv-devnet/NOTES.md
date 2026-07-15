@@ -73,13 +73,35 @@ wall clock threads.
   proposes, reusing the view indexed leader rotation of the qtv-bft core. A silent
   or offline leader no longer stalls the chain: the timeout routes around it.
   Progress continues while an honest supermajority is online, and safety holds
-  under reordering and view changes because a node stages at most one block per
-  height and never attests a second, so no two nodes finalize different blocks at
-  one height. A node finalizes only once every online committee member has
-  attested its staged block, and an attestation arriving by several overlay paths
-  is de duplicated by its content id and counted once, so the overlay never lets a
-  node finalize without genuinely receiving a supermajority. The certificate and
-  the finalized block are byte identical across nodes.
+  under reordering and view changes because a node locks on the block it attests
+  and changes that lock only under a justification, so no two nodes finalize
+  different blocks at one height. A node finalizes only once every online committee
+  member has attested its staged block, and an attestation arriving by several
+  overlay paths is de duplicated by its content id and counted once, so the overlay
+  never lets a node finalize without genuinely receiving a supermajority. The
+  certificate and the finalized block are byte identical across nodes.
+- Fork choice with a view change lock and unlock over the non finalized frontier.
+  Deterministic finality means a finalized block never reorganizes, so fork choice
+  is only ever over the current working height, where an asynchronous split or two
+  leaders across views can produce competing blocks. When a validator attests a
+  block in a view it locks on that block, and while locked it does not attest a
+  conflicting block at the same height in a later view. It unlocks only on a valid
+  proposal that carries a higher view justification, a quorum of two thirds plus
+  one view change records for that view, whose highest lock the proposed block
+  matches, or a fresh block when no record in the quorum reports a lock. This is
+  the lock change with a justification. A view change record is a module lattice
+  attestation over a canonical view change subject, so a quorum of them is an
+  unforgeable proof that the network reached the view, and a locked record carries
+  the block its signer holds so the leader that collects the quorum re-proposes it.
+  The block a node builds on and attests is the one the justification of the
+  highest view selects, the locked block of the highest lock view, ties broken by
+  the smaller consensus value so every node picks the same one. Any two quorums of
+  the committee intersect, so a justification for a later view always overlaps the
+  attesters of any block that finalized below it, which is why a lock change never
+  lets two conflicting blocks reach a supermajority at one height and safety by
+  quorum intersection holds. When a split heals the members synchronize on one view
+  through the view change records and finalize the block the justification selects,
+  so liveness returns.
 
 ## Frozen decisions honored
 
@@ -121,10 +143,20 @@ network still needs are named here and are not built yet.
   live consensus, not a background stream folded into the round. Dynamic membership,
   where a peer joins or leaves mid run and the overlay is repaired around it, is
   still the fixed loopback overlay named above and below.
-- Fork choice under deep reorgs. Each node follows the single finalized chain and
-  does not resolve competing forks. The single stage per height keeps two blocks
-  from finalizing at one height, so no fork forms; a full asynchronous view change
-  that lets a node safely re-vote across a proposal split, rather than hold its
-  first vote, is the harder case left to the consensus crate.
+- Deep reorg fork choice across many heights. The view change lock and unlock
+  above resolves competing blocks at the working height, the non finalized
+  frontier, and the tests cover a split that heals to one branch and two leaders
+  across views that converge on one block with no node finalizing the other.
+  Because finality is deterministic and a finalized block never reorganizes, the
+  frontier is only ever the single working height, so a deep reorg that rewrites
+  several already finalized heights cannot form and is out of scope by
+  construction. What is not built is a fork choice that weighs whole competing
+  subtrees under an adversary that withholds and releases certificates to force a
+  multi height reorg, which a stronger fault model would need. The devnet fault
+  model is offline and asynchrony, not byzantine equivocation. A view change record
+  is signed and entitlement checked so a forged justification does not verify, but
+  a validator that signs two conflicting records is equivocation, which slashing
+  covers and which is held for the founder decision, so that adversary is out of
+  the devnet scope.
 - Slashing distribution. Only equivocation is slashable and none occurs here, so
   no node is ever slashed and no penalty is distributed.
