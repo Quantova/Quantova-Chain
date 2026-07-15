@@ -34,7 +34,7 @@ use qtv_store::{BlockStore, StateStore};
 use qtv_tx::Wrapper;
 
 use crate::config::{DevnetConfig, NodeConfig};
-use crate::wire::Proposal;
+use crate::wire::{Message, Proposal};
 
 /// A chain height, the block number a node produces.
 pub type Height = u64;
@@ -163,6 +163,9 @@ pub struct DevNode {
     state_store: StateStore,
     outbox: Vec<Wrapper>,
     staged: Option<Staged>,
+    round_atts: Vec<Attestation>,
+    future_props: Vec<Proposal>,
+    silent: bool,
     chain: Vec<FinalizedBlock>,
     slashed: Vec<u64>,
 }
@@ -205,6 +208,9 @@ impl DevNode {
             state_store,
             outbox: Vec::new(),
             staged: None,
+            round_atts: Vec::new(),
+            future_props: Vec::new(),
+            silent: false,
             chain: Vec::new(),
             slashed: Vec::new(),
         };
@@ -366,18 +372,21 @@ impl DevNode {
         selection: &Selection,
         attestations: &[Attestation],
     ) -> Result<(), RoundError> {
-        let staged = self.staged.take().ok_or(RoundError::NotStaged)?;
+        let block = self.staged.as_ref().ok_or(RoundError::NotStaged)?.block;
         let certificate = aggregate(
             self.height,
             self.height,
-            staged.block,
+            block,
             &selection.commitment,
             &self.beacon,
             attestations,
         )
         .ok_or(RoundError::NotFinalized)?;
         // Aggregation admits only entitled attestations whose module lattice
-        // signature verifies, so the certificate is verified by construction.
+        // signature verifies, so the certificate is verified by construction. The
+        // staged block is taken only once a quorum aggregates, so a speculative
+        // finalize that falls short leaves the stage intact for the next attestation.
+        let staged = self.staged.take().expect("the staged block is present");
 
         let cert_digest = certificate.digest();
         let attesters = certificate.attesters();
@@ -389,6 +398,8 @@ impl DevNode {
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
         self.height += 1;
         self.view = 0;
+        self.round_atts.clear();
+        self.future_props.clear();
         self.mempool.remove_included(&staged.included_ids);
         self.chain.push(FinalizedBlock {
             block: chain_block,
@@ -396,6 +407,147 @@ impl DevNode {
             attesters,
         });
         Ok(())
+    }
+
+    /// Enter the current view of the current height. An online leader that has not
+    /// yet staged builds and offers its proposal and attests it; a leader that has
+    /// already staged this view re-offers the same proposal, which lets a peer that
+    /// came online late still receive it. A non leader, a silent leader, or an
+    /// offline node offers nothing, so the view times out and rotates. Returns the
+    /// messages to gossip.
+    pub fn enter_round(&mut self, selection: &Selection, online: bool) -> Vec<Message> {
+        if !online || self.silent || leader_for(selection, self.view) != self.id {
+            return Vec::new();
+        }
+        let current_stage = matches!(&self.staged, Some(staged) if staged.view == self.view);
+        let proposal = if current_stage {
+            let staged = self.staged.as_ref().expect("a current stage is present");
+            Proposal {
+                view: staged.view,
+                header: staged.header.clone(),
+                body: staged.body.clone(),
+            }
+        } else {
+            self.build_proposal(selection)
+        };
+        let attestation = self.attest().expect("the leader staged its own block");
+        self.record_attestation(&attestation);
+        vec![
+            Message::Proposal(proposal),
+            Message::Attest(Box::new(attestation)),
+        ]
+    }
+
+    /// Handle a proposal that arrived over the wire. A proposal for a later view is
+    /// buffered until the node reaches that view; a stale, misrouted, or invalid
+    /// proposal is dropped; a valid proposal for the current view is accepted,
+    /// attested once, and the attestation is returned to gossip. The node stages at
+    /// most one block per height, so it never attests a second block and safety
+    /// holds under reordering and view changes.
+    pub fn on_proposal(
+        &mut self,
+        selection: &Selection,
+        from: u64,
+        proposal: Proposal,
+    ) -> Vec<Message> {
+        if proposal.header.height() != self.height
+            || leader_for(selection, proposal.view) != from
+            || proposal.view < self.view
+        {
+            return Vec::new();
+        }
+        if proposal.view > self.view {
+            self.buffer_proposal(proposal);
+            return Vec::new();
+        }
+        if self.staged.is_some() {
+            return Vec::new();
+        }
+        if self.accept_proposal(selection, &proposal).is_err() {
+            return Vec::new();
+        }
+        let attestation = self.attest().expect("the accepted block attests");
+        self.record_attestation(&attestation);
+        vec![Message::Attest(Box::new(attestation))]
+    }
+
+    /// Collect an attestation that arrived over the wire. It is kept for the current
+    /// height regardless of the block it names; the finalize path aggregates only
+    /// the ones over the staged block, so attestations may arrive reordered or ahead
+    /// of the proposal.
+    pub fn on_attestation(&mut self, attestation: Attestation) {
+        if attestation.height == self.height {
+            self.record_attestation(&attestation);
+        }
+    }
+
+    /// Fire the view timeout. The view advances only when the node is still at that
+    /// view and has seen no valid proposal to lock onto; a node that already staged a
+    /// block waits for it to finalize rather than rotating, and a stale timer is
+    /// ignored. Returns whether the view advanced.
+    pub fn on_timeout(&mut self, view: View) -> bool {
+        if self.view != view || self.staged.is_some() {
+            return false;
+        }
+        self.view += 1;
+        true
+    }
+
+    /// Take a buffered proposal for the current view, if one arrived ahead of the
+    /// view change that reaches it.
+    pub fn take_buffered_proposal(&mut self) -> Option<Proposal> {
+        let pos = self.future_props.iter().position(|p| p.view == self.view)?;
+        Some(self.future_props.remove(pos))
+    }
+
+    /// Try to finalize the staged block from the attestations collected so far.
+    /// Returns whether it finalized; a shortfall leaves the stage in place for more
+    /// attestations, so this is safe to call after every message.
+    pub fn try_finalize(&mut self, selection: &Selection) -> Result<bool, RoundError> {
+        if self.staged.is_none() {
+            return Ok(false);
+        }
+        let attestations = self.round_atts.clone();
+        match self.finalize(selection, &attestations) {
+            Ok(()) => Ok(true),
+            Err(RoundError::NotFinalized) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Record an attestation for the current height, once per signer and block.
+    fn record_attestation(&mut self, attestation: &Attestation) {
+        let seen = self
+            .round_atts
+            .iter()
+            .any(|a| a.from == attestation.from && a.block == attestation.block);
+        if !seen {
+            self.round_atts.push(attestation.clone());
+        }
+    }
+
+    /// Buffer a proposal for a later view of the current height, once per view.
+    fn buffer_proposal(&mut self, proposal: Proposal) {
+        if !self.future_props.iter().any(|p| p.view == proposal.view) {
+            self.future_props.push(proposal);
+        }
+    }
+
+    /// The current view of the current height.
+    pub fn view(&self) -> View {
+        self.view
+    }
+
+    /// Make this node a silent leader: it withholds its proposal when it leads,
+    /// modelling a present but unproductive leader that a timeout routes around. It
+    /// still attests other leaders' blocks and is never slashed.
+    pub fn set_silent(&mut self, silent: bool) {
+        self.silent = silent;
+    }
+
+    /// Whether this node withholds its proposal when it leads.
+    pub fn is_silent(&self) -> bool {
+        self.silent
     }
 
     /// Persist a finalized block and the accounts it touched, then commit the new
