@@ -22,9 +22,25 @@ fn an_offline_node_does_not_stall_a_supermajority_and_is_never_slashed() {
     let mut devnet =
         Devnet::over_duplex(config(&base, &[true, true, true, true], accounts)).expect("devnet");
 
-    let offline_index = devnet.len() - 1;
+    // Take a validator offline that does not lead the first height, so the online
+    // supermajority still finalizes at least one height before the loop stops at a
+    // height the offline node would lead. Leader liveness under an offline leader
+    // is deferred, so the offline node must not be the first leader.
+    let first_leader = devnet.peek_leader().expect("leader");
+    let offline_index = (0..devnet.len())
+        .rev()
+        .find(|&i| devnet.node(i).id() != first_leader)
+        .expect("a validator that does not lead the first height");
     let offline_id = devnet.node(offline_index).id();
     devnet.set_active(offline_index, false);
+
+    // The online validators are every validator but the offline one, in ascending
+    // id order, and they are the set that attests each finalized block.
+    let mut online_ids: Vec<u64> = (0..devnet.len())
+        .map(|i| devnet.node(i).id())
+        .filter(|&id| id != offline_id)
+        .collect();
+    online_ids.sort_unstable();
 
     // Finalize a stretch with the node offline. Leader liveness under an offline
     // leader is deferred, so stop before a height the offline node would lead.
@@ -59,7 +75,7 @@ fn an_offline_node_does_not_stall_a_supermajority_and_is_never_slashed() {
             "an online node diverged"
         );
         for block in devnet.node(i).chain() {
-            assert_eq!(block.attesters, vec![1, 2, 3]);
+            assert_eq!(block.attesters, online_ids);
             assert!(!block.attesters.contains(&offline_id));
         }
         assert!(devnet.node(i).slashed().is_empty());

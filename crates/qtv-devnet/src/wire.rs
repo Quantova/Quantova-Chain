@@ -15,7 +15,7 @@ use qtv_block::{Block as ChainBlock, Header};
 use qtv_codec::{Decoder, Encode, Encoder, Error as CodecError};
 use qtv_crypto::ml_dsa::SIGNATURE_BYTES;
 use qtv_crypto::sha3::sha3_256;
-use qtv_crypto::vrf::{OUTPUT_BYTES, PROOF_BYTES};
+use qtv_crypto::vrf_mldsa::{OUTPUT_BYTES, PROOF_BYTES};
 use qtv_sampler::sortition::Draw;
 use qtv_tx::{Body, Call, Wrapper};
 
