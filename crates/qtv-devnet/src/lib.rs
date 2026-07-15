@@ -26,12 +26,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
-pub mod devnet;
-pub mod node;
-pub mod transport;
 pub mod wire;
 
 pub use config::{DevnetConfig, NodeConfig};
-pub use devnet::Devnet;
-pub use node::{DevNode, Height};
 pub use wire::Message;
