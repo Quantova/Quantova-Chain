@@ -19,6 +19,7 @@
 
 mod identity;
 pub mod keyschedule;
+pub mod record;
 
 pub use identity::{Identity, PeerId};
 pub use keyschedule::{DirKey, SessionKeys};
