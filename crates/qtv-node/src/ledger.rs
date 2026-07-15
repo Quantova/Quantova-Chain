@@ -76,6 +76,13 @@ fn state_key(address: &str) -> Key {
     key
 }
 
+/// The trie key an address maps to, the handle a disk store persists an account
+/// under. It is the same key the ledger writes under, so a persisted account
+/// reloads into the identical trie position.
+pub fn account_key(address: &str) -> Key {
+    state_key(address)
+}
+
 /// The account state of the chain over the sparse Merkle trie.
 #[derive(Debug, Clone, Default)]
 pub struct Ledger {
@@ -86,6 +93,13 @@ impl Ledger {
     /// An empty ledger with no accounts.
     pub fn new() -> Self {
         Ledger { trie: Trie::new() }
+    }
+
+    /// A ledger over a trie loaded from disk. The trie holds the account leaves a
+    /// store reopened, so a node restarted from its store rebuilds the exact state
+    /// it committed, with the same state root.
+    pub fn from_trie(trie: Trie) -> Self {
+        Ledger { trie }
     }
 
     /// The account an address holds, or the default fresh account when the
