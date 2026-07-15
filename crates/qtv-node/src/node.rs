@@ -145,6 +145,46 @@ pub fn validator_address(id: u64) -> String {
     qtv_account::derive(&validator_seed(id), 0).address()
 }
 
+/// Execute an ordered list of candidate transactions against the ledger. Each
+/// candidate that validates and executes through the virtual machine has its post
+/// execution balances and bumped nonce written back, and a candidate that no
+/// longer validates or that faults is skipped. The included transactions are
+/// returned in the order they applied. The leader runs this over its mempool
+/// candidates to build a block, and every other node runs it over the proposed
+/// body to reach the same post execution state root.
+pub fn execute_ordered(
+    ledger: &mut Ledger,
+    candidates: &[Wrapper],
+    fee_params: &FeeParams,
+) -> Vec<Wrapper> {
+    let mut included = Vec::new();
+    for wrapper in candidates {
+        let plan = match validate(wrapper, ledger, fee_params) {
+            Ok(plan) => plan,
+            Err(_) => continue,
+        };
+        let mut sender = ledger.account(&plan.sender);
+        let mut recipient = ledger.account(&plan.recipient);
+        let transferred = match execute_transfer(
+            sender.balance,
+            recipient.balance,
+            plan.amount,
+            plan.fee,
+            wrapper.body().gas_limit(),
+        ) {
+            Ok(transferred) => transferred,
+            Err(_) => continue,
+        };
+        sender.balance = transferred.sender_balance;
+        sender.nonce += 1;
+        recipient.balance = transferred.recipient_balance;
+        ledger.set_account(&plan.sender, &sender);
+        ledger.set_account(&plan.recipient, &recipient);
+        included.push(wrapper.clone());
+    }
+    included
+}
+
 /// The node: the state transition and finalization loop over a fixed committee.
 pub struct Node {
     ledger: Ledger,
@@ -282,37 +322,10 @@ impl Node {
         Ok(self.chain.last().expect("a block was just finalized"))
     }
 
-    /// Execute the mempool candidates against state in build order. Each valid
-    /// transaction is executed through the virtual machine and its post execution
-    /// balances and bumped nonce are written back. A transaction that no longer
-    /// validates or that faults is skipped and left for a later height.
+    /// Execute the mempool candidates against state in build order.
     fn execute_block(&mut self) -> Vec<Wrapper> {
-        let mut included = Vec::new();
-        for wrapper in self.mempool.candidates() {
-            let plan = match validate(&wrapper, &self.ledger, &self.fee_params) {
-                Ok(plan) => plan,
-                Err(_) => continue,
-            };
-            let mut sender = self.ledger.account(&plan.sender);
-            let mut recipient = self.ledger.account(&plan.recipient);
-            let transferred = match execute_transfer(
-                sender.balance,
-                recipient.balance,
-                plan.amount,
-                plan.fee,
-                wrapper.body().gas_limit(),
-            ) {
-                Ok(transferred) => transferred,
-                Err(_) => continue,
-            };
-            sender.balance = transferred.sender_balance;
-            sender.nonce += 1;
-            recipient.balance = transferred.recipient_balance;
-            self.ledger.set_account(&plan.sender, &sender);
-            self.ledger.set_account(&plan.recipient, &recipient);
-            included.push(wrapper);
-        }
-        included
+        let candidates = self.mempool.candidates();
+        execute_ordered(&mut self.ledger, &candidates, &self.fee_params)
     }
 
     /// Produce a run of heights in order, stopping at the first that does not
