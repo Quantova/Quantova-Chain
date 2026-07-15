@@ -9,8 +9,9 @@
 //! dropped at the edge, which is where a classical or malformed artifact is
 //! refused.
 
-use qtv_attest::{Attestation, Block, Parent};
-use qtv_block::Header;
+use qtv_attest::certificate::SuccinctProof;
+use qtv_attest::{Attestation, Block, Body as CertBody, Certificate, Envelope, Parent};
+use qtv_block::{Block as ChainBlock, Header};
 use qtv_codec::{Decoder, Encode, Encoder, Error as CodecError};
 use qtv_crypto::ml_dsa::SIGNATURE_BYTES;
 use qtv_crypto::sha3::sha3_256;
@@ -28,11 +29,22 @@ const TAG_PROPOSAL: u8 = 2;
 const TAG_ATTEST: u8 = 3;
 /// The tag that selects a peer list message, the discovery exchange.
 const TAG_PEERS: u8 = 4;
+/// The tag that selects a status message, a node's finalized height.
+const TAG_STATUS: u8 = 5;
+/// The tag that selects a block range request during catch up sync.
+const TAG_GET_BLOCKS: u8 = 6;
+/// The tag that selects a served block range, the sync response.
+const TAG_BLOCKS: u8 = 7;
 
 /// The tag that marks a genesis parent link.
 const PARENT_GENESIS: u8 = 0;
 /// The tag that marks a value parent link.
 const PARENT_VALUE: u8 = 1;
+
+/// The stage tag of a stage one certificate body, the aggregated attestations.
+const STAGE_ONE: u8 = 1;
+/// The stage tag of a stage two certificate body, a single succinct proof.
+const STAGE_TWO: u8 = 2;
 
 /// A block proposal: the view it is offered in, the real chain header the
 /// committee attests over, and the ordered body the header commits to. The view
@@ -59,6 +71,15 @@ pub enum Message {
     /// The peers a node knows, exchanged with a bootstrap neighbor so the network
     /// discovers itself from a small set of bootstrap edges.
     Peers(Vec<PeerEntry>),
+    /// A node's finalized status, the next height it will produce. A node learns a
+    /// peer is ahead when the peer status names a greater height than its own.
+    Status(u64),
+    /// A request for the finalized blocks in the inclusive height range, sent by a
+    /// node behind the tip to a peer ahead of it.
+    GetBlocks { from: u64, to: u64 },
+    /// The finalized blocks a peer serves for a range, each carrying its finality
+    /// certificate in its certificate slot, verified block by block by the receiver.
+    Blocks(Vec<ChainBlock>),
 }
 
 /// A reason a wire message failed to parse. Any of these drops the message.
@@ -72,6 +93,8 @@ pub enum DecodeError {
     UnknownTag(u8),
     /// A parent link tag named neither genesis nor a value.
     BadParent(u8),
+    /// A certificate stage tag named neither stage one nor stage two.
+    BadStage(u8),
     /// A fixed width crypto field was not its expected length.
     BadLength,
     /// A text field did not hold valid text.
@@ -120,6 +143,22 @@ impl Message {
                     encoder.put_bytes(entry.address().as_bytes());
                 }
             }
+            Message::Status(height) => {
+                encoder.put_tag(TAG_STATUS);
+                encoder.put_u64(*height);
+            }
+            Message::GetBlocks { from, to } => {
+                encoder.put_tag(TAG_GET_BLOCKS);
+                encoder.put_u64(*from);
+                encoder.put_u64(*to);
+            }
+            Message::Blocks(blocks) => {
+                encoder.put_tag(TAG_BLOCKS);
+                encoder.put_u64(blocks.len() as u64);
+                for block in blocks {
+                    encode_chain_block(&mut encoder, block);
+                }
+            }
         }
         encoder.into_bytes()
     }
@@ -157,6 +196,20 @@ impl Message {
                     peers.push(PeerEntry::new(key, address));
                 }
                 Message::Peers(peers)
+            }
+            TAG_STATUS => Message::Status(decoder.get_u64()?),
+            TAG_GET_BLOCKS => {
+                let from = decoder.get_u64()?;
+                let to = decoder.get_u64()?;
+                Message::GetBlocks { from, to }
+            }
+            TAG_BLOCKS => {
+                let count = decoder.get_u64()?;
+                let mut blocks = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    blocks.push(decode_chain_block(&mut decoder)?);
+                }
+                Message::Blocks(blocks)
             }
             tag => return Err(DecodeError::UnknownTag(tag)),
         };
@@ -265,4 +318,110 @@ fn decode_block(decoder: &mut Decoder<'_>) -> Result<Block, DecodeError> {
         parent,
         cost,
     })
+}
+
+/// The canonical encoding of a finality certificate, the bytes that fill the
+/// certificate slot of a finalized block. A syncing node reads this back and
+/// verifies it against the committee commitment and the beacon before it accepts
+/// the block, so the certificate travels with the block it finalizes.
+pub fn certificate_to_bytes(certificate: &Certificate) -> Vec<u8> {
+    let mut encoder = Encoder::new();
+    encode_envelope(&mut encoder, &certificate.envelope);
+    match &certificate.body {
+        CertBody::Stage1(body) => {
+            encoder.put_u8(STAGE_ONE);
+            encoder.put_u64(body.attestations.len() as u64);
+            for attestation in &body.attestations {
+                encode_attestation(&mut encoder, attestation);
+            }
+        }
+        CertBody::Stage2(body) => {
+            encoder.put_u8(STAGE_TWO);
+            encoder.put_u64(body.attester_count as u64);
+            encoder.put_bytes(&body.proof.bytes);
+        }
+    }
+    encoder.into_bytes()
+}
+
+/// Read a finality certificate from a certificate slot, refusing trailing bytes.
+pub fn certificate_from_bytes(bytes: &[u8]) -> Result<Certificate, DecodeError> {
+    let mut decoder = Decoder::new(bytes);
+    let envelope = decode_envelope(&mut decoder)?;
+    let certificate = match decoder.get_u8()? {
+        STAGE_ONE => {
+            let count = decoder.get_u64()?;
+            let mut attestations = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                attestations.push(decode_attestation(&mut decoder)?);
+            }
+            Certificate::stage_one(envelope, attestations)
+        }
+        STAGE_TWO => {
+            let attester_count = decoder.get_u64()? as usize;
+            let proof = decoder.get_bytes()?.to_vec();
+            Certificate::stage_two(envelope, attester_count, SuccinctProof { bytes: proof })
+        }
+        stage => return Err(DecodeError::BadStage(stage)),
+    };
+    decoder.finish()?;
+    Ok(certificate)
+}
+
+/// Append the canonical encoding of a certificate envelope: the height, the slot,
+/// the consensus block, and the committee commitment digest.
+fn encode_envelope(encoder: &mut Encoder, envelope: &Envelope) {
+    encoder.put_u64(envelope.height);
+    encoder.put_u64(envelope.slot);
+    encode_block(encoder, &envelope.block);
+    encoder.put_bytes(&envelope.committee);
+}
+
+/// Read a certificate envelope, reconstructing the committee digest from its fixed
+/// width field.
+fn decode_envelope(decoder: &mut Decoder<'_>) -> Result<Envelope, DecodeError> {
+    let height = decoder.get_u64()?;
+    let slot = decoder.get_u64()?;
+    let block = decode_block(decoder)?;
+    let committee: [u8; 32] = read_fixed(decoder)?;
+    Ok(Envelope {
+        height,
+        slot,
+        block,
+        committee,
+    })
+}
+
+/// Append the canonical encoding of a finalized chain block: the header, the
+/// certificate slot, and the ordered body, the mirror of the block encoding.
+fn encode_chain_block(encoder: &mut Encoder, block: &ChainBlock) {
+    block.header().encode(encoder);
+    encoder.put_bytes(block.certificate());
+    encoder.put_u64(block.body().len() as u64);
+    for wrapper in block.body() {
+        wrapper.encode(encoder);
+    }
+}
+
+/// Read a finalized chain block from its whole canonical encoding, the form the
+/// block store keeps, refusing trailing bytes. A peer decodes a stored block this
+/// way to serve it for sync.
+pub fn chain_block_from_bytes(bytes: &[u8]) -> Result<ChainBlock, DecodeError> {
+    let mut decoder = Decoder::new(bytes);
+    let block = decode_chain_block(&mut decoder)?;
+    decoder.finish()?;
+    Ok(block)
+}
+
+/// Read a finalized chain block field by field, the mirror of its canonical
+/// encoding.
+fn decode_chain_block(decoder: &mut Decoder<'_>) -> Result<ChainBlock, DecodeError> {
+    let header = Header::decode(decoder)?;
+    let certificate = decoder.get_bytes()?.to_vec();
+    let count = decoder.get_u64()?;
+    let mut body = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        body.push(decode_wrapper(decoder)?);
+    }
+    Ok(ChainBlock::new(header, certificate, body))
 }
