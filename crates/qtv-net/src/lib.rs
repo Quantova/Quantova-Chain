@@ -17,11 +17,15 @@
 
 #![forbid(unsafe_code)]
 
+mod channel;
+mod handshake;
 mod identity;
 pub mod keyschedule;
 mod pipe;
 pub mod record;
+mod transcript;
 
+pub use channel::Channel;
 pub use identity::{Identity, PeerId};
 pub use keyschedule::{DirKey, SessionKeys};
 pub use pipe::{duplex, DuplexStream};
