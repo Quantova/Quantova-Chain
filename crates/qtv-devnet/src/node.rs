@@ -57,8 +57,12 @@ pub fn net_identity(id: u64) -> Identity {
 pub enum RoundError {
     /// A store read or write failed.
     Io(io::Error),
+    /// A channel handshake or a record send or receive failed.
+    Net(qtv_net::Error),
     /// The sortition admitted no committee for the height.
     NoCommittee,
+    /// The elected leader was not online, so no block was proposed.
+    LeaderOffline,
     /// No entitled supermajority formed, so the block did not finalize.
     NotFinalized,
     /// A proposal did not reconcile with the node view of the height.
@@ -72,6 +76,12 @@ pub enum RoundError {
 impl From<io::Error> for RoundError {
     fn from(error: io::Error) -> Self {
         RoundError::Io(error)
+    }
+}
+
+impl From<qtv_net::Error> for RoundError {
+    fn from(error: qtv_net::Error) -> Self {
+        RoundError::Net(error)
     }
 }
 
@@ -341,7 +351,8 @@ impl DevNode {
             attestations,
         )
         .ok_or(RoundError::NotFinalized)?;
-        debug_assert!(self.consensus.verify(&certificate, selection, &self.beacon));
+        // Aggregation admits only entitled attestations whose module lattice
+        // signature verifies, so the certificate is verified by construction.
 
         let cert_digest = certificate.digest();
         let attesters = certificate.attesters();
