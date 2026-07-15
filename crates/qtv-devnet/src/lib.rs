@@ -26,9 +26,11 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod node;
 pub mod transport;
 pub mod wire;
 
 pub use config::{DevnetConfig, NodeConfig};
+pub use node::{DevNode, FinalizedBlock, Height};
 pub use transport::{connect_duplex_mesh, Mesh};
 pub use wire::Message;
