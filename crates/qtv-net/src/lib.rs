@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 mod channel;
+pub mod erasure;
 mod handshake;
 mod identity;
 pub mod keyschedule;
@@ -26,6 +27,7 @@ pub mod record;
 mod transcript;
 
 pub use channel::Channel;
+pub use erasure::{Coded, Commitment, Shard, ShardProof};
 pub use identity::{Identity, PeerId};
 pub use keyschedule::{DirKey, SessionKeys};
 pub use pipe::{duplex, DuplexStream};
