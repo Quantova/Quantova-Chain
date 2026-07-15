@@ -138,6 +138,13 @@ fn validator_seed(id: u64) -> [u8; 32] {
     seed
 }
 
+/// The proposer address a validator signs blocks under, derived deterministically
+/// from its consensus id. Every node computes the same address for a leader, so a
+/// header built by one node hashes the same on every other.
+pub fn validator_address(id: u64) -> String {
+    qtv_account::derive(&validator_seed(id), 0).address()
+}
+
 /// The node: the state transition and finalization loop over a fixed committee.
 pub struct Node {
     ledger: Ledger,
@@ -179,12 +186,7 @@ impl Node {
         let validator_addresses = genesis
             .validators
             .iter()
-            .map(|v| {
-                (
-                    v.id,
-                    qtv_account::derive(&validator_seed(v.id), 0).address(),
-                )
-            })
+            .map(|v| (v.id, validator_address(v.id)))
             .collect();
 
         Node {
