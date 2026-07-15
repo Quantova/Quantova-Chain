@@ -18,8 +18,10 @@
 #![forbid(unsafe_code)]
 
 mod identity;
+pub mod keyschedule;
 
 pub use identity::{Identity, PeerId};
+pub use keyschedule::{DirKey, SessionKeys};
 
 use std::fmt;
 
