@@ -51,6 +51,7 @@ fn a_proposal_message_round_trips() {
         view: 2,
         header: header.clone(),
         body: body.clone(),
+        justification: Vec::new(),
     })
     .encode();
     match Message::decode(&bytes).expect("decodes") {
