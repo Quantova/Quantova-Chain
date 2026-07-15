@@ -33,8 +33,10 @@ pub mod node;
 pub mod transport;
 pub mod wire;
 
+pub use clock::{Clock, Event, Time};
 pub use config::{DevnetConfig, NodeConfig};
 pub use devnet::Devnet;
-pub use node::{DevNode, FinalizedBlock, Height};
+pub use network::Network;
+pub use node::{leader_for, DevNode, FinalizedBlock, Height, View};
 pub use transport::{connect_duplex_mesh, Mesh};
 pub use wire::Message;

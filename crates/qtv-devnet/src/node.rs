@@ -10,11 +10,14 @@
 //! finalized block and the account state behind it are persisted through
 //! qtv-store, so a node reopened from disk rebuilds the exact chain it committed.
 //!
-//! The node exposes the round as phases the driver sequences over the wire:
-//! select the committee, build or accept the proposal, attest, and finalize. The
-//! driver moves each sealed message between the channels; the node never touches a
-//! channel itself.
+//! The node exposes its round as event handlers the driver dispatches: enter the
+//! current view, take a proposal, take an attestation, fire a view timeout, and
+//! try to finalize. It runs its own round on the logical clock over its own view,
+//! and it stages at most one block per height, so it never attests a second and no
+//! two nodes finalize different blocks at one height. The driver moves each sealed
+//! record between the channels; the node never touches a channel itself.
 
+use std::cell::RefCell;
 use std::io;
 
 use qtv_attest::aggregate::aggregate;
@@ -79,8 +82,6 @@ pub enum RoundError {
     Net(qtv_net::Error),
     /// The sortition admitted no committee for the height.
     NoCommittee,
-    /// The elected leader was not online, so no block was proposed.
-    LeaderOffline,
     /// No entitled supermajority formed, so the block did not finalize.
     NotFinalized,
     /// A proposal did not reconcile with the node view of the height.
@@ -166,6 +167,7 @@ pub struct DevNode {
     round_atts: Vec<Attestation>,
     future_props: Vec<Proposal>,
     silent: bool,
+    selection_cache: RefCell<Option<Selection>>,
     chain: Vec<FinalizedBlock>,
     slashed: Vec<u64>,
 }
@@ -211,6 +213,7 @@ impl DevNode {
             round_atts: Vec::new(),
             future_props: Vec::new(),
             silent: false,
+            selection_cache: RefCell::new(None),
             chain: Vec::new(),
             slashed: Vec::new(),
         };
@@ -251,6 +254,7 @@ impl DevNode {
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
         self.beacon = Beacon::from_seed(*header.beacon_seed()).advance(&cert_digest, head);
         self.height = head + 1;
+        *self.selection_cache.borrow_mut() = None;
         Ok(())
     }
 
@@ -277,11 +281,20 @@ impl DevNode {
             .admit(transaction, &self.ledger, &self.fee_params);
     }
 
-    /// Select the committee and elect the leader for the current height.
+    /// Select the committee and elect the leader for the current height. The
+    /// selection is a pure function of the beacon and height, both fixed within a
+    /// height, so it is cached and the sortition runs once per height rather than
+    /// once per event. The cache is cleared when the height advances.
     pub fn select(&self) -> Result<Selection, RoundError> {
-        self.consensus
+        if let Some(selection) = self.selection_cache.borrow().as_ref() {
+            return Ok(selection.clone());
+        }
+        let selection = self
+            .consensus
             .select(&self.beacon, self.height)
-            .ok_or(RoundError::NoCommittee)
+            .ok_or(RoundError::NoCommittee)?;
+        *self.selection_cache.borrow_mut() = Some(selection.clone());
+        Ok(selection)
     }
 
     /// Build the block for the current height from the mempool and stage it. The
@@ -400,6 +413,7 @@ impl DevNode {
         self.view = 0;
         self.round_atts.clear();
         self.future_props.clear();
+        *self.selection_cache.borrow_mut() = None;
         self.mempool.remove_included(&staged.included_ids);
         self.chain.push(FinalizedBlock {
             block: chain_block,
@@ -409,33 +423,39 @@ impl DevNode {
         Ok(())
     }
 
-    /// Enter the current view of the current height. An online leader that has not
-    /// yet staged builds and offers its proposal and attests it; a leader that has
-    /// already staged this view re-offers the same proposal, which lets a peer that
-    /// came online late still receive it. A non leader, a silent leader, or an
-    /// offline node offers nothing, so the view times out and rotates. Returns the
-    /// messages to gossip.
+    /// Enter the current view of the current height. An online leader offers its
+    /// proposal for the view, building it the first time and re-offering the same
+    /// one on a later entry, so a peer that came online late still receives it. Any
+    /// node that has staged a block re-offers its attestation, so the late peer
+    /// collects the full set. A silent leader withholds its proposal but still
+    /// attests, and an offline node offers nothing, so the view times out and
+    /// rotates. Returns the messages to gossip.
     pub fn enter_round(&mut self, selection: &Selection, online: bool) -> Vec<Message> {
-        if !online || self.silent || leader_for(selection, self.view) != self.id {
+        if !online {
             return Vec::new();
         }
-        let current_stage = matches!(&self.staged, Some(staged) if staged.view == self.view);
-        let proposal = if current_stage {
-            let staged = self.staged.as_ref().expect("a current stage is present");
-            Proposal {
-                view: staged.view,
-                header: staged.header.clone(),
-                body: staged.body.clone(),
-            }
-        } else {
-            self.build_proposal(selection)
-        };
-        let attestation = self.attest().expect("the leader staged its own block");
-        self.record_attestation(&attestation);
-        vec![
-            Message::Proposal(proposal),
-            Message::Attest(Box::new(attestation)),
-        ]
+        let mut messages = Vec::new();
+        let leads = leader_for(selection, self.view) == self.id;
+        if leads && !self.silent {
+            let current_stage = matches!(&self.staged, Some(staged) if staged.view == self.view);
+            let proposal = if current_stage {
+                let staged = self.staged.as_ref().expect("a current stage is present");
+                Proposal {
+                    view: staged.view,
+                    header: staged.header.clone(),
+                    body: staged.body.clone(),
+                }
+            } else {
+                self.build_proposal(selection)
+            };
+            messages.push(Message::Proposal(proposal));
+        }
+        if self.staged.is_some() {
+            let attestation = self.attest().expect("the staged block attests");
+            self.record_attestation(&attestation);
+            messages.push(Message::Attest(Box::new(attestation)));
+        }
+        messages
     }
 
     /// Handle a proposal that arrived over the wire. A proposal for a later view is
@@ -498,6 +518,22 @@ impl DevNode {
     pub fn take_buffered_proposal(&mut self) -> Option<Proposal> {
         let pos = self.future_props.iter().position(|p| p.view == self.view)?;
         Some(self.future_props.remove(pos))
+    }
+
+    /// Whether the node has collected an attestation over its staged block from
+    /// every listed signer. The driver passes the online committee, so a node
+    /// finalizes only once every online member has attested. The certificate then
+    /// carries the same set of attestations on every node and is byte identical,
+    /// rather than the first quorum each node happened to see.
+    pub fn has_attestations_from(&self, signers: &[u64]) -> bool {
+        let Some(staged) = &self.staged else {
+            return false;
+        };
+        signers.iter().all(|signer| {
+            self.round_atts
+                .iter()
+                .any(|a| a.from == *signer && a.block == staged.block)
+        })
     }
 
     /// Try to finalize the staged block from the attestations collected so far.

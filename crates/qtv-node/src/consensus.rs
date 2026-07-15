@@ -49,6 +49,7 @@ impl ConsensusValidator {
 
 /// The committee for a slot: the public commitment a verifier checks against, the
 /// selected member ids in ascending order, and the elected leader.
+#[derive(Clone)]
 pub struct Selection {
     pub commitment: CommitteeCommitment,
     pub members: Vec<u64>,
