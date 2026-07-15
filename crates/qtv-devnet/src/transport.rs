@@ -102,8 +102,7 @@ pub fn connect_duplex_mesh(identities: &[Identity]) -> Result<Mesh<DuplexStream>
             let id_far = identities[j].clone();
             let peer_near = identities[i].peer_id();
             let peer_far = identities[j].peer_id();
-            let accepting =
-                thread::spawn(move || Channel::accept_pinned(far, &id_far, &peer_near));
+            let accepting = thread::spawn(move || Channel::accept_pinned(far, &id_far, &peer_near));
             let channel_i = Channel::connect_pinned(near, &id_near, &peer_far)?;
             let channel_j = accepting.join().expect("the accept thread joins")?;
             links.insert((i, j), channel_i);
