@@ -30,6 +30,7 @@
 #![forbid(unsafe_code)]
 
 pub mod clock;
+pub mod coded;
 pub mod config;
 pub mod devnet;
 pub mod discovery;
