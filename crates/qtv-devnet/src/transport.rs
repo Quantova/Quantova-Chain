@@ -67,6 +67,30 @@ impl<S: Read + Write> Mesh<S> {
         Ok(())
     }
 
+    /// The number of sealed records in flight on the directed edge from `from` to
+    /// `to`, not yet opened by the receiver.
+    pub fn pending(&self, from: usize, to: usize) -> usize {
+        self.pending.get(&(from, to)).copied().unwrap_or(0)
+    }
+
+    /// Open exactly one record waiting for `to` from `from`, in send order. The
+    /// round loop calls this once per delivery event, so a sealed record crosses
+    /// the channel at the logical time its event fires while the edge stays in
+    /// send order. Panics if no record is in flight on the edge.
+    pub fn recv_one(&mut self, to: usize, from: usize) -> Result<Vec<u8>> {
+        let count = self
+            .pending
+            .get_mut(&(from, to))
+            .filter(|c| **c > 0)
+            .expect("a delivery event fires only for a record in flight");
+        *count -= 1;
+        let channel = self
+            .links
+            .get_mut(&(to, from))
+            .expect("a mesh link exists for every ordered pair");
+        channel.recv()
+    }
+
     /// Open every record waiting for `receiver` from each listed sender, in sender
     /// order, returning the sender index and the plaintext of each. Exactly the
     /// records that were sent are read, so the drain never blocks on an empty edge.
