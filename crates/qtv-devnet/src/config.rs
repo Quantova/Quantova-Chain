@@ -13,23 +13,35 @@ use qtv_node::fee::FeeParams;
 use qtv_node::node::{Genesis, GenesisAccount, ValidatorSpec};
 
 /// The configuration of one node: its consensus identity, its native stake,
-/// whether it is online this run, and where its stores live on disk.
+/// whether it is online this run, where its stores live on disk, the bootstrap
+/// peers it starts discovery from, and the address other nodes dial to reach it.
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
     pub id: u64,
     pub stake: u64,
     pub online: bool,
     pub store_dir: PathBuf,
+    /// The consensus ids of the bootstrap peers this node starts from. The node
+    /// discovers the rest of the network by exchanging its known peer set with
+    /// these. An empty list leaves the node reachable only through peers that
+    /// bootstrap from it.
+    pub bootstrap: Vec<u64>,
+    /// The address other nodes dial to reach this node. On the in memory devnet it
+    /// is a symbolic handle; over a real transport it is a socket address.
+    pub address: String,
 }
 
 impl NodeConfig {
-    /// An online node with the given id, stake, and store directory.
+    /// An online node with the given id, stake, and store directory, with no
+    /// bootstrap peers set yet.
     pub fn online(id: u64, stake: u64, store_dir: impl Into<PathBuf>) -> Self {
         NodeConfig {
             id,
             stake,
             online: true,
             store_dir: store_dir.into(),
+            bootstrap: Vec::new(),
+            address: format!("mem://{id}"),
         }
     }
 
@@ -41,17 +53,34 @@ impl NodeConfig {
             stake,
             online: false,
             store_dir: store_dir.into(),
+            bootstrap: Vec::new(),
+            address: format!("mem://{id}"),
         }
+    }
+
+    /// The same node reachable through the given bootstrap peers.
+    pub fn with_bootstrap(mut self, bootstrap: Vec<u64>) -> Self {
+        self.bootstrap = bootstrap;
+        self
     }
 }
 
-/// The configuration of a whole devnet: the shared genesis fields and the nodes.
+/// The default overlay fanout, a full mesh. A small devnet keeps every pair
+/// connected unless a larger network sets a bound, so the existing behavior is
+/// preserved while a bounded overlay is opt in through a smaller fanout.
+pub const FULL_FANOUT: usize = usize::MAX;
+
+/// The configuration of a whole devnet: the shared genesis fields, the nodes, and
+/// the overlay fanout each node keeps neighbors up to.
 #[derive(Clone, Debug)]
 pub struct DevnetConfig {
     pub fee_params: FeeParams,
     pub accounts: Vec<GenesisAccount>,
     pub nodes: Vec<NodeConfig>,
     pub genesis_time: u64,
+    /// The most neighbors a node keeps in the gossip overlay. `FULL_FANOUT` keeps
+    /// every pair connected; a smaller bound draws a ring lattice of that degree.
+    pub fanout: usize,
 }
 
 impl DevnetConfig {

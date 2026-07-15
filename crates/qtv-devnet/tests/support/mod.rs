@@ -42,18 +42,45 @@ pub fn unique_base(name: &str) -> PathBuf {
 }
 
 /// A devnet configuration over a base directory, one node per online flag, all at
-/// the same stake, funding the given genesis accounts.
+/// the same stake, funding the given genesis accounts. The nodes bootstrap from a
+/// star centered on the first node and keep a full overlay, so the topology
+/// matches the historical full mesh unless a test lowers the fanout.
 pub fn config(base: &Path, online: &[bool], accounts: Vec<GenesisAccount>) -> DevnetConfig {
+    config_with_fanout(base, online, accounts, qtv_devnet::config::FULL_FANOUT)
+}
+
+/// A devnet configuration with an explicit overlay fanout, so a test can draw a
+/// bounded overlay rather than a full mesh.
+pub fn config_with_fanout(
+    base: &Path,
+    online: &[bool],
+    accounts: Vec<GenesisAccount>,
+    fanout: usize,
+) -> DevnetConfig {
+    let count = online.len();
     let nodes = online
         .iter()
         .enumerate()
         .map(|(i, &on)| {
             let id = i as u64 + 1;
+            // A star centered on the first node: the first reaches the second, the
+            // rest reach the first, so the bootstrap graph is connected.
+            let bootstrap = if i == 0 {
+                if count > 1 {
+                    vec![2]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                vec![1]
+            };
             NodeConfig {
                 id,
                 stake: VALIDATOR_STAKE,
                 online: on,
                 store_dir: base.join(format!("node-{id}")),
+                bootstrap,
+                address: format!("mem://{id}"),
             }
         })
         .collect();
@@ -62,6 +89,7 @@ pub fn config(base: &Path, online: &[bool], accounts: Vec<GenesisAccount>) -> De
         accounts,
         nodes,
         genesis_time: GENESIS_TIME,
+        fanout,
     }
 }
 

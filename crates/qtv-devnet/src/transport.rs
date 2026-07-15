@@ -38,9 +38,29 @@ impl<S> Mesh<S> {
         }
     }
 
+    /// An empty mesh over a node count, to be filled with links as the overlay is
+    /// formed. Discovery establishes the bootstrap links first, then the overlay
+    /// adds a bounded neighbor link per node.
+    pub fn empty(node_count: usize) -> Self {
+        Mesh::from_links(node_count, BTreeMap::new())
+    }
+
     /// The number of nodes the mesh connects.
     pub fn node_count(&self) -> usize {
         self.node_count
+    }
+
+    /// Whether a channel is established on the directed edge from `from` to `to`.
+    pub fn has_edge(&self, from: usize, to: usize) -> bool {
+        self.links.contains_key(&(from, to))
+    }
+
+    /// Add an established pair of channels for the undirected edge between `i` and
+    /// `j`, one channel in each direction. A discovered overlay edge is added here
+    /// once its pinned handshake has authenticated both endpoints.
+    pub fn add_link(&mut self, i: usize, j: usize, channel_ij: Channel<S>, channel_ji: Channel<S>) {
+        self.links.insert((i, j), channel_ij);
+        self.links.insert((j, i), channel_ji);
     }
 }
 
@@ -113,25 +133,53 @@ impl<S: Read + Write> Mesh<S> {
     }
 }
 
-/// Stand up a full mesh over in memory duplex streams, one channel per pair, each
-/// side running the pinned post-quantum handshake on its own thread so the two
-/// sides complete together.
+/// Run the pinned post-quantum handshake between two identities over a fresh in
+/// memory duplex, each side on its own thread so the two complete together. The
+/// initiator and responder each pin the other identity, so the returned channels
+/// are authenticated: a peer that cannot prove the identity is refused here, which
+/// is where a discovered peer is trusted or dropped. Returns the `i` to `j`
+/// channel and the `j` to `i` channel.
+pub fn connect_duplex_pair(
+    id_i: &Identity,
+    id_j: &Identity,
+) -> Result<(Channel<DuplexStream>, Channel<DuplexStream>)> {
+    let (near, far) = duplex();
+    let id_near = id_i.clone();
+    let id_far = id_j.clone();
+    let peer_near = id_i.peer_id();
+    let peer_far = id_j.peer_id();
+    let accepting = thread::spawn(move || Channel::accept_pinned(far, &id_far, &peer_near));
+    let channel_i = Channel::connect_pinned(near, &id_near, &peer_far)?;
+    let channel_j = accepting.join().expect("the accept thread joins")?;
+    Ok((channel_i, channel_j))
+}
+
+/// Stand up a full mesh over in memory duplex streams, one channel per pair. Used
+/// where the operator wires every pair by hand rather than discovering the overlay.
 pub fn connect_duplex_mesh(identities: &[Identity]) -> Result<Mesh<DuplexStream>> {
     let n = identities.len();
-    let mut links = BTreeMap::new();
+    let mut mesh = Mesh::empty(n);
     for i in 0..n {
         for j in (i + 1)..n {
-            let (near, far) = duplex();
-            let id_near = identities[i].clone();
-            let id_far = identities[j].clone();
-            let peer_near = identities[i].peer_id();
-            let peer_far = identities[j].peer_id();
-            let accepting = thread::spawn(move || Channel::accept_pinned(far, &id_far, &peer_near));
-            let channel_i = Channel::connect_pinned(near, &id_near, &peer_far)?;
-            let channel_j = accepting.join().expect("the accept thread joins")?;
-            links.insert((i, j), channel_i);
-            links.insert((j, i), channel_j);
+            let (channel_i, channel_j) = connect_duplex_pair(&identities[i], &identities[j])?;
+            mesh.add_link(i, j, channel_i, channel_j);
         }
     }
-    Ok(Mesh::from_links(n, links))
+    Ok(mesh)
+}
+
+/// Stand up channels for exactly the given undirected overlay edges over in memory
+/// duplex streams, so the mesh is a bounded overlay rather than a full mesh.
+pub fn connect_duplex_overlay(
+    identities: &[Identity],
+    edges: &[(usize, usize)],
+) -> Result<Mesh<DuplexStream>> {
+    let mut mesh = Mesh::empty(identities.len());
+    for &(i, j) in edges {
+        if !mesh.has_edge(i, j) {
+            let (channel_i, channel_j) = connect_duplex_pair(&identities[i], &identities[j])?;
+            mesh.add_link(i, j, channel_i, channel_j);
+        }
+    }
+    Ok(mesh)
 }
