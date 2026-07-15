@@ -35,6 +35,9 @@ const TAG_STATUS: u8 = 5;
 const TAG_GET_BLOCKS: u8 = 6;
 /// The tag that selects a served block range, the sync response.
 const TAG_BLOCKS: u8 = 7;
+/// The tag that selects a view change record, a member's move to a later view
+/// carrying the block it is locked on.
+const TAG_VIEW_CHANGE: u8 = 8;
 
 /// The tag that marks a genesis parent link.
 const PARENT_GENESIS: u8 = 0;
@@ -50,11 +53,42 @@ const STAGE_TWO: u8 = 2;
 /// committee attests over, and the ordered body the header commits to. The view
 /// names which leader in the rotation proposed it, so a receiver checks the
 /// proposal against the leader of that view and never against a stale one.
-#[derive(Clone, Debug)]
+///
+/// A proposal offered in a later view after a split may carry a justification: a
+/// quorum of view change records for that view. The justification is what lets a
+/// locked member unlock and attest a conflicting block, so it never does so on a
+/// bare later proposal, only on one that proves the network moved on.
+#[derive(Clone)]
 pub struct Proposal {
     pub view: u64,
     pub header: Header,
     pub body: Vec<Wrapper>,
+    pub justification: Vec<ViewChange>,
+}
+
+/// The block a member is locked on, carried in its view change record so the
+/// leader that collects the quorum holds the full block it must re-propose, not
+/// only its value.
+#[derive(Clone)]
+pub struct LockedBlock {
+    pub header: Header,
+    pub body: Vec<Wrapper>,
+}
+
+/// A view change record: one committee member's signed move to a later view,
+/// carrying the block it is currently locked on if any. The signature is a
+/// module lattice attestation over a canonical view change subject that commits
+/// to the height, the target view, the lock view, and the locked value, so a
+/// forged record does not verify and a quorum of records is an unforgeable proof
+/// that the network reached the target view. A leader aggregates a quorum of
+/// these into the justification it attaches to its proposal.
+#[derive(Clone)]
+pub struct ViewChange {
+    pub height: u64,
+    pub target_view: u64,
+    pub lock_view: u64,
+    pub locked: Option<LockedBlock>,
+    pub att: Attestation,
 }
 
 /// A gossip message. A node forwards a transaction it admitted, a leader forwards
@@ -80,6 +114,10 @@ pub enum Message {
     /// The finalized blocks a peer serves for a range, each carrying its finality
     /// certificate in its certificate slot, verified block by block by the receiver.
     Blocks(Vec<ChainBlock>),
+    /// One committee member view change record, its signed move to a later view
+    /// carrying the block it is locked on, gossiped after a split so a leader can
+    /// gather a quorum of them into a justification.
+    ViewChange(Box<ViewChange>),
 }
 
 /// A reason a wire message failed to parse. Any of these drops the message.
@@ -130,6 +168,10 @@ impl Message {
                 for wrapper in &proposal.body {
                     wrapper.encode(&mut encoder);
                 }
+                encoder.put_u64(proposal.justification.len() as u64);
+                for record in &proposal.justification {
+                    encode_view_change(&mut encoder, record);
+                }
             }
             Message::Attest(attestation) => {
                 encoder.put_tag(TAG_ATTEST);
@@ -159,6 +201,10 @@ impl Message {
                     encode_chain_block(&mut encoder, block);
                 }
             }
+            Message::ViewChange(record) => {
+                encoder.put_tag(TAG_VIEW_CHANGE);
+                encode_view_change(&mut encoder, record);
+            }
         }
         encoder.into_bytes()
     }
@@ -184,7 +230,17 @@ impl Message {
                 for _ in 0..count {
                     body.push(decode_wrapper(&mut decoder)?);
                 }
-                Message::Proposal(Proposal { view, header, body })
+                let just_count = decoder.get_u64()?;
+                let mut justification = Vec::with_capacity(just_count as usize);
+                for _ in 0..just_count {
+                    justification.push(decode_view_change(&mut decoder)?);
+                }
+                Message::Proposal(Proposal {
+                    view,
+                    header,
+                    body,
+                    justification,
+                })
             }
             TAG_ATTEST => Message::Attest(Box::new(decode_attestation(&mut decoder)?)),
             TAG_PEERS => {
@@ -211,6 +267,7 @@ impl Message {
                 }
                 Message::Blocks(blocks)
             }
+            TAG_VIEW_CHANGE => Message::ViewChange(Box::new(decode_view_change(&mut decoder)?)),
             tag => return Err(DecodeError::UnknownTag(tag)),
         };
         decoder.finish()?;
@@ -279,6 +336,55 @@ fn decode_attestation(decoder: &mut Decoder<'_>) -> Result<Attestation, DecodeEr
         block,
         membership: Draw { output, proof },
         sig,
+    })
+}
+
+/// Append the canonical encoding of a view change record: the height, the target
+/// view, the lock view, the locked block if any, and the module lattice
+/// attestation that signs the whole claim.
+fn encode_view_change(encoder: &mut Encoder, record: &ViewChange) {
+    encoder.put_u64(record.height);
+    encoder.put_u64(record.target_view);
+    encoder.put_u64(record.lock_view);
+    match &record.locked {
+        Some(locked) => {
+            encoder.put_u8(1);
+            locked.header.encode(encoder);
+            encoder.put_u64(locked.body.len() as u64);
+            for wrapper in &locked.body {
+                wrapper.encode(encoder);
+            }
+        }
+        None => encoder.put_u8(0),
+    }
+    encode_attestation(encoder, &record.att);
+}
+
+/// Read a view change record, refusing a lock flag that is neither zero nor one.
+fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeError> {
+    let height = decoder.get_u64()?;
+    let target_view = decoder.get_u64()?;
+    let lock_view = decoder.get_u64()?;
+    let locked = match decoder.get_u8()? {
+        0 => None,
+        1 => {
+            let header = Header::decode(decoder)?;
+            let count = decoder.get_u64()?;
+            let mut body = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                body.push(decode_wrapper(decoder)?);
+            }
+            Some(LockedBlock { header, body })
+        }
+        other => return Err(DecodeError::BadParent(other)),
+    };
+    let att = decode_attestation(decoder)?;
+    Ok(ViewChange {
+        height,
+        target_view,
+        lock_view,
+        locked,
+        att,
     })
 }
 

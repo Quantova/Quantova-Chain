@@ -89,6 +89,12 @@ impl Clock {
         self.queue.push(Reverse(Scheduled { time, seq, event }));
     }
 
+    /// The time the next event fires, without popping it. None when the queue is
+    /// empty. A driver uses this to run the clock only up to a deadline.
+    pub fn peek_time(&self) -> Option<Time> {
+        self.queue.peek().map(|Reverse(scheduled)| scheduled.time)
+    }
+
     /// Pop the next event, advancing the present to its time. None when the queue
     /// is empty, which is quiescence: no timer and no record is left to act on.
     pub fn next_event(&mut self) -> Option<Event> {

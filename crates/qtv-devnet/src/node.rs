@@ -12,10 +12,14 @@
 //!
 //! The node exposes its round as event handlers the driver dispatches: enter the
 //! current view, take a proposal, take an attestation, fire a view timeout, and
-//! try to finalize. It runs its own round on the logical clock over its own view,
-//! and it stages at most one block per height, so it never attests a second and no
-//! two nodes finalize different blocks at one height. The driver moves each sealed
-//! record between the channels; the node never touches a channel itself.
+//! try to finalize. It runs its own round on the logical clock over its own view.
+//! Staging a block is the lock: while locked the node does not attest a conflicting
+//! block at a later view unless a proposal carries a higher view justification, a
+//! quorum of view change records whose highest lock the block matches. Any two
+//! quorums intersect, so a lock change never lets two conflicting blocks reach a
+//! supermajority and no two nodes finalize different blocks at one height. The
+//! driver moves each sealed record between the channels; the node never touches a
+//! channel itself.
 
 use std::cell::RefCell;
 use std::io;
@@ -37,7 +41,7 @@ use qtv_store::{BlockStore, StateStore};
 use qtv_tx::Wrapper;
 
 use crate::config::{DevnetConfig, NodeConfig};
-use crate::wire::{Message, Proposal};
+use crate::wire::{LockedBlock, Message, Proposal, ViewChange};
 
 /// A chain height, the block number a node produces.
 pub type Height = u64;
@@ -163,13 +167,21 @@ impl FinalizedBlock {
 }
 
 /// The block a node has proposed or accepted for the current height, waiting for
-/// the attestations that finalize it.
+/// the attestations that finalize it. Staging a block is the lock: the node holds
+/// this block and the view it locked in, and it will not attest a conflicting
+/// block at a later view without a justification. The resulting ledger is kept
+/// here rather than committed to the node, so the node stays on its confirmed
+/// state and a lock change re-executes the new block from that state cleanly.
 struct Staged {
     view: View,
     header: Header,
     body: Vec<Wrapper>,
     block: ConsensusBlock,
     included_ids: Vec<String>,
+    ledger: Ledger,
+    /// The justification the block was accepted under, an empty set for a view
+    /// zero block, re-offered so a late peer sees why the lock changed.
+    justification: Vec<ViewChange>,
 }
 
 /// One devnet node.
@@ -193,6 +205,7 @@ pub struct DevNode {
     staged: Option<Staged>,
     round_atts: Vec<Attestation>,
     future_props: Vec<Proposal>,
+    view_changes: Vec<ViewChange>,
     silent: bool,
     selection_cache: RefCell<Option<Selection>>,
     chain: Vec<FinalizedBlock>,
@@ -239,6 +252,7 @@ impl DevNode {
             staged: None,
             round_atts: Vec::new(),
             future_props: Vec::new(),
+            view_changes: Vec::new(),
             silent: false,
             selection_cache: RefCell::new(None),
             chain: Vec::new(),
@@ -327,14 +341,22 @@ impl DevNode {
     /// Build the block for the current height from the mempool and stage it. The
     /// leader runs this, then gossips the returned proposal.
     pub fn build_proposal(&mut self, selection: &Selection) -> Proposal {
+        self.build_proposal_at(selection, self.view)
+    }
+
+    /// Build a fresh block for a given view and stage it. The body executes
+    /// against a copy of the confirmed state, so the node's own ledger stays on
+    /// the confirmed state until the block finalizes.
+    fn build_proposal_at(&mut self, selection: &Selection, view: View) -> Proposal {
         let height = self.height;
-        let proposer = validator_address(leader_for(selection, self.view));
+        let proposer = validator_address(leader_for(selection, view));
         let candidates = self.mempool.candidates();
-        let included = execute_ordered(&mut self.ledger, &candidates, &self.fee_params);
+        let mut ledger = self.ledger.clone();
+        let included = execute_ordered(&mut ledger, &candidates, &self.fee_params);
         let header = Header::new(
             height,
             self.parent_header_hash,
-            self.ledger.state_root(),
+            ledger.state_root(),
             transaction_root(&included),
             empty_transaction_root(),
             *self.beacon.seed(),
@@ -344,23 +366,25 @@ impl DevNode {
         let block = ConsensusBlock::new(height, header_value(&header.hash()), self.parent_val);
         let included_ids = included.iter().map(Wrapper::id).collect();
         self.staged = Some(Staged {
-            view: self.view,
+            view,
             header: header.clone(),
             body: included.clone(),
             block,
             included_ids,
+            ledger,
+            justification: Vec::new(),
         });
         Proposal {
-            view: self.view,
+            view,
             header,
             body: included,
+            justification: Vec::new(),
         }
     }
 
-    /// Accept a gossiped proposal. The node executes the proposed body against its
-    /// own state and rejects the proposal unless the whole body applies and the
-    /// resulting roots and the parent link match the header. On acceptance the
-    /// block is staged for attestation.
+    /// Accept a gossiped proposal for the current view. The node checks the
+    /// proposal came from the leader of its view, then stages the block. A
+    /// justified later-view proposal takes a separate path.
     pub fn accept_proposal(
         &mut self,
         selection: &Selection,
@@ -368,16 +392,33 @@ impl DevNode {
     ) -> Result<(), RoundError> {
         let header = &proposal.header;
         if proposal.view != self.view
-            || header.height() != self.height
-            || *header.parent_hash() != self.parent_header_hash
-            || header.beacon_seed() != self.beacon.seed()
             || header.proposer() != validator_address(leader_for(selection, proposal.view))
         {
             return Err(RoundError::ProposalRejected);
         }
-        let included = execute_ordered(&mut self.ledger, &proposal.body, &self.fee_params);
-        if included.len() != proposal.body.len()
-            || self.ledger.state_root() != *header.state_root()
+        self.stage_from(header, &proposal.body, proposal.view)
+    }
+
+    /// Execute a header and body against a copy of the confirmed state and stage
+    /// the block when the whole body applies and the resulting roots and the
+    /// parent link match the header. The confirmed ledger is untouched, so a lock
+    /// change re-executes the new block from the same base without a rollback.
+    fn stage_from(
+        &mut self,
+        header: &Header,
+        body: &[Wrapper],
+        view: View,
+    ) -> Result<(), RoundError> {
+        if header.height() != self.height
+            || *header.parent_hash() != self.parent_header_hash
+            || header.beacon_seed() != self.beacon.seed()
+        {
+            return Err(RoundError::ProposalRejected);
+        }
+        let mut ledger = self.ledger.clone();
+        let included = execute_ordered(&mut ledger, body, &self.fee_params);
+        if included.len() != body.len()
+            || ledger.state_root() != *header.state_root()
             || transaction_root(&included) != *header.transaction_root()
         {
             return Err(RoundError::ProposalRejected);
@@ -385,11 +426,13 @@ impl DevNode {
         let block = ConsensusBlock::new(self.height, header_value(&header.hash()), self.parent_val);
         let included_ids = included.iter().map(Wrapper::id).collect();
         self.staged = Some(Staged {
-            view: proposal.view,
+            view,
             header: header.clone(),
-            body: proposal.body.clone(),
+            body: body.to_vec(),
             block,
             included_ids,
+            ledger,
+            justification: Vec::new(),
         });
         Ok(())
     }
@@ -428,6 +471,8 @@ impl DevNode {
         // finalize that falls short leaves the stage intact for the next attestation.
         let staged = self.staged.take().expect("the staged block is present");
 
+        // Adopt the state the staged block executed to as the confirmed state.
+        self.ledger = staged.ledger;
         let cert_digest = certificate.digest();
         let attesters = certificate.attesters();
         let cert_slot = crate::wire::certificate_to_bytes(&certificate);
@@ -441,6 +486,7 @@ impl DevNode {
         self.view = 0;
         self.round_atts.clear();
         self.future_props.clear();
+        self.view_changes.clear();
         *self.selection_cache.borrow_mut() = None;
         self.mempool.remove_included(&staged.included_ids);
         self.chain.push(FinalizedBlock {
@@ -464,14 +510,19 @@ impl DevNode {
         }
         let mut messages = Vec::new();
         let leads = leader_for(selection, self.view) == self.id;
-        if leads && !self.silent {
-            let current_stage = matches!(&self.staged, Some(staged) if staged.view == self.view);
+        // A leader offers a fresh proposal at view zero, or re-offers its current
+        // staged block. A later view offers a proposal only through the view change
+        // justification, which the driver builds once the leader holds a quorum of
+        // view change records, so a bare later proposal never splits a locked node.
+        let current_stage = matches!(&self.staged, Some(staged) if staged.view == self.view);
+        if leads && !self.silent && (self.view == 0 || current_stage) {
             let proposal = if current_stage {
                 let staged = self.staged.as_ref().expect("a current stage is present");
                 Proposal {
                     view: staged.view,
                     header: staged.header.clone(),
                     body: staged.body.clone(),
+                    justification: staged.justification.clone(),
                 }
             } else {
                 self.build_proposal(selection)
@@ -498,10 +549,19 @@ impl DevNode {
         from: u64,
         proposal: Proposal,
     ) -> Vec<Message> {
-        if proposal.header.height() != self.height
-            || leader_for(selection, proposal.view) != from
-            || proposal.view < self.view
-        {
+        if proposal.header.height() != self.height {
+            return Vec::new();
+        }
+        // A proposal that carries a justification takes the lock change path: a
+        // locked node may unlock and attest a conflicting block, but only under a
+        // valid quorum for a higher view.
+        if !proposal.justification.is_empty() {
+            return self.on_justified_proposal(selection, proposal);
+        }
+        // A bare proposal follows the plain rule. A later view is buffered until the
+        // node reaches it; a stale or misrouted one is dropped; and once locked the
+        // node holds, so it never attests a second block on a bare proposal.
+        if leader_for(selection, proposal.view) != from || proposal.view < self.view {
             return Vec::new();
         }
         if proposal.view > self.view {
@@ -517,6 +577,288 @@ impl DevNode {
         let attestation = self.attest().expect("the accepted block attests");
         self.record_attestation(&attestation);
         vec![Message::Attest(Box::new(attestation))]
+    }
+
+    /// Handle a justified proposal, the lock change path. The node accepts and
+    /// attests the block, unlocking from any conflicting block it held, only when
+    /// the proposal carries a valid justification: a quorum of view change records
+    /// for the proposal's view, that view is not behind the node, and the proposed
+    /// block is the one the justification selects, the locked block of the highest
+    /// lock view, or a fresh block from the view's leader when no record is locked.
+    /// This is the exact rule that unlocks a validator: a valid proposal that
+    /// carries a higher view justification for the same height.
+    fn on_justified_proposal(&mut self, selection: &Selection, proposal: Proposal) -> Vec<Message> {
+        let view = proposal.view;
+        if view < self.view {
+            return Vec::new();
+        }
+        let Some(records) = self.valid_justification(selection, &proposal.justification, view)
+        else {
+            return Vec::new();
+        };
+        let proposed_value = header_value(&proposal.header.hash());
+        match justified_choice(&records) {
+            Some(locked) => {
+                // The justification selects a locked block: the proposal must
+                // re-propose exactly it, whatever view first proposed it.
+                if header_value(&locked.header.hash()) != proposed_value {
+                    return Vec::new();
+                }
+            }
+            None => {
+                // No record is locked: the leader of this view may offer a fresh
+                // block, so it must be shaped by that leader.
+                if *proposal.header.proposer() != validator_address(leader_for(selection, view)) {
+                    return Vec::new();
+                }
+            }
+        }
+        if self
+            .stage_from(&proposal.header, &proposal.body, view)
+            .is_err()
+        {
+            return Vec::new();
+        }
+        if let Some(staged) = self.staged.as_mut() {
+            staged.justification = proposal.justification;
+        }
+        self.view = view;
+        self.future_props.clear();
+        let attestation = self.attest().expect("the justified block attests");
+        self.record_attestation(&attestation);
+        vec![Message::Attest(Box::new(attestation))]
+    }
+
+    /// This node's view change record for a target view, reporting the block it is
+    /// currently locked on so the leader that collects the quorum can re-propose it.
+    /// The record is a module lattice attestation over a canonical view change
+    /// subject, so it is entitlement checked and unforgeable exactly like a finality
+    /// attestation.
+    pub fn make_view_change(&self, target_view: View) -> ViewChange {
+        let (lock_view, locked_value, has_lock, locked) = match &self.staged {
+            Some(staged) => {
+                let value = header_value(&staged.header.hash());
+                let block = LockedBlock {
+                    header: staged.header.clone(),
+                    body: staged.body.clone(),
+                };
+                (staged.view, value, true, Some(block))
+            }
+            None => (0, 0, false, None),
+        };
+        let subject =
+            view_change_subject(self.height, target_view, lock_view, locked_value, has_lock);
+        let att = self
+            .attester
+            .attest(self.height, self.height, subject, &self.beacon);
+        ViewChange {
+            height: self.height,
+            target_view,
+            lock_view,
+            locked,
+            att,
+        }
+    }
+
+    /// Collect a view change record for the current height, once per signer and
+    /// target view, keeping only records that verify as an entitled committee
+    /// member's signed move to that view.
+    pub fn collect_view_change(&mut self, selection: &Selection, record: ViewChange) {
+        if record.height != self.height || !self.verify_view_change(selection, &record) {
+            return;
+        }
+        let seen = self
+            .view_changes
+            .iter()
+            .any(|r| r.att.from == record.att.from && r.target_view == record.target_view);
+        if !seen {
+            self.view_changes.push(record);
+        }
+    }
+
+    /// Whether a view change record verifies: it is signed by an entitled committee
+    /// member, and the signature binds the exact height, target view, lock view, and
+    /// locked value the record carries, so neither the move nor the reported lock can
+    /// be forged.
+    fn verify_view_change(&self, selection: &Selection, record: &ViewChange) -> bool {
+        let Some(member) = selection.commitment.member(record.att.from) else {
+            return false;
+        };
+        let (has_lock, locked_value, lock_view) = match &record.locked {
+            Some(block) => (true, header_value(&block.header.hash()), record.lock_view),
+            None => (false, 0, 0),
+        };
+        let subject = view_change_subject(
+            record.height,
+            record.target_view,
+            lock_view,
+            locked_value,
+            has_lock,
+        );
+        if record.att.height != record.height
+            || record.att.slot != record.height
+            || record.att.block != subject
+        {
+            return false;
+        }
+        if !record.att.signature_verifies(&member.attest_pk) {
+            return false;
+        }
+        record.att.is_entitled(
+            &member.vrf_pk,
+            &self.beacon,
+            member.weight,
+            selection.commitment.total_weight,
+            selection.commitment.budget,
+        )
+    }
+
+    /// The verified quorum of view change records for a target view, or None when
+    /// the collected records do not form a supermajority of distinct members. This
+    /// is the justification: any two quorums of the committee intersect, so a
+    /// justification for a view always overlaps the attesters of any block that
+    /// finalized at a lower view, which is what keeps a lock change safe.
+    fn valid_justification(
+        &self,
+        selection: &Selection,
+        records: &[ViewChange],
+        view: View,
+    ) -> Option<Vec<ViewChange>> {
+        let mut seen: Vec<u64> = Vec::new();
+        let mut valid: Vec<ViewChange> = Vec::new();
+        for record in records {
+            if record.target_view != view || record.height != self.height {
+                continue;
+            }
+            if !self.verify_view_change(selection, record) {
+                continue;
+            }
+            if seen.contains(&record.att.from) {
+                continue;
+            }
+            seen.push(record.att.from);
+            valid.push(record.clone());
+        }
+        if qtv_bft::params::is_quorum(seen.len(), selection.commitment.len()) {
+            Some(valid)
+        } else {
+            None
+        }
+    }
+
+    /// Build the leader's justified proposal for a view once it holds a quorum of
+    /// view change records, staging the block it proposes. The proposed block is the
+    /// locked block of the highest lock view in the quorum, the fork choice over the
+    /// non finalized frontier, or a fresh block when no member is locked. None when
+    /// no quorum has formed yet.
+    pub fn build_justified_proposal(
+        &mut self,
+        selection: &Selection,
+        view: View,
+    ) -> Option<Proposal> {
+        let records = self.justified_records(selection, view)?;
+        let proposal = match justified_choice(&records) {
+            Some(locked) => {
+                self.stage_from(&locked.header, &locked.body, view).ok()?;
+                Proposal {
+                    view,
+                    header: locked.header,
+                    body: locked.body,
+                    justification: records.clone(),
+                }
+            }
+            None => {
+                let mut proposal = self.build_proposal_at(selection, view);
+                proposal.justification = records.clone();
+                proposal
+            }
+        };
+        if let Some(staged) = self.staged.as_mut() {
+            staged.justification = records;
+        }
+        Some(proposal)
+    }
+
+    /// The quorum of collected view change records for a view, if one has formed.
+    /// The collected records were verified as they arrived, so this counts distinct
+    /// members without re-verifying each signature.
+    fn justified_records(&self, selection: &Selection, view: View) -> Option<Vec<ViewChange>> {
+        let mut seen: Vec<u64> = Vec::new();
+        let mut records: Vec<ViewChange> = Vec::new();
+        for record in &self.view_changes {
+            if record.target_view != view {
+                continue;
+            }
+            if seen.contains(&record.att.from) {
+                continue;
+            }
+            seen.push(record.att.from);
+            records.push(record.clone());
+        }
+        if qtv_bft::params::is_quorum(seen.len(), selection.commitment.len()) {
+            Some(records)
+        } else {
+            None
+        }
+    }
+
+    /// Attest the staged block and record the attestation, returning it to gossip.
+    /// The leader uses this to attest the block it just justified and proposed.
+    pub fn attest_staged(&mut self) -> Option<Attestation> {
+        let attestation = self.attest().ok()?;
+        self.record_attestation(&attestation);
+        Some(attestation)
+    }
+
+    /// The highest view for which the node has collected view change records from a
+    /// blocking set of distinct members, `n - quorum + 1`, which guarantees at least
+    /// one honest member genuinely reached that view. A node that sees this jumps to
+    /// the view and adds its own record, so the committee converges on one view after
+    /// a split, the view synchronization that restores liveness.
+    pub fn view_sync_target(&self, selection: &Selection) -> Option<View> {
+        let n = selection.commitment.len();
+        let blocking = n - qtv_bft::params::supermajority(n) + 1;
+        let mut views: Vec<View> = self.view_changes.iter().map(|r| r.target_view).collect();
+        views.sort_unstable();
+        views.dedup();
+        views
+            .into_iter()
+            .rev()
+            .find(|&view| self.distinct_view_changes(view) >= blocking)
+    }
+
+    /// The number of distinct members whose view change record for a view the node
+    /// has collected. The records were verified on arrival, so this only counts.
+    fn distinct_view_changes(&self, view: View) -> usize {
+        let mut seen: Vec<u64> = Vec::new();
+        for record in &self.view_changes {
+            if record.target_view == view && !seen.contains(&record.att.from) {
+                seen.push(record.att.from);
+            }
+        }
+        seen.len()
+    }
+
+    /// Jump to a later view, keeping any lock. A node does this on seeing a blocking
+    /// set of view change records for the view, so it joins the view change without
+    /// abandoning the block it is locked on.
+    pub fn jump_to(&mut self, view: View) {
+        if view > self.view {
+            self.view = view;
+        }
+    }
+
+    /// The view of the currently staged block, if any.
+    pub fn staged_view(&self) -> Option<View> {
+        self.staged.as_ref().map(|staged| staged.view)
+    }
+
+    /// The consensus value of the currently staged block, the value the lock holds,
+    /// if any. Two competing blocks at one height carry different values.
+    pub fn staged_value(&self) -> Option<u64> {
+        self.staged
+            .as_ref()
+            .map(|staged| header_value(&staged.header.hash()))
     }
 
     /// Collect an attestation that arrived over the wire. It is kept for the current
@@ -783,6 +1125,7 @@ impl DevNode {
         self.staged = None;
         self.round_atts.clear();
         self.future_props.clear();
+        self.view_changes.clear();
         *self.selection_cache.borrow_mut() = None;
         self.mempool.remove_included(&included_ids);
         self.chain.push(FinalizedBlock {
@@ -792,6 +1135,46 @@ impl DevNode {
         });
         Ok(())
     }
+}
+
+/// The canonical subject a view change record signs: a consensus block whose value
+/// commits to the height, the target view, the lock view, and the locked value, all
+/// under a domain tag that separates it from any finality block. Signing this with
+/// the module lattice key binds the whole move and its reported lock, so a forged
+/// record does not verify.
+fn view_change_subject(
+    height: Height,
+    target_view: View,
+    lock_view: View,
+    locked_value: u64,
+    has_lock: bool,
+) -> ConsensusBlock {
+    let mut buf = Vec::with_capacity(21 + 8 * 4 + 1);
+    buf.extend_from_slice(b"QTV-DEVNET-VIEWCHANGE");
+    buf.extend_from_slice(&height.to_le_bytes());
+    buf.extend_from_slice(&target_view.to_le_bytes());
+    buf.extend_from_slice(&lock_view.to_le_bytes());
+    buf.extend_from_slice(&locked_value.to_le_bytes());
+    buf.push(has_lock as u8);
+    let commitment = qtv_bft::hash::digest_u64(&buf);
+    ConsensusBlock::new(height, commitment, Parent::Genesis)
+}
+
+/// The block a justification selects: the locked block of the highest lock view
+/// among the quorum, ties broken by the smaller consensus value so every node picks
+/// the same one. None when no member in the quorum is locked, in which case the
+/// leader is free to offer a fresh block. This is the fork choice tie break.
+fn justified_choice(records: &[ViewChange]) -> Option<LockedBlock> {
+    records
+        .iter()
+        .filter_map(|record| {
+            record
+                .locked
+                .as_ref()
+                .map(|block| (record.lock_view, header_value(&block.header.hash()), block))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)))
+        .map(|(_, _, block)| block.clone())
 }
 
 /// Decode the header and the certificate digest from a stored block, the two

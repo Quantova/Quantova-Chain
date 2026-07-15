@@ -41,7 +41,7 @@ use qtv_tx::Wrapper;
 
 use qtv_block::Block as ChainBlock;
 
-use crate::clock::{Clock, Event};
+use crate::clock::{Clock, Event, Time};
 use crate::config::DevnetConfig;
 use crate::discovery::{PeerEntry, PeerTable};
 use crate::network::Network;
@@ -73,6 +73,9 @@ pub struct Devnet<S> {
     /// Each node's record of the gossip messages it has already seen, so a message
     /// arriving by several paths is relayed and counted once.
     seen: Vec<Seen>,
+    /// The network partition, a group id per node. Records cross only within a
+    /// group, so two groups model a split; one group is the healed network.
+    partition: Vec<usize>,
 }
 
 impl Devnet<DuplexStream> {
@@ -130,6 +133,7 @@ impl Devnet<DuplexStream> {
             peers,
             overlay: vec![Vec::new(); n],
             seen: vec![Seen::new(); n],
+            partition: vec![0; n],
         };
         devnet.discover(&bootstrap)?;
         devnet.form_overlay(&identities)?;
@@ -228,6 +232,7 @@ impl<S> Devnet<S> {
             peers,
             overlay,
             seen: vec![Seen::new(); n],
+            partition: vec![0; n],
         })
     }
 
@@ -274,10 +279,36 @@ impl<S> Devnet<S> {
         self.nodes[index].set_silent(silent);
     }
 
+    /// Split the network into groups by a group id per node index. A record crosses
+    /// only within a group, so two groups model a partition where neither side
+    /// hears the other. Each side runs its round but reaches no supermajority alone.
+    pub fn set_partition(&mut self, groups: &[usize]) {
+        assert_eq!(groups.len(), self.nodes.len(), "a group id per node");
+        self.partition = groups.to_vec();
+    }
+
+    /// Heal the network: every node returns to one group, so records cross freely
+    /// again and the split ends.
+    pub fn heal(&mut self) {
+        self.partition = vec![0; self.nodes.len()];
+    }
+
+    /// Whether two nodes are in the same partition group, so a record may cross
+    /// between them.
+    fn same_group(&self, i: usize, j: usize) -> bool {
+        self.partition[i] == self.partition[j]
+    }
+
     /// Replace the delivery schedule the round loop stamps records with, for
     /// example a reordering schedule or one with a shorter view timeout.
     pub fn set_network(&mut self, network: Network) {
         self.network = network;
+    }
+
+    /// The view timeout of the current schedule, the logical time a node waits at a
+    /// view before it rotates. A test picks a `drive_window` deadline against this.
+    pub fn view_timeout(&self) -> Time {
+        self.network.view_timeout()
     }
 
     /// The peers a node has discovered.
@@ -384,7 +415,7 @@ impl<S: Read + Write> Devnet<S> {
             for (from, bytes) in &frontier {
                 let neighbors = self.overlay[*from].clone();
                 for to in neighbors {
-                    if active.contains(&to) {
+                    if active.contains(&to) && self.same_group(*from, to) {
                         self.mesh.send(*from, to, bytes)?;
                     }
                 }
@@ -393,7 +424,7 @@ impl<S: Read + Write> Devnet<S> {
             for &to in active {
                 let neighbors = self.overlay[to].clone();
                 for from in neighbors {
-                    if !active.contains(&from) {
+                    if !active.contains(&from) || !self.same_group(from, to) {
                         continue;
                     }
                     let count = self.mesh.pending(from, to);
@@ -425,7 +456,7 @@ impl<S: Read + Write> Devnet<S> {
     ) -> Result<(), RoundError> {
         let neighbors = self.overlay[at_node].clone();
         for to in neighbors {
-            if Some(to) == exclude || !active.contains(&to) {
+            if Some(to) == exclude || !active.contains(&to) || !self.same_group(at_node, to) {
                 continue;
             }
             self.mesh.send(at_node, to, bytes)?;
@@ -459,6 +490,19 @@ impl<S: Read + Write> Devnet<S> {
         for message in &messages {
             self.originate(i, message, active)?;
         }
+        // Past view zero a node announces its move as a view change record. This is
+        // what lets the leader gather a quorum, and what lets a peer that was
+        // partitioned away learn the move once the split heals and the node re-enters.
+        if online && self.nodes[i].view() > 0 {
+            let record = self.nodes[i].make_view_change(self.nodes[i].view());
+            self.nodes[i].collect_view_change(&selection, record.clone());
+            self.originate(i, &Message::ViewChange(Box::new(record)), active)?;
+        }
+        // A later view leader offers its proposal only once it holds a quorum of
+        // view change records, so entering the view may already let it propose.
+        if online {
+            self.try_justified_proposal(i, active)?;
+        }
         if online && self.nodes[i].view() < MAX_VIEW {
             let at = self.clock.now() + self.network.view_timeout();
             let event = Event::Timeout {
@@ -467,6 +511,30 @@ impl<S: Read + Write> Devnet<S> {
                 view: self.nodes[i].view(),
             };
             self.clock.schedule(at, event);
+        }
+        Ok(())
+    }
+
+    /// Let the leader of a later view offer its justified proposal once it holds a
+    /// quorum of view change records for that view. It builds the proposal at most
+    /// once per view, staging and attesting the block it selects, then gossips both.
+    fn try_justified_proposal(&mut self, i: usize, active: &[usize]) -> Result<(), RoundError> {
+        if !self.active[i] {
+            return Ok(());
+        }
+        let selection = self.nodes[i].select()?;
+        let view = self.nodes[i].view();
+        if view == 0 || leader_for(&selection, view) != self.nodes[i].id() {
+            return Ok(());
+        }
+        if self.nodes[i].staged_view() == Some(view) {
+            return Ok(());
+        }
+        if let Some(proposal) = self.nodes[i].build_justified_proposal(&selection, view) {
+            self.originate(i, &Message::Proposal(proposal), active)?;
+            if let Some(attestation) = self.nodes[i].attest_staged() {
+                self.originate(i, &Message::Attest(Box::new(attestation)), active)?;
+            }
         }
         Ok(())
     }
@@ -517,6 +585,33 @@ impl<S: Read + Write> Devnet<S> {
         Ok(())
     }
 
+    /// Collect a view change record at a node. It joins the view change when a
+    /// blocking set of records has reached a later view, announcing its own move so
+    /// the whole committee converges on one view after a split, and it lets the
+    /// leader of that view offer its justified proposal once the quorum is in hand.
+    fn deliver_view_change(
+        &mut self,
+        to: usize,
+        record: crate::wire::ViewChange,
+        ceiling: Height,
+        active: &[usize],
+    ) -> Result<(), RoundError> {
+        let selection = self.nodes[to].select()?;
+        self.nodes[to].collect_view_change(&selection, record);
+        if let Some(target) = self.nodes[to].view_sync_target(&selection) {
+            if target > self.nodes[to].view() {
+                // A blocking set has reached a later view: join it, keeping any lock.
+                // Entering the view announces this node's own move and lets it
+                // propose if it leads and already holds the quorum.
+                self.nodes[to].jump_to(target);
+                self.enter_round(to, active)?;
+            }
+        }
+        self.try_justified_proposal(to, active)?;
+        self.settle(to, ceiling, active)?;
+        Ok(())
+    }
+
     /// Act on one event: open a delivered record, relay it onward across the overlay
     /// the first time this node sees it, and dispatch it to the consensus layer; or
     /// fire a view timeout and, if it advanced the view, enter the new one and pick
@@ -552,6 +647,9 @@ impl<S: Read + Write> Devnet<S> {
                         self.nodes[to].on_attestation(*attestation);
                         self.settle(to, ceiling, active)?;
                     }
+                    Message::ViewChange(record) => {
+                        self.deliver_view_change(to, *record, ceiling, active)?;
+                    }
                     // Discovery and the sync request and response do not gossip over
                     // the round clock, so they never arrive on this path.
                     Message::Peers(_)
@@ -570,6 +668,8 @@ impl<S: Read + Write> Devnet<S> {
                     return Ok(());
                 }
                 if self.nodes[node].on_timeout(view) {
+                    // The node advanced without a lock. Entering the new view
+                    // announces the move as a view change record.
                     self.enter_round(node, active)?;
                     if let Some(proposal) = self.nodes[node].take_buffered_proposal() {
                         self.deliver_proposal(node, proposal, ceiling, active)?;
@@ -628,10 +728,9 @@ impl<S: Read + Write> Devnet<S> {
                 if height >= target {
                     continue;
                 }
-                let server = self.overlay[i]
-                    .iter()
-                    .copied()
-                    .find(|&j| self.active[j] && self.nodes[j].sync_height() > height);
+                let server = self.overlay[i].iter().copied().find(|&j| {
+                    self.active[j] && self.same_group(i, j) && self.nodes[j].sync_height() > height
+                });
                 let Some(j) = server else {
                     continue;
                 };
@@ -660,6 +759,31 @@ impl<S: Read + Write> Devnet<S> {
             if !progressed {
                 break;
             }
+        }
+        Ok(())
+    }
+
+    /// Turn the logical clock only up to a deadline, so a test can run a split for a
+    /// bounded stretch and then heal it before every timer has fired. Enters the
+    /// round for each active node, then processes exactly the events scheduled at or
+    /// before the deadline. Nothing forces finality; a partitioned side simply acts
+    /// and holds.
+    pub fn drive_window(&mut self, ceiling: Height, deadline: Time) -> Result<(), RoundError> {
+        let active = self.active_indices();
+        if active.is_empty() {
+            return Ok(());
+        }
+        for &i in &active {
+            if self.nodes[i].height() < ceiling {
+                self.enter_round(i, &active)?;
+            }
+        }
+        while let Some(time) = self.clock.peek_time() {
+            if time > deadline {
+                break;
+            }
+            let event = self.clock.next_event().expect("a peeked event pops");
+            self.handle_event(event, ceiling, &active)?;
         }
         Ok(())
     }
