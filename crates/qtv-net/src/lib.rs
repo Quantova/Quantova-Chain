@@ -19,10 +19,12 @@
 
 mod identity;
 pub mod keyschedule;
+mod pipe;
 pub mod record;
 
 pub use identity::{Identity, PeerId};
 pub use keyschedule::{DirKey, SessionKeys};
+pub use pipe::{duplex, DuplexStream};
 
 use std::fmt;
 
