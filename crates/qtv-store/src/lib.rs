@@ -21,3 +21,8 @@
 //! states the scope and the deferred hardening.
 
 #![forbid(unsafe_code)]
+
+mod block_store;
+mod log;
+
+pub use block_store::BlockStore;
