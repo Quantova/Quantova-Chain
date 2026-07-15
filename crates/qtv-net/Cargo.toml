@@ -1,0 +1,10 @@
+[package]
+name = "qtv-net"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The post-quantum authenticated secure channel for the Quantova stack: an ML-KEM and ML-DSA handshake, a SHAKE key schedule, and a ChaCha20-Poly1305 record layer over a standard library stream."
+
+[dependencies]
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", tag = "v0.2.0" }
