@@ -257,3 +257,73 @@ fn the_same_inputs_give_the_same_finalized_chain() {
     assert_eq!(one.ledger().state_root(), two.ledger().state_root());
     assert_eq!(one.height(), two.height());
 }
+
+/// A node running a block of many senders and recipients, mixing independent
+/// transfers and ones that share an account, at the given core count. The block
+/// is submitted at one height so the executor sees the whole block at once. Each
+/// sender appears once, since the mempool admits only the next nonce of a sender,
+/// so the conflicts come from a shared recipient and from one transfer paying an
+/// account that another transfer spends from.
+fn run_batch(params: &FeeParams, threads: usize) -> Node {
+    let funders: Vec<Account> = (0..24).map(user).collect();
+    let accounts: Vec<GenesisAccount> = funders
+        .iter()
+        .map(|a| GenesisAccount::from_account(a, 10_000_000))
+        .collect();
+    let mut node =
+        Node::new(genesis(accounts, &[true, true, true, true])).with_parallelism(threads);
+
+    // Ten independent transfers, each from its own sender to a recipient nobody
+    // else touches.
+    for i in 0..10u64 {
+        let tx = transfer(
+            &funders[i as usize],
+            &user(12 + i).address(),
+            1_000 + i,
+            0,
+            params,
+        );
+        node.submit(tx).expect("admitted");
+    }
+    // Two more senders pay the same recipient, a write write conflict on that
+    // account that must serialise in block order.
+    node.submit(transfer(&funders[10], &user(23).address(), 500, 0, params))
+        .expect("admitted");
+    node.submit(transfer(&funders[11], &user(23).address(), 400, 0, params))
+        .expect("admitted");
+    // A transfer that pays account twelve, which is itself a sender above, a read
+    // write conflict across the two.
+    node.submit(transfer(&funders[13], &user(12).address(), 300, 0, params))
+        .expect("admitted");
+
+    node.produce().expect("finalized");
+    node
+}
+
+#[test]
+fn a_parallel_node_finalizes_the_identical_chain_as_the_sequential_node() {
+    let params = FeeParams::devnet();
+    let sequential = run_batch(&params, 1);
+    let parallel = run_batch(&params, 8);
+
+    // The whole finalized chain, including every header hash, state root, and
+    // certificate digest, is bit identical, so parallel execution changed nothing
+    // an observer of the chain can see.
+    assert_eq!(fingerprint(&sequential), fingerprint(&parallel));
+    assert_eq!(
+        sequential.ledger().state_root(),
+        parallel.ledger().state_root()
+    );
+    // Every account landed on the same balance and nonce under both paths.
+    for i in 0..24u64 {
+        let address = user(i).address();
+        assert_eq!(
+            sequential.ledger().balance(&address),
+            parallel.ledger().balance(&address)
+        );
+        assert_eq!(
+            sequential.ledger().nonce(&address),
+            parallel.ledger().nonce(&address)
+        );
+    }
+}

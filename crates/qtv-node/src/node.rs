@@ -18,6 +18,7 @@ use crate::execution::execute_transfer;
 use crate::fee::FeeParams;
 use crate::ledger::{Account, Ledger};
 use crate::mempool::{validate, Mempool, Reject};
+use crate::parallel::execute_parallel;
 
 use qtv_attest::Certificate;
 
@@ -199,6 +200,7 @@ pub struct Node {
     genesis_time: u64,
     chain: Vec<Finalized>,
     slashed: Vec<u64>,
+    exec_threads: usize,
 }
 
 impl Node {
@@ -242,7 +244,24 @@ impl Node {
             genesis_time: genesis.genesis_time,
             chain: Vec::new(),
             slashed: Vec::new(),
+            exec_threads: 1,
         }
+    }
+
+    /// Set how many cores the node executes a block across. One core is the
+    /// sequential path. More than one runs transactions with disjoint state
+    /// concurrently and serialises conflicting ones in block order, for the
+    /// identical post state and root. A server class validator sets this to its
+    /// core count to lift execution off the wall clock.
+    pub fn set_parallelism(&mut self, threads: usize) {
+        self.exec_threads = threads.max(1);
+    }
+
+    /// The node with its block execution set to run across the given cores. The
+    /// builder form of `set_parallelism`.
+    pub fn with_parallelism(mut self, threads: usize) -> Self {
+        self.set_parallelism(threads);
+        self
     }
 
     /// Submit a signed transaction to the mempool. It is admitted only when valid.
@@ -322,10 +341,22 @@ impl Node {
         Ok(self.chain.last().expect("a block was just finalized"))
     }
 
-    /// Execute the mempool candidates against state in build order.
+    /// Execute the mempool candidates against state in build order. With one core
+    /// this is the sequential path; with more it is the parallel executor, which
+    /// produces the identical post state and root while running transactions with
+    /// disjoint state concurrently.
     fn execute_block(&mut self) -> Vec<Wrapper> {
         let candidates = self.mempool.candidates();
-        execute_ordered(&mut self.ledger, &candidates, &self.fee_params)
+        if self.exec_threads > 1 {
+            execute_parallel(
+                &mut self.ledger,
+                &candidates,
+                &self.fee_params,
+                self.exec_threads,
+            )
+        } else {
+            execute_ordered(&mut self.ledger, &candidates, &self.fee_params)
+        }
     }
 
     /// Produce a run of heights in order, stopping at the first that does not

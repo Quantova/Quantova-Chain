@@ -21,3 +21,4 @@ pub mod fee;
 pub mod ledger;
 pub mod mempool;
 pub mod node;
+pub mod parallel;
