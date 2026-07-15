@@ -8,3 +8,6 @@ description = "The post-quantum authenticated secure channel for the Quantova st
 
 [dependencies]
 qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", tag = "v0.2.0" }
+
+[dev-dependencies]
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", tag = "v0.2.0" }
