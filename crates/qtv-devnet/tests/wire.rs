@@ -7,6 +7,8 @@ use qtv_attest::{Attester, Beacon, Block, Parent};
 use qtv_block::{empty_transaction_root, Header};
 use qtv_node::fee::FeeParams;
 
+use qtv_devnet::discovery::PeerEntry;
+use qtv_devnet::node::net_identity;
 use qtv_devnet::wire::{Message, Proposal};
 
 use support::{transfer, user};
@@ -83,6 +85,38 @@ fn an_attestation_message_round_trips_and_still_verifies() {
         }
         _ => panic!("decoded a different message"),
     }
+}
+
+#[test]
+fn a_peer_list_message_round_trips() {
+    let one = net_identity(1);
+    let two = net_identity(2);
+    let peers = vec![
+        PeerEntry::from_identity(&one, "mem://1"),
+        PeerEntry::from_identity(&two, "mem://2"),
+    ];
+    let bytes = Message::Peers(peers.clone()).encode();
+    match Message::decode(&bytes).expect("decodes") {
+        Message::Peers(decoded) => {
+            assert_eq!(decoded.len(), 2);
+            assert_eq!(decoded[0].peer_id(), one.peer_id());
+            assert_eq!(decoded[0].address(), "mem://1");
+            assert_eq!(decoded[1].peer_id(), two.peer_id());
+        }
+        _ => panic!("decoded a different message"),
+    }
+}
+
+#[test]
+fn the_content_id_is_stable_and_separates_messages() {
+    let params = FeeParams::devnet();
+    let alice = user(0);
+    let bob = user(1);
+    let one = transfer(&alice, &bob.address(), 1, 0, &params);
+    let two = transfer(&alice, &bob.address(), 2, 1, &params);
+    // The same message hashes to the same id, distinct messages to distinct ids.
+    assert_eq!(Message::Tx(one.clone()).id(), Message::Tx(one.clone()).id());
+    assert_ne!(Message::Tx(one).id(), Message::Tx(two).id());
 }
 
 #[test]

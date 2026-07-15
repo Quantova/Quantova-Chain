@@ -13,9 +13,12 @@ use qtv_attest::{Attestation, Block, Parent};
 use qtv_block::Header;
 use qtv_codec::{Decoder, Encode, Encoder, Error as CodecError};
 use qtv_crypto::ml_dsa::SIGNATURE_BYTES;
+use qtv_crypto::sha3::sha3_256;
 use qtv_crypto::vrf::{OUTPUT_BYTES, PROOF_BYTES};
 use qtv_sampler::sortition::Draw;
 use qtv_tx::{Body, Call, Wrapper};
+
+use crate::discovery::{PeerEntry, KEY_BYTES};
 
 /// The tag that selects a transaction message.
 const TAG_TX: u8 = 1;
@@ -23,6 +26,8 @@ const TAG_TX: u8 = 1;
 const TAG_PROPOSAL: u8 = 2;
 /// The tag that selects an attestation message.
 const TAG_ATTEST: u8 = 3;
+/// The tag that selects a peer list message, the discovery exchange.
+const TAG_PEERS: u8 = 4;
 
 /// The tag that marks a genesis parent link.
 const PARENT_GENESIS: u8 = 0;
@@ -41,7 +46,8 @@ pub struct Proposal {
 }
 
 /// A gossip message. A node forwards a transaction it admitted, a leader forwards
-/// its proposal, and a committee member forwards its attestation.
+/// its proposal, a committee member forwards its attestation, and a node reports
+/// the peers it knows to a bootstrap neighbor during discovery.
 #[derive(Clone)]
 pub enum Message {
     /// A submitted transaction spreading toward the leader mempools.
@@ -50,6 +56,9 @@ pub enum Message {
     Proposal(Proposal),
     /// One committee member attestation over a proposed block.
     Attest(Box<Attestation>),
+    /// The peers a node knows, exchanged with a bootstrap neighbor so the network
+    /// discovers itself from a small set of bootstrap edges.
+    Peers(Vec<PeerEntry>),
 }
 
 /// A reason a wire message failed to parse. Any of these drops the message.
@@ -103,8 +112,23 @@ impl Message {
                 encoder.put_tag(TAG_ATTEST);
                 encode_attestation(&mut encoder, attestation);
             }
+            Message::Peers(peers) => {
+                encoder.put_tag(TAG_PEERS);
+                encoder.put_u64(peers.len() as u64);
+                for entry in peers {
+                    encoder.put_bytes(entry.key());
+                    encoder.put_bytes(entry.address().as_bytes());
+                }
+            }
         }
         encoder.into_bytes()
+    }
+
+    /// The content id of the message, its SHA3-256 over the canonical encoding.
+    /// The overlay keys its seen record by this, so a message that arrives by two
+    /// paths carries one id and is relayed and counted once.
+    pub fn id(&self) -> [u8; 32] {
+        gossip_id(&self.encode())
     }
 
     /// Read a message from a whole payload in canonical form, refusing trailing
@@ -124,11 +148,26 @@ impl Message {
                 Message::Proposal(Proposal { view, header, body })
             }
             TAG_ATTEST => Message::Attest(Box::new(decode_attestation(&mut decoder)?)),
+            TAG_PEERS => {
+                let count = decoder.get_u64()?;
+                let mut peers = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    let key: [u8; KEY_BYTES] = read_fixed(&mut decoder)?;
+                    let address = read_text(&mut decoder)?;
+                    peers.push(PeerEntry::new(key, address));
+                }
+                Message::Peers(peers)
+            }
             tag => return Err(DecodeError::UnknownTag(tag)),
         };
         decoder.finish()?;
         Ok(message)
     }
+}
+
+/// The content id of a canonical message encoding, its SHA3-256 digest.
+pub fn gossip_id(bytes: &[u8]) -> [u8; 32] {
+    sha3_256(bytes)
 }
 
 /// Read a length delimited byte string as text.
