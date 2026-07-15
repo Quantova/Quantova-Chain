@@ -39,11 +39,13 @@ use qtv_net::{DuplexStream, Identity};
 use qtv_node::mempool::Reject;
 use qtv_tx::Wrapper;
 
+use qtv_block::Block as ChainBlock;
+
 use crate::clock::{Clock, Event};
 use crate::config::DevnetConfig;
 use crate::discovery::{PeerEntry, PeerTable};
 use crate::network::Network;
-use crate::node::{leader_for, net_identity, DevNode, Height, RoundError, View};
+use crate::node::{leader_for, net_identity, DevNode, Height, RoundError, SyncError, View};
 use crate::overlay::{ring_lattice, Seen};
 use crate::transport::{connect_duplex_pair, Mesh};
 use crate::wire::{gossip_id, Message};
@@ -327,6 +329,20 @@ impl<S> Devnet<S> {
             .map(|&i| self.nodes[i].height())
             .unwrap_or(0)
     }
+
+    /// The finalized blocks a node would serve for a range, each carrying its
+    /// finality certificate. Exposed so a test can take a genuine served block and
+    /// alter it before feeding it back to the verifier.
+    pub fn served_blocks(&self, index: usize, from: Height, to: Height) -> Vec<ChainBlock> {
+        self.nodes[index].serve_blocks(from, to)
+    }
+
+    /// Feed a finalized block to a node's trustless sync verifier directly,
+    /// returning whether it was accepted. A verified block advances the node; a
+    /// forged one is refused and the node is left untouched.
+    pub fn apply_synced(&mut self, index: usize, block: ChainBlock) -> Result<(), SyncError> {
+        self.nodes[index].apply_synced_block(block)
+    }
 }
 
 impl<S: Read + Write> Devnet<S> {
@@ -536,7 +552,12 @@ impl<S: Read + Write> Devnet<S> {
                         self.nodes[to].on_attestation(*attestation);
                         self.settle(to, ceiling, active)?;
                     }
-                    Message::Peers(_) => {}
+                    // Discovery and the sync request and response do not gossip over
+                    // the round clock, so they never arrive on this path.
+                    Message::Peers(_)
+                    | Message::Status(_)
+                    | Message::GetBlocks { .. }
+                    | Message::Blocks(_) => {}
                 }
             }
             Event::Timeout { node, height, view } => {
@@ -579,6 +600,70 @@ impl<S: Read + Write> Devnet<S> {
         Ok(())
     }
 
+    /// Catch every active node behind the tip up to the highest active node over
+    /// the overlay channels. A node behind the tip asks an active neighbor that is
+    /// ahead for the finalized blocks it is missing, and it commits each only after
+    /// verifying the certificate, the parent link, and the re-executed state root
+    /// itself, trusting nothing about the serving peer. Runs to a fixpoint, so a
+    /// node several heights behind catches up in successive batches, and every
+    /// verified block advances it one height until the active set holds one height.
+    /// A node that cannot reach an active neighbor ahead of it holds where it is.
+    pub fn sync(&mut self) -> Result<(), RoundError> {
+        let active = self.active_indices();
+        loop {
+            let target = active
+                .iter()
+                .map(|&i| self.nodes[i].sync_height())
+                .max()
+                .unwrap_or(0);
+            if active
+                .iter()
+                .all(|&i| self.nodes[i].sync_height() >= target)
+            {
+                break;
+            }
+            let mut progressed = false;
+            for &i in &active {
+                let height = self.nodes[i].sync_height();
+                if height >= target {
+                    continue;
+                }
+                let server = self.overlay[i]
+                    .iter()
+                    .copied()
+                    .find(|&j| self.active[j] && self.nodes[j].sync_height() > height);
+                let Some(j) = server else {
+                    continue;
+                };
+                let to = self.nodes[j].sync_height() - 1;
+                let request = Message::GetBlocks { from: height, to }.encode();
+                self.mesh.send(i, j, &request)?;
+                let asked = self.mesh.recv_one(j, i)?;
+                let (from, to) = match Message::decode(&asked) {
+                    Ok(Message::GetBlocks { from, to }) => (from, to),
+                    _ => continue,
+                };
+                let blocks = self.nodes[j].serve_blocks(from, to);
+                let response = Message::Blocks(blocks).encode();
+                self.mesh.send(j, i, &response)?;
+                let served = self.mesh.recv_one(i, j)?;
+                let Ok(Message::Blocks(blocks)) = Message::decode(&served) else {
+                    continue;
+                };
+                for block in blocks {
+                    if self.nodes[i].apply_synced_block(block).is_err() {
+                        break;
+                    }
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Drive the active nodes until they all reach a target height. Returns whether
     /// they reached it; a false return is a stall, the online set below a
     /// supermajority, and the nodes hold at the height they had.
@@ -587,6 +672,7 @@ impl<S: Read + Write> Devnet<S> {
         if active.is_empty() {
             return Ok(false);
         }
+        self.sync()?;
         self.gossip_transactions(&active)?;
         self.drive_to(target)?;
         Ok(active.iter().all(|&i| self.nodes[i].height() >= target))
@@ -600,6 +686,7 @@ impl<S: Read + Write> Devnet<S> {
         if active.is_empty() {
             return Ok(());
         }
+        self.sync()?;
         let ceiling = self.height() + 1;
         self.gossip_transactions(&active)?;
         self.drive_to(ceiling)?;

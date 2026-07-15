@@ -104,6 +104,33 @@ impl From<qtv_net::Error> for RoundError {
     }
 }
 
+/// A reason a synced block was refused. A refused block never advances the
+/// syncing node and the serving peer is not trusted for it, so a forged or
+/// altered chain cannot be synced.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SyncError {
+    /// The block is not the exact next height the node needs.
+    WrongHeight,
+    /// The block does not link to the node head by parent hash.
+    WrongParent,
+    /// The block carries a beacon seed other than the one the node holds for the
+    /// height.
+    WrongBeacon,
+    /// The committee could not be selected for the height.
+    NoCommittee,
+    /// The certificate slot did not decode.
+    BadCertificate,
+    /// The certificate names a different subject than this exact block.
+    WrongSubject,
+    /// The certificate did not verify as an entitled supermajority under the
+    /// committee commitment and the beacon.
+    UnverifiedCertificate,
+    /// Re-executing the body did not reproduce the header roots.
+    WrongStateRoot,
+    /// Persisting the accepted block failed.
+    Io,
+}
+
 /// A finalized block a node holds: the chain block, the leader that proposed it,
 /// and the attesters that finalized it.
 pub struct FinalizedBlock {
@@ -403,7 +430,8 @@ impl DevNode {
 
         let cert_digest = certificate.digest();
         let attesters = certificate.attesters();
-        let chain_block = ChainBlock::new(staged.header, cert_digest.to_vec(), staged.body);
+        let cert_slot = crate::wire::certificate_to_bytes(&certificate);
+        let chain_block = ChainBlock::new(staged.header, cert_slot, staged.body);
         self.persist(&chain_block)?;
 
         self.beacon = self.beacon.advance(&cert_digest, self.height);
@@ -661,15 +689,121 @@ impl DevNode {
     pub fn slashed(&self) -> &[u64] {
         &self.slashed
     }
+
+    /// The node finalized status, the next height it will produce. A peer learns
+    /// this node is ahead when it names a greater height than the peer holds.
+    pub fn sync_height(&self) -> Height {
+        self.height
+    }
+
+    /// Serve the finalized blocks in the inclusive height range from the block
+    /// store, each carrying its finality certificate in its certificate slot. A
+    /// height the node has not finalized ends the range, so a peer never serves a
+    /// gap it cannot fill.
+    pub fn serve_blocks(&self, from: Height, to: Height) -> Vec<ChainBlock> {
+        let mut blocks = Vec::new();
+        let mut height = from;
+        while height <= to {
+            let Some(bytes) = self.block_store.block_by_height(height) else {
+                break;
+            };
+            match crate::wire::chain_block_from_bytes(bytes) {
+                Ok(block) => blocks.push(block),
+                Err(_) => break,
+            }
+            height += 1;
+        }
+        blocks
+    }
+
+    /// Verify a finalized block received from a peer and, only if it fully checks
+    /// out, commit it and advance to the next height. Nothing about the serving
+    /// peer is trusted: the block is accepted only when its certificate verifies
+    /// as an entitled supermajority of module lattice attestations over this exact
+    /// block under the committee commitment and the beacon, its header links to the
+    /// node head by parent hash, and re-executing its body against the node own
+    /// state reproduces the header roots. A block that fails any check leaves the
+    /// node untouched, so a forged or altered chain cannot advance it.
+    pub fn apply_synced_block(&mut self, block: ChainBlock) -> Result<(), SyncError> {
+        let header = block.header().clone();
+        if header.height() != self.height {
+            return Err(SyncError::WrongHeight);
+        }
+        if *header.parent_hash() != self.parent_header_hash {
+            return Err(SyncError::WrongParent);
+        }
+        if header.beacon_seed() != self.beacon.seed() {
+            return Err(SyncError::WrongBeacon);
+        }
+        let selection = self.select().map_err(|_| SyncError::NoCommittee)?;
+        let certificate = crate::wire::certificate_from_bytes(block.certificate())
+            .map_err(|_| SyncError::BadCertificate)?;
+        let subject =
+            ConsensusBlock::new(self.height, header_value(&header.hash()), self.parent_val);
+        if certificate.envelope.height != self.height
+            || certificate.envelope.slot != self.height
+            || certificate.envelope.block != subject
+        {
+            return Err(SyncError::WrongSubject);
+        }
+        if !certificate
+            .verify(&selection.commitment, &self.beacon)
+            .is_verified()
+        {
+            return Err(SyncError::UnverifiedCertificate);
+        }
+        // Re-execute the body against a copy of the state, so a block that fails
+        // the root check leaves the committed ledger untouched.
+        let mut ledger = self.ledger.clone();
+        let included = execute_ordered(&mut ledger, block.body(), &self.fee_params);
+        if included.len() != block.body().len()
+            || ledger.state_root() != *header.state_root()
+            || transaction_root(&included) != *header.transaction_root()
+        {
+            return Err(SyncError::WrongStateRoot);
+        }
+
+        // Every check passed: adopt the verified state and commit the block.
+        self.ledger = ledger;
+        self.persist(&block).map_err(|_| SyncError::Io)?;
+        let cert_digest = certificate.digest();
+        let leader = selection
+            .members
+            .iter()
+            .copied()
+            .find(|&id| validator_address(id) == *header.proposer())
+            .unwrap_or(selection.leader);
+        let attesters = certificate.attesters();
+        let included_ids: Vec<String> = block.body().iter().map(Wrapper::id).collect();
+        self.beacon = self.beacon.advance(&cert_digest, self.height);
+        self.parent_header_hash = block.header_hash();
+        self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
+        self.height += 1;
+        self.view = 0;
+        self.staged = None;
+        self.round_atts.clear();
+        self.future_props.clear();
+        *self.selection_cache.borrow_mut() = None;
+        self.mempool.remove_included(&included_ids);
+        self.chain.push(FinalizedBlock {
+            block,
+            leader,
+            attesters,
+        });
+        Ok(())
+    }
 }
 
 /// Decode the header and the certificate digest from a stored block, the two
-/// values a node needs to reconstruct its consensus state on reload. The body is
-/// left unread since the ledger is rebuilt from the state store.
+/// values a node needs to reconstruct its consensus state on reload. The
+/// certificate slot carries the whole finality certificate; its digest is what
+/// the beacon advances over. The body is left unread since the ledger is rebuilt
+/// from the state store.
 fn decode_head(bytes: &[u8]) -> Result<(Header, [u8; 32]), RoundError> {
     let mut decoder = Decoder::new(bytes);
     let header = Header::decode(&mut decoder).map_err(|_| RoundError::Decode)?;
-    let certificate = decoder.get_bytes().map_err(|_| RoundError::Decode)?;
-    let digest: [u8; 32] = certificate.try_into().map_err(|_| RoundError::Decode)?;
-    Ok((header, digest))
+    let cert_slot = decoder.get_bytes().map_err(|_| RoundError::Decode)?;
+    let certificate =
+        crate::wire::certificate_from_bytes(cert_slot).map_err(|_| RoundError::Decode)?;
+    Ok((header, certificate.digest()))
 }
