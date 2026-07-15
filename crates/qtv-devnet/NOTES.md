@@ -2,12 +2,14 @@
 
 This crate turns the single process node loop into several real nodes that talk
 over the qtv-net post-quantum channel and reach finality over the wire. Each node
-holds its own identity, its own state and store, and a secure channel to every
-peer. The nodes gossip three things over the channels: submitted transactions,
-block proposals, and attestations. The committee is chosen by the sampler, the
-leader proposes over the wire, the members attest over the wire, an entitled
-supermajority aggregates into the certificate, and every node commits the same
-finalized block and persists it through qtv-store before advancing.
+holds its own identity, its own state and store, and a bounded set of overlay
+neighbors rather than a channel to every peer. A node discovers the network from a
+small set of bootstrap peers, then gossips three things to its neighbors and
+relays what it hears onward, the submitted transactions, the block proposals, and
+the attestations. The committee is chosen by the sampler, the leader proposes over the
+overlay, the members attest over the overlay, an entitled supermajority aggregates
+into the certificate, and every node commits the same finalized block and persists
+it through qtv-store before advancing.
 
 Each node runs its own round on a logical clock rather than in lockstep. A slot
 is 150 milliseconds of logical time. A node acts when a sealed message arrives or
@@ -18,7 +20,20 @@ wall clock threads.
 
 ## What is in this crate
 
-- A secure channel mesh. Every pair of nodes runs the qtv-net ML-KEM and ML-DSA
+- Peer discovery. A node starts from a small set of bootstrap peers and exchanges
+  its known peer set with them over a qtv-net channel, merging what it learns until
+  every node on a connected bootstrap graph knows the whole network. A peer entry
+  carries the network identity and the address. A discovered peer is trusted only
+  once a channel to it completes the pinned handshake, so a peer that cannot prove
+  the identity is refused rather than trusted from its discovery claim.
+- A bounded gossip overlay. A node keeps a bounded neighbor set drawn as a ring
+  lattice over the discovered peers ordered by identity fingerprint, not a link to
+  every node. A message is relayed to a node's neighbors, and each node remembers
+  the messages it has seen, keyed by content id, so it relays each one at most once
+  and never loops. Every node links to its ring successor, so the overlay is
+  connected and a proposal or attestation from any node reaches every node within a
+  bounded number of hops.
+- A secure channel per overlay link. Every link runs the qtv-net ML-KEM and ML-DSA
   handshake with identity pinning and then exchanges ChaCha20-Poly1305 sealed
   records. A gossip message travels the channel sealed, and a peer that cannot
   open a record tears the channel down.
@@ -46,8 +61,10 @@ wall clock threads.
   under reordering and view changes because a node stages at most one block per
   height and never attests a second, so no two nodes finalize different blocks at
   one height. A node finalizes only once every online committee member has
-  attested its staged block, so the certificate and the finalized block are byte
-  identical across nodes.
+  attested its staged block, and an attestation arriving by several overlay paths
+  is de duplicated by its content id and counted once, so the overlay never lets a
+  node finalize without genuinely receiving a supermajority. The certificate and
+  the finalized block are byte identical across nodes.
 
 ## Frozen decisions honored
 
@@ -63,17 +80,17 @@ wall clock threads.
 
 This is a small local devnet, a handful of nodes over loopback, driven in one
 test process over real qtv-net channels or over localhost TCP. The event loop
-turns a logical clock and moves each sealed record between the channels; it is the
-devnet harness, not a shortcut around the wire, since every record is sealed and
-opened by qtv-net. Transaction gossip is delivered at once before a round, since
-the bounded gossip overlay is deferred; the logical clock models the consensus
-round, where the asynchrony, the timeouts, and the view changes live. The parts a
-production network still needs are named here and are not built yet.
+turns a logical clock and moves each sealed record between the overlay channels;
+it is the devnet harness, not a shortcut around the wire, since every record is
+sealed and opened by qtv-net. Discovery and transaction gossip flood over the
+overlay at once before a round, since a transaction only has to reach the leader
+mempool before it proposes; the logical clock models the consensus round, where
+the asynchrony, the timeouts, and the view changes live. The parts a production
+network still needs are named here and are not built yet.
 
-- The bounded gossip overlay, peer discovery, and NAT traversal. The mesh is a
-  fixed full mesh over loopback, a record is delivered to every peer rather than
-  forwarded to a bounded neighbor set, and transactions spread at once rather than
-  over the logical clock.
+- NAT traversal and dynamic membership. The bootstrap graph and the overlay are
+  fixed for a run over loopback; a node does not punch through a NAT, and the
+  overlay is not repaired or rebalanced as peers join and leave mid run.
 - The full QUIC datagram transport, multiplexed streams, congestion control, and
   session key rotation, all of which sit above the qtv-net channel and are named
   in the qtv-net notes.
