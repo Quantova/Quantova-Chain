@@ -1,0 +1,15 @@
+[package]
+name = "qtv-store"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The first file backed block and state persistence for the Quantova stack."
+
+[dependencies]
+qtv-codec = { path = "../qtv-codec" }
+qtv-block = { path = "../qtv-block" }
+qtv-state = { path = "../qtv-state" }
+
+[dev-dependencies]
+qtv-tx = { path = "../qtv-tx" }
