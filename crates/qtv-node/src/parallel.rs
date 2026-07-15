@@ -1,0 +1,460 @@
+//! Deterministic parallel execution of an ordered block.
+//!
+//! A block is an ordered list of transactions and the finalized state must be as
+//! if every transaction ran in that order. Sequential execution reaches that
+//! state one transaction at a time, which is the wall clock bottleneck: at about
+//! ten microseconds of execution per transaction, a hundred thousand
+//! transactions a second is a full second of execution per second of wall clock,
+//! with no headroom. This module runs transactions with disjoint state across the
+//! cores while holding the result bit identical to that sequential order.
+//!
+//! ## What a transaction reads and writes
+//!
+//! A transaction in this slice is a native transfer. The virtual machine debits
+//! the sender by the amount and the fee and credits the recipient by the
+//! amount, and validation reads the sender account for its key, its nonce, and
+//! its balance. So the declared read set and the declared write set of a transfer
+//! are both exactly the sender address and the recipient address, matching the
+//! state access manifest the instruction set specification gives every entry.
+//! Two transactions conflict, on a read write or a write write, when their
+//! address sets intersect: they share the sender, share the recipient, or one
+//! sends to the other.
+//!
+//! ## How the order is preserved
+//!
+//! The transactions are assigned to layers in block order. A transaction's layer
+//! is one past the highest layer of any earlier transaction it conflicts with, so
+//! for any two conflicting transactions the earlier one lands in a strictly lower
+//! layer. The contrapositive is the property the parallel phase relies on: no two
+//! transactions in the same layer conflict, so their address sets are pairwise
+//! disjoint.
+//!
+//! Execution walks the layers in order. Within a layer every transaction is read
+//! from the state as it stood at the start of the layer, executed on its own
+//! cores, and its writes are collected; the writes are applied before the next
+//! layer begins. Because the layer's address sets are disjoint, no transaction in
+//! it can observe or overwrite another's account, so running the layer across the
+//! cores lands on the exact state that running the same layer one transaction at a
+//! time would.
+//!
+//! ## Why this equals the sequential order, on every input
+//!
+//! Take any transaction. Every earlier transaction that touches one of its two
+//! accounts conflicts with it and therefore sits in a lower layer, already
+//! applied; every transaction in its own layer touches neither of its accounts;
+//! and no later transaction has run yet. So the accounts it reads hold exactly
+//! the values the sequential order would have left there, its validation, its
+//! virtual machine run, and its two writes are identical to sequential, and a
+//! transaction the sequential order skips, on a failed validation or a fault, is
+//! skipped here too and moves no state. By induction over the layers the whole
+//! block lands on the sequential post state. The layering is a pure function of
+//! the block and the declared addresses, with no wall clock and no thread order
+//! in it, and the state root is fixed by the set of accounts and not by the order
+//! they were written, so the post state and its root are bit identical to the
+//! sequential path on every input.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+
+use qtv_tx::Wrapper;
+
+use crate::execution::execute_transfer;
+use crate::fee::FeeParams;
+use crate::ledger::{Account, Ledger};
+use crate::mempool::plan_from_account;
+
+/// The two addresses a transfer declares it reads and writes: the sender and the
+/// recipient, taken straight from the transaction.
+fn access(wrapper: &Wrapper) -> (&str, &str) {
+    (wrapper.body().sender(), wrapper.body().call().target())
+}
+
+/// Assign every transaction in a block to a conflict layer and return the layers
+/// in order, each holding the block indices of its transactions. A transaction's
+/// layer is one past the highest layer of any earlier transaction that shares one
+/// of its two addresses, so conflicting transactions never share a layer and the
+/// transactions within a layer have pairwise disjoint address sets. The layering
+/// depends only on the ordered block and the declared addresses, so it is the
+/// same on every run.
+pub fn plan_layers(candidates: &[Wrapper]) -> Vec<Vec<usize>> {
+    // The highest layer assigned so far to any transaction that touched an
+    // address. An address unseen so far sits at layer zero.
+    let mut address_layer: HashMap<&str, usize> = HashMap::new();
+    let mut layers: Vec<Vec<usize>> = Vec::new();
+
+    for (index, wrapper) in candidates.iter().enumerate() {
+        let (sender, recipient) = access(wrapper);
+        let earlier = address_layer
+            .get(sender)
+            .copied()
+            .max(address_layer.get(recipient).copied())
+            .unwrap_or(0);
+        let layer = earlier + 1;
+        address_layer.insert(sender, layer);
+        address_layer.insert(recipient, layer);
+        if layers.len() < layer {
+            layers.push(Vec::new());
+        }
+        layers[layer - 1].push(index);
+    }
+
+    layers
+}
+
+/// The state a single transaction reads at the start of its layer: its block
+/// index, the transaction, and the sender and recipient accounts as they stood
+/// then. The accounts are owned so the run touches no shared trie.
+struct Task<'a> {
+    index: usize,
+    wrapper: &'a Wrapper,
+    sender_address: String,
+    recipient_address: String,
+    sender: Account,
+    recipient: Account,
+}
+
+/// The write a transaction commits: the two accounts to store back, named by
+/// address. A transaction the block order skips produces no write.
+struct Write {
+    index: usize,
+    sender_address: String,
+    sender: Account,
+    recipient_address: String,
+    recipient: Account,
+}
+
+/// Run one task exactly as the sequential path would: validate against the sender
+/// account read for the layer, execute the transfer through the virtual machine,
+/// and on a clean run return the two updated accounts to store back. A failed
+/// validation or a fault returns nothing, which moves no state, the same skip the
+/// sequential path takes.
+fn run_task(task: &Task<'_>, fee_params: &FeeParams) -> Option<Write> {
+    let plan = plan_from_account(task.wrapper, &task.sender, fee_params).ok()?;
+    let transferred = execute_transfer(
+        task.sender.balance,
+        task.recipient.balance,
+        plan.amount,
+        plan.fee,
+        task.wrapper.body().gas_limit(),
+    )
+    .ok()?;
+
+    let mut sender = task.sender.clone();
+    sender.balance = transferred.sender_balance;
+    sender.nonce += 1;
+    let mut recipient = task.recipient.clone();
+    recipient.balance = transferred.recipient_balance;
+
+    Some(Write {
+        index: task.index,
+        sender_address: task.sender_address.clone(),
+        sender,
+        recipient_address: task.recipient_address.clone(),
+        recipient,
+    })
+}
+
+/// Run a layer's tasks across the worker threads and return their writes. The
+/// tasks have pairwise disjoint accounts, so a worker never touches another's
+/// state and the writes carry no ordering between them. Workers pull the next
+/// task from a shared counter, which balances an uneven layer without any unsafe
+/// code or an external pool. A single task or a single worker runs inline.
+fn run_layer(tasks: &[Task<'_>], fee_params: &FeeParams, threads: usize) -> Vec<Write> {
+    let workers = threads.clamp(1, tasks.len().max(1));
+    if workers <= 1 || tasks.len() <= 1 {
+        return tasks
+            .iter()
+            .filter_map(|t| run_task(t, fee_params))
+            .collect();
+    }
+
+    let next = AtomicUsize::new(0);
+    let mut writes: Vec<Write> = Vec::with_capacity(tasks.len());
+    thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut local = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= tasks.len() {
+                            break;
+                        }
+                        if let Some(write) = run_task(&tasks[i], fee_params) {
+                            local.push(write);
+                        }
+                    }
+                    local
+                })
+            })
+            .collect();
+        for handle in handles {
+            writes.extend(handle.join().expect("an execution worker panicked"));
+        }
+    });
+    writes
+}
+
+/// Execute an ordered block against the ledger across up to `threads` cores,
+/// producing the identical post state and root the sequential path produces, and
+/// return the included transactions in block order. Transactions with disjoint
+/// state run concurrently and conflicting transactions serialise in block order.
+/// With one thread this is the sequential path with the same layering overhead.
+pub fn execute_parallel(
+    ledger: &mut Ledger,
+    candidates: &[Wrapper],
+    fee_params: &FeeParams,
+    threads: usize,
+) -> Vec<Wrapper> {
+    let layers = plan_layers(candidates);
+    let mut included: Vec<usize> = Vec::new();
+
+    for layer in &layers {
+        // Read every account the layer touches as it stands now, before any of
+        // the layer's writes land. The accounts are disjoint across the layer, so
+        // this snapshot is exactly what each transaction would read in order.
+        let tasks: Vec<Task<'_>> = layer
+            .iter()
+            .map(|&index| {
+                let wrapper = &candidates[index];
+                let (sender_address, recipient_address) = access(wrapper);
+                let sender_address = sender_address.to_string();
+                let recipient_address = recipient_address.to_string();
+                let sender = ledger.account(&sender_address);
+                let recipient = ledger.account(&recipient_address);
+                Task {
+                    index,
+                    wrapper,
+                    sender_address,
+                    recipient_address,
+                    sender,
+                    recipient,
+                }
+            })
+            .collect();
+
+        let mut writes = run_layer(&tasks, fee_params, threads);
+        // Apply the layer's writes in block order. The accounts are disjoint, so
+        // the order does not change the state, but it keeps the apply itself a
+        // pure function of the block for a clean, reviewable trace.
+        writes.sort_by_key(|write| write.index);
+        for write in writes {
+            ledger.set_account(&write.sender_address, &write.sender);
+            ledger.set_account(&write.recipient_address, &write.recipient);
+            included.push(write.index);
+        }
+    }
+
+    included.sort_unstable();
+    included
+        .into_iter()
+        .map(|index| candidates[index].clone())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::execution::transfer_call;
+    use crate::ledger::Account;
+    use crate::node::execute_ordered;
+    use qtv_account::{derive, Account as KeyAccount};
+    use qtv_tx::{sign, Body};
+
+    const SEED: [u8; 32] = [23u8; 32];
+
+    fn keypair(index: u64) -> KeyAccount {
+        derive(&SEED, index)
+    }
+
+    fn fund(ledger: &mut Ledger, account: &KeyAccount, balance: u64) {
+        ledger.set_account(
+            &account.address(),
+            &Account::funded(balance, account.scheme(), account.public_key().to_vec()),
+        );
+    }
+
+    fn transfer(
+        from: &KeyAccount,
+        to: &str,
+        amount: u64,
+        nonce: u64,
+        fee_params: &FeeParams,
+    ) -> Wrapper {
+        let call = transfer_call(to, amount);
+        let body = Body::new(
+            from.address(),
+            nonce,
+            crate::execution::TRANSFER_GAS,
+            u128::from(fee_params.transfer_fee()),
+            call,
+        );
+        sign(from, &body)
+    }
+
+    /// A ledger holding many funded accounts, and the keypairs behind them.
+    fn population(count: u64, balance: u64) -> (Ledger, Vec<KeyAccount>) {
+        let mut ledger = Ledger::new();
+        let keys: Vec<KeyAccount> = (0..count).map(keypair).collect();
+        for key in &keys {
+            fund(&mut ledger, key, balance);
+        }
+        (ledger, keys)
+    }
+
+    fn included_ids(included: &[Wrapper]) -> Vec<String> {
+        included.iter().map(Wrapper::id).collect()
+    }
+
+    /// The sequential path and the parallel path over the same block must reach
+    /// the same post state and the same included set. Checked here across every
+    /// thread count so the equivalence does not ride on one worker layout.
+    fn assert_matches(base: &Ledger, block: &[Wrapper], fee_params: &FeeParams) {
+        let mut sequential = base.clone();
+        let sequential_included = execute_ordered(&mut sequential, block, fee_params);
+
+        for threads in [1usize, 2, 4, 8, 16] {
+            let mut parallel = base.clone();
+            let parallel_included = execute_parallel(&mut parallel, block, fee_params, threads);
+            assert_eq!(
+                sequential.state_root(),
+                parallel.state_root(),
+                "state root differs at {threads} threads"
+            );
+            assert_eq!(
+                included_ids(&sequential_included),
+                included_ids(&parallel_included),
+                "included set differs at {threads} threads"
+            );
+        }
+    }
+
+    #[test]
+    fn an_independent_block_is_one_layer_and_matches() {
+        let fee = FeeParams::devnet();
+        let (ledger, keys) = population(64, 1_000_000);
+        // Each sender pays a fresh recipient nobody else touches, so no two
+        // transactions share an address.
+        let block: Vec<Wrapper> = (0..32)
+            .map(|i| transfer(&keys[i], &keys[32 + i].address(), 1_000, 0, &fee))
+            .collect();
+
+        let layers = plan_layers(&block);
+        assert_eq!(layers.len(), 1, "an independent block is a single layer");
+        assert_eq!(layers[0].len(), 32);
+        assert_matches(&ledger, &block, &fee);
+    }
+
+    #[test]
+    fn an_all_conflicting_block_degrades_to_sequential_and_matches() {
+        let fee = FeeParams::devnet();
+        let (ledger, keys) = population(40, 10_000_000);
+        // One sender pays many recipients in nonce order. Every transaction shares
+        // the sender, so each lands in its own layer and the block is fully serial.
+        let block: Vec<Wrapper> = (0..32)
+            .map(|i| transfer(&keys[0], &keys[1 + i].address(), 1_000, i as u64, &fee))
+            .collect();
+
+        let layers = plan_layers(&block);
+        assert_eq!(layers.len(), 32, "an all conflicting block is fully serial");
+        assert!(layers.iter().all(|layer| layer.len() == 1));
+        assert_matches(&ledger, &block, &fee);
+    }
+
+    #[test]
+    fn a_chain_of_dependencies_serialises_in_order_and_matches() {
+        let fee = FeeParams::devnet();
+        let (ledger, keys) = population(16, 5_000_000);
+        // A pays B, B pays C, C pays D: each transaction's sender is the prior
+        // recipient, so the whole run is a single dependency chain.
+        let block: Vec<Wrapper> = (0..8)
+            .map(|i| transfer(&keys[i], &keys[i + 1].address(), 2_000, 0, &fee))
+            .collect();
+
+        let layers = plan_layers(&block);
+        assert_eq!(layers.len(), 8, "a dependency chain is fully serial");
+        assert_matches(&ledger, &block, &fee);
+    }
+
+    #[test]
+    fn a_random_mixed_block_matches_over_many_seeds() {
+        let fee = FeeParams::devnet();
+        let (ledger, keys) = population(24, 50_000_000);
+        let accounts = keys.len() as u64;
+
+        // A small deterministic generator so the blocks are varied but the test is
+        // reproducible without a dependency.
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+
+        for _ in 0..40 {
+            // Track a per sender nonce so most transactions are valid, with some
+            // deliberately stale to exercise the skip path in both executors.
+            let mut nonce = vec![0u64; keys.len()];
+            let len = (next() % 40) as usize + 1;
+            let mut block = Vec::with_capacity(len);
+            for _ in 0..len {
+                let s = (next() % accounts) as usize;
+                let mut r = (next() % accounts) as usize;
+                if r == s {
+                    r = (r + 1) % keys.len();
+                }
+                let stale = next().is_multiple_of(7);
+                let n = if stale && nonce[s] > 0 {
+                    nonce[s] - 1
+                } else {
+                    let n = nonce[s];
+                    nonce[s] += 1;
+                    n
+                };
+                let amount = (next() % 5_000) + 1;
+                block.push(transfer(&keys[s], &keys[r].address(), amount, n, &fee));
+            }
+            assert_matches(&ledger, &block, &fee);
+        }
+    }
+
+    #[test]
+    fn the_parallel_path_is_deterministic_across_runs() {
+        let fee = FeeParams::devnet();
+        let (ledger, keys) = population(24, 50_000_000);
+        let block: Vec<Wrapper> = (0..20)
+            .map(|i| {
+                transfer(
+                    &keys[i % 12],
+                    &keys[12 + (i % 12)].address(),
+                    500 + i as u64,
+                    (i / 12) as u64,
+                    &fee,
+                )
+            })
+            .collect();
+
+        let mut first = ledger.clone();
+        let first_included = execute_parallel(&mut first, &block, &fee, 8);
+        for _ in 0..8 {
+            let mut again = ledger.clone();
+            let again_included = execute_parallel(&mut again, &block, &fee, 8);
+            assert_eq!(first.state_root(), again.state_root());
+            assert_eq!(included_ids(&first_included), included_ids(&again_included));
+        }
+    }
+
+    #[test]
+    fn an_empty_block_has_no_layers_and_moves_nothing() {
+        let fee = FeeParams::devnet();
+        let (ledger, _) = population(4, 1_000);
+        assert!(plan_layers(&[]).is_empty());
+        let mut parallel = ledger.clone();
+        let included = execute_parallel(&mut parallel, &[], &fee, 8);
+        assert!(included.is_empty());
+        assert_eq!(parallel.state_root(), ledger.state_root());
+    }
+}

@@ -12,7 +12,7 @@ use qtv_tx::Wrapper;
 
 use crate::execution::{transfer_amount, TRANSFER_GAS};
 use crate::fee::FeeParams;
-use crate::ledger::Ledger;
+use crate::ledger::{Account, Ledger};
 
 /// The reason a transaction was refused admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,10 +54,25 @@ pub fn validate(
     ledger: &Ledger,
     fee_params: &FeeParams,
 ) -> Result<TransferPlan, Reject> {
+    let sender = ledger.account(wrapper.body().sender());
+    plan_from_account(wrapper, &sender, fee_params)
+}
+
+/// Validate a transaction against an already read sender account and the fee
+/// parameters. This is the whole of `validate` past the state read, split out so
+/// a caller that has already loaded the sender account, such as the parallel
+/// executor working over a state snapshot, validates a transaction by the exact
+/// same rules without a second trie lookup. The rules never touch the recipient
+/// account, only the sender account and the transaction itself, so the outcome is
+/// fixed by the sender account passed in.
+pub fn plan_from_account(
+    wrapper: &Wrapper,
+    account: &Account,
+    fee_params: &FeeParams,
+) -> Result<TransferPlan, Reject> {
     let body = wrapper.body();
     let sender = body.sender().to_string();
 
-    let account = ledger.account(&sender);
     if !account.has_key() {
         return Err(Reject::UnknownSender);
     }
