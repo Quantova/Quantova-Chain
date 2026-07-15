@@ -10,7 +10,12 @@
 all-features = true
 
 [bans]
-multiple-versions = "warn"
+# Duplicate versions of a crate are drift and a hard failure here, never a
+# warning. The single crypto crate is the one this guards. It must resolve to
+# exactly one version across the whole graph, so a split crypto graph cannot land
+# quietly. The stack carries no third party registry crates, so the only way a
+# duplicate arises is a pin left behind at an old tag.
+multiple-versions = "deny"
 # The stack has no third party registry crates, only the standard library and our
 # own crates pinned by git tag and path, which carry no registry version. The
 # wildcard check has nothing to guard here and only false flags our own pins.
