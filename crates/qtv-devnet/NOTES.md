@@ -9,6 +9,13 @@ leader proposes over the wire, the members attest over the wire, an entitled
 supermajority aggregates into the certificate, and every node commits the same
 finalized block and persists it through qtv-store before advancing.
 
+Each node runs its own round on a logical clock rather than in lockstep. A slot
+is 150 milliseconds of logical time. A node acts when a sealed message arrives or
+a view timeout fires, driven by an event loop over the clock and the qtv-net
+channels, not by a central driver stepping every node together. The determinism
+the tests need comes from the logical clock and a fixed message order, not from
+wall clock threads.
+
 ## What is in this crate
 
 - A secure channel mesh. Every pair of nodes runs the qtv-net ML-KEM and ML-DSA
@@ -29,6 +36,18 @@ finalized block and persists it through qtv-store before advancing.
 - Restart from disk. A node reopens its block store and state store, rebuilds its
   ledger from the committed leaves, reconstructs the beacon and the parent link
   from its last finalized block, and rejoins at the next height.
+- Asynchronous per node rounds on a logical clock. A slot is 150 milliseconds of
+  logical time. Each node acts when a sealed record arrives or a view timeout
+  fires. The leader of a view proposes within its slot; a node that sees no valid
+  proposal by its timeout advances the view, and the next leader in rotation
+  proposes, reusing the view indexed leader rotation of the qtv-bft core. A silent
+  or offline leader no longer stalls the chain: the timeout routes around it.
+  Progress continues while an honest supermajority is online, and safety holds
+  under reordering and view changes because a node stages at most one block per
+  height and never attests a second, so no two nodes finalize different blocks at
+  one height. A node finalizes only once every online committee member has
+  attested its staged block, so the certificate and the finalized block are byte
+  identical across nodes.
 
 ## Frozen decisions honored
 
@@ -43,25 +62,29 @@ finalized block and persists it through qtv-store before advancing.
 ## Honest scope: what is deferred to later networking work
 
 This is a small local devnet, a handful of nodes over loopback, driven in one
-test process over real qtv-net channels or over localhost TCP. The driver moves
-each sealed message between the channels in lockstep rounds; it is the devnet
-harness, not a shortcut around the wire, since every message is sealed and opened
-by qtv-net. The parts a production network still needs are named here and are not
-built yet.
+test process over real qtv-net channels or over localhost TCP. The event loop
+turns a logical clock and moves each sealed record between the channels; it is the
+devnet harness, not a shortcut around the wire, since every record is sealed and
+opened by qtv-net. Transaction gossip is delivered at once before a round, since
+the bounded gossip overlay is deferred; the logical clock models the consensus
+round, where the asynchrony, the timeouts, and the view changes live. The parts a
+production network still needs are named here and are not built yet.
 
-- Peer discovery, NAT traversal, and a bounded gossip overlay. The mesh is a
-  fixed full mesh over loopback, and a message is delivered to every peer rather
-  than forwarded to a bounded neighbor set.
+- The bounded gossip overlay, peer discovery, and NAT traversal. The mesh is a
+  fixed full mesh over loopback, a record is delivered to every peer rather than
+  forwarded to a bounded neighbor set, and transactions spread at once rather than
+  over the logical clock.
 - The full QUIC datagram transport, multiplexed streams, congestion control, and
   session key rotation, all of which sit above the qtv-net channel and are named
   in the qtv-net notes.
-- Asynchronous rounds. The driver runs the propose, attest, and finalize phases
-  in lockstep; partial synchrony, timeouts, and view changes are not modeled, so
-  the elected leader is assumed online for the slot it leads.
+- Catch up sync for a node that missed heights. A restarted node reloads the chain
+  it persisted, and a node that was offline for a stall rejoins at the height the
+  others held; but a node that fell behind on already finalized heights does not
+  fetch and verify them from a peer over the wire.
 - Fork choice under deep reorgs. Each node follows the single finalized chain and
-  does not resolve competing forks.
-- Chain sync for a node that missed heights. A restarted node reloads the chain it
-  persisted; a node that was fully offline for a stretch does not catch up on the
-  heights it missed over the wire.
+  does not resolve competing forks. The single stage per height keeps two blocks
+  from finalizing at one height, so no fork forms; a full asynchronous view change
+  that lets a node safely re-vote across a proposal split, rather than hold its
+  first vote, is the harder case left to the consensus crate.
 - Slashing distribution. Only equivocation is slashable and none occurs here, so
   no node is ever slashed and no penalty is distributed.
