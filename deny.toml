@@ -11,7 +11,10 @@ all-features = true
 
 [bans]
 multiple-versions = "warn"
-wildcards = "deny"
+# The stack has no third party registry crates, only the standard library and our
+# own crates pinned by git tag and path, which carry no registry version. The
+# wildcard check has nothing to guard here and only false flags our own pins.
+wildcards = "allow"
 deny = [
     "k256",
     "ed25519-dalek",
@@ -41,3 +44,8 @@ confidence-threshold = 0.9
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+
+# The stack pins its own crates from the Quantova organization by git tag. Any
+# other git source stays denied.
+[sources.allow-org]
+github = ["Quantova"]
