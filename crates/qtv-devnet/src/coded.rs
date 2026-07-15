@@ -235,6 +235,15 @@ pub fn encode_piece(shard: &Shard, proof: &ShardProof) -> Vec<u8> {
 /// header, the commitment, and the shard pieces the node custodies, each counted from
 /// its real canonical encoding; the whole block figure is the canonical block
 /// encoding every node downloads today. The ratio is the per node saving.
+///
+/// Read this figure for exactly what it is. It is the saving for a node performing the
+/// custody and availability duty, holding and verifying its share rather than the whole
+/// block. A node that must reconstruct the whole block, a committee member that executes
+/// and attests, gathers k shards and by information theory downloads a full block worth,
+/// so for that node the gain is not fewer bytes but loss tolerance and a parallel pull
+/// from k sources instead of the whole block from one. The saving is real for the
+/// availability layer and it does not by itself reduce what a reconstructing validator
+/// downloads. It is never to be reported as a plain per validator bandwidth cut.
 #[derive(Debug, Clone, Copy)]
 pub struct Bandwidth {
     /// The bytes a node downloads under erasure coding: header, commitment, and its
