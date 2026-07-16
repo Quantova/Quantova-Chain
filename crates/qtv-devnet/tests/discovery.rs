@@ -35,6 +35,7 @@ fn chain_config(base: &std::path::Path, count: usize) -> DevnetConfig {
         // A ring overlay keeps discovery cheap; discovery is independent of the
         // fanout, so the peer tables converge the same whatever the overlay degree.
         fanout: 2,
+        slots: qtv_devnet::config::DEFAULT_SLOTS,
     }
 }
 
