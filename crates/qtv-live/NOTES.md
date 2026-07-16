@@ -74,71 +74,46 @@ network propagation. Both are stated in the code beside the number.
 
 ## The sortition, stated plainly
 
-The task this harness serves asked for the one time key sortition with the stake
-floor on, the closed sortition gate. That construction lives in the QRC-CONSENSUS
-working tree and is not yet tagged. The devnet pins consensus v0.3.0, whose sortition
-is the module lattice (ML-DSA) verifiable random draw, the grindable predecessor the
-one time construction replaces. So this harness measures the module lattice draw
-sortition, real and NIST module lattice, but not the one time construction, and it
-enforces no stake floor at this pin.
+The devnet pins consensus v0.4.0, the one time key sortition with the minimum self
+stake floor on. Committee membership and proposer eligibility are drawn and rechecked
+as a committed one time preimage with its Merkle path against the registered root, and
+an account below the floor is not eligible. The attestation over that membership
+carries the module lattice signature. This is the grinding resistant successor to the
+v0.3.0 module lattice verifiable random draw, which is no longer on the path. The
+sortition is real and NIST module lattice.
 
-Wiring the one time construction into the live harness is a cross repo step: a new
-QRC-CONSENSUS tag for the one time sortition, then a qtv-devnet pin bump with the
-attestation membership moved from the draw to the one time credential and the stake
-floor turned on. That is a founder decision on release and pinning across two repos.
-It is flagged here and not taken in this pass, and it is the first item of remaining
-work.
+## The block width
 
-## The block width bound
-
-A single gossiped proposal carries the whole block body as one qtv-net record, and a
-record's plaintext is bounded at one mebibyte. At the 3309 byte module lattice
-signature the transaction is about 3.5 kilobytes on the wire, so the block width is
-bounded at about three hundred transactions per block over the plain gossip path. The
-harness estimates the body size from one real signed transaction and refuses an
-oversize block width with a clear message rather than failing inside the transport.
-Lifting this bound is the erasure coded block dissemination the devnet already carries
-in `coded.rs` but the round loop does not yet use for the proposal; that is the second
-item of remaining work.
+The devnet no longer carries a proposal as one whole qtv-net record. It codes the
+block the proposal commits to into k data shards and n minus k parity shards under a
+SHA3 commitment and disseminates the shards over the overlay, each shard within the one
+mebibyte record plaintext bound, and every node rebuilds the block from any k shards
+and verifies it against the header before use. So the block width is no longer bounded
+by the record size. The harness estimates the old single record width from one real
+signed transaction, about three hundred transactions at the 3309 byte module lattice
+signature, and drives a width above it, which the single record path would have
+refused.
 
 ## Remaining work
 
-1. Bump the devnet to the one time key sortition with the stake floor, the flagged
-   cross repo founder decision above.
-2. Disseminate the proposal over the erasure coded path so the block width is not
-   bounded by the single record size.
-3. A true multi machine run: the same harness over qtv-net sockets across hosts, which
-   is what finally measures inter node bandwidth and propagation latency and turns the
-   in process finality compute floor into a real network finality.
+A true multi machine run: the same harness over qtv-net sockets across hosts, which is
+what finally measures inter node bandwidth and propagation latency and turns the in
+process finality compute floor into a real network finality.
 
-## Measured figures on the reference host
+## Measured figures
 
-The host is an Apple M4, ten cores, sixteen gigabytes, the same reference host the
-modelled benchmark uses, built in release. The figures move a little between runs;
-rerun for current ones. They are measured, in process, on one host, and carry the
-caveats above: the throughput is compute bound, network free, and serial over the
-committee on one host, and the finality is the in process compute time per block
-excluding real network propagation. They are not multi machine network figures.
-
-Two configurations, each a real run over the stated committee and block width.
-
-- Four validators, committee four, supermajority three, block width 250. Over 73
-  seconds of consensus wall clock it finalised 30 blocks and 7500 transactions.
-  Sustained finalised throughput about 103 transactions a second, consensus only,
-  about 96 end to end with client signing. Finality per block: median about 2360
-  milliseconds, p90 about 2840, p99 about 3010, maximum about 3050.
-
-- Seven validators, committee seven, supermajority five, block width 100. Over 45
-  seconds of consensus wall clock it finalised 37 blocks and 3700 transactions.
-  Sustained finalised throughput about 82 transactions a second, consensus only,
-  about 78 end to end. Finality per block: median about 1210 milliseconds, p90 about
-  1340, p99 about 1490, maximum about 1540.
-
-The per block time is dominated by the committee re verifying the block serially on
-one host, so it rises with both the block width and the validator count, which is
-the serial single host artefact named above and not a property of the consensus. A
-real multi machine network verifies the members in parallel and pays real network
-latency instead; measuring that is the third item of remaining work.
+The harness measures two numbers on each run over the stated committee and block
+width, on the wall clock: the sustained finalised throughput and the finality latency
+distribution with its tail. No committed results file backs a stated figure here, so
+the current numbers come from running the harness with the command below, and they
+carry the caveats above. The throughput is compute bound, network free, and serial
+over the committee on one host, so it is not a multi machine network throughput. The
+finality is the in process compute time per block, dominated by the committee re
+verifying the block serially on one host, so it rises with both the block width and the
+validator count; that is the serial single host artefact, not a property of the
+consensus, and it excludes real network propagation. A real multi machine run verifies
+the members in parallel and pays real network latency instead, which is the remaining
+work above.
 
 ## Reproduce
 

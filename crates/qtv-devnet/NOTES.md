@@ -5,11 +5,12 @@ over the qtv-net post-quantum channel and reach finality over the wire. Each nod
 holds its own identity, its own state and store, and a bounded set of overlay
 neighbors rather than a channel to every peer. A node discovers the network from a
 small set of bootstrap peers, then gossips three things to its neighbors and
-relays what it hears onward, the submitted transactions, the block proposals, and
-the attestations. The committee is chosen by the sampler, the leader proposes over the
-overlay, the members attest over the overlay, an entitled supermajority aggregates
-into the certificate, and every node commits the same finalized block and persists
-it through qtv-store before advancing.
+relays what it hears onward, the submitted transactions, the block proposals
+disseminated as erasure coded shards, and the attestations. The committee is chosen by
+the one time key sortition of consensus v0.4.0 with the stake floor on, the leader
+proposes over the overlay, the members attest over the overlay, an entitled
+supermajority aggregates into the certificate, and every node commits the same
+finalized block and persists it through qtv-store before advancing.
 
 Each node runs its own round on a logical clock rather than in lockstep. A slot
 is 150 milliseconds of logical time. A node acts when a sealed message arrives or
@@ -38,9 +39,19 @@ wall clock threads.
   records. A gossip message travels the channel sealed, and a peer that cannot
   open a record tears the channel down.
 - A wire message codec over the canonical qtv-codec: a submitted transaction, a
-  block proposal carrying the real header and body, and a committee attestation
-  carrying the sampler membership draw and the module lattice signature. A
-  message that does not parse by the codec is dropped at the edge.
+  block proposal disseminated as its erasure coded shards rather than one whole
+  record, and a committee attestation carrying the one time membership credential
+  and the module lattice signature. A message that does not parse by the codec is
+  dropped at the edge.
+- Erasure coded block dissemination. A block proposal does not travel as one whole
+  qtv-net record. The block the proposal's header commits to is coded into k data
+  shards and n minus k parity shards under a SHA3 commitment the header carries, and
+  the shards are dispersed over the overlay, each within the one mebibyte record
+  plaintext bound. A node rebuilds the block from any k verified shards and checks it
+  against the header before it reaches the consensus layer, so a corrupted or misplaced
+  shard is refused at the edge and nothing about the disperser is trusted. A wider
+  block draws more shards rather than a larger record, so the block width is no longer
+  bounded by the record size.
 - A per node loop that reuses the chain crates without forking them. Execution,
   the mempool, committee selection, attestation, and certificate aggregation are
   the same qtv-node, qtv-sampler, and qtv-attest logic. Each node executes the
