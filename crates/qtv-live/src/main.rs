@@ -42,6 +42,17 @@
 //! on one host, not a live global network figure. The modelled global topology
 //! finality and the bandwidth bound throughput live in the separate Quantova-Bench
 //! and are labelled modelled there; they are not restated here as measured.
+//!
+//! WHAT ERASURE CODED DISSEMINATION CHANGES HERE. The devnet no longer carries a
+//! block proposal as one whole qtv-net record. It codes the block the proposal
+//! commits to into k data shards and n minus k parity shards under a SHA3 commitment
+//! and disseminates the shards over the overlay, each shard within the record bound,
+//! and every node rebuilds the block from any k shards and verifies it against the
+//! header. This changes how the proposal is carried; it does not turn the in memory
+//! transport into a real network, so it does not by itself produce a network
+//! throughput number. What it does is remove the width cap the single record proposal
+//! imposed, so a block wider than one record can be driven and measured at all. This
+//! harness now runs a width that the single record path would have refused.
 
 mod stats;
 
@@ -158,11 +169,12 @@ fn build_batch(
     (batch, start.elapsed())
 }
 
-/// The qtv-net record plaintext bound, one mebibyte. A single gossiped proposal
-/// carries the whole block body as one record, so the block width is bounded by
-/// this over the transaction wire size. Kept here so the harness refuses an
-/// oversize block with a clear message rather than failing mid run inside the
-/// transport.
+/// The qtv-net record plaintext bound, one mebibyte. The devnet no longer carries a
+/// proposal as one whole record: it disseminates the proposal as its erasure coded
+/// shards, each shard within this bound, and every node rebuilds the block from any k
+/// shards and verifies it against the header. So this bound no longer caps the block
+/// width; it is kept only to report the width the old single record path could carry,
+/// so a run above it is one the old path would have refused.
 const MAX_RECORD_PLAINTEXT: usize = 1 << 20;
 
 /// One driven height: submit the pre built batch to the ingress node and finalise
@@ -240,6 +252,8 @@ fn main() {
     println!("     finality certificate that every node verifies (no stub)");
     println!("   - real transactions, each a 3309 byte module lattice signature, verified on ingress");
     println!("   - real qtv-net post quantum channel (ML-KEM + ML-DSA handshake, ChaCha20-Poly1305)");
+    println!("   - real erasure coded proposal dissemination: the proposal is coded into shards under");
+    println!("     a SHA3 commitment and rebuilt from any k, verified against the header, per node");
     println!(" The sortition that runs:");
     println!("   - the one time key sortition, drawn as a committed preimage with its Merkle path");
     println!("     against the registered root, with the minimum self stake floor on. It is the");
@@ -250,6 +264,9 @@ fn main() {
     println!("   - every member's compute runs serially on this one host, not parallel across machines");
     println!("   - the devnet schedules the round on a logical clock, so slot and view timeouts are");
     println!("     logical; the finality figure below is measured wall clock compute, not modelled slots");
+    println!("   - coded dissemination changes how the proposal is carried, it does not turn the in");
+    println!("     memory transport into a real network. It removes the width cap so a wider block can");
+    println!("     be measured; it does not by itself produce a network throughput number.");
     println!();
     println!(" Consensus parameters: slot {} ms (logical), committee budget {}, stake {} QTOV,",
         qtv_bft::params::SLOT_MS,
@@ -274,27 +291,38 @@ fn main() {
     let fee = u128::from(FeeParams::devnet().transfer_fee());
     let mut nonces = vec![0u64; senders_n];
 
-    // A single gossiped proposal carries the whole block body as one qtv-net
-    // record, so refuse a block width that would exceed the record bound rather
-    // than fail mid run inside the transport. The estimate uses one real signed
-    // transaction so it tracks the true wire size.
+    // The proposal is no longer one whole record. The devnet erasure codes the block
+    // the proposal commits to into k data shards and n minus k parity shards under a
+    // SHA3 commitment and disseminates the shards over the overlay, each shard within
+    // the record bound, and every node rebuilds the block from any k shards and
+    // verifies it against the header before use. So the block width is no longer
+    // capped by the record size. The single record path could carry only the width
+    // below, computed from one real signed transaction so it tracks the true wire
+    // size, and a run above it is one that path would have refused mid run inside the
+    // transport.
     let sample_tx_bytes = {
         let call = transfer_call(&recipients[0], TRANSFER_AMOUNT);
         let body = Body::new(senders[0].address(), 0, TRANSFER_GAS, fee, call);
         qtv_codec::to_bytes(&sign(&senders[0], &body)).len()
     };
     let est_body_bytes = sample_tx_bytes * senders_n;
-    if est_body_bytes + 4096 > MAX_RECORD_PLAINTEXT {
-        let max_width = (MAX_RECORD_PLAINTEXT - 4096) / sample_tx_bytes;
-        eprintln!(
-            "QTV_LIVE_ACCOUNTS={senders_n} makes a {:.2} MB block body, over the {:.0} MB qtv-net\n\
-             record bound. A single proposal is one record here, so lower QTV_LIVE_ACCOUNTS to at\n\
-             most {max_width} at this {sample_tx_bytes} byte transaction size.",
-            est_body_bytes as f64 / 1e6,
-            MAX_RECORD_PLAINTEXT as f64 / 1e6,
-        );
-        std::process::exit(2);
+    let old_single_record_width = (MAX_RECORD_PLAINTEXT - 4096) / sample_tx_bytes;
+
+    println!(" Proposal dissemination: erasure coded shards over the overlay, not one whole record.");
+    println!("   the block is coded into k data + parity shards under a SHA3 commitment; each node");
+    println!("   rebuilds it from any k shards and verifies it against the header before use.");
+    println!("   block body at this width       : {:.2} MB ({senders_n} tx x {sample_tx_bytes} bytes)",
+        est_body_bytes as f64 / 1e6);
+    println!("   old single record width cap    : {old_single_record_width} accounts ({:.0} MB record bound)",
+        MAX_RECORD_PLAINTEXT as f64 / 1e6);
+    if senders_n > old_single_record_width {
+        println!("   THIS RUN's width {senders_n} EXCEEDS the old cap, so the single record proposal path");
+        println!("   would have refused it. The coded dissemination is what carries it.");
+    } else {
+        println!("   this run's width {senders_n} is within the old cap; the wider run above it is the one");
+        println!("   that would previously have been refused.");
     }
+    rule();
 
     println!(" Standing up {validators} validators over the qtv-net duplex mesh and discovering peers ...");
     let mut devnet =
