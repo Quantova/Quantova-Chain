@@ -15,6 +15,7 @@ use qtv_block::{Block as ChainBlock, Header};
 use qtv_codec::{Decoder, Encode, Encoder, Error as CodecError};
 use qtv_crypto::ml_dsa::SIGNATURE_BYTES;
 use qtv_crypto::sha3::sha3_256;
+use qtv_net::erasure::{Commitment, Shard, ShardProof, DIGEST_LEN};
 use qtv_sampler::onetime::{MerklePath, NODE_BYTES, PREIMAGE_BYTES};
 use qtv_sampler::sortition::Credential;
 use qtv_tx::{Body, Call, Wrapper};
@@ -38,6 +39,9 @@ const TAG_BLOCKS: u8 = 7;
 /// The tag that selects a view change record, a member's move to a later view
 /// carrying the block it is locked on.
 const TAG_VIEW_CHANGE: u8 = 8;
+/// The tag that selects one erasure coded shard of a block proposal, the unit that
+/// disseminates a proposal over the overlay in place of a single whole record.
+const TAG_CODED_PROPOSAL: u8 = 9;
 
 /// The tag that marks a genesis parent link.
 const PARENT_GENESIS: u8 = 0;
@@ -64,6 +68,27 @@ pub struct Proposal {
     pub header: Header,
     pub body: Vec<Wrapper>,
     pub justification: Vec<ViewChange>,
+}
+
+/// One erasure coded shard of a block proposal, the unit that disseminates a
+/// proposal over the overlay in place of one whole record. The block the proposal's
+/// header commits to is coded into k data shards and n minus k parity shards under a
+/// SHA3 commitment, and each shard travels as its own message within the transport
+/// record bound. A shard carries the routing metadata every shard repeats, the view,
+/// the header, the shared commitment, and the justification, alongside its own shard
+/// bytes and the Merkle proof that authenticates them, so a receiver that gathers any
+/// k of the shards rebuilds the whole proposal and checks the block against the
+/// header without a separate metadata message. A shard is verified against the
+/// commitment before it is used, and a wider block draws more shards rather than a
+/// larger one, so the block width is no longer bounded by the record size.
+#[derive(Clone)]
+pub struct CodedProposal {
+    pub view: u64,
+    pub header: Header,
+    pub commitment: Commitment,
+    pub justification: Vec<ViewChange>,
+    pub shard: Shard,
+    pub proof: ShardProof,
 }
 
 /// The block a member is locked on, carried in its view change record so the
@@ -98,8 +123,14 @@ pub struct ViewChange {
 pub enum Message {
     /// A submitted transaction spreading toward the leader mempools.
     Tx(Wrapper),
-    /// A leader block proposal for the current height.
+    /// A leader block proposal for the current height, carried whole in one record.
+    /// The overlay disseminates a proposal as coded shards instead, so this variant
+    /// is the codec form a whole proposal round trips through, not the wire unit.
     Proposal(Proposal),
+    /// One erasure coded shard of a leader block proposal. The overlay disseminates a
+    /// proposal as its shards, so a block wider than one record is carried as shards
+    /// and rebuilt on receipt from any k of them.
+    CodedProposal(Box<CodedProposal>),
     /// One committee member attestation over a proposed block.
     Attest(Box<Attestation>),
     /// The peers a node knows, exchanged with a bootstrap neighbor so the network
@@ -173,6 +204,10 @@ impl Message {
                     encode_view_change(&mut encoder, record);
                 }
             }
+            Message::CodedProposal(coded) => {
+                encoder.put_tag(TAG_CODED_PROPOSAL);
+                encode_coded_proposal(&mut encoder, coded);
+            }
             Message::Attest(attestation) => {
                 encoder.put_tag(TAG_ATTEST);
                 encode_attestation(&mut encoder, attestation);
@@ -241,6 +276,9 @@ impl Message {
                     body,
                     justification,
                 })
+            }
+            TAG_CODED_PROPOSAL => {
+                Message::CodedProposal(Box::new(decode_coded_proposal(&mut decoder)?))
             }
             TAG_ATTEST => Message::Attest(Box::new(decode_attestation(&mut decoder)?)),
             TAG_PEERS => {
@@ -414,6 +452,82 @@ fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeErr
         lock_view,
         locked,
         att,
+    })
+}
+
+/// Append the canonical encoding of one erasure coded proposal shard: the view, the
+/// header, the commitment the shards code under, the justification, and the shard
+/// with its Merkle proof. The commitment and the proof travel with the shard so a
+/// receiver verifies the shard against the root before it uses it.
+fn encode_coded_proposal(encoder: &mut Encoder, coded: &CodedProposal) {
+    encoder.put_u64(coded.view);
+    coded.header.encode(encoder);
+    encode_commitment(encoder, &coded.commitment);
+    encoder.put_u64(coded.justification.len() as u64);
+    for record in &coded.justification {
+        encode_view_change(encoder, record);
+    }
+    encoder.put_u64(coded.shard.index as u64);
+    encoder.put_bytes(&coded.shard.bytes);
+    encoder.put_u64(coded.proof.siblings.len() as u64);
+    for sibling in &coded.proof.siblings {
+        encoder.put_bytes(sibling);
+    }
+}
+
+/// Read one erasure coded proposal shard, reconstructing the commitment, the shard,
+/// and the Merkle proof from their length delimited fields.
+fn decode_coded_proposal(decoder: &mut Decoder<'_>) -> Result<CodedProposal, DecodeError> {
+    let view = decoder.get_u64()?;
+    let header = Header::decode(decoder)?;
+    let commitment = decode_commitment(decoder)?;
+    let just_count = decoder.get_u64()?;
+    let mut justification = Vec::with_capacity(just_count as usize);
+    for _ in 0..just_count {
+        justification.push(decode_view_change(decoder)?);
+    }
+    let index = decoder.get_u64()? as usize;
+    let bytes = decoder.get_bytes()?.to_vec();
+    let sibling_count = decoder.get_u64()?;
+    let mut siblings = Vec::with_capacity(sibling_count as usize);
+    for _ in 0..sibling_count {
+        let sibling: [u8; DIGEST_LEN] = read_fixed(decoder)?;
+        siblings.push(sibling);
+    }
+    Ok(CodedProposal {
+        view,
+        header,
+        commitment,
+        justification,
+        shard: Shard { index, bytes },
+        proof: ShardProof { siblings },
+    })
+}
+
+/// Append the canonical encoding of a shard commitment: the Merkle root over the
+/// shard hashes and the coding parameters that fix the shards.
+fn encode_commitment(encoder: &mut Encoder, commitment: &Commitment) {
+    encoder.put_bytes(&commitment.root);
+    encoder.put_u64(commitment.k as u64);
+    encoder.put_u64(commitment.n as u64);
+    encoder.put_u64(commitment.shard_len as u64);
+    encoder.put_u64(commitment.data_len as u64);
+}
+
+/// Read a shard commitment, reconstructing the root from its fixed width field and
+/// the parameters from their eight byte integers.
+fn decode_commitment(decoder: &mut Decoder<'_>) -> Result<Commitment, DecodeError> {
+    let root: [u8; DIGEST_LEN] = read_fixed(decoder)?;
+    let k = decoder.get_u64()? as usize;
+    let n = decoder.get_u64()? as usize;
+    let shard_len = decoder.get_u64()? as usize;
+    let data_len = decoder.get_u64()? as usize;
+    Ok(Commitment {
+        root,
+        k,
+        n,
+        shard_len,
+        data_len,
     })
 }
 
