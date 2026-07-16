@@ -1,0 +1,34 @@
+[package]
+name = "qtv-loopback"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A loopback multi node run that gives each validator its own operating system process talking over real localhost TCP sockets through the real qtv-net post quantum channel, so the committee computes in parallel, and measures the sustained finalised throughput and finality distribution against the in process serial baseline at the identical committee size and block width. It isolates one variable, parallelism, over near zero propagation; it is not a geographic network throughput or a real global finality."
+
+[[bin]]
+name = "qtv-loopback"
+path = "src/bin/qtv-loopback.rs"
+
+[[bin]]
+name = "qtv-validator"
+path = "src/bin/qtv-validator.rs"
+
+[dependencies]
+# The chain crates the workload and the validator are built from, by path so the run
+# measures the exact current node, not a lagging tag.
+qtv-account = { path = "../qtv-account" }
+qtv-codec = { path = "../qtv-codec" }
+qtv-tx = { path = "../qtv-tx" }
+qtv-node = { path = "../qtv-node" }
+
+# The real post quantum secure channel and the real multi node substrate. The
+# validator process reuses the DevNode round primitives and drives them over real
+# qtv-net TCP sockets rather than the in process logical clock.
+qtv-net = { path = "../qtv-net" }
+qtv-devnet = { path = "../qtv-devnet" }
+
+# The consensus parameters reported alongside the numbers, pinned at the same tag the
+# devnet uses so the whole graph keeps one crypto version.
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", tag = "v0.4.0" }
+qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", tag = "v0.4.0" }
