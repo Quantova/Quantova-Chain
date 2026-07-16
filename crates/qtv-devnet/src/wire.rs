@@ -3,7 +3,7 @@
 //!
 //! Three things travel the wire: a submitted transaction, a block proposal that
 //! carries the real header and the ordered body, and a committee attestation that
-//! carries the sampler membership draw and the module lattice signature. Every
+//! carries the one time membership credential and the module lattice signature. Every
 //! message enters and leaves the wire through the qtv-codec canonical encoding, so
 //! a message has exactly one encoded form and a message that does not parse is
 //! dropped at the edge, which is where a classical or malformed artifact is
@@ -15,8 +15,8 @@ use qtv_block::{Block as ChainBlock, Header};
 use qtv_codec::{Decoder, Encode, Encoder, Error as CodecError};
 use qtv_crypto::ml_dsa::SIGNATURE_BYTES;
 use qtv_crypto::sha3::sha3_256;
-use qtv_crypto::vrf_mldsa::{OUTPUT_BYTES, PROOF_BYTES};
-use qtv_sampler::sortition::Draw;
+use qtv_sampler::onetime::{MerklePath, NODE_BYTES, PREIMAGE_BYTES};
+use qtv_sampler::sortition::Credential;
 use qtv_tx::{Body, Call, Wrapper};
 
 use crate::discovery::{PeerEntry, KEY_BYTES};
@@ -308,34 +308,63 @@ fn decode_wrapper(decoder: &mut Decoder<'_>) -> Result<Wrapper, DecodeError> {
 }
 
 /// Append the canonical encoding of an attestation: its subject, the consensus
-/// block, the sampler membership draw, and the module lattice signature.
+/// block, the one time membership credential, and the module lattice signature.
 fn encode_attestation(encoder: &mut Encoder, attestation: &Attestation) {
     encoder.put_u64(attestation.from);
     encoder.put_u64(attestation.height);
     encoder.put_u64(attestation.slot);
     encode_block(encoder, &attestation.block);
-    encoder.put_bytes(&attestation.membership.output);
-    encoder.put_bytes(&attestation.membership.proof);
+    encode_credential(encoder, &attestation.membership);
     encoder.put_bytes(&attestation.sig);
 }
 
-/// Read an attestation, reconstructing the sampler draw and the signature from
-/// their fixed width fields.
+/// Read an attestation, reconstructing the one time credential and the signature
+/// from their fields.
 fn decode_attestation(decoder: &mut Decoder<'_>) -> Result<Attestation, DecodeError> {
     let from = decoder.get_u64()?;
     let height = decoder.get_u64()?;
     let slot = decoder.get_u64()?;
     let block = decode_block(decoder)?;
-    let output: [u8; OUTPUT_BYTES] = read_fixed(decoder)?;
-    let proof: [u8; PROOF_BYTES] = read_fixed(decoder)?;
+    let membership = decode_credential(decoder)?;
     let sig: [u8; SIGNATURE_BYTES] = read_fixed(decoder)?;
     Ok(Attestation {
         from,
         height,
         slot,
         block,
-        membership: Draw { output, proof },
+        membership,
         sig,
+    })
+}
+
+/// Append the canonical encoding of a one time membership credential: the slot
+/// position, the committed preimage, and the Merkle path to the registered root.
+/// This is the sortition draw a verifier rechecks against the account root, and it
+/// travels the wire so a receiver rechecks entitlement without a secret.
+fn encode_credential(encoder: &mut Encoder, credential: &Credential) {
+    encoder.put_u64(credential.position);
+    encoder.put_bytes(&credential.preimage);
+    encoder.put_u64(credential.path.siblings.len() as u64);
+    for sibling in &credential.path.siblings {
+        encoder.put_bytes(sibling);
+    }
+}
+
+/// Read a one time membership credential, reconstructing the preimage and the
+/// Merkle path from their length delimited fields.
+fn decode_credential(decoder: &mut Decoder<'_>) -> Result<Credential, DecodeError> {
+    let position = decoder.get_u64()?;
+    let preimage: [u8; PREIMAGE_BYTES] = read_fixed(decoder)?;
+    let count = decoder.get_u64()?;
+    let mut siblings = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let sibling: [u8; NODE_BYTES] = read_fixed(decoder)?;
+        siblings.push(sibling);
+    }
+    Ok(Credential {
+        position,
+        preimage,
+        path: MerklePath { siblings },
     })
 }
 
