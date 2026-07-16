@@ -228,4 +228,57 @@ mod tests {
         assert_eq!(header_value(&[3u8; 32]), header_value(&[3u8; 32]));
         assert_ne!(header_value(&[3u8; 32]), header_value(&[4u8; 32]));
     }
+
+    // Regression guard: the running consensus rejects a draw made by the old
+    // grindable mechanism. A committee membership presented as an old style
+    // verifiable random draw, a credential with no Merkle path to the member
+    // registered root, is refused by the running verification rather than
+    // finalizing the block, so a regression to the grindable path fails here.
+    #[test]
+    fn the_running_consensus_rejects_an_old_mechanism_draw() {
+        use qtv_attest::verify::RejectReason;
+        use qtv_attest::{Attestation, Certificate, Envelope, Verdict};
+        use qtv_sampler::onetime::MerklePath;
+        use qtv_sampler::sortition::Credential;
+
+        let consensus = Consensus::new(&set(&[true, true, true, true]));
+        let beacon = genesis_beacon();
+        let selection = consensus.select(&beacon, 1).expect("committee");
+        let block = block_for(1);
+
+        // Positive control: a quorum of genuine one time credentials finalizes and
+        // verifies through the running consensus.
+        let genuine = consensus
+            .finalize(&selection, 1, 1, block, &beacon)
+            .expect("finality");
+        assert!(consensus.verify(&genuine, &selection, &beacon));
+
+        // Rebuild the certificate but replace one member one time credential with an
+        // old style draw: a fabricated preimage and path that authenticate to no
+        // registered root. The module lattice signatures stay genuine.
+        let mut atts: Vec<Attestation> = selection
+            .members
+            .iter()
+            .take(3)
+            .filter_map(|id| consensus.attesters.get(id))
+            .map(|a| a.attest(1, 1, block, &beacon))
+            .collect();
+        let depth = atts[0].membership.path.siblings.len();
+        atts[0].membership = Credential {
+            position: 1,
+            preimage: [0xAB; 32],
+            path: MerklePath {
+                siblings: vec![[0xCD; 32]; depth],
+            },
+        };
+        let forged =
+            Certificate::stage_one(Envelope::new(1, 1, block, &selection.commitment), atts);
+
+        // The running consensus verification refuses the forged certificate.
+        assert!(!consensus.verify(&forged, &selection, &beacon));
+        assert_eq!(
+            forged.verify(&selection.commitment, &beacon),
+            Verdict::Rejected(RejectReason::NotEntitled)
+        );
+    }
 }
