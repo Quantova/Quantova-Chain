@@ -10,6 +10,7 @@ use qtv_node::fee::FeeParams;
 
 use qtv_devnet::discovery::PeerEntry;
 use qtv_devnet::node::net_identity;
+use qtv_devnet::coded::code_proposal;
 use qtv_devnet::wire::{certificate_from_bytes, certificate_to_bytes, Message, Proposal};
 
 use support::{transfer, user};
@@ -60,6 +61,50 @@ fn a_proposal_message_round_trips() {
             assert_eq!(decoded.header, header);
             assert_eq!(decoded.body.len(), 1);
             assert_eq!(decoded.body[0].id(), body[0].id());
+        }
+        _ => panic!("decoded a different message"),
+    }
+}
+
+#[test]
+fn a_coded_proposal_shard_round_trips_and_still_verifies() {
+    let params = FeeParams::devnet();
+    let alice = user(0);
+    let bob = user(1);
+    let body = vec![
+        transfer(&alice, &bob.address(), 500, 0, &params),
+        transfer(&alice, &bob.address(), 501, 1, &params),
+    ];
+    let header = Header::new(
+        3,
+        [0u8; 32],
+        [7u8; 32],
+        qtv_block::transaction_root(&body),
+        empty_transaction_root(),
+        [9u8; 32],
+        "q1proposer".to_string(),
+        1_700_000_000_150,
+    );
+    let proposal = Proposal {
+        view: 4,
+        header: header.clone(),
+        body,
+        justification: Vec::new(),
+    };
+    // Code the proposal into its shards and round trip one shard message.
+    let shards = code_proposal(&proposal).expect("code the proposal");
+    let shard = shards[1].clone();
+    let bytes = Message::CodedProposal(Box::new(shard.clone())).encode();
+    match Message::decode(&bytes).expect("decodes") {
+        Message::CodedProposal(decoded) => {
+            assert_eq!(decoded.view, 4);
+            assert_eq!(decoded.header, header);
+            assert_eq!(decoded.commitment, shard.commitment);
+            assert_eq!(decoded.shard, shard.shard);
+            assert_eq!(decoded.proof, shard.proof);
+            assert!(decoded.justification.is_empty());
+            // The shard still authenticates against its commitment after the wire.
+            assert!(decoded.commitment.verify_shard(&decoded.shard, &decoded.proof));
         }
         _ => panic!("decoded a different message"),
     }

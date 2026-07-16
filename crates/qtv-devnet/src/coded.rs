@@ -18,12 +18,14 @@
 //! produces match the advertised commitment. Nothing about the disperser is
 //! trusted; a block that fails any check is refused.
 
+use std::collections::HashMap;
+
 use qtv_block::{transaction_root, Block as ChainBlock, Header};
 use qtv_codec::{to_bytes, Decoder, Encoder};
 use qtv_crypto::sha3::sha3_256;
 use qtv_net::erasure::{self, Commitment, Shard, ShardProof, DIGEST_LEN};
 
-use crate::wire::chain_block_from_bytes;
+use crate::wire::{chain_block_from_bytes, CodedProposal, Proposal, ViewChange};
 
 /// A reason an erasure coded block was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +182,193 @@ pub fn reconstruct_block(
         return Err(CodedError::CommitmentMismatch);
     }
     Ok(block)
+}
+
+/// The size one data shard aims for, chosen well under the qtv-net record plaintext
+/// bound of one mebibyte so a shard, its Merkle proof, the header, the commitment,
+/// and any justification travel in one record with room to spare. At a quarter of a
+/// mebibyte a shard is a quarter of the record, leaving three quarters for the
+/// metadata that rides with it, so a coded proposal shard never approaches the bound.
+pub const SHARD_TARGET: usize = 1 << 18;
+
+/// The erasure parameters for a payload of a given canonical length: the data shard
+/// count k sized so each data shard sits near the shard target, and the total shard
+/// count n at twice k for a half rate code so up to k shards may be lost and any k
+/// reconstruct. Both are clamped to the field: k stays at least two for a real code
+/// and at most half the field, so n stays within the field size. A wider block draws
+/// more shards rather than a larger shard, so a shard stays within the record bound
+/// and the block width is carried by the shard count, not the record size.
+pub fn coding_params(payload_len: usize) -> (usize, usize) {
+    let k = payload_len.div_ceil(SHARD_TARGET).clamp(2, erasure::MAX_SHARDS / 2);
+    let n = (2 * k).min(erasure::MAX_SHARDS);
+    (k, n)
+}
+
+/// Code a block proposal into the erasure coded shards that disseminate it over the
+/// overlay in place of a single whole record. The block the proposal's header commits
+/// to is coded, header and ordered body with an empty certificate slot since a
+/// proposal carries no certificate yet, so any k of the returned shards reconstruct
+/// that block byte for byte and check against the header exactly as the coded block
+/// path does. Each returned shard is one gossip message: it carries the view, the
+/// header, the shared commitment, the justification, and its own shard and proof, so
+/// a receiver that holds any k of them rebuilds the whole proposal without a separate
+/// metadata message.
+pub fn code_proposal(proposal: &Proposal) -> Result<Vec<CodedProposal>, CodedError> {
+    let block = ChainBlock::new(
+        proposal.header.clone(),
+        Vec::new(),
+        proposal.body.clone(),
+    );
+    let (k, n) = coding_params(to_bytes(&block).len());
+    let coded = code_block(&block, k, n)?;
+    let commitment = coded.commitment().clone();
+    let mut shards = Vec::with_capacity(coded.shard_count());
+    for index in 0..coded.shard_count() {
+        let (shard, proof) = coded.piece(index);
+        shards.push(CodedProposal {
+            view: proposal.view,
+            header: proposal.header.clone(),
+            commitment: commitment.clone(),
+            justification: proposal.justification.clone(),
+            shard,
+            proof,
+        });
+    }
+    Ok(shards)
+}
+
+/// The key that identifies one proposal a node reassembles: the view it was offered
+/// in and the commitment root over its shards. The view is part of the key because
+/// the same block is re-proposed at a later view after a split, once bare and once
+/// carrying a view change justification, and each re-proposal must reconstruct and
+/// reach the consensus layer on its own, exactly as each distinct whole proposal
+/// message did before coding.
+type ProposalKey = (u64, [u8; DIGEST_LEN]);
+
+/// A per node reassembly buffer that turns received coded proposal shards back into
+/// whole block proposals. It is the receive side of coded dissemination: a shard is
+/// admitted only once it verifies against its commitment, and once k distinct
+/// verified shards for one proposal are in hand the block is reconstructed and checked
+/// against the header exactly as the coded block path does. A shard that fails its
+/// commitment never enters the buffer, and a full set that fails reconstruction or its
+/// header check is refused, so nothing about the disperser is trusted. The buffer
+/// keys a proposal by its view and commitment root, forgets it once it reconstructs so
+/// a late duplicate shard is dropped rather than rebuilt twice, and prunes proposals
+/// from heights the node has passed so the buffer stays bounded over a long run.
+#[derive(Clone, Default)]
+pub struct ProposalAssembler {
+    /// Proposals still gathering shards, keyed by view and commitment root.
+    pending: HashMap<ProposalKey, Pending>,
+    /// The proposals already reconstructed, keyed to their height so a stale one
+    /// prunes, so a late shard for a finished proposal is dropped.
+    done: HashMap<ProposalKey, u64>,
+    /// The highest proposal height seen, the point older buffered state prunes below.
+    horizon: u64,
+}
+
+/// One proposal gathering its shards: the routing metadata every shard repeats and
+/// the distinct verified pieces collected so far.
+#[derive(Clone)]
+struct Pending {
+    height: u64,
+    view: u64,
+    header: Header,
+    commitment: Commitment,
+    justification: Vec<ViewChange>,
+    pieces: Vec<(Shard, ShardProof)>,
+}
+
+impl ProposalAssembler {
+    /// An empty buffer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Admit one coded proposal shard. Returns `Some(Ok(proposal))` when this shard
+    /// completed a set of k verified shards that reconstructs the block and checks
+    /// against the header, `Some(Err(_))` when a full set failed reconstruction or its
+    /// header check, so the proposal is refused, and `None` while still gathering or
+    /// when the shard did not verify against its commitment and was dropped.
+    pub fn admit(&mut self, coded: CodedProposal) -> Option<Result<Proposal, CodedError>> {
+        let key: ProposalKey = (coded.view, coded.commitment.root);
+        if self.done.contains_key(&key) {
+            return None;
+        }
+        // A shard is checked against the commitment before it is used, so a corrupted
+        // or misplaced shard is rejected at the edge and never enters the reassembly.
+        if !coded.commitment.verify_shard(&coded.shard, &coded.proof) {
+            return None;
+        }
+        let height = coded.header.height();
+        self.prune(height);
+
+        let CodedProposal {
+            view,
+            header,
+            commitment,
+            justification,
+            shard,
+            proof,
+        } = coded;
+        let entry = self.pending.entry(key).or_insert_with(|| Pending {
+            height,
+            view,
+            header: header.clone(),
+            commitment: commitment.clone(),
+            justification,
+            pieces: Vec::new(),
+        });
+        // Every shard under one root carries the same commitment; a shard whose
+        // commitment does not match the one the root fixes is dropped rather than
+        // mixed into the set.
+        if entry.commitment != commitment {
+            return None;
+        }
+        if entry.pieces.iter().any(|(s, _)| s.index == shard.index) {
+            return None;
+        }
+        entry.pieces.push((shard, proof));
+        if entry.pieces.len() < entry.commitment.k {
+            return None;
+        }
+
+        // k verified shards are in hand: rebuild the block and check it against the
+        // header. The proposal is retired whatever the outcome, since any k of the
+        // verified shards yield the same payload, so a failed set never reconstructs
+        // from a later shard.
+        let pending = self
+            .pending
+            .remove(&key)
+            .expect("the pending proposal was just present");
+        self.done.insert(key, pending.height);
+        let header_hash = pending.header.hash();
+        let rebuilt = reconstruct_block(
+            &pending.header,
+            &header_hash,
+            &pending.commitment,
+            &pending.pieces,
+        );
+        Some(rebuilt.map(|block| Proposal {
+            view: pending.view,
+            header: pending.header,
+            body: block.body().to_vec(),
+            justification: pending.justification,
+        }))
+    }
+
+    /// Drop buffered proposals from heights the node has passed. A proposal keyed by a
+    /// commitment root never collides with another height's, so this only reclaims
+    /// memory; it never changes which proposal a shard belongs to. A small window is
+    /// kept so a shard that arrives a little out of height order is not discarded.
+    fn prune(&mut self, height: u64) {
+        if height <= self.horizon {
+            return;
+        }
+        self.horizon = height;
+        let floor = height.saturating_sub(2);
+        self.pending.retain(|_, p| p.height >= floor);
+        self.done.retain(|_, &mut h| h >= floor);
+    }
 }
 
 /// The canonical encoding of a commitment, the bytes the header carries and a node
@@ -409,6 +598,159 @@ mod tests {
         assert_eq!(a.header_hash(), b.header_hash());
         for i in 0..a.shard_count() {
             assert_eq!(a.piece(i), b.piece(i));
+        }
+    }
+
+    /// A block proposal at a view, its header committing to the body, ready to be
+    /// coded and disseminated.
+    fn sample_proposal(count: usize, view: u64) -> Proposal {
+        let block = sample_block(count);
+        Proposal {
+            view,
+            header: block.header().clone(),
+            body: block.body().to_vec(),
+            justification: Vec::new(),
+        }
+    }
+
+    /// Assert two proposals carry the same view, header, and ordered body, the byte
+    /// exact identity a reassembled proposal must hold against the coded one.
+    fn same_proposal(rebuilt: &Proposal, original: &Proposal) {
+        assert_eq!(rebuilt.view, original.view, "the view differed");
+        assert_eq!(rebuilt.header, original.header, "the header differed");
+        assert_eq!(rebuilt.body.len(), original.body.len(), "the body length differed");
+        for (a, b) in rebuilt.body.iter().zip(original.body.iter()) {
+            assert_eq!(a.id(), b.id(), "a body transaction differed");
+        }
+    }
+
+    #[test]
+    fn a_coded_proposal_reassembles_byte_for_byte_from_any_k() {
+        let proposal = sample_proposal(64, 3);
+        let shards = code_proposal(&proposal).expect("code the proposal");
+        let k = shards[0].commitment.k;
+        let n = shards[0].commitment.n;
+        // A half rate code: the shard count is twice the data shard count.
+        assert_eq!(n, 2 * k);
+        assert_eq!(shards.len(), n);
+
+        // Feed the parity shards alone, the k shards that share no byte with the data
+        // shards, the hardest subset. Reassembly completes on exactly the k th shard.
+        let mut assembler = ProposalAssembler::new();
+        let mut rebuilt = None;
+        for (fed, coded) in shards.iter().skip(n - k).cloned().enumerate() {
+            match assembler.admit(coded) {
+                Some(result) => {
+                    assert_eq!(fed + 1, k, "reassembly completed before k shards");
+                    rebuilt = Some(result.expect("k verified shards reconstruct"));
+                }
+                None => assert!(fed + 1 < k, "reassembly did not complete at k shards"),
+            }
+        }
+        same_proposal(&rebuilt.expect("k shards reconstruct the proposal"), &proposal);
+    }
+
+    #[test]
+    fn a_wrong_proposal_shard_is_refused_and_a_clean_set_still_reassembles() {
+        let proposal = sample_proposal(48, 0);
+        let shards = code_proposal(&proposal).expect("code the proposal");
+        let k = shards[0].commitment.k;
+        let mut assembler = ProposalAssembler::new();
+
+        // A shard with a flipped byte fails its commitment and is dropped, never
+        // entering the reassembly.
+        let mut corrupt = shards[0].clone();
+        corrupt.shard.bytes[0] ^= 0xff;
+        assert!(
+            assembler.admit(corrupt).is_none(),
+            "a corrupted shard was admitted"
+        );
+
+        // A clean set of k still reconstructs the proposal, so a wrong shard neither
+        // corrupts nor blocks the block.
+        let mut rebuilt = None;
+        for coded in shards.iter().take(k).cloned() {
+            if let Some(result) = assembler.admit(coded) {
+                rebuilt = Some(result.expect("the clean k reconstruct"));
+            }
+        }
+        same_proposal(&rebuilt.expect("the clean k reconstruct the proposal"), &proposal);
+    }
+
+    #[test]
+    fn each_coded_proposal_shard_fits_one_record() {
+        // A block wider than one qtv-net record, the case the old single record
+        // proposal could not carry.
+        let proposal = sample_proposal(800, 0);
+        let block = ChainBlock::new(
+            proposal.header.clone(),
+            Vec::new(),
+            proposal.body.clone(),
+        );
+        let block_len = to_bytes(&block).len();
+        let record_bound = 1usize << 20;
+        assert!(
+            block_len > record_bound,
+            "the sample block {block_len} did not exceed one record, so the test is not meaningful"
+        );
+
+        // Every shard travels as its own gossip message, and each stays within the
+        // record bound, so a block the single record path would refuse disseminates.
+        let shards = code_proposal(&proposal).expect("code the proposal");
+        for coded in &shards {
+            let message = crate::wire::Message::CodedProposal(Box::new(coded.clone()));
+            let bytes = message.encode();
+            assert!(
+                bytes.len() < record_bound,
+                "a coded proposal shard message {} was not below the record bound",
+                bytes.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_reassembled_proposal_is_dropped_when_its_shards_do_not_match_the_header() {
+        // Shards whose commitment codes one block cannot be passed off under another
+        // header: reassembly rebuilds the block the shards code, and the header check
+        // refuses it. This exercises the refusal path a malicious disperser would hit.
+        let proposal = sample_proposal(32, 0);
+        let shards = code_proposal(&proposal).expect("code the proposal");
+        let k = shards[0].commitment.k;
+
+        // Rewrite each shard to advertise a different header while keeping the true
+        // commitment and shards, the mismatch a disperser could attempt.
+        let other = sample_proposal(33, 0);
+        let mut assembler = ProposalAssembler::new();
+        let mut outcome = None;
+        for coded in shards.iter().take(k).cloned() {
+            let forged = CodedProposal {
+                header: other.header.clone(),
+                ..coded
+            };
+            if let Some(result) = assembler.admit(forged) {
+                outcome = Some(result);
+            }
+        }
+        assert!(
+            matches!(outcome, Some(Err(_))),
+            "a header that did not match the coded block was not refused"
+        );
+    }
+
+    #[test]
+    fn coding_params_keep_a_shard_within_the_record_bound() {
+        let record_bound = 1usize << 20;
+        // Across a wide span of payload sizes the data shard stays a fraction of a
+        // record, so the shard plus its metadata never approaches the bound.
+        for mib in [1usize, 2, 4, 8, 16, 31] {
+            let len = mib * 1024 * 1024;
+            let (k, n) = coding_params(len);
+            assert!(k >= 2 && n == 2 * k && n <= erasure::MAX_SHARDS);
+            let shard_len = len.div_ceil(k);
+            assert!(
+                shard_len < record_bound / 2,
+                "a {mib} MiB payload gave a {shard_len} byte shard, too close to the record bound"
+            );
         }
     }
 }

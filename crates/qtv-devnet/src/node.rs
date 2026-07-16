@@ -94,6 +94,9 @@ pub enum RoundError {
     NotStaged,
     /// A stored block could not be decoded on reload.
     Decode,
+    /// Erasure coding a proposal for dissemination refused it, which only a coding
+    /// parameter out of range reaches and the parameters are derived in range.
+    Coding(crate::coded::CodedError),
 }
 
 impl From<io::Error> for RoundError {
@@ -105,6 +108,12 @@ impl From<io::Error> for RoundError {
 impl From<qtv_net::Error> for RoundError {
     fn from(error: qtv_net::Error) -> Self {
         RoundError::Net(error)
+    }
+}
+
+impl From<crate::coded::CodedError> for RoundError {
+    fn from(error: crate::coded::CodedError) -> Self {
+        RoundError::Coding(error)
     }
 }
 

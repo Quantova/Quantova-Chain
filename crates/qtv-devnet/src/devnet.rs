@@ -42,13 +42,14 @@ use qtv_tx::Wrapper;
 use qtv_block::Block as ChainBlock;
 
 use crate::clock::{Clock, Event, Time};
+use crate::coded::{code_proposal, ProposalAssembler};
 use crate::config::DevnetConfig;
 use crate::discovery::{PeerEntry, PeerTable};
 use crate::network::Network;
 use crate::node::{leader_for, net_identity, DevNode, Height, RoundError, SyncError, View};
 use crate::overlay::{ring_lattice, Seen};
 use crate::transport::{connect_duplex_pair, Mesh};
-use crate::wire::{gossip_id, Message};
+use crate::wire::{gossip_id, CodedProposal, Message, Proposal};
 
 /// The most views a height rotates through before the loop gives up on it. A run
 /// that exhausts this bound without finalizing has stalled, which happens only
@@ -76,6 +77,10 @@ pub struct Devnet<S> {
     /// The network partition, a group id per node. Records cross only within a
     /// group, so two groups model a split; one group is the healed network.
     partition: Vec<usize>,
+    /// Each node's reassembly buffer for coded proposal shards, so a proposal
+    /// disseminated as shards is rebuilt from any k of them and checked against the
+    /// header before it reaches the consensus layer.
+    assemblers: Vec<ProposalAssembler>,
 }
 
 impl Devnet<DuplexStream> {
@@ -134,6 +139,7 @@ impl Devnet<DuplexStream> {
             overlay: vec![Vec::new(); n],
             seen: vec![Seen::new(); n],
             partition: vec![0; n],
+            assemblers: vec![ProposalAssembler::new(); n],
         };
         devnet.discover(&bootstrap)?;
         devnet.form_overlay(&identities)?;
@@ -233,6 +239,7 @@ impl<S> Devnet<S> {
             overlay,
             seen: vec![Seen::new(); n],
             partition: vec![0; n],
+            assemblers: vec![ProposalAssembler::new(); n],
         })
     }
 
@@ -481,14 +488,38 @@ impl<S: Read + Write> Devnet<S> {
         self.spread(from, None, &bytes, active)
     }
 
+    /// Disseminate a block proposal over the overlay as its erasure coded shards
+    /// rather than one whole record. The block the proposal's header commits to is
+    /// coded into k data shards and n minus k parity shards under a SHA3 commitment,
+    /// and each shard is emitted as its own gossip message within the transport record
+    /// bound, so a block larger than the record limit is carried as shards and rebuilt
+    /// on receipt from any k of them. Each shard floods the overlay once, keyed by its
+    /// own content id, exactly as a whole message does.
+    fn originate_proposal(
+        &mut self,
+        from: usize,
+        proposal: Proposal,
+        active: &[usize],
+    ) -> Result<(), RoundError> {
+        for coded in code_proposal(&proposal)? {
+            self.originate(from, &Message::CodedProposal(Box::new(coded)), active)?;
+        }
+        Ok(())
+    }
+
     /// Enter a node's current view: offer and gossip its proposal if it leads, and
     /// arm its view timeout unless it has run out of views.
     fn enter_round(&mut self, i: usize, active: &[usize]) -> Result<(), RoundError> {
         let selection = self.nodes[i].select()?;
         let online = self.active[i];
         let messages = self.nodes[i].enter_round(&selection, online);
-        for message in &messages {
-            self.originate(i, message, active)?;
+        for message in messages {
+            match message {
+                // A proposal disseminates as its erasure coded shards, not one whole
+                // record, so a block wider than the record bound is carried as shards.
+                Message::Proposal(proposal) => self.originate_proposal(i, proposal, active)?,
+                other => self.originate(i, &other, active)?,
+            }
         }
         // Past view zero a node announces its move as a view change record. This is
         // what lets the leader gather a quorum, and what lets a peer that was
@@ -531,7 +562,7 @@ impl<S: Read + Write> Devnet<S> {
             return Ok(());
         }
         if let Some(proposal) = self.nodes[i].build_justified_proposal(&selection, view) {
-            self.originate(i, &Message::Proposal(proposal), active)?;
+            self.originate_proposal(i, proposal, active)?;
             if let Some(attestation) = self.nodes[i].attest_staged() {
                 self.originate(i, &Message::Attest(Box::new(attestation)), active)?;
             }
@@ -582,6 +613,29 @@ impl<S: Read + Write> Devnet<S> {
             self.originate(to, message, active)?;
         }
         self.settle(to, ceiling, active)?;
+        Ok(())
+    }
+
+    /// Admit one coded proposal shard at a node. The shard is verified against the
+    /// commitment before it is used, and once k verified shards for one proposal are
+    /// in hand the block is reconstructed and checked against the header exactly as the
+    /// coded block path does, then the rebuilt proposal follows the same delivery path
+    /// a whole proposal would. A shard that fails its commitment, or a full set that
+    /// fails reconstruction or its header check, is refused and dropped, so nothing
+    /// about the disperser is trusted.
+    fn deliver_coded_proposal(
+        &mut self,
+        to: usize,
+        coded: CodedProposal,
+        ceiling: Height,
+        active: &[usize],
+    ) -> Result<(), RoundError> {
+        match self.assemblers[to].admit(coded) {
+            Some(Ok(proposal)) => self.deliver_proposal(to, proposal, ceiling, active)?,
+            // A refused coded proposal never reaches the consensus layer; the view
+            // times out and rotates as it would for a silent leader.
+            Some(Err(_)) | None => {}
+        }
         Ok(())
     }
 
@@ -642,6 +696,9 @@ impl<S: Read + Write> Devnet<S> {
                     Message::Tx(transaction) => self.nodes[to].admit_gossiped(transaction),
                     Message::Proposal(proposal) => {
                         self.deliver_proposal(to, proposal, ceiling, active)?
+                    }
+                    Message::CodedProposal(coded) => {
+                        self.deliver_coded_proposal(to, *coded, ceiling, active)?
                     }
                     Message::Attest(attestation) => {
                         self.nodes[to].on_attestation(*attestation);
