@@ -49,6 +49,22 @@ finalisation. Only transactions in a genuinely finalised block are counted, and 
 the transactions the block actually carried. Two warmup heights advance the chain
 before the measured window and are not counted.
 
+What these figures are not, before the figures themselves. This is a slot count
+capacity run. It is not a throughput measurement and its numbers must not be read or
+quoted as one. The 281 transactions a second, the 879 heights, and the 7032
+transactions below are the by product of driving a deliberately thin eight transaction
+block as fast as possible to spend slots, and they measure only that the tree no longer
+bounds the run. They are not comparable to the loopback figure of 363 transactions a
+second, which was measured at a block width of two hundred and fifty for a different
+purpose, and they are not comparable to any other figure here or elsewhere, because the
+width and the purpose differ. A wider block would report a lower transaction rate and
+prove more about throughput and less about the ceiling, and a thinner one the reverse,
+so the rate here is a dial of the width, not a property of the system. The finality
+figure of about twenty eight milliseconds is likewise the finality of a thin eight
+transaction block on one host with no propagation, not a network or a full width
+finality. The one honest reading of this run is the height count against the ceiling,
+nothing else.
+
 The measured figures. The run finalised 879 heights and 7032 transactions over the
 twenty five second consensus wall clock. The sustained finalised throughput was 281
 transactions a second measured over the consensus wall clock, and 243 transactions a
@@ -57,21 +73,6 @@ committee had a median of 28.3 milliseconds, a ninetieth percentile of 29.4
 milliseconds, a ninety ninth percentile of 32.0 milliseconds, and a maximum of 52.4
 milliseconds, with a minimum of 24.2 milliseconds and a mean of 28.5 milliseconds over
 the 879 finalised blocks.
-
-What these figures are not. This is a slot count capacity run. It is not a throughput
-measurement and its numbers must not be read or quoted as one. The 281 transactions a
-second, the 879 heights, and the 7032 transactions are the by product of driving a
-deliberately thin eight transaction block as fast as possible to spend slots, and they
-measure only that the tree no longer bounds the run. They are not comparable to the
-loopback figure of 363 transactions a second, which was measured at a block width of
-two hundred and fifty for a different purpose, and they are not comparable to any other
-figure here or elsewhere, because the width and the purpose differ. A wider block would
-report a lower transaction rate and prove more about throughput and less about the
-ceiling, and a thinner one the reverse, so the rate here is a dial of the width, not a
-property of the system. The finality figure of about twenty eight milliseconds is
-likewise the finality of a thin eight transaction block on one host with no
-propagation, not a network or a full width finality. The one honest reading of this run
-is the height count against the ceiling, nothing else.
 
 What this proves. The 879 finalised heights in one sustained run are more than
 thirteen times the sixty four height ceiling the default slot count imposes, and every
