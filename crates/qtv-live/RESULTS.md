@@ -15,7 +15,7 @@ sizing each validator tree to four thousand and ninety six slots through the att
 slot count constructor, a single sustained run finalises far more than sixty four
 heights and the tree no longer bounds it.
 
-Host and build. The host is an Apple M4 with ten cores and seventeen gigabytes of
+Host and build. The host is an Apple M4 with ten cores and sixteen gigabytes of
 memory. The profile is the release build at optimisation level three. The source is
 the Quantova chain at commit 6ea0182, which drives the devnet nodes over path
 dependencies, with the consensus crates pinned at tag v0.5.0.
@@ -25,7 +25,13 @@ from a real finalised block is four and the supermajority to finalise is three. 
 width is eight distinct signing accounts, each sending one transfer to the next
 account every height, so a block carries eight real transactions and each transaction
 carries a real module lattice signature over a distinct key on a distinct state leaf
-and is verified on the ingress path. The mix is a uniform transfer workload, one
+and is verified on the ingress path. The width of eight is deliberately thin. It is a
+run time choice that overrides the harness default of two hundred and fifty, made
+because the purpose of this run is to exhaust the slot count and not to measure
+throughput. A thin block finalises fast, so a fixed consensus window drives as many
+heights as possible and spends slots as fast as possible, which is what puts the slot
+count under pressure. A wider block would finalise fewer heights in the same window and
+demonstrate less about the ceiling. The mix is a uniform transfer workload, one
 transfer per account per height, and none is a no op. The committee is drawn by the
 real one time key sortition of consensus v0.5.0 with the minimum self stake floor on,
 and each validator commits a one time preimage tree of four thousand and ninety six
@@ -51,6 +57,21 @@ committee had a median of 28.3 milliseconds, a ninetieth percentile of 29.4
 milliseconds, a ninety ninth percentile of 32.0 milliseconds, and a maximum of 52.4
 milliseconds, with a minimum of 24.2 milliseconds and a mean of 28.5 milliseconds over
 the 879 finalised blocks.
+
+What these figures are not. This is a slot count capacity run. It is not a throughput
+measurement and its numbers must not be read or quoted as one. The 281 transactions a
+second, the 879 heights, and the 7032 transactions are the by product of driving a
+deliberately thin eight transaction block as fast as possible to spend slots, and they
+measure only that the tree no longer bounds the run. They are not comparable to the
+loopback figure of 363 transactions a second, which was measured at a block width of
+two hundred and fifty for a different purpose, and they are not comparable to any other
+figure here or elsewhere, because the width and the purpose differ. A wider block would
+report a lower transaction rate and prove more about throughput and less about the
+ceiling, and a thinner one the reverse, so the rate here is a dial of the width, not a
+property of the system. The finality figure of about twenty eight milliseconds is
+likewise the finality of a thin eight transaction block on one host with no
+propagation, not a network or a full width finality. The one honest reading of this run
+is the height count against the ceiling, nothing else.
 
 What this proves. The 879 finalised heights in one sustained run are more than
 thirteen times the sixty four height ceiling the default slot count imposes, and every
