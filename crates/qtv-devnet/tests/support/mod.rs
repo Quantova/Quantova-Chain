@@ -90,6 +90,7 @@ pub fn config_with_fanout(
         nodes,
         genesis_time: GENESIS_TIME,
         fanout,
+        slots: qtv_devnet::config::DEFAULT_SLOTS,
     }
 }
 

@@ -70,6 +70,13 @@ impl NodeConfig {
 /// preserved while a bounded overlay is opt in through a smaller fanout.
 pub const FULL_FANOUT: usize = usize::MAX;
 
+/// The one time slot count a devnet sizes each validator tree to unless a run asks
+/// for more. It is the consensus sampler default. One slot is spent per finalised
+/// height, so this bounds a run to that many heights, and a driver that must sustain
+/// more heights raises the count through the DevnetConfig slots field rather than
+/// changing this default.
+pub const DEFAULT_SLOTS: u64 = qtv_sampler::validator::DEFAULT_SLOTS;
+
 /// The configuration of a whole devnet: the shared genesis fields, the nodes, and
 /// the overlay fanout each node keeps neighbors up to.
 #[derive(Clone, Debug)]
@@ -81,6 +88,12 @@ pub struct DevnetConfig {
     /// The most neighbors a node keeps in the gossip overlay. `FULL_FANOUT` keeps
     /// every pair connected; a smaller bound draws a ring lattice of that degree.
     pub fanout: usize,
+    /// The one time slot count every validator tree is sized to for this devnet.
+    /// `DEFAULT_SLOTS` keeps the consensus default; a harness that must finalise more
+    /// heights than the default serves sets a larger count here, which flows into the
+    /// committee sampler and the attester so the whole draw and verify path serves the
+    /// larger count.
+    pub slots: u64,
 }
 
 impl DevnetConfig {

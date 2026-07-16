@@ -21,7 +21,7 @@ use qtv_attest::aggregate::aggregate;
 use qtv_attest::{Attester, Certificate, CommitteeCommitment};
 use qtv_sampler::committee::Registry;
 use qtv_sampler::params::COMMITTEE_BUDGET;
-use qtv_sampler::validator::SamplerValidator;
+use qtv_sampler::validator::{SamplerValidator, DEFAULT_SLOTS};
 
 pub use qtv_attest::{Beacon, Block, Parent};
 
@@ -78,17 +78,28 @@ pub struct Consensus {
 }
 
 impl Consensus {
-    /// Build the driver over a validator set. Each validator contributes a sampler
-    /// key for sortition and an attester holding both the module lattice signing
-    /// key and the sortition key.
+    /// Build the driver over a validator set at the default one time slot count.
+    /// Each validator contributes a sampler key for sortition and an attester
+    /// holding both the module lattice signing key and the sortition key.
     pub fn new(validators: &[ConsensusValidator]) -> Self {
+        Self::with_slots(validators, DEFAULT_SLOTS)
+    }
+
+    /// Build the driver over a validator set at an explicit one time slot count. The
+    /// sampler tree and the attester tree of every validator are sized to the same
+    /// count, so the committee draw, the reveal, and the certificate verification all
+    /// serve the same slots. One slot is spent per finalised height, so the count is
+    /// the ceiling on how many heights a run can finalise before the sortition
+    /// refuses a slot past the commitment. A driver that must sustain more heights
+    /// than the default serves sizes the count up here.
+    pub fn with_slots(validators: &[ConsensusValidator], slots: u64) -> Self {
         let sampler = validators
             .iter()
-            .map(|v| SamplerValidator::new(v.id, v.stake))
+            .map(|v| SamplerValidator::with_slots(v.id, v.stake, slots))
             .collect();
         let attesters = validators
             .iter()
-            .map(|v| (v.id, Attester::new(v.id, v.stake)))
+            .map(|v| (v.id, Attester::with_slots(v.id, v.stake, slots)))
             .collect();
         let online = validators.iter().map(|v| (v.id, v.online)).collect();
         Consensus {

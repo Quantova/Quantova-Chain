@@ -9,7 +9,7 @@
 //!
 //! WHAT IS REAL HERE. The validator instances are real DevNode instances, each
 //! with its own module lattice key. The committee is drawn by the real qtv-sampler
-//! one time key sortition, the grinding resistant construction of consensus v0.4.0,
+//! one time key sortition, the grinding resistant construction of consensus v0.5.0,
 //! the pin the buildable devnet now carries. Each validator commits a one time
 //! preimage tree bonded to its stake, and membership is a committed preimage with
 //! its Merkle path against the registered root, drawn with the stake floor on.
@@ -23,7 +23,7 @@
 //!
 //! THE SORTITION THIS RUNS, STATED PLAINLY. This harness measures the one time key
 //! sortition, the grinding resistant successor to the v0.3.0 module lattice
-//! verifiable random draw. The devnet pins consensus v0.4.0, which carries the one
+//! verifiable random draw. The devnet pins consensus v0.5.0, which carries the one
 //! time construction with the minimum self stake floor on by default, so committee
 //! membership and proposer eligibility are drawn and rechecked as a committed one
 //! time preimage with its Merkle path against the registered root, and an account
@@ -79,6 +79,13 @@ const ACCOUNT_SEED: [u8; 32] = [37u8; 32];
 const FUND: u64 = 1_000_000_000_000;
 /// The value each transfer moves. Nonzero so no transaction is a no op.
 const TRANSFER_AMOUNT: u64 = 1;
+/// The one time slot count the harness sizes each validator tree to. The founder
+/// authorised this count for the harness so a sustained run can finalise more heights
+/// than the consensus default of sixty four serves, one slot per height. It is a
+/// harness parameter, not a consensus parameter. The consensus default is unchanged;
+/// the harness opts into the larger count through the DevnetConfig slots field, which
+/// flows into the committee sampler and the attester over the with_slots path.
+const HARNESS_SLOTS: u64 = 4096;
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -145,6 +152,7 @@ fn devnet_config(base: &PathBuf, validators: usize, senders: &[Account]) -> Devn
         nodes,
         genesis_time: GENESIS_TIME,
         fanout: FULL_FANOUT,
+        slots: HARNESS_SLOTS,
     }
 }
 
@@ -241,12 +249,12 @@ fn main() {
     println!("   build: release (opt-level 3)");
     println!(" Source:");
     println!("   Quantova-Chain commit {commit} (qtv-live drives qtv-devnet, path deps)");
-    println!("   consensus crates pinned at QRC-CONSENSUS tag v0.4.0 (qtv-bft, qtv-sampler, qtv-attest)");
+    println!("   consensus crates pinned at QRC-CONSENSUS tag v0.5.0 (qtv-bft, qtv-sampler, qtv-attest)");
     println!();
     println!(" Real in this run:");
     println!("   - {validators} real validator instances, each with its own module lattice key");
     println!("   - real qtv-sampler committee sortition: the one time key sortition of consensus");
-    println!("     v0.4.0 with the stake floor on, each validator staking {} QTOV at the floor",
+    println!("     v0.5.0 with the stake floor on, each validator staking {} QTOV at the floor",
         qtv_bft::params::VALIDATOR_STAKE_QTOV);
     println!("   - real block production, real module lattice attestations, real aggregated");
     println!("     finality certificate that every node verifies (no stub)");
@@ -258,7 +266,11 @@ fn main() {
     println!("   - the one time key sortition, drawn as a committed preimage with its Merkle path");
     println!("     against the registered root, with the minimum self stake floor on. It is the");
     println!("     grinding resistant successor to the v0.3.0 module lattice draw, now pinned at");
-    println!("     consensus v0.4.0, so the predecessor draw is no longer on the path.");
+    println!("     consensus v0.5.0, so the predecessor draw is no longer on the path.");
+    println!("   - the harness sizes each validator one time tree to {HARNESS_SLOTS} slots through the");
+    println!("     with_slots path, a harness parameter, not the consensus default of 64. One slot is");
+    println!("     spent per height, so a sustained run finalises past 64 heights without the sortition");
+    println!("     refusing a slot past the commitment.");
     println!(" In process, so NOT measured:");
     println!("   - inter node bandwidth and propagation latency (in memory duplex, not a socket)");
     println!("   - every member's compute runs serially on this one host, not parallel across machines");

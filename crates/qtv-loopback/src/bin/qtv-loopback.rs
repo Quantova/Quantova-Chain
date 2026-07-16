@@ -320,10 +320,12 @@ fn main() {
     let senders_n = env_usize("QTV_MP_ACCOUNTS", 250).max(2);
     let run_secs = env_usize("QTV_MP_SECS", 60).max(1);
     let warmup = env_usize("QTV_MP_WARMUP", 2);
-    // The height cap keeps warmup plus measured heights safely under the one time
-    // sortition tree's committed slot count, which the pinned consensus v0.4.0 fixes
-    // at a small default and this run does not change.
-    let height_cap = env_usize("QTV_MP_HEIGHTCAP", 48);
+    // The height cap keeps warmup plus measured heights under the one time sortition
+    // tree's committed slot count. The harness sizes that tree to HARNESS_SLOTS, well
+    // above the consensus default, so the cap no longer pins the run below the default
+    // and a sustained run can finalise past it. The default here leaves headroom below
+    // the harness slot count for the warmup heights.
+    let height_cap = env_usize("QTV_MP_HEIGHTCAP", (qtv_loopback::HARNESS_SLOTS as usize) - 64);
 
     let manifest = env!("CARGO_MANIFEST_DIR");
     let cpu = shell("sysctl", &["-n", "machdep.cpu.brand_string"], "unknown CPU");
@@ -360,15 +362,15 @@ fn main() {
     println!("   build: release (opt-level 3)");
     println!(" Source:");
     println!("   Quantova-Chain commit {commit} (qtv-loopback drives qtv-devnet DevNodes)");
-    println!("   consensus crates pinned at QRC-CONSENSUS tag v0.4.0 (qtv-bft, qtv-sampler, qtv-attest)");
+    println!("   consensus crates pinned at QRC-CONSENSUS tag v0.5.0 (qtv-bft, qtv-sampler, qtv-attest)");
     println!();
     println!(" Configuration (identical for both sides):");
     println!("   validators / committee : {validators}");
     println!("   block width (accounts) : {senders_n}");
     println!("   target consensus secs  : {run_secs}");
     println!("   warmup heights         : {warmup} (not counted)");
-    println!("   height cap             : {height_cap} measured (keeps the run under the one time");
-    println!("                            sortition's {}-slot tree; see the note below)", 64);
+    println!("   height cap             : {height_cap} measured (under the one time sortition's");
+    println!("                            {}-slot tree the harness sizes; see the note below)", qtv_loopback::HARNESS_SLOTS);
     println!(" Process count (loopback): {validators} validator processes + 1 driver");
     rule();
 
@@ -536,12 +538,13 @@ fn main() {
     println!(" parallelism alone.");
     rule();
 
-    println!(" NOTE on the run length. The consensus v0.4.0 one time key sortition commits each");
-    println!(" validator's tree to a fixed slot count (64 by the pinned default), one slot per");
-    println!(" height, so a run cannot exceed that many finalised heights without the sortition");
-    println!(" refusing a slot past the commitment. Both runs above are capped below it. Raising");
-    println!(" the slot count is a sortition sizing change across the consensus repo and is a");
-    println!(" founder decision on pinning; it is not taken here, so the sustained window is");
-    println!(" whatever fits under the committed slot count at this per block speed.");
+    println!(" NOTE on the run length. The one time key sortition commits each validator's tree");
+    println!(" to a fixed slot count, one slot per height, and a run cannot exceed that many");
+    println!(" finalised heights without the sortition refusing a slot past the commitment. The");
+    println!(" consensus default of 64 stays the default; the harness sizes its trees to {} slots",
+        qtv_loopback::HARNESS_SLOTS);
+    println!(" through the with_slots path, a harness parameter only, so a sustained run is no");
+    println!(" longer bounded near 64 heights and both runs above stop on the target seconds or the");
+    println!(" height cap rather than on the slot count.");
     println!("================================================================================");
 }

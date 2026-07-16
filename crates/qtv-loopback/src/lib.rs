@@ -7,7 +7,7 @@
 //! operating system process and lets them talk over real localhost TCP sockets
 //! through the real qtv-net post quantum channel, so the committee computes in
 //! parallel across processes with near zero propagation. Serial becomes parallel.
-//! Nothing else changes: the same consensus (v0.4.0 one time key sortition with the
+//! Nothing else changes: the same consensus (v0.5.0 one time key sortition with the
 //! stake floor on), the same real module lattice attestations, the same real
 //! aggregated finality certificate, the same real 3309 byte module lattice signed
 //! transactions, and the same erasure coded proposal dissemination.
@@ -51,6 +51,15 @@ pub const FUND: u64 = 1_000_000_000_000;
 /// The value each transfer moves. Nonzero so no transaction is a no op. Identical to
 /// the baseline.
 pub const TRANSFER_AMOUNT: u64 = 1;
+/// The one time slot count the harness sizes each validator tree to. The founder
+/// authorised this count for the harness so a sustained run can finalise more heights
+/// than the consensus default of sixty four serves, one slot per height. It is a
+/// harness parameter, not a consensus parameter. The consensus default is unchanged;
+/// the harness opts into the larger count through the DevnetConfig slots field, which
+/// flows into the committee sampler and the attester over the with_slots path. Both
+/// the serial baseline and the multi process run read this one value, so the two runs
+/// still drive the byte identical committee and their finalised chains stay identical.
+pub const HARNESS_SLOTS: u64 = 4096;
 
 /// A distinct funded sender account, one per block slot. Each sends one transfer per
 /// height, so the block width is the account count and every signature is over a
@@ -105,6 +114,7 @@ pub fn devnet_config(base: &PathBuf, validators: usize, senders: &[Account]) -> 
         nodes,
         genesis_time: GENESIS_TIME,
         fanout: FULL_FANOUT,
+        slots: HARNESS_SLOTS,
     }
 }
 

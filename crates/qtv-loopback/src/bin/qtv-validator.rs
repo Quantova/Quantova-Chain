@@ -13,7 +13,7 @@
 //!
 //! WHAT IS REAL HERE. The validator is a real qtv-devnet DevNode, reusing the exact
 //! chain and consensus crates the in process baseline uses, not a reimplementation.
-//! The committee is the real qtv-sampler one time key sortition of consensus v0.4.0
+//! The committee is the real qtv-sampler one time key sortition of consensus v0.5.0
 //! with the stake floor on. Blocks are built by the real leader, executed through the
 //! real virtual machine to a real state root, attested with real module lattice
 //! signatures over the real one time membership credential, and finalised by a real
@@ -389,7 +389,11 @@ fn main() {
     let senders_n = env_usize("QTV_MP_ACCOUNTS", 250).max(2);
     let run_secs = env_usize("QTV_MP_SECS", 60).max(1) as f64;
     let warmup = env_usize("QTV_MP_WARMUP", 2);
-    let height_cap = env_usize("QTV_MP_HEIGHTCAP", 48);
+    // The harness sizes each validator tree to HARNESS_SLOTS, well above the consensus
+    // default, so the cap no longer pins the run below the default. The default leaves
+    // headroom below the harness slot count for the warmup heights, and the driver
+    // passes the same value it uses so both stay in step.
+    let height_cap = env_usize("QTV_MP_HEIGHTCAP", (qtv_loopback::HARNESS_SLOTS as usize) - 64);
     let base = std::env::var("QTV_MP_BASE").expect("the store base directory");
     let base = std::path::PathBuf::from(base);
 
@@ -468,8 +472,9 @@ fn main() {
 
     // The measured sustained run: drive heights until the consensus wall clock reaches
     // the target or the height cap is hit. The cap keeps the whole run, warmup plus
-    // measured, safely under the one time sortition tree's committed slot count, which
-    // the pinned consensus fixes and this run does not change.
+    // measured, under the one time sortition tree's committed slot count. The harness
+    // sizes that tree to HARNESS_SLOTS through the with_slots path, well above the
+    // consensus default, so the run is no longer bounded near the default height count.
     let mut per_block_ms: Vec<f64> = Vec::new();
     let mut finalized_tx: u64 = 0;
     let mut consensus_wall = Duration::ZERO;
