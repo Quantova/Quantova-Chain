@@ -1,0 +1,29 @@
+[package]
+name = "qtv-live"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A live in process multi node harness that stands up several real validator instances over the real post quantum transport, runs real committee sortition, block production, module lattice attestation, and aggregated finality, and measures the wall clock sustained finalised throughput and the finality distribution with its tail. It measures; it does not tune."
+
+[[bin]]
+name = "qtv-live"
+path = "src/main.rs"
+
+[dependencies]
+# The chain crates the workload is built from, by path so the harness measures
+# the exact current node, not a lagging tag.
+qtv-account = { path = "../qtv-account" }
+qtv-codec = { path = "../qtv-codec" }
+qtv-tx = { path = "../qtv-tx" }
+qtv-node = { path = "../qtv-node" }
+
+# The live multi node substrate: several real DevNode instances gossiping real
+# consensus over the qtv-net post quantum channel to a real finality certificate.
+qtv-devnet = { path = "../qtv-devnet" }
+
+# The consensus parameters reported alongside the numbers: the committee budget,
+# the stake floor, and the slot. Pinned at the same tag the devnet uses so the
+# whole graph keeps one crypto version.
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", tag = "v0.3.0" }
+qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", tag = "v0.3.0" }
