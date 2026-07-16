@@ -1,0 +1,5 @@
+# Cross repo pins. One git dependency per line, repository then tag.
+QRC-CONSENSUS  v0.4.0
+q-prover       v0.8.0
+Q-Crypto       v0.3.0
+QVM            v0.3.0
