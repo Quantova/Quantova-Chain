@@ -9,6 +9,16 @@ records between processes on one host. It is not a geographic network throughput
 not a real global finality, because the sockets are localhost and carry no inter host
 bandwidth or propagation latency.
 
+The host is optimistic, read every figure here as a floor. These numbers were measured
+on an Apple M4, a laptop chip with an unrepresentatively fast core. A rehearsal on real
+servers, recorded in RESULTS-rack-rehearsal.md in the qtv-widearea crate, found the same
+module lattice workload roughly an order of magnitude slower per core on server hardware
+than on this M4. A real validator is a server, not a laptop, so the finality here is a
+best case and the throughput here is a best case, and on representative hardware the
+finality rises and the throughput falls by a factor not yet measured. The 686 millisecond
+median and the 363 transactions a second below are what fast silicon can do, not what a
+validator set will see.
+
 ## The question this settles
 
 The in process baseline runs every committee member's compute serially inside one
