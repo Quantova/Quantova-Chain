@@ -37,6 +37,21 @@ draws a record from every up member and the whole committee jumps together. This
 only departure from the loopback substrate, and it is what lets the run degrade honestly
 rather than hang.
 
+Where this view change lives, precisely, because the layer matters. The abstract
+rotation is in the pinned consensus. qtv-bft at v0.5.0 advances the view of an undecided
+height and rotates its leader on a timeout, and its own test rotates past an offline or
+byzantine leader, so the consensus holds the rotation logic and proves it. The concrete
+distributed realisation this harness drives, the signed view change record, its
+collection, and the blocking set of the committee size minus the supermajority plus one
+that a node advances on, lives in the qtv-devnet node and uses the pinned consensus
+quorum and leader schedule as its primitives. So the honest degradation runs real code
+over the real quorum, but the concrete view synchronisation is a devnet layer realisation
+of the consensus rotation rather than a frozen consensus wire protocol, and its record is
+the same view change record still on the open list, uncoded and not yet specified as a
+wire record. When that record is specified and coded, this path is reconciled against it
+rather than assumed to match, the same formal to concrete seam the consensus spec already
+names for the committee fairness.
+
 ## The single transport port
 
 The wide area run fixes one transport TCP port for the whole run, port 40404, the
