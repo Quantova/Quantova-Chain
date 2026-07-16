@@ -9,24 +9,25 @@
 //!
 //! WHAT IS REAL HERE. The validator instances are real DevNode instances, each
 //! with its own module lattice key. The committee is drawn by the real qtv-sampler
-//! sortition, the module lattice (ML-DSA) verifiable random draw of consensus
-//! v0.3.0, the pin the buildable devnet carries. Blocks are produced by the real
-//! leader, executed through the real virtual machine to a real state root, attested
-//! with real module lattice signatures over the real membership draw, and finalised
-//! by a real aggregated certificate that every node verifies. Every transaction
-//! carries a real 3309 byte module lattice signature and is verified on the ingress
-//! path. Every gossip byte is sealed and opened through the real qtv-net channel, an
-//! ML-KEM and ML-DSA handshake with a ChaCha20-Poly1305 record layer.
+//! one time key sortition, the grinding resistant construction of consensus v0.4.0,
+//! the pin the buildable devnet now carries. Each validator commits a one time
+//! preimage tree bonded to its stake, and membership is a committed preimage with
+//! its Merkle path against the registered root, drawn with the stake floor on.
+//! Blocks are produced by the real leader, executed through the real virtual machine
+//! to a real state root, attested with real module lattice signatures over the real
+//! one time membership credential, and finalised by a real aggregated certificate
+//! that every node verifies. Every transaction carries a real 3309 byte module
+//! lattice signature and is verified on the ingress path. Every gossip byte is
+//! sealed and opened through the real qtv-net channel, an ML-KEM and ML-DSA
+//! handshake with a ChaCha20-Poly1305 record layer.
 //!
-//! WHAT IS NOT YET WIRED, STATED PLAINLY. The one time key sortition with the stake
-//! floor, the closed sortition gate, is the successor to the v0.3.0 module lattice
-//! draw. It lives in the QRC-CONSENSUS working tree, is not yet tagged, and the
-//! devnet still pins consensus v0.3.0, so this harness measures the module lattice
-//! draw sortition, not the one time construction, and no stake floor is enforced at
-//! this pin. Bumping the devnet to the one time construction is a cross repo step,
-//! a new consensus tag and a devnet pin bump with the attestation membership moved
-//! from the draw to the one time credential; it is flagged for the founder, not
-//! taken here, and is the first item of remaining work below.
+//! THE SORTITION THIS RUNS, STATED PLAINLY. This harness measures the one time key
+//! sortition, the grinding resistant successor to the v0.3.0 module lattice
+//! verifiable random draw. The devnet pins consensus v0.4.0, which carries the one
+//! time construction with the minimum self stake floor on by default, so committee
+//! membership and proposer eligibility are drawn and rechecked as a committed one
+//! time preimage with its Merkle path against the registered root, and an account
+//! below the floor is not eligible. The predecessor draw is no longer on the path.
 //!
 //! WHAT IS IN PROCESS, NOT MULTI MACHINE, AND SO NOT MEASURED. The validators run
 //! as several instances inside one operating system process on one host, and the
@@ -228,32 +229,34 @@ fn main() {
     println!("   build: release (opt-level 3)");
     println!(" Source:");
     println!("   Quantova-Chain commit {commit} (qtv-live drives qtv-devnet, path deps)");
-    println!("   consensus crates pinned at QRC-CONSENSUS tag v0.3.0 (qtv-bft, qtv-sampler, qtv-attest)");
+    println!("   consensus crates pinned at QRC-CONSENSUS tag v0.4.0 (qtv-bft, qtv-sampler, qtv-attest)");
     println!();
     println!(" Real in this run:");
     println!("   - {validators} real validator instances, each with its own module lattice key");
-    println!("   - real qtv-sampler committee sortition: the module lattice (ML-DSA) VRF draw of");
-    println!("     consensus v0.3.0, each validator staking {} QTOV",
+    println!("   - real qtv-sampler committee sortition: the one time key sortition of consensus");
+    println!("     v0.4.0 with the stake floor on, each validator staking {} QTOV at the floor",
         qtv_bft::params::VALIDATOR_STAKE_QTOV);
     println!("   - real block production, real module lattice attestations, real aggregated");
     println!("     finality certificate that every node verifies (no stub)");
     println!("   - real transactions, each a 3309 byte module lattice signature, verified on ingress");
     println!("   - real qtv-net post quantum channel (ML-KEM + ML-DSA handshake, ChaCha20-Poly1305)");
-    println!(" NOT yet wired (flagged, not self authorised):");
-    println!("   - the one time key sortition with the stake floor on. It is the QRC-CONSENSUS");
-    println!("     working tree successor to the v0.3.0 draw, not yet tagged; the devnet pins v0.3.0,");
-    println!("     so this run measures the module lattice draw, not the one time construction, and");
-    println!("     enforces no stake floor. The bump is a cross repo founder decision.");
+    println!(" The sortition that runs:");
+    println!("   - the one time key sortition, drawn as a committed preimage with its Merkle path");
+    println!("     against the registered root, with the minimum self stake floor on. It is the");
+    println!("     grinding resistant successor to the v0.3.0 module lattice draw, now pinned at");
+    println!("     consensus v0.4.0, so the predecessor draw is no longer on the path.");
     println!(" In process, so NOT measured:");
     println!("   - inter node bandwidth and propagation latency (in memory duplex, not a socket)");
     println!("   - every member's compute runs serially on this one host, not parallel across machines");
     println!("   - the devnet schedules the round on a logical clock, so slot and view timeouts are");
     println!("     logical; the finality figure below is measured wall clock compute, not modelled slots");
     println!();
-    println!(" Consensus parameters: slot {} ms (logical), committee budget {}, stake {} QTOV",
+    println!(" Consensus parameters: slot {} ms (logical), committee budget {}, stake {} QTOV,",
         qtv_bft::params::SLOT_MS,
         qtv_sampler::params::COMMITTEE_BUDGET,
         qtv_bft::params::VALIDATOR_STAKE_QTOV);
+    println!("      minimum self stake floor {} QTOV, on",
+        qtv_sampler::params::MIN_SELF_STAKE);
     println!(" Run: {validators} validators, {senders_n} distinct signing accounts (block width),");
     println!("      target sustained duration {run_secs:.0} s, {warmup} warmup heights (not counted)");
     rule();

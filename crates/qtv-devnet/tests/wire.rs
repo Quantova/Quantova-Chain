@@ -79,8 +79,9 @@ fn an_attestation_message_round_trips_and_still_verifies() {
             assert_eq!(decoded.height, attestation.height);
             assert_eq!(decoded.slot, attestation.slot);
             assert_eq!(decoded.block, attestation.block);
-            assert_eq!(decoded.membership.output, attestation.membership.output);
-            assert_eq!(decoded.membership.proof, attestation.membership.proof);
+            assert_eq!(decoded.membership.position, attestation.membership.position);
+            assert_eq!(decoded.membership.preimage, attestation.membership.preimage);
+            assert_eq!(decoded.membership.path, attestation.membership.path);
             assert_eq!(decoded.sig, attestation.sig);
             // The signature survives the wire and still verifies under the key.
             assert!(decoded.signature_verifies(attester.attest_public_key()));

@@ -705,7 +705,7 @@ impl DevNode {
             return false;
         }
         record.att.is_entitled(
-            &member.vrf_pk,
+            &member.root,
             &self.beacon,
             member.weight,
             selection.commitment.total_weight,
