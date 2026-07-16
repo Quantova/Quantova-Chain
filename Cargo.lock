@@ -172,3 +172,18 @@ source = "git+https://github.com/Quantova/QVM.git?tag=v0.3.0#e6acea206b93c7b2c13
 dependencies = [
  "qtv-crypto",
 ]
+
+[[package]]
+name = "qtv-widearea"
+version = "0.1.0"
+dependencies = [
+ "qtv-account",
+ "qtv-bft",
+ "qtv-codec",
+ "qtv-devnet",
+ "qtv-loopback",
+ "qtv-net",
+ "qtv-node",
+ "qtv-sampler",
+ "qtv-tx",
+]

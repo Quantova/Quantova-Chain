@@ -1,0 +1,40 @@
+[package]
+name = "qtv-widearea"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A wide area run that gives each validator its own operating system process on its own host, reading its listen address and its peers' real addresses from configuration and talking over the real qtv-net post quantum channel across real wide area sockets. It is the loopback multi process harness with the localhost peer addresses replaced by real host addresses, so a run across regions measures real propagation on top of the parallelism the loopback run already measured. It finalises on the real consensus supermajority so a slow or dropped host degrades the run honestly rather than producing a number that looks fine and is not."
+
+[[bin]]
+name = "qtv-widearea"
+path = "src/bin/qtv-widearea.rs"
+
+[[bin]]
+name = "qtv-validator-wide"
+path = "src/bin/qtv-validator-wide.rs"
+
+[dependencies]
+# The chain crates the workload and the validator are built from, by path so the run
+# drives the exact current node, not a lagging tag.
+qtv-account = { path = "../qtv-account" }
+qtv-codec = { path = "../qtv-codec" }
+qtv-tx = { path = "../qtv-tx" }
+qtv-node = { path = "../qtv-node" }
+
+# The real post quantum secure channel and the real multi node substrate. The
+# validator process reuses the DevNode round primitives and drives them over real
+# qtv-net TCP sockets across real host addresses rather than localhost.
+qtv-net = { path = "../qtv-net" }
+qtv-devnet = { path = "../qtv-devnet" }
+
+# The loopback harness lib. The workload, the funded accounts, the devnet
+# configuration, and the finality distribution are reused byte for byte from the
+# loopback run, so the two harnesses drive the identical workload over the identical
+# committee and differ only in the peer addresses and the honest degradation path.
+qtv-loopback = { path = "../qtv-loopback" }
+
+# The consensus parameters reported alongside the run, pinned at the same tag the
+# devnet uses so the whole graph keeps one crypto version.
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", tag = "v0.5.0" }
+qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", tag = "v0.5.0" }
