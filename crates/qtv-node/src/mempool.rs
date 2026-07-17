@@ -58,6 +58,24 @@ pub fn validate(
     plan_from_account(wrapper, &sender, fee_params)
 }
 
+/// Validate a transaction against the current state and the fee parameters using a
+/// signature verdict computed elsewhere rather than verifying the signature here.
+/// It is `validate` for a caller that has already verified the signature, such as
+/// the parallel pre pass the block executor runs over the whole block, so the
+/// sequential loop applies the state dependent checks without recomputing the one
+/// expensive check. A false verdict is refused as a bad signature and the state
+/// rules are applied identically, so it admits the same transactions `validate`
+/// admits against the same account.
+pub fn validate_verified(
+    wrapper: &Wrapper,
+    ledger: &Ledger,
+    fee_params: &FeeParams,
+    signature_ok: bool,
+) -> Result<TransferPlan, Reject> {
+    let sender = ledger.account(wrapper.body().sender());
+    plan_verified(wrapper, &sender, fee_params, signature_ok)
+}
+
 /// Validate a transaction against an already read sender account and the fee
 /// parameters. This is the whole of `validate` past the state read, split out so
 /// a caller that has already loaded the sender account, such as the parallel
@@ -70,15 +88,52 @@ pub fn plan_from_account(
     account: &Account,
     fee_params: &FeeParams,
 ) -> Result<TransferPlan, Reject> {
-    let body = wrapper.body();
-    let sender = body.sender().to_string();
-
     if !account.has_key() {
         return Err(Reject::UnknownSender);
     }
     if !qtv_tx::verify(wrapper, &account.public_key) {
         return Err(Reject::BadSignature);
     }
+    plan_from_account_checks(wrapper, account, fee_params)
+}
+
+/// Validate a transaction against an already read sender account and the fee
+/// parameters, taking the signature verdict as given rather than verifying it
+/// here. This is `plan_from_account` for a caller that has already verified the
+/// signature, such as the block executor's parallel pre pass, so the sequential
+/// path applies the state dependent checks without recomputing the signature. A
+/// false verdict is refused as a bad signature, the same skip `plan_from_account`
+/// takes when the signature does not verify, and the state dependent checks are
+/// the identical rules, so the transfer this returns and the transactions it
+/// admits match `plan_from_account` on the same account. The verdict must be
+/// qtv_tx::verify of this transaction under the public key this account carries,
+/// and because verifying over an absent key is always false, a true verdict
+/// already implies the account holds a key.
+pub fn plan_verified(
+    wrapper: &Wrapper,
+    account: &Account,
+    fee_params: &FeeParams,
+    signature_ok: bool,
+) -> Result<TransferPlan, Reject> {
+    if !signature_ok {
+        return Err(Reject::BadSignature);
+    }
+    plan_from_account_checks(wrapper, account, fee_params)
+}
+
+/// The state dependent half of validation, applied once the sender key and the
+/// signature are settled: the nonce, the call shape, the self transfer guard, the
+/// gas floor, the fee floor, and the balance. Both the full validation and the
+/// pre verified path share this, so the two apply byte identical state rules and
+/// differ only in where the signature was checked.
+fn plan_from_account_checks(
+    wrapper: &Wrapper,
+    account: &Account,
+    fee_params: &FeeParams,
+) -> Result<TransferPlan, Reject> {
+    let body = wrapper.body();
+    let sender = body.sender().to_string();
+
     if body.nonce() != account.nonce {
         return Err(Reject::BadNonce {
             expected: account.nonce,
