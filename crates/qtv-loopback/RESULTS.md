@@ -9,15 +9,17 @@ records between processes on one host. It is not a geographic network throughput
 not a real global finality, because the sockets are localhost and carry no inter host
 bandwidth or propagation latency.
 
-The host is optimistic, read every figure here as a floor. These numbers were measured
-on an Apple M4, a laptop chip with an unrepresentatively fast core. A rehearsal on real
-servers, recorded in RESULTS-rack-rehearsal.md in the qtv-widearea crate, found the same
-module lattice workload roughly an order of magnitude slower per core on server hardware
-than on this M4. A real validator is a server, not a laptop, so the finality here is a
-best case and the throughput here is a best case, and on representative hardware the
-finality rises and the throughput falls by a factor not yet measured. The 686 millisecond
-median and the 363 transactions a second below are what fast silicon can do, not what a
-validator set will see.
+The host is broadly representative, checked against a real server. These numbers were
+measured on an Apple M4. A rehearsal on two real twenty four core servers, recorded in
+RESULTS-rack-rehearsal.md in the qtv-widearea crate, measured the same module lattice
+workload at width two hundred and fifty at about 674 milliseconds a block on the servers
+against about 686 milliseconds a block here, so a real server is comparable to this M4,
+within a small factor and not an order of magnitude apart. An earlier note here claimed
+the servers were far slower, that was a measurement contaminated by a concurrent build
+and it is retracted. The remaining caveat is only that the server figure was a committee
+of two against this committee of four, so a same committee comparison would move it
+somewhat. These figures are a reasonable stand in for server hardware, not a validator
+set number, because they still carry no propagation.
 
 ## The question this settles
 
