@@ -18,7 +18,7 @@ use crate::consensus::{header_value, Beacon, Consensus, ConsensusValidator, Pare
 use crate::execution::execute_transfer;
 use crate::fee::FeeParams;
 use crate::ledger::{Account, Ledger};
-use crate::mempool::{validate_verified, Mempool, Reject};
+use crate::mempool::{validate_verified, Admitted, Mempool, Reject};
 use crate::parallel::execute_parallel;
 
 use qtv_attest::Certificate;
@@ -355,8 +355,9 @@ impl Node {
         self
     }
 
-    /// Submit a signed transaction to the mempool. It is admitted only when valid.
-    pub fn submit(&mut self, transaction: Wrapper) -> Result<(), Reject> {
+    /// Submit a signed transaction to the mempool. It is admitted only when valid,
+    /// and the outcome distinguishes a fresh admission from an idempotent resubmit.
+    pub fn submit(&mut self, transaction: Wrapper) -> Result<Admitted, Reject> {
         self.mempool
             .admit(transaction, &self.ledger, &self.fee_params)
     }

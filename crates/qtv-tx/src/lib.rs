@@ -234,6 +234,23 @@ pub fn sign(account: &Account, body: &Body) -> Wrapper {
     }
 }
 
+/// Whether the node can verify a signature under this scheme identifier. It is
+/// exactly the set of arms `verify` dispatches to a real check, so admission can
+/// refuse an unverifiable scheme cleanly as unsupported rather than report its
+/// unavoidable false verdict as a bad signature, which would tell a client its
+/// signature is wrong when the truth is we do not verify that scheme. It tracks the
+/// same feature gate as `verify`, so a scheme is supported here exactly when `verify`
+/// has a real arm for it, and Falcon becomes supported the day the fn-dsa standard
+/// lands and the feature is on.
+pub fn scheme_supported(scheme: u8) -> bool {
+    match scheme {
+        SCHEME_LATTICE | SCHEME_HASH => true,
+        #[cfg(feature = "fn-dsa")]
+        SCHEME_FALCON => true,
+        _ => false,
+    }
+}
+
 /// Verify a wrapper against a sender public key. The digest is recomputed under
 /// the same domain tag, the scheme identifier of the wrapper selects the
 /// signature to check, and any scheme identifier that names no scheme is

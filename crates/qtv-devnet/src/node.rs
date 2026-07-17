@@ -22,6 +22,7 @@
 //! channel itself.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io;
 
 use qtv_attest::aggregate::aggregate;
@@ -35,7 +36,7 @@ use qtv_node::consensus::{
 };
 use qtv_node::fee::FeeParams;
 use qtv_node::ledger::{account_key, Account, Ledger};
-use qtv_node::mempool::{Mempool, Reject};
+use qtv_node::mempool::{Admitted, Mempool, Reject};
 use qtv_node::node::{execute_ordered, validator_address, Genesis};
 use qtv_store::{BlockStore, StateStore};
 use qtv_tx::Wrapper;
@@ -219,6 +220,10 @@ pub struct DevNode {
     selection_cache: RefCell<Option<Selection>>,
     chain: Vec<FinalizedBlock>,
     slashed: Vec<u64>,
+    /// The finalised height of each transaction by its id, the index that lets the
+    /// node answer whether a transaction landed and where without scanning the chain.
+    /// It is grown as blocks finalise and rebuilt from the block store on reload.
+    tx_index: HashMap<String, Height>,
 }
 
 impl DevNode {
@@ -266,6 +271,7 @@ impl DevNode {
             selection_cache: RefCell::new(None),
             chain: Vec::new(),
             slashed: Vec::new(),
+            tx_index: HashMap::new(),
         };
 
         if dev.block_store.is_empty() {
@@ -305,16 +311,41 @@ impl DevNode {
         self.beacon = Beacon::from_seed(*header.beacon_seed()).advance(&cert_digest, head);
         self.height = head + 1;
         *self.selection_cache.borrow_mut() = None;
+        self.rebuild_tx_index(head);
         Ok(())
     }
 
-    /// Submit a transaction to this node. It is admitted only when valid, and an
-    /// admitted transaction is queued to gossip to the peers.
-    pub fn submit(&mut self, transaction: Wrapper) -> Result<(), Reject> {
-        self.mempool
-            .admit(transaction.clone(), &self.ledger, &self.fee_params)?;
-        self.outbox.push(transaction);
-        Ok(())
+    /// Rebuild the transaction index from the stored blocks up to the head height, so a
+    /// restarted node answers for its whole persisted chain and not only for the blocks
+    /// it finalises after reopening. The index is held in memory and this scan runs once
+    /// at startup, which is fine for a bounded chain. A persistent index is the change
+    /// to make when a chain outgrows a startup scan.
+    fn rebuild_tx_index(&mut self, head: Height) {
+        self.tx_index.clear();
+        for height in qtv_bft::params::MIN_HEIGHT..=head {
+            let decoded = self
+                .block_store
+                .block_by_height(height)
+                .and_then(|bytes| crate::wire::chain_block_from_bytes(bytes).ok());
+            if let Some(block) = decoded {
+                for wrapper in block.body() {
+                    self.tx_index.insert(wrapper.id(), height);
+                }
+            }
+        }
+    }
+
+    /// Submit a transaction to this node. It is admitted only when valid. A fresh
+    /// admission is queued to gossip to the peers; an idempotent resubmit of a
+    /// transaction already held is reported as known and not gossiped a second time.
+    pub fn submit(&mut self, transaction: Wrapper) -> Result<Admitted, Reject> {
+        let admitted =
+            self.mempool
+                .admit(transaction.clone(), &self.ledger, &self.fee_params)?;
+        if admitted == Admitted::Fresh {
+            self.outbox.push(transaction);
+        }
+        Ok(admitted)
     }
 
     /// Submit a batch of transactions to this node in one parallel signature pre pass.
@@ -995,8 +1026,12 @@ impl DevNode {
     /// state root as the store head.
     fn persist(&mut self, block: &ChainBlock) -> Result<(), RoundError> {
         self.block_store.put_block(block)?;
+        let height = block.header().height();
         let mut touched: Vec<String> = Vec::new();
         for wrapper in block.body() {
+            // Index the transaction at the height it finalised, so the node can answer
+            // whether it landed and where without scanning the chain.
+            self.tx_index.insert(wrapper.id(), height);
             let sender = wrapper.body().sender().to_string();
             let recipient = wrapper.body().call().target().to_string();
             if !touched.contains(&sender) {
@@ -1059,6 +1094,14 @@ impl DevNode {
     /// The number of finalized blocks on disk.
     pub fn stored_blocks(&self) -> usize {
         self.block_store.len()
+    }
+
+    /// The finalised height of a transaction by its id, if this node holds it in its
+    /// chain, or None if the node has never finalised it. This is the honest answer to
+    /// whether a transaction landed and where. Because finality is a certificate, the
+    /// height is absolute, not a confirmation count creeping toward certainty.
+    pub fn finalized_height(&self, tx_id: &str) -> Option<Height> {
+        self.tx_index.get(tx_id).copied()
     }
 
     /// The validators this node slashed. Only equivocation is slashable and none

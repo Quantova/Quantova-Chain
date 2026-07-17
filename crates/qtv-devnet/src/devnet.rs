@@ -36,7 +36,7 @@ use std::collections::BTreeSet;
 use std::io::{Read, Write};
 
 use qtv_net::{DuplexStream, Identity};
-use qtv_node::mempool::Reject;
+use qtv_node::mempool::{Admitted, Reject};
 use qtv_tx::Wrapper;
 
 use qtv_block::Block as ChainBlock;
@@ -269,7 +269,7 @@ impl<S> Devnet<S> {
     }
 
     /// Submit a transaction to a node by index.
-    pub fn submit(&mut self, index: usize, transaction: Wrapper) -> Result<(), Reject> {
+    pub fn submit(&mut self, index: usize, transaction: Wrapper) -> Result<Admitted, Reject> {
         self.nodes[index].submit(transaction)
     }
 

@@ -16,14 +16,26 @@ use crate::execution::{transfer_amount, TRANSFER_GAS};
 use crate::fee::FeeParams;
 use crate::ledger::{Account, Ledger};
 
-/// The reason a transaction was refused admission.
+/// The reason a transaction was refused admission. This enum is a public contract:
+/// a client branches on these verdicts, so the set is closed and no catch all is
+/// added, since a bin becomes the place everything unexplained goes and then it is a
+/// contract that cannot change. Every branch of validation returns one of these, in a
+/// fixed order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reject {
     /// The sender has no account with a public key to verify against.
     UnknownSender,
+    /// The scheme identifier names a signature the node does not verify. It is
+    /// distinct from a bad signature on purpose: the signature is not wrong, the
+    /// scheme is one we do not check, so a client is told to change its scheme rather
+    /// than told its key is wrong.
+    UnsupportedScheme,
     /// The signature does not verify under the sender public key.
     BadSignature,
-    /// The nonce does not match the next expected value of the sender.
+    /// The nonce does not match the next expected value of the sender. The check is
+    /// strict equality, so a nonce too high is refused exactly like one too low and
+    /// there is no future nonce queuing. A sender submits in strict nonce order, one
+    /// at a time, and the expected and got values let a client resync.
     BadNonce { expected: u64, got: u64 },
     /// The call is not a well formed native transfer.
     BadCall,
@@ -31,10 +43,23 @@ pub enum Reject {
     SelfTransfer,
     /// The gas limit does not cover a transfer.
     InsufficientGas,
-    /// The offered fee is below the protocol fee.
+    /// The offered fee is below the protocol fee. The fee is a floor and a bid: a
+    /// higher offer orders a transaction earlier in the pool but the charge is always
+    /// the fixed protocol fee, never the bid, so offering more never costs more.
     FeeTooLow,
     /// The sender cannot pay the amount and the fee.
     InsufficientFunds,
+}
+
+/// The outcome of admitting a transaction that passed validation. Accepted carries
+/// two states so a client resubmitting can tell whether its earlier submission
+/// already landed in the pool, and so a duplicate is never gossiped a second time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admitted {
+    /// Newly admitted to the pool this call.
+    Fresh,
+    /// Already held from an earlier submission, so this call was an idempotent no op.
+    Known,
 }
 
 /// A validated native transfer ready to execute: the sender, the recipient, the
@@ -93,6 +118,9 @@ pub fn plan_from_account(
     if !account.has_key() {
         return Err(Reject::UnknownSender);
     }
+    if !qtv_tx::scheme_supported(wrapper.scheme()) {
+        return Err(Reject::UnsupportedScheme);
+    }
     if !qtv_tx::verify(wrapper, &account.public_key) {
         return Err(Reject::BadSignature);
     }
@@ -117,6 +145,9 @@ pub fn plan_verified(
     fee_params: &FeeParams,
     signature_ok: bool,
 ) -> Result<TransferPlan, Reject> {
+    if !qtv_tx::scheme_supported(wrapper.scheme()) {
+        return Err(Reject::UnsupportedScheme);
+    }
     if !signature_ok {
         return Err(Reject::BadSignature);
     }
@@ -262,21 +293,23 @@ impl Mempool {
         self.pending.is_empty()
     }
 
-    /// Admit a transaction, validating it against the state and the fee
-    /// parameters first. A refused transaction is never held. A resubmission of a
-    /// transaction already held is dropped.
+    /// Admit a transaction, validating it against the state and the fee parameters
+    /// first. A refused transaction is never held and its reason is returned. A
+    /// resubmission of a transaction already held is a no op and reports `Known`, so a
+    /// resubmit is idempotent and the caller can tell it from a fresh admission.
     pub fn admit(
         &mut self,
         wrapper: Wrapper,
         ledger: &Ledger,
         fee_params: &FeeParams,
-    ) -> Result<(), Reject> {
+    ) -> Result<Admitted, Reject> {
         validate(&wrapper, ledger, fee_params)?;
         let id = wrapper.id();
-        if !self.pending.iter().any(|w| w.id() == id) {
-            self.pending.push(wrapper);
+        if self.pending.iter().any(|w| w.id() == id) {
+            return Ok(Admitted::Known);
         }
-        Ok(())
+        self.pending.push(wrapper);
+        Ok(Admitted::Fresh)
     }
 
     /// Admit a batch of transactions in one parallel signature pre pass, then apply the
@@ -465,6 +498,51 @@ mod tests {
                 got: 3
             })
         );
+    }
+
+    #[test]
+    fn an_unsupported_scheme_is_refused_as_such_not_as_a_bad_signature() {
+        let params = FeeParams::devnet();
+        let alice = keypair(0);
+        let bob = keypair(1);
+        let mut ledger = Ledger::new();
+        fund(&mut ledger, &alice, 10_000);
+        let good = signed_transfer(
+            &alice,
+            &bob.address(),
+            500,
+            0,
+            u128::from(params.transfer_fee()),
+        );
+        // Re-wrap the signed body under a scheme identifier the node does not verify.
+        // The signature is untouched, so this must read as unsupported rather than bad.
+        let tx = Wrapper::new(good.body().clone(), 99, good.signature().to_vec());
+        let mut pool = Mempool::new();
+        assert_eq!(
+            pool.admit(tx, &ledger, &params),
+            Err(Reject::UnsupportedScheme)
+        );
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn a_resubmission_is_known_and_idempotent() {
+        let params = FeeParams::devnet();
+        let alice = keypair(0);
+        let bob = keypair(1);
+        let mut ledger = Ledger::new();
+        fund(&mut ledger, &alice, 10_000);
+        let tx = signed_transfer(
+            &alice,
+            &bob.address(),
+            500,
+            0,
+            u128::from(params.transfer_fee()),
+        );
+        let mut pool = Mempool::new();
+        assert_eq!(pool.admit(tx.clone(), &ledger, &params), Ok(Admitted::Fresh));
+        assert_eq!(pool.admit(tx, &ledger, &params), Ok(Admitted::Known));
+        assert_eq!(pool.len(), 1);
     }
 
     #[test]
