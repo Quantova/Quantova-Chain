@@ -179,6 +179,10 @@ fn main() {
     let mut finalized_tx: u64 = 0;
     let mut consensus_ms = 0.0f64;
     let mut sign_ms = 0.0f64;
+    // The untimed fill wall clock, accumulated over exactly the measured heights that
+    // feed consensus_ms, so the admission the fill phase does is visible beside consensus
+    // without being counted as consensus.
+    let mut fill_ms = 0.0f64;
     let mut heights: u64 = 0;
     let mut rotations: u64 = 0;
     let mut stalled = false;
@@ -204,6 +208,7 @@ fn main() {
                 txs,
                 rotated,
                 phases,
+                fill,
             } => {
                 // A finalised height advanced the chain. A height that carried the full
                 // batch is a measured sample; a rare empty height, which a spurious
@@ -214,6 +219,7 @@ fn main() {
                 if txs > 0 {
                     sign_ms += sign_dt.as_secs_f64() * 1000.0;
                     consensus_ms += elapsed.as_secs_f64() * 1000.0;
+                    fill_ms += fill.as_secs_f64() * 1000.0;
                     per_block_ms.push(elapsed.as_secs_f64() * 1000.0);
                     finalized_tx += txs as u64;
                     heights += 1;
@@ -250,6 +256,7 @@ fn main() {
         finalized_tx,
         consensus_ms,
         sign_ms,
+        fill_ms,
         committee,
         heights,
         rotations,
