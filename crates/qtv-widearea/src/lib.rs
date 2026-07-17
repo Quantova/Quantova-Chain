@@ -118,6 +118,19 @@ pub struct RunReport {
     pub chainhash: String,
     pub block_hashes: Vec<String>,
     pub stalled: bool,
+    /// The per phase split of the consensus wall clock, summed over the measured
+    /// heights, in milliseconds. Instrumentation only, it does not enter any consensus
+    /// decision and the finalised chain is byte identical whether it is measured or not.
+    /// The idle wait blocked on the peer, the leader build and disseminate, the proposal
+    /// verify, the attestation aggregate, the finalise, and the ingress batch flood; the
+    /// unattributed remainder is reported separately as phase_other_ms so no time is
+    /// hidden.
+    pub phase_wait_ms: f64,
+    pub phase_build_ms: f64,
+    pub phase_verify_ms: f64,
+    pub phase_aggregate_ms: f64,
+    pub phase_finalise_ms: f64,
+    pub phase_flood_ms: f64,
 }
 
 impl RunReport {
@@ -135,6 +148,22 @@ impl RunReport {
     pub fn finality(&self) -> Option<Distribution> {
         Distribution::of(&self.per_block_ms)
     }
+
+    /// The consensus wall clock not attributed to any of the six timed phases, the
+    /// honest remainder so nothing is hidden. It is the consensus wall clock less the
+    /// summed phase totals, covering the buffered replay, the view change path, and the
+    /// loop overhead that no seam times. It is not forced to a floor, so a seam overlap
+    /// would show as a small negative, which does not occur on a finalised height since
+    /// the seams do not nest.
+    pub fn phase_other_ms(&self) -> f64 {
+        self.consensus_ms
+            - self.phase_wait_ms
+            - self.phase_build_ms
+            - self.phase_verify_ms
+            - self.phase_aggregate_ms
+            - self.phase_finalise_ms
+            - self.phase_flood_ms
+    }
 }
 
 /// The RESULT line a validator prints, and the mirror the driver reads it back with.
@@ -150,6 +179,9 @@ pub fn format_result(report: &RunReport) -> String {
     let blockhashes = report.block_hashes.join(",");
     format!(
         "RESULT idx={} heights={} finalized_tx={} consensus_ms={:.3} sign_ms={:.3} \
+         phase_wait_ms={:.3} phase_build_ms={:.3} phase_verify_ms={:.3} \
+         phase_aggregate_ms={:.3} phase_finalise_ms={:.3} phase_flood_ms={:.3} \
+         phase_other_ms={:.3} \
          committee={} rotations={} chainhash={} stall={} perblock={perblock} \
          blockhashes={blockhashes}",
         report.idx,
@@ -157,6 +189,13 @@ pub fn format_result(report: &RunReport) -> String {
         report.finalized_tx,
         report.consensus_ms,
         report.sign_ms,
+        report.phase_wait_ms,
+        report.phase_build_ms,
+        report.phase_verify_ms,
+        report.phase_aggregate_ms,
+        report.phase_finalise_ms,
+        report.phase_flood_ms,
+        report.phase_other_ms(),
         report.committee,
         report.rotations,
         report.chainhash,
@@ -179,6 +218,13 @@ pub fn parse_result(line: &str) -> RunReport {
             "finalized_tx" => report.finalized_tx = value.parse().unwrap_or(0),
             "consensus_ms" => report.consensus_ms = value.parse().unwrap_or(0.0),
             "sign_ms" => report.sign_ms = value.parse().unwrap_or(0.0),
+            "phase_wait_ms" => report.phase_wait_ms = value.parse().unwrap_or(0.0),
+            "phase_build_ms" => report.phase_build_ms = value.parse().unwrap_or(0.0),
+            "phase_verify_ms" => report.phase_verify_ms = value.parse().unwrap_or(0.0),
+            "phase_aggregate_ms" => report.phase_aggregate_ms = value.parse().unwrap_or(0.0),
+            "phase_finalise_ms" => report.phase_finalise_ms = value.parse().unwrap_or(0.0),
+            "phase_flood_ms" => report.phase_flood_ms = value.parse().unwrap_or(0.0),
+            // phase_other_ms is the derived remainder, recomputed from the fields above.
             "committee" => report.committee = value.parse().unwrap_or(0),
             "rotations" => report.rotations = value.parse().unwrap_or(0),
             "chainhash" => report.chainhash = value.to_string(),

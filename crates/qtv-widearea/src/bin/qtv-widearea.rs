@@ -221,6 +221,15 @@ fn report_run(reports: &[RunReport], label: &str) {
         println!("   finality p99 (ms)            : {:.1}", d.p99);
         println!("   finality max (ms)            : {:.1}", d.max);
     }
+    // The per phase split of the consensus wall clock, where the block's wall clock
+    // actually goes. The five phases plus the unattributed remainder sum to it.
+    println!("   phase wait (ms)              : {:.1}", ingress.phase_wait_ms);
+    println!("   phase build (ms)             : {:.1}", ingress.phase_build_ms);
+    println!("   phase verify (ms)            : {:.1}", ingress.phase_verify_ms);
+    println!("   phase aggregate (ms)         : {:.1}", ingress.phase_aggregate_ms);
+    println!("   phase finalise (ms)          : {:.1}", ingress.phase_finalise_ms);
+    println!("   phase flood (ms)             : {:.1}", ingress.phase_flood_ms);
+    println!("   phase other (ms)             : {:.1}", ingress.phase_other_ms());
     rule();
 }
 
