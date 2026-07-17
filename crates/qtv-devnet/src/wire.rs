@@ -662,6 +662,16 @@ pub fn chain_block_from_bytes(bytes: &[u8]) -> Result<ChainBlock, DecodeError> {
     Ok(block)
 }
 
+/// Read a transaction from its whole canonical encoding, the form a client submits it
+/// in over the RPC, refusing trailing bytes. This is the exact decode the mesh uses
+/// for a gossiped transaction, exposed so the gateway parses a submission the same way.
+pub fn wrapper_from_bytes(bytes: &[u8]) -> Result<Wrapper, DecodeError> {
+    let mut decoder = Decoder::new(bytes);
+    let wrapper = decode_wrapper(&mut decoder)?;
+    decoder.finish()?;
+    Ok(wrapper)
+}
+
 /// Read a finalized chain block field by field, the mirror of its canonical
 /// encoding.
 fn decode_chain_block(decoder: &mut Decoder<'_>) -> Result<ChainBlock, DecodeError> {

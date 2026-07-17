@@ -1,0 +1,20 @@
+[package]
+name = "qtv-gateway"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Quantova RPC gateway. It serves the six read and write methods a client needs over plain HTTP with our own JSON, reaching the node through a request and reply channel rather than a shared lock, so the node stays single owner of its state and the gateway can later move to its own process by swapping the channel for a socket."
+
+[dependencies]
+# The node the gateway reads from and submits to, and the chain types the views are
+# built from. The gateway holds no consensus itself, it only reads a running node.
+qtv-devnet = { path = "../qtv-devnet" }
+qtv-node = { path = "../qtv-node" }
+qtv-tx = { path = "../qtv-tx" }
+qtv-block = { path = "../qtv-block" }
+qtv-idfmt = { path = "../qtv-idfmt" }
+
+# The consensus parameters, for the minimum height that tells a fresh node from one
+# that holds a finalised head. Pinned at the same tag the rest of the graph uses.
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", tag = "v0.5.0" }

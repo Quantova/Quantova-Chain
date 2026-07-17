@@ -55,6 +55,7 @@ dependencies = [
  "qtv-account",
  "qtv-crypto",
  "qtv-devnet",
+ "qtv-gateway",
  "qtv-net",
  "qtv-node",
 ]
@@ -75,6 +76,18 @@ dependencies = [
  "qtv-sampler",
  "qtv-state",
  "qtv-store",
+ "qtv-tx",
+]
+
+[[package]]
+name = "qtv-gateway"
+version = "0.1.0"
+dependencies = [
+ "qtv-bft",
+ "qtv-block",
+ "qtv-devnet",
+ "qtv-idfmt",
+ "qtv-node",
  "qtv-tx",
 ]
 

@@ -289,6 +289,13 @@ impl Mempool {
         self.pending.len()
     }
 
+    /// Whether a transaction with this id is waiting in the pool. The node answers a
+    /// pending status from this, the state between a submission being accepted and the
+    /// block that finalises it.
+    pub fn contains(&self, id: &str) -> bool {
+        self.pending.iter().any(|w| w.id() == id)
+    }
+
     /// Whether the pool holds no transactions.
     pub fn is_empty(&self) -> bool {
         self.pending.is_empty()

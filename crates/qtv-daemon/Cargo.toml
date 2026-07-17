@@ -27,6 +27,10 @@ qtv-net = { path = "../qtv-net" }
 # instead of the harness measurement loop.
 qtv-devnet = { path = "../qtv-devnet" }
 
+# The RPC gateway. The daemon runs it in process as a thread, feeding client requests
+# to the round loop over a channel so the node stays the single owner of its state.
+qtv-gateway = { path = "../qtv-gateway" }
+
 # The audited post quantum crypto, for the SHA3 that fixes the genesis hash a chain
 # id is bound through. Pinned at the same tag the rest of the graph uses.
 qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", tag = "v0.3.0" }

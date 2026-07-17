@@ -129,6 +129,27 @@ fn run() -> Result<(), String> {
     spawn_stop_watcher(stop_path, stopped.clone());
 
     let mut driver = driver::Driver::new(node, idx, mesh);
+
+    // Stand up the RPC gateway when the config asks for it. It binds its own port and
+    // feeds client requests to the round loop over a channel, so the node stays the
+    // single owner of its state and the gateway only asks it.
+    if let Some(rpc_addr) = settings.rpc_listen.clone() {
+        let rpc_listener = TcpListener::bind(&rpc_addr)
+            .map_err(|e| format!("binding the RPC address {rpc_addr}: {e}"))?;
+        let (requests_tx, requests_rx) = std::sync::mpsc::channel();
+        let context = qtv_gateway::NodeContext {
+            chain_id: genesis_file.chain_id.clone(),
+            genesis_hash_hex: util::hex(&genesis_file.hash),
+            fee_params: genesis_file.genesis.fee_params,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        driver.attach_rpc(context, requests_rx);
+        qtv_gateway::serve(rpc_listener, requests_tx);
+        util::log(&format!("RPC gateway serving on {rpc_addr}"));
+    } else {
+        util::log("no RPC configured, the node runs with no client facing surface");
+    }
+
     driver.run(
         Duration::from_millis(settings.block_interval_ms),
         Duration::from_millis(settings.view_timeout_ms),
