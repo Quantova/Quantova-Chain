@@ -49,6 +49,17 @@ version = "0.2.0"
 source = "git+https://github.com/Quantova/Q-Crypto.git?tag=v0.3.0#98860273eb291c211fa2dc24f9b63f18936f562c"
 
 [[package]]
+name = "qtv-daemon"
+version = "0.1.0"
+dependencies = [
+ "qtv-account",
+ "qtv-crypto",
+ "qtv-devnet",
+ "qtv-net",
+ "qtv-node",
+]
+
+[[package]]
 name = "qtv-devnet"
 version = "0.1.0"
 dependencies = [

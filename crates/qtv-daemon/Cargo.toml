@@ -1,0 +1,32 @@
+[package]
+name = "qtv-daemon"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The standalone Quantova validator daemon, quantovad. It carves the devnet node into a runnable process driven by a genesis file and a node config file, runs a continuous production round over the real qtv-net post quantum mesh, persists every finalised block through qtv-store, and resumes from disk on restart. A committee of one is its own supermajority, so a single quantovad is a live chain on its own."
+
+[[bin]]
+name = "quantovad"
+path = "src/main.rs"
+
+[dependencies]
+# The account model, for deriving a funded genesis account's address from its
+# scheme and public key.
+qtv-account = { path = "../qtv-account" }
+
+# The node engine: the genesis, the account and validator specs, the fee schedule,
+# and the committee selection the daemon drives.
+qtv-node = { path = "../qtv-node" }
+
+# The real post quantum secure channel the mesh is built from.
+qtv-net = { path = "../qtv-net" }
+
+# The devnet node and its round primitives. The daemon reuses DevNode as the one
+# node core rather than forking it, and drives it over a continuous production loop
+# instead of the harness measurement loop.
+qtv-devnet = { path = "../qtv-devnet" }
+
+# The audited post quantum crypto, for the SHA3 that fixes the genesis hash a chain
+# id is bound through. Pinned at the same tag the rest of the graph uses.
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", tag = "v0.3.0" }
