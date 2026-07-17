@@ -32,7 +32,7 @@
 use qtv_account::{derive, Account};
 use qtv_devnet::config::{DevnetConfig, NodeConfig, FULL_FANOUT};
 use qtv_devnet::wire::{gossip_id, Message};
-use qtv_node::execution::{transfer_call, TRANSFER_GAS};
+use qtv_node::execution::{transfer_call, TRANSFER_METER};
 use qtv_node::fee::FeeParams;
 use qtv_node::node::GenesisAccount;
 use qtv_tx::{sign, Body, Wrapper};
@@ -133,7 +133,7 @@ pub fn build_batch(
     let mut batch = Vec::with_capacity(senders.len());
     for (i, from) in senders.iter().enumerate() {
         let call = transfer_call(&recipients[i], TRANSFER_AMOUNT);
-        let body = Body::new(from.address(), nonces[i], TRANSFER_GAS, fee, call);
+        let body = Body::new(from.address(), nonces[i], TRANSFER_METER, fee, call);
         batch.push(sign(from, &body));
         nonces[i] += 1;
     }

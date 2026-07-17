@@ -335,13 +335,13 @@ fn read_fixed<const N: usize>(decoder: &mut Decoder<'_>) -> Result<[u8; N], Deco
 fn decode_wrapper(decoder: &mut Decoder<'_>) -> Result<Wrapper, DecodeError> {
     let sender = read_text(decoder)?;
     let nonce = decoder.get_u64()?;
-    let gas_limit = decoder.get_u64()?;
+    let meter_limit = decoder.get_u64()?;
     let fee = decoder.get_u128()?;
     let target = read_text(decoder)?;
     let args = decoder.get_bytes()?.to_vec();
     let scheme = decoder.get_u8()?;
     let signature = decoder.get_bytes()?.to_vec();
-    let body = Body::new(sender, nonce, gas_limit, fee, Call::new(target, args));
+    let body = Body::new(sender, nonce, meter_limit, fee, Call::new(target, args));
     Ok(Wrapper::new(body, scheme, signature))
 }
 

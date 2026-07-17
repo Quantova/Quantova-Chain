@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use qtv_account::{derive, Account};
 use qtv_devnet::config::{DevnetConfig, NodeConfig};
 use qtv_devnet::DevNode;
-use qtv_node::execution::{transfer_call, TRANSFER_GAS};
+use qtv_node::execution::{transfer_call, TRANSFER_METER};
 use qtv_node::fee::FeeParams;
 use qtv_node::node::GenesisAccount;
 use qtv_tx::{sign, Body, Wrapper};
@@ -100,7 +100,7 @@ pub fn transfer(from: &Account, to: &str, amount: u64, nonce: u64, params: &FeeP
     let body = Body::new(
         from.address(),
         nonce,
-        TRANSFER_GAS,
+        TRANSFER_METER,
         u128::from(params.transfer_fee()),
         call,
     );

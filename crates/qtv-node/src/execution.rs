@@ -38,9 +38,9 @@ ADD r6, r6, r0
 SSTORE r5, r6
 HALT";
 
-/// The exact gas a transfer program spends over the qtv-vm gas schedule. It is
-/// the minimum gas limit a transfer needs to run to a clean halt.
-pub const TRANSFER_GAS: u64 = 1_210;
+/// The meter a transfer program spends over the machine's weighted schedule, and so
+/// the minimum meter limit a transfer needs to reach a clean halt.
+pub const TRANSFER_METER: u64 = 1_210;
 
 /// A native transfer call: the recipient address as the target and the amount as
 /// eight little endian bytes of arguments.
@@ -64,29 +64,32 @@ pub fn transfer_amount(call: &Call) -> Option<u64> {
 pub enum ExecError {
     /// The sender could not cover the amount and the fee, so the debit faulted.
     InsufficientFunds,
-    /// The gas limit did not cover the program.
-    OutOfGas,
+    /// The meter limit did not cover the program's execution.
+    MeterExhausted,
     /// Any other virtual machine fault, which a native transfer never reaches.
     Vm(Fault),
 }
 
-/// The outcome of a transfer: the post execution balances and the gas spent.
+/// The outcome of a transfer: the post execution balances and the meter spent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Transferred {
     pub sender_balance: u64,
     pub recipient_balance: u64,
-    pub gas_used: u64,
+    pub meter_used: u64,
 }
 
 /// Execute a transfer through the virtual machine. The sender and recipient
 /// balances seed the interpreter storage and the amount and fee seed the constant
-/// pool. A clean halt yields the two post execution balances and the gas spent.
+/// pool. A clean halt yields the two post execution balances and the meter spent.
+/// The meter limit is passed to the machine, which meters execution per operation
+/// and faults when it would exceed the limit, and the machine's own metering is
+/// mapped back onto our meter here at the one boundary where the two meet.
 pub fn execute_transfer(
     sender_balance: u64,
     recipient_balance: u64,
     amount: u64,
     fee: u64,
-    gas_limit: u64,
+    meter_limit: u64,
 ) -> Result<Transferred, ExecError> {
     let code = assemble(TRANSFER_PROGRAM).expect("the transfer program assembles");
     let consts = [amount, fee];
@@ -94,19 +97,19 @@ pub fn execute_transfer(
     storage.insert(SENDER_SLOT, sender_balance);
     storage.insert(RECIPIENT_SLOT, recipient_balance);
 
-    let outcome = Interpreter::new(&code, &consts, gas_limit)
+    let outcome = Interpreter::new(&code, &consts, meter_limit)
         .with_storage(storage)
         .run()
         .map_err(|fault| match fault {
             Fault::Overflow => ExecError::InsufficientFunds,
-            Fault::OutOfGas => ExecError::OutOfGas,
+            Fault::OutOfGas => ExecError::MeterExhausted,
             other => ExecError::Vm(other),
         })?;
 
     Ok(Transferred {
         sender_balance: outcome.storage.get(&SENDER_SLOT).copied().unwrap_or(0),
         recipient_balance: outcome.storage.get(&RECIPIENT_SLOT).copied().unwrap_or(0),
-        gas_used: outcome.gas_used,
+        meter_used: outcome.gas_used,
     })
 }
 
@@ -129,21 +132,21 @@ mod tests {
 
     #[test]
     fn a_transfer_moves_the_amount_and_the_fee() {
-        let out = execute_transfer(1_000, 50, 200, 10, TRANSFER_GAS).expect("halt");
+        let out = execute_transfer(1_000, 50, 200, 10, TRANSFER_METER).expect("halt");
         assert_eq!(out.sender_balance, 1_000 - 200 - 10);
         assert_eq!(out.recipient_balance, 50 + 200);
-        assert_eq!(out.gas_used, TRANSFER_GAS);
+        assert_eq!(out.meter_used, TRANSFER_METER);
     }
 
     #[test]
     fn a_transfer_that_cannot_pay_faults_and_moves_nothing() {
-        let err = execute_transfer(150, 0, 200, 10, TRANSFER_GAS).unwrap_err();
+        let err = execute_transfer(150, 0, 200, 10, TRANSFER_METER).unwrap_err();
         assert_eq!(err, ExecError::InsufficientFunds);
     }
 
     #[test]
-    fn a_transfer_below_its_gas_runs_out() {
-        let err = execute_transfer(1_000, 0, 200, 10, TRANSFER_GAS - 1).unwrap_err();
-        assert_eq!(err, ExecError::OutOfGas);
+    fn a_transfer_below_its_meter_runs_out() {
+        let err = execute_transfer(1_000, 0, 200, 10, TRANSFER_METER - 1).unwrap_err();
+        assert_eq!(err, ExecError::MeterExhausted);
     }
 }
