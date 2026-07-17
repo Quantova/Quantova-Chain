@@ -212,6 +212,10 @@ fn report_run(reports: &[RunReport], label: &str) {
         ingress.consensus_ms / 1000.0
     );
     println!(
+        "   fill wall clock, untimed (s) : {:.1}  (admission, not counted as consensus)",
+        ingress.fill_ms / 1000.0
+    );
+    println!(
         "   sustained throughput (tx/s)  : {:.0}",
         ingress.throughput()
     );

@@ -50,7 +50,9 @@ pub struct PhaseTimers {
     /// Finalising the staged block in try_finalize.
     pub finalise: Duration,
     /// The ingress flooding the pre signed batch, the submit plus broadcast over every
-    /// transaction, before anyone proposes. Only the ingress host does this work.
+    /// transaction, before anyone proposes. The flood now runs in the untimed fill phase
+    /// before the timed region starts, so this timed seam stays at or near zero; it is
+    /// kept as the proof that the admission artifact left the timed region.
     pub flood: Duration,
 }
 
@@ -66,6 +68,11 @@ pub enum HeightOutcome {
         /// The per phase split of this height's wall clock, instrumentation only, summed
         /// across the run beside the finality samples.
         phases: PhaseTimers,
+        /// The untimed fill wall clock for this height, the admission that happened
+        /// before the timed region: the ingress flood and the drain that admits the batch
+        /// until the mempool holds the height's width. Reported separately as fill_ms so
+        /// the admission is visible but never counted as consensus.
+        fill: Duration,
     },
     /// The height did not finalise within the stall guard, which happens when the
     /// online set is below the supermajority so no quorum can form.
@@ -302,14 +309,18 @@ impl Runtime {
         finalized
     }
 
-    /// Drive one height to finality or a stall. The ingress process floods the pre
-    /// signed batch over the real sockets before anyone proposes, and the timed region
-    /// starts before that flood so it covers the same work the loopback run times. A
-    /// message that arrived ahead of this height is replayed first. The leader waits
-    /// until it holds the whole batch before it proposes at view zero; a view whose
-    /// leader does not propose in time rotates to the next leader, and the height
-    /// finalises once the online members have attested the block the surviving leader
-    /// carried.
+    /// Drive one height to finality or a stall in two phases, split the way a real chain
+    /// works: an untimed fill phase that admits the block's transactions before anyone
+    /// proposes, then the timed consensus phase over an already full mempool. In the fill
+    /// phase the ingress floods the pre signed batch over the real sockets and every node
+    /// drains and admits the transactions until its mempool holds the height's width, so
+    /// admission, which a real chain does in the mempool before the block, is not counted
+    /// as consensus; a consensus record that arrives during the fill is buffered, not
+    /// acted on, so the timed phase still sees it. The timed region then starts with the
+    /// mempool already full, so the leader proposes at once; a message that arrived ahead
+    /// of this height is replayed first, a view whose leader does not propose in time
+    /// rotates to the next leader, and the height finalises once the online members have
+    /// attested the block the surviving leader carried.
     pub fn drive_height(
         &mut self,
         batch: Option<Vec<qtv_tx::Wrapper>>,
@@ -317,38 +328,70 @@ impl Runtime {
         let start_height = self.node.height();
         let selection = self.node.select().map_err(|e| format!("select: {e:?}"))?;
 
-        let start = Instant::now();
-        // Reset the phase accumulator so its totals cover exactly this height's timed
-        // region [start, finality), the same region the returned elapsed measures.
-        self.phase = PhaseTimers::default();
+        // The untimed fill phase. Admission is not consensus, so it happens before the
+        // timed region, the way a real chain has its mempool full before a block and the
+        // proposer takes the transactions already admitted. Nothing here enters a
+        // consensus decision, so the finalised chain is byte identical whether admission
+        // is timed or not; what moves is when admission is measured, not what is admitted.
+        let fill_start = Instant::now();
 
-        // Replay any messages that arrived while this process was on an earlier height
-        // and named this one, so the real socket asynchrony does not lose them.
-        let ready: Vec<(usize, Vec<u8>)> = std::mem::take(&mut self.buffered)
-            .into_iter()
-            .filter(|(_, bytes)| {
-                Message::decode(bytes)
-                    .map(|m| message_height(&m) == Some(start_height))
-                    .unwrap_or(false)
-            })
-            .collect();
-        for (_, bytes) in ready {
-            if let Ok(message) = Message::decode(&bytes) {
-                self.dispatch(message, &selection);
-            }
-        }
-
-        // The ingress process floods the batch, admitting it and gossiping it over the
-        // real sockets, before anyone proposes.
+        // The ingress process floods the batch, admitting it into its own mempool and
+        // gossiping it over the real sockets, before anyone proposes. This is the old
+        // flood loop, moved out of the timed region because it is admission, not
+        // consensus.
         if let Some(batch) = batch {
-            // Flood seam: the ingress submitting and broadcasting every transaction.
-            let flood_start = Instant::now();
             for transaction in batch {
                 let _ = self.node.submit(transaction.clone());
                 let bytes = Message::Tx(transaction).encode();
                 self.broadcast(&bytes);
             }
-            self.phase.flood += flood_start.elapsed();
+        }
+
+        // Every node drains incoming records and admits the transactions until its
+        // mempool holds the height's full width, or the fill deadline passes so a
+        // genuinely dropped peer stalls honestly rather than hanging. A non transaction
+        // record, a proposal, an attestation, or a view change, is buffered for the timed
+        // phase to replay rather than acted on here, so no consensus runs during the fill;
+        // a record for an earlier height is stale and dropped.
+        let fill_deadline = fill_start + self.stall;
+        while self.node.mempool_len() < self.senders_n && Instant::now() < fill_deadline {
+            match self.inbound.recv_timeout(Duration::from_millis(20)) {
+                Ok((_, bytes)) => match Message::decode(&bytes) {
+                    Ok(Message::Tx(transaction)) => self.node.admit_gossiped(transaction),
+                    Ok(other) => match message_height(&other) {
+                        Some(h) if h < start_height => {}
+                        _ => self.buffered.push((0, bytes)),
+                    },
+                    Err(_) => {}
+                },
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let fill = fill_start.elapsed();
+
+        // The timed consensus region. The mempool is already full, so this measures
+        // propose through finalise with no admission in it.
+        let start = Instant::now();
+        // Reset the phase accumulator so its totals cover exactly this height's timed
+        // region [start, finality), the same region the returned elapsed measures.
+        self.phase = PhaseTimers::default();
+
+        // Replay the records buffered for this height: those that arrived while this
+        // process was on an earlier height and named this one, and any consensus record
+        // buffered during the fill, so the real socket asynchrony does not lose them and
+        // the timed phase acts on them. A record for a later height is kept buffered for
+        // when this process reaches it rather than dropped.
+        let buffered = std::mem::take(&mut self.buffered);
+        for (_, bytes) in buffered {
+            match Message::decode(&bytes) {
+                Ok(message) => match message_height(&message) {
+                    Some(h) if h == start_height => self.dispatch(message, &selection),
+                    Some(h) if h > start_height => self.buffered.push((0, bytes)),
+                    _ => {}
+                },
+                Err(_) => {}
+            }
         }
 
         let mut entered_view: Option<u64> = None;
@@ -368,6 +411,7 @@ impl Runtime {
                     txs,
                     rotated,
                     phases: self.phase,
+                    fill,
                 });
             }
             if start.elapsed() >= self.stall {

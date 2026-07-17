@@ -112,6 +112,12 @@ pub struct RunReport {
     pub finalized_tx: u64,
     pub consensus_ms: f64,
     pub sign_ms: f64,
+    /// The untimed fill wall clock, summed over the measured heights, in milliseconds.
+    /// This is the admission a real chain does in the mempool before a block: the ingress
+    /// flood and the drain that admits the batch until the mempool holds the height's
+    /// width. It sits outside the timed consensus region, so consensus_ms excludes it; it
+    /// is reported here so the admission is visible but never counted as consensus.
+    pub fill_ms: f64,
     pub committee: usize,
     pub heights: u64,
     pub rotations: u64,
@@ -179,6 +185,7 @@ pub fn format_result(report: &RunReport) -> String {
     let blockhashes = report.block_hashes.join(",");
     format!(
         "RESULT idx={} heights={} finalized_tx={} consensus_ms={:.3} sign_ms={:.3} \
+         fill_ms={:.3} \
          phase_wait_ms={:.3} phase_build_ms={:.3} phase_verify_ms={:.3} \
          phase_aggregate_ms={:.3} phase_finalise_ms={:.3} phase_flood_ms={:.3} \
          phase_other_ms={:.3} \
@@ -189,6 +196,7 @@ pub fn format_result(report: &RunReport) -> String {
         report.finalized_tx,
         report.consensus_ms,
         report.sign_ms,
+        report.fill_ms,
         report.phase_wait_ms,
         report.phase_build_ms,
         report.phase_verify_ms,
@@ -218,6 +226,7 @@ pub fn parse_result(line: &str) -> RunReport {
             "finalized_tx" => report.finalized_tx = value.parse().unwrap_or(0),
             "consensus_ms" => report.consensus_ms = value.parse().unwrap_or(0.0),
             "sign_ms" => report.sign_ms = value.parse().unwrap_or(0.0),
+            "fill_ms" => report.fill_ms = value.parse().unwrap_or(0.0),
             "phase_wait_ms" => report.phase_wait_ms = value.parse().unwrap_or(0.0),
             "phase_build_ms" => report.phase_build_ms = value.parse().unwrap_or(0.0),
             "phase_verify_ms" => report.phase_verify_ms = value.parse().unwrap_or(0.0),
