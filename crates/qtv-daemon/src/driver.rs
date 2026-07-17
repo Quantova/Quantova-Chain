@@ -32,6 +32,8 @@ use qtv_devnet::{leader_for, DevNode};
 use qtv_net::Channel;
 use qtv_node::consensus::Selection;
 
+use qtv_gateway::{GatewayCall, NodeContext};
+
 use crate::mesh::Mesh;
 use crate::util::{hex, log};
 
@@ -53,6 +55,12 @@ pub struct Driver {
     up: Vec<bool>,
     assembler: ProposalAssembler,
     buffered: Vec<Vec<u8>>,
+    /// The RPC seam, present when the daemon was configured with a gateway. The static
+    /// context node info reports, and the queue of client requests the gateway threads
+    /// feed. The round loop drains this between round steps and answers each against the
+    /// node, so the gateway never touches the node's state itself.
+    rpc_context: Option<NodeContext>,
+    rpc_requests: Option<Receiver<GatewayCall>>,
 }
 
 impl Driver {
@@ -67,6 +75,32 @@ impl Driver {
             up: mesh.up,
             assembler: ProposalAssembler::new(),
             buffered: Vec::new(),
+            rpc_context: None,
+            rpc_requests: None,
+        }
+    }
+
+    /// Attach the RPC seam, the node info context and the queue of client requests the
+    /// gateway feeds. Once attached, the round loop serves these between round steps.
+    pub fn attach_rpc(&mut self, context: NodeContext, requests: Receiver<GatewayCall>) {
+        self.rpc_context = Some(context);
+        self.rpc_requests = Some(requests);
+    }
+
+    /// Drain and answer every gateway request waiting in the queue, each against the
+    /// node. This is called at each tick of the round loop, so a client request is
+    /// answered within a tick, and it never blocks, so an idle queue costs nothing.
+    fn serve_rpc(&mut self) {
+        let Some(requests) = self.rpc_requests.as_ref() else {
+            return;
+        };
+        let calls: Vec<GatewayCall> = std::iter::from_fn(|| requests.try_recv().ok()).collect();
+        let Some(context) = self.rpc_context.as_ref() else {
+            return;
+        };
+        for call in calls {
+            let result = qtv_gateway::handle(context, &mut self.node, call.request);
+            let _ = call.reply.send(result);
         }
     }
 
@@ -118,6 +152,9 @@ impl Driver {
             if stopped.load(Ordering::SeqCst) {
                 return Ok(());
             }
+            // Answer any client requests waiting at the gateway before the round step, so
+            // a read or a submission is served within a tick of arriving.
+            self.serve_rpc();
             if self.node.height() > start_height {
                 self.log_finalized();
                 return Ok(());

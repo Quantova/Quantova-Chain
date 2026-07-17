@@ -102,6 +102,10 @@ pub struct NodeSettings {
     /// The peers this node dials, each a genesis validator id and its socket address.
     /// A single node network lists none and is its own supermajority.
     pub peers: Vec<(u64, String)>,
+    /// The address the RPC gateway binds, `host:port`, when the node should serve the
+    /// RPC. Absent leaves the node running with no client facing surface, the posture
+    /// item one shipped in.
+    pub rpc_listen: Option<String>,
 }
 
 impl NodeSettings {
@@ -120,6 +124,7 @@ impl NodeSettings {
         let mut block_interval_ms = DEFAULT_BLOCK_INTERVAL_MS;
         let mut view_timeout_ms = DEFAULT_VIEW_TIMEOUT_MS;
         let mut peers: Vec<(u64, String)> = Vec::new();
+        let mut rpc_listen: Option<String> = None;
 
         for field in &fields {
             match field.key.as_str() {
@@ -130,6 +135,7 @@ impl NodeSettings {
                 "block_interval_ms" => block_interval_ms = field.u64("block_interval_ms")?,
                 "view_timeout_ms" => view_timeout_ms = field.u64("view_timeout_ms")?,
                 "peer" => peers.push(parse_peer(field)?),
+                "rpc" => rpc_listen = Some(field.value.clone()),
                 other => return Err(field.error(&format!("unknown config key '{other}'"))),
             }
         }
@@ -145,6 +151,7 @@ impl NodeSettings {
             block_interval_ms,
             view_timeout_ms,
             peers,
+            rpc_listen,
         })
     }
 }

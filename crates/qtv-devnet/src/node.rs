@@ -1104,6 +1104,26 @@ impl DevNode {
         self.tx_index.get(tx_id).copied()
     }
 
+    /// Whether a transaction with this id is waiting in the mempool, the state between
+    /// a submission being accepted and the block that finalises it.
+    pub fn is_pending(&self, tx_id: &str) -> bool {
+        self.mempool.contains(tx_id)
+    }
+
+    /// The finalised block at a height, if the node holds it.
+    pub fn block_at_height(&self, height: Height) -> Option<ChainBlock> {
+        self.serve_blocks(height, height).into_iter().next()
+    }
+
+    /// The finalised block with a given block id, if the node holds it. The id decodes
+    /// to the header hash the block is stored under.
+    pub fn block_by_id(&self, id: &str) -> Option<ChainBlock> {
+        let payload = qtv_idfmt::parse_block(id).ok()?;
+        let hash: [u8; 32] = payload.try_into().ok()?;
+        let bytes = self.block_store.block_by_hash(&hash)?;
+        crate::wire::chain_block_from_bytes(bytes).ok()
+    }
+
     /// The validators this node slashed. Only equivocation is slashable and none
     /// occurs here, so this is always empty and an offline node is never slashed.
     pub fn slashed(&self) -> &[u64] {
