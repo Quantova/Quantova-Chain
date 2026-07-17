@@ -321,6 +321,28 @@ impl Runtime {
     /// of this height is replayed first, a view whose leader does not propose in time
     /// rotates to the next leader, and the height finalises once the online members have
     /// attested the block the surviving leader carried.
+    /// Sort one record received during the fill phase. A gossiped transaction is collected
+    /// into the batch to admit in one parallel signature pre pass; a consensus record for
+    /// this height or a later one is buffered for the timed phase to replay; a record for
+    /// an earlier height is stale and dropped. This is the fill drain's per record rule,
+    /// factored out so the blocking receive and the non blocking drain that follows it sort
+    /// a record the same way.
+    fn sort_fill_record(
+        bytes: Vec<u8>,
+        start_height: u64,
+        gossiped: &mut Vec<qtv_tx::Wrapper>,
+        buffered: &mut Vec<(usize, Vec<u8>)>,
+    ) {
+        match Message::decode(&bytes) {
+            Ok(Message::Tx(transaction)) => gossiped.push(transaction),
+            Ok(other) => match message_height(&other) {
+                Some(h) if h < start_height => {}
+                _ => buffered.push((0, bytes)),
+            },
+            Err(_) => {}
+        }
+    }
+
     pub fn drive_height(
         &mut self,
         batch: Option<Vec<qtv_tx::Wrapper>>,
@@ -335,38 +357,56 @@ impl Runtime {
         // is timed or not; what moves is when admission is measured, not what is admitted.
         let fill_start = Instant::now();
 
-        // The ingress process floods the batch, admitting it into its own mempool and
-        // gossiping it over the real sockets, before anyone proposes. This is the old
-        // flood loop, moved out of the timed region because it is admission, not
-        // consensus.
+        // The ingress process floods the batch, gossiping every transaction over the real
+        // sockets and admitting the whole batch into its own mempool in one parallel
+        // signature pre pass, before anyone proposes. This is the old flood loop with the
+        // per transaction submit replaced by one batched submit; it stays out of the timed
+        // region because it is admission, not consensus, and it admits and gossips exactly
+        // the same transactions the per transaction flood did.
         if let Some(batch) = batch {
-            for transaction in batch {
-                let _ = self.node.submit(transaction.clone());
-                let bytes = Message::Tx(transaction).encode();
+            for transaction in &batch {
+                let bytes = Message::Tx(transaction.clone()).encode();
                 self.broadcast(&bytes);
             }
+            self.node.submit_batch(batch);
         }
 
-        // Every node drains incoming records and admits the transactions until its
-        // mempool holds the height's full width, or the fill deadline passes so a
-        // genuinely dropped peer stalls honestly rather than hanging. A non transaction
-        // record, a proposal, an attestation, or a view change, is buffered for the timed
-        // phase to replay rather than acted on here, so no consensus runs during the fill;
-        // a record for an earlier height is stale and dropped.
+        // Every node drains incoming records until its mempool holds the height's full
+        // width, or the fill deadline passes so a genuinely dropped peer stalls honestly
+        // rather than hanging. The gossiped transactions arriving during the fill are
+        // collected into a buffer and admitted in one parallel signature pre pass, before
+        // the fullness check next reads the mempool length, rather than one at a time. A
+        // non transaction record, a proposal, an attestation, or a view change, is buffered
+        // for the timed phase to replay rather than acted on here, so no consensus runs
+        // during the fill; a record for an earlier height is stale and dropped.
         let fill_deadline = fill_start + self.stall;
+        let mut gossiped: Vec<qtv_tx::Wrapper> = Vec::new();
         while self.node.mempool_len() < self.senders_n && Instant::now() < fill_deadline {
             match self.inbound.recv_timeout(Duration::from_millis(20)) {
-                Ok((_, bytes)) => match Message::decode(&bytes) {
-                    Ok(Message::Tx(transaction)) => self.node.admit_gossiped(transaction),
-                    Ok(other) => match message_height(&other) {
-                        Some(h) if h < start_height => {}
-                        _ => self.buffered.push((0, bytes)),
-                    },
-                    Err(_) => {}
-                },
+                Ok((_, bytes)) => {
+                    Self::sort_fill_record(bytes, start_height, &mut gossiped, &mut self.buffered);
+                    // Collect the rest of a burst already queued without blocking, so the
+                    // whole burst of gossiped transactions lands in one parallel pre pass.
+                    while let Ok((_, bytes)) = self.inbound.try_recv() {
+                        Self::sort_fill_record(
+                            bytes,
+                            start_height,
+                            &mut gossiped,
+                            &mut self.buffered,
+                        );
+                    }
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
+            if !gossiped.is_empty() {
+                self.node.admit_gossiped_batch(std::mem::take(&mut gossiped));
+            }
+        }
+        // Admit any transactions collected on the final pass, so nothing gathered during
+        // the fill is dropped when the mempool filled or the deadline passed.
+        if !gossiped.is_empty() {
+            self.node.admit_gossiped_batch(gossiped);
         }
         let fill = fill_start.elapsed();
 
