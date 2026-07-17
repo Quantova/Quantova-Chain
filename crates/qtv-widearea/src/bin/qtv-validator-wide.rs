@@ -44,7 +44,7 @@ use qtv_loopback::{
     accounts, build_batch, chain_digest, devnet_config, hex, recipients, transfer_fee,
 };
 use qtv_widearea::env as wenv;
-use qtv_widearea::runtime::{build_mesh, HeightOutcome, Runtime};
+use qtv_widearea::runtime::{build_mesh, HeightOutcome, PhaseTimers, Runtime};
 use qtv_widearea::{env_usize, format_result, RunReport};
 
 /// The port of a `host:port` address, the one this process binds. The host part names
@@ -137,6 +137,7 @@ fn main() {
         slow: Duration::from_millis(slow_ms),
         view_timeout: Duration::from_millis(view_ms),
         stall: Duration::from_secs(stall_secs),
+        phase: PhaseTimers::default(),
     };
 
     let fee = transfer_fee();
@@ -181,6 +182,14 @@ fn main() {
     let mut heights: u64 = 0;
     let mut rotations: u64 = 0;
     let mut stalled = false;
+    // The per phase wall clock, accumulated over exactly the measured heights that feed
+    // consensus_ms, so the five phases plus the derived remainder sum to it.
+    let mut phase_wait_ms = 0.0f64;
+    let mut phase_build_ms = 0.0f64;
+    let mut phase_verify_ms = 0.0f64;
+    let mut phase_aggregate_ms = 0.0f64;
+    let mut phase_finalise_ms = 0.0f64;
+    let mut phase_flood_ms = 0.0f64;
 
     while (heights as usize) < target_heights && (rt.node.chain().len()) < height_cap {
         let (batch, sign_dt) = if idx == 0 {
@@ -194,6 +203,7 @@ fn main() {
                 elapsed,
                 txs,
                 rotated,
+                phases,
             } => {
                 // A finalised height advanced the chain. A height that carried the full
                 // batch is a measured sample; a rare empty height, which a spurious
@@ -207,6 +217,14 @@ fn main() {
                     per_block_ms.push(elapsed.as_secs_f64() * 1000.0);
                     finalized_tx += txs as u64;
                     heights += 1;
+                    // Accumulate the phase split alongside consensus_ms, on the same
+                    // measured heights, so the totals cover the whole timed run.
+                    phase_wait_ms += phases.wait.as_secs_f64() * 1000.0;
+                    phase_build_ms += phases.build.as_secs_f64() * 1000.0;
+                    phase_verify_ms += phases.verify.as_secs_f64() * 1000.0;
+                    phase_aggregate_ms += phases.aggregate.as_secs_f64() * 1000.0;
+                    phase_finalise_ms += phases.finalise.as_secs_f64() * 1000.0;
+                    phase_flood_ms += phases.flood.as_secs_f64() * 1000.0;
                     if rotated {
                         rotations += 1;
                     }
@@ -238,6 +256,12 @@ fn main() {
         chainhash,
         block_hashes,
         stalled,
+        phase_wait_ms,
+        phase_build_ms,
+        phase_verify_ms,
+        phase_aggregate_ms,
+        phase_finalise_ms,
+        phase_flood_ms,
     };
     println!("{}", format_result(&report));
     std::io::stdout().flush().expect("flush the result line");

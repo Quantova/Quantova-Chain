@@ -30,6 +30,30 @@ use qtv_loopback::message_height;
 /// mesh yields to the round loop.
 type MeshChannels = (Vec<Option<Channel<TcpStream>>>, Receiver<(usize, Vec<u8>)>);
 
+/// Per phase wall clock for one driven height, a Duration for each seam a block's wall
+/// clock passes through: the idle wait blocked on the peer, the leader build and
+/// disseminate, the proposal verify, the attestation aggregate, and the finalise. This
+/// is instrumentation only. It is reset at the start of each timed height, accumulated
+/// across that height's loop iterations at the named seams, and read out in the height's
+/// outcome; it never enters a consensus decision, so the message flow and the finalised
+/// chain are unchanged whether it is measured or not.
+#[derive(Clone, Copy, Default)]
+pub struct PhaseTimers {
+    /// The idle wait blocked in recv_timeout, whether it returns a message or times out.
+    pub wait: Duration,
+    /// The leader building and disseminating its proposal in enter_current_view.
+    pub build: Duration,
+    /// Verifying a received proposal in on_proposal.
+    pub verify: Duration,
+    /// Aggregating a received attestation in on_attestation.
+    pub aggregate: Duration,
+    /// Finalising the staged block in try_finalize.
+    pub finalise: Duration,
+    /// The ingress flooding the pre signed batch, the submit plus broadcast over every
+    /// transaction, before anyone proposes. Only the ingress host does this work.
+    pub flood: Duration,
+}
+
 /// A single driven height's outcome for a host's measurement.
 pub enum HeightOutcome {
     /// The height finalised: the wall clock it took, how many transactions the
@@ -39,6 +63,9 @@ pub enum HeightOutcome {
         elapsed: Duration,
         txs: usize,
         rotated: bool,
+        /// The per phase split of this height's wall clock, instrumentation only, summed
+        /// across the run beside the finality samples.
+        phases: PhaseTimers,
     },
     /// The height did not finalise within the stall guard, which happens when the
     /// online set is below the supermajority so no quorum can form.
@@ -75,6 +102,10 @@ pub struct Runtime {
     pub view_timeout: Duration,
     /// The wall clock a single height is given before the run calls it a stall.
     pub stall: Duration,
+    /// The per phase wall clock of the height being driven, reset at the start of each
+    /// timed height and read out in its outcome. Instrumentation only; it never enters a
+    /// consensus decision.
+    pub phase: PhaseTimers,
 }
 
 impl Runtime {
@@ -211,7 +242,10 @@ impl Runtime {
             Message::CodedProposal(coded) => {
                 if let Some(Ok(proposal)) = self.assembler.admit(*coded) {
                     let proposer = leader_for(selection, proposal.view);
+                    // Verify seam: verifying the received block in on_proposal.
+                    let verify_start = Instant::now();
                     let out = self.node.on_proposal(selection, proposer, proposal);
+                    self.phase.verify += verify_start.elapsed();
                     for message in out {
                         self.emit(message);
                     }
@@ -219,12 +253,20 @@ impl Runtime {
             }
             Message::Proposal(proposal) => {
                 let proposer = leader_for(selection, proposal.view);
+                // Verify seam: verifying the received block in on_proposal.
+                let verify_start = Instant::now();
                 let out = self.node.on_proposal(selection, proposer, proposal);
+                self.phase.verify += verify_start.elapsed();
                 for message in out {
                     self.emit(message);
                 }
             }
-            Message::Attest(attestation) => self.node.on_attestation(*attestation),
+            Message::Attest(attestation) => {
+                // Aggregate seam: collecting the received attestation in on_attestation.
+                let aggregate_start = Instant::now();
+                self.node.on_attestation(*attestation);
+                self.phase.aggregate += aggregate_start.elapsed();
+            }
             Message::ViewChange(record) => {
                 self.node.collect_view_change(selection, *record);
                 if let Some(target) = self.node.view_sync_target(selection) {
@@ -253,7 +295,11 @@ impl Runtime {
         if !self.node.has_attestations_from(&online) {
             return false;
         }
-        self.node.try_finalize(selection).unwrap_or(false)
+        // Finalise seam: the try_finalize compute, timed wherever settle runs it.
+        let finalise_start = Instant::now();
+        let finalized = self.node.try_finalize(selection).unwrap_or(false);
+        self.phase.finalise += finalise_start.elapsed();
+        finalized
     }
 
     /// Drive one height to finality or a stall. The ingress process floods the pre
@@ -272,6 +318,9 @@ impl Runtime {
         let selection = self.node.select().map_err(|e| format!("select: {e:?}"))?;
 
         let start = Instant::now();
+        // Reset the phase accumulator so its totals cover exactly this height's timed
+        // region [start, finality), the same region the returned elapsed measures.
+        self.phase = PhaseTimers::default();
 
         // Replay any messages that arrived while this process was on an earlier height
         // and named this one, so the real socket asynchrony does not lose them.
@@ -292,11 +341,14 @@ impl Runtime {
         // The ingress process floods the batch, admitting it and gossiping it over the
         // real sockets, before anyone proposes.
         if let Some(batch) = batch {
+            // Flood seam: the ingress submitting and broadcasting every transaction.
+            let flood_start = Instant::now();
             for transaction in batch {
                 let _ = self.node.submit(transaction.clone());
                 let bytes = Message::Tx(transaction).encode();
                 self.broadcast(&bytes);
             }
+            self.phase.flood += flood_start.elapsed();
         }
 
         let mut entered_view: Option<u64> = None;
@@ -315,6 +367,7 @@ impl Runtime {
                     elapsed: start.elapsed(),
                     txs,
                     rotated,
+                    phases: self.phase,
                 });
             }
             if start.elapsed() >= self.stall {
@@ -342,7 +395,10 @@ impl Runtime {
             let ready_to_enter = entered_view != Some(view)
                 && (!(view == 0 && leads) || self.node.mempool_len() >= self.senders_n);
             if self.i_am_up() && ready_to_enter {
+                // Build seam: the leader building and disseminating its proposal.
+                let build_start = Instant::now();
                 self.enter_current_view(&selection, view);
+                self.phase.build += build_start.elapsed();
                 entered_view = Some(view);
                 view_deadline = Instant::now() + self.view_timeout;
             }
@@ -355,7 +411,13 @@ impl Runtime {
                 view_deadline = Instant::now() + self.view_timeout;
             }
 
-            match self.inbound.recv_timeout(Duration::from_millis(20)) {
+            // Wait seam: the idle wait blocked on the peer, the duration actually spent
+            // in recv_timeout whether it returns a message or times out. This is the most
+            // important phase, the wait for a peer's record to arrive over the socket.
+            let wait_start = Instant::now();
+            let received = self.inbound.recv_timeout(Duration::from_millis(20));
+            self.phase.wait += wait_start.elapsed();
+            match received {
                 Ok((_, bytes)) => {
                     let message = match Message::decode(&bytes) {
                         Ok(m) => m,
