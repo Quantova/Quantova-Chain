@@ -3,7 +3,7 @@
 //! A transaction is a wrapper around a body. The signature is carried outside
 //! the body so that the body stays the exact run of bytes that a sender commits
 //! to. The body holds the sender address, a nonce that orders the transactions
-//! of a sender, the gas limit, the fee, and the call. A call is a target address
+//! of a sender, the meter limit, the fee, and the call. A call is a target address
 //! together with the encoded arguments.
 //!
 //! The bytes that are signed are the sha3 256 hash of the canonical body
@@ -87,19 +87,19 @@ impl Encode for Call {
 pub struct Body {
     sender: String,
     nonce: u64,
-    gas_limit: u64,
+    meter_limit: u64,
     fee: u128,
     call: Call,
 }
 
 impl Body {
-    /// Assemble a body from a sender address, a nonce, a gas limit, a fee, and a
+    /// Assemble a body from a sender address, a nonce, a meter limit, a fee, and a
     /// call.
-    pub fn new(sender: String, nonce: u64, gas_limit: u64, fee: u128, call: Call) -> Self {
+    pub fn new(sender: String, nonce: u64, meter_limit: u64, fee: u128, call: Call) -> Self {
         Body {
             sender,
             nonce,
-            gas_limit,
+            meter_limit,
             fee,
             call,
         }
@@ -115,9 +115,12 @@ impl Body {
         self.nonce
     }
 
-    /// The gas limit the sender allows the call to consume.
-    pub fn gas_limit(&self) -> u64 {
-        self.gas_limit
+    /// The meter limit, the ceiling on execution work the sender allows this call to
+    /// spend. The machine meters execution per operation and halts at this limit. It is
+    /// not a price. The charge is the fee, which is a separate field, so the meter never
+    /// pays.
+    pub fn meter_limit(&self) -> u64 {
+        self.meter_limit
     }
 
     /// The fee the sender offers for inclusion.
@@ -135,7 +138,7 @@ impl Encode for Body {
     fn encode(&self, encoder: &mut Encoder) {
         encoder.put_bytes(self.sender.as_bytes());
         self.nonce.encode(encoder);
-        self.gas_limit.encode(encoder);
+        self.meter_limit.encode(encoder);
         self.fee.encode(encoder);
         self.call.encode(encoder);
     }

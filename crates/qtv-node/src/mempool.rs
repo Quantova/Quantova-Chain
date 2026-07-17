@@ -3,7 +3,7 @@
 //! A transaction is admitted only when it is valid: its signature verifies under
 //! the sender public key held in state, its nonce matches the next expected value
 //! of the sender, and the sender can pay the transfer amount, the protocol fee,
-//! and the gas. An invalid transaction is refused at the edge and never held, so
+//! and the meter. An invalid transaction is refused at the edge and never held, so
 //! a bad signature or an insufficient balance can never reach a block. The pool
 //! orders candidates by fee for a simple market and, within a sender, by nonce,
 //! so block building over the same admitted set is reproducible.
@@ -12,7 +12,7 @@ use std::thread;
 
 use qtv_tx::Wrapper;
 
-use crate::execution::{transfer_amount, TRANSFER_GAS};
+use crate::execution::{transfer_amount, TRANSFER_METER};
 use crate::fee::FeeParams;
 use crate::ledger::{Account, Ledger};
 
@@ -41,8 +41,9 @@ pub enum Reject {
     BadCall,
     /// The transfer names the sender as its own recipient.
     SelfTransfer,
-    /// The gas limit does not cover a transfer.
-    InsufficientGas,
+    /// The meter limit does not cover a transfer's execution. The sender's declared
+    /// limit is below the minimum the execution needs, the same shape as a fee too low.
+    MeterLimitTooLow,
     /// The offered fee is below the protocol fee. The fee is a floor and a bid: a
     /// higher offer orders a transaction earlier in the pool but the charge is always
     /// the fixed protocol fee, never the bid, so offering more never costs more.
@@ -156,7 +157,7 @@ pub fn plan_verified(
 
 /// The state dependent half of validation, applied once the sender key and the
 /// signature are settled: the nonce, the call shape, the self transfer guard, the
-/// gas floor, the fee floor, and the balance. Both the full validation and the
+/// meter floor, the fee floor, and the balance. Both the full validation and the
 /// pre verified path share this, so the two apply byte identical state rules and
 /// differ only in where the signature was checked.
 fn plan_from_account_checks(
@@ -182,8 +183,8 @@ fn plan_from_account_checks(
     if recipient == sender {
         return Err(Reject::SelfTransfer);
     }
-    if body.gas_limit() < TRANSFER_GAS {
-        return Err(Reject::InsufficientGas);
+    if body.meter_limit() < TRANSFER_METER {
+        return Err(Reject::MeterLimitTooLow);
     }
 
     let fee = fee_params.transfer_fee();
@@ -410,7 +411,7 @@ mod tests {
 
     fn signed_transfer(from: &KeyAccount, to: &str, amount: u64, nonce: u64, fee: u128) -> Wrapper {
         let call = transfer_call(to, amount);
-        let body = Body::new(from.address(), nonce, TRANSFER_GAS, fee, call);
+        let body = Body::new(from.address(), nonce, TRANSFER_METER, fee, call);
         sign(from, &body)
     }
 

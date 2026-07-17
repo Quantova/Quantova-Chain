@@ -136,7 +136,7 @@ fn run_task(task: &Task<'_>, fee_params: &FeeParams) -> Option<Write> {
         task.recipient.balance,
         plan.amount,
         plan.fee,
-        task.wrapper.body().gas_limit(),
+        task.wrapper.body().meter_limit(),
     )
     .ok()?;
 
@@ -286,7 +286,7 @@ mod tests {
         let body = Body::new(
             from.address(),
             nonce,
-            crate::execution::TRANSFER_GAS,
+            crate::execution::TRANSFER_METER,
             u128::from(fee_params.transfer_fee()),
             call,
         );

@@ -30,7 +30,7 @@ use std::time::Instant;
 
 use qtv_account::{derive, Account as KeyAccount};
 use qtv_idfmt::render_address;
-use qtv_node::execution::{execute_transfer, transfer_call, TRANSFER_GAS};
+use qtv_node::execution::{execute_transfer, transfer_call, TRANSFER_METER};
 use qtv_node::fee::FeeParams;
 use qtv_node::ledger::{Account, Ledger};
 use qtv_node::node::execute_ordered;
@@ -114,7 +114,7 @@ fn build_block(
             tagged_address(0x01, i as u64)
         };
         let call = transfer_call(&recipient, 100);
-        let body = Body::new(senders[i].address(), 0, TRANSFER_GAS, fee_amount, call);
+        let body = Body::new(senders[i].address(), 0, TRANSFER_METER, fee_amount, call);
         sign(&senders[i], &body)
     })
 }
@@ -178,7 +178,7 @@ fn measure_vm(inputs: &[(u64, u64, u64, u64)], threads: usize) -> (f64, f64) {
             let start = Instant::now();
             let mut acc = 0u64;
             for &(sender, recipient, amount, fee) in inputs {
-                let out = execute_transfer(sender, recipient, amount, fee, TRANSFER_GAS)
+                let out = execute_transfer(sender, recipient, amount, fee, TRANSFER_METER)
                     .expect("a funded transfer runs clean");
                 acc = acc.wrapping_add(out.sender_balance);
             }
@@ -204,7 +204,7 @@ fn measure_vm(inputs: &[(u64, u64, u64, u64)], threads: usize) -> (f64, f64) {
                                 }
                                 let (sender, recipient, amount, fee) = inputs[i];
                                 let out =
-                                    execute_transfer(sender, recipient, amount, fee, TRANSFER_GAS)
+                                    execute_transfer(sender, recipient, amount, fee, TRANSFER_METER)
                                         .expect("a funded transfer runs clean");
                                 acc = acc.wrapping_add(out.sender_balance);
                             }

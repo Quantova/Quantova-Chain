@@ -3,7 +3,7 @@
 //! validator, and determinism end to end over the composed stack.
 
 use qtv_account::{derive, Account};
-use qtv_node::execution::{transfer_call, TRANSFER_GAS};
+use qtv_node::execution::{transfer_call, TRANSFER_METER};
 use qtv_node::fee::FeeParams;
 use qtv_node::mempool::Reject;
 use qtv_node::node::{Finalized, Genesis, GenesisAccount, Node, ProduceError, ValidatorSpec};
@@ -43,7 +43,7 @@ fn transfer(from: &Account, to: &str, amount: u64, nonce: u64, params: &FeeParam
     let body = Body::new(
         from.address(),
         nonce,
-        TRANSFER_GAS,
+        TRANSFER_METER,
         u128::from(params.transfer_fee()),
         call,
     );

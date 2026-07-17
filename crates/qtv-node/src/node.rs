@@ -202,7 +202,7 @@ fn execute_ordered_across(
             recipient.balance,
             plan.amount,
             plan.fee,
-            wrapper.body().gas_limit(),
+            wrapper.body().meter_limit(),
         ) {
             Ok(transferred) => transferred,
             Err(_) => continue,
@@ -491,7 +491,7 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execution::{transfer_call, TRANSFER_GAS};
+    use crate::execution::{transfer_call, TRANSFER_METER};
     use crate::ledger::Account;
     use qtv_account::{derive, Account as KeyAccount};
     use qtv_tx::{sign, Body};
@@ -514,7 +514,7 @@ mod tests {
         let body = Body::new(
             from.address(),
             nonce,
-            TRANSFER_GAS,
+            TRANSFER_METER,
             u128::from(fee.transfer_fee()),
             call,
         );
@@ -681,7 +681,7 @@ mod tests {
                 recipient.balance,
                 plan.amount,
                 plan.fee,
-                wrapper.body().gas_limit(),
+                wrapper.body().meter_limit(),
             ) {
                 Ok(transferred) => transferred,
                 Err(_) => continue,

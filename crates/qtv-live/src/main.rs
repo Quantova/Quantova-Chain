@@ -63,7 +63,7 @@ use std::time::{Duration, Instant};
 use qtv_account::{derive, Account};
 use qtv_devnet::config::{DevnetConfig, NodeConfig, FULL_FANOUT};
 use qtv_devnet::Devnet;
-use qtv_node::execution::{transfer_call, TRANSFER_GAS};
+use qtv_node::execution::{transfer_call, TRANSFER_METER};
 use qtv_node::fee::FeeParams;
 use qtv_node::node::GenesisAccount;
 use qtv_tx::{sign, Body, Wrapper};
@@ -170,7 +170,7 @@ fn build_batch(
     let mut batch = Vec::with_capacity(senders.len());
     for (i, from) in senders.iter().enumerate() {
         let call = transfer_call(&recipients[i], TRANSFER_AMOUNT);
-        let body = Body::new(from.address(), nonces[i], TRANSFER_GAS, fee, call);
+        let body = Body::new(from.address(), nonces[i], TRANSFER_METER, fee, call);
         batch.push(sign(from, &body));
         nonces[i] += 1;
     }
@@ -314,7 +314,7 @@ fn main() {
     // transport.
     let sample_tx_bytes = {
         let call = transfer_call(&recipients[0], TRANSFER_AMOUNT);
-        let body = Body::new(senders[0].address(), 0, TRANSFER_GAS, fee, call);
+        let body = Body::new(senders[0].address(), 0, TRANSFER_METER, fee, call);
         qtv_codec::to_bytes(&sign(&senders[0], &body)).len()
     };
     let est_body_bytes = sample_tx_bytes * senders_n;

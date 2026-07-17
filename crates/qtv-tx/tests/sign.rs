@@ -27,7 +27,7 @@ fn rebuild(body: &Body, nonce: u64, args: Vec<u8>) -> Body {
     Body::new(
         body.sender().to_string(),
         nonce,
-        body.gas_limit(),
+        body.meter_limit(),
         body.fee(),
         call,
     )
