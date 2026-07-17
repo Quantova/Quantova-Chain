@@ -317,6 +317,20 @@ impl DevNode {
         Ok(())
     }
 
+    /// Submit a batch of transactions to this node in one parallel signature pre pass.
+    /// The batch is admitted through the mempool's batched path, which verifies every
+    /// signature across the cores and then admits the same transactions per transaction
+    /// `admit` would, and the admitted transactions are queued to gossip in the order
+    /// they were admitted, exactly the outbox bookkeeping `submit` does one at a time. So
+    /// a batched submit leaves the same pool and the same gossip queue as submitting each
+    /// transaction in turn, with the signatures verified in parallel.
+    pub fn submit_batch(&mut self, batch: Vec<Wrapper>) {
+        let admitted = self
+            .mempool
+            .admit_batch(batch, &self.ledger, &self.fee_params);
+        self.outbox.extend(admitted);
+    }
+
     /// Take the transactions queued to gossip since the last round.
     pub fn take_outbox(&mut self) -> Vec<Wrapper> {
         std::mem::take(&mut self.outbox)
@@ -329,6 +343,18 @@ impl DevNode {
         let _ = self
             .mempool
             .admit(transaction, &self.ledger, &self.fee_params);
+    }
+
+    /// Admit a batch of transactions that arrived over the wire in one parallel signature
+    /// pre pass. Duplicates and invalid transactions are dropped, and gossiped
+    /// transactions are not requeued, so they do not loop back around the mesh. This is
+    /// `admit_gossiped` over a whole batch: the mempool's batched path admits exactly the
+    /// transactions the per transaction path would, with the signatures verified across
+    /// the cores instead of one at a time.
+    pub fn admit_gossiped_batch(&mut self, batch: Vec<Wrapper>) {
+        let _ = self
+            .mempool
+            .admit_batch(batch, &self.ledger, &self.fee_params);
     }
 
     /// Select the committee and elect the leader for the current height. The
