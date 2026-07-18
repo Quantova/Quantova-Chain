@@ -224,6 +224,10 @@ pub struct DevNode {
     /// node answer whether a transaction landed and where without scanning the chain.
     /// It is grown as blocks finalise and rebuilt from the block store on reload.
     tx_index: HashMap<String, Height>,
+    /// Arbitrary header notes to stamp by height, empty unless the operator sets
+    /// them. When this node proposes a height that has an entry, the bytes go into
+    /// the header's arbitrary data field exactly as given, a coinbase style note.
+    block_messages: HashMap<u64, Vec<u8>>,
 }
 
 impl DevNode {
@@ -272,6 +276,7 @@ impl DevNode {
             chain: Vec::new(),
             slashed: Vec::new(),
             tx_index: HashMap::new(),
+            block_messages: HashMap::new(),
         };
 
         if dev.block_store.is_empty() {
@@ -404,6 +409,18 @@ impl DevNode {
         Ok(selection)
     }
 
+    /// Set the arbitrary header notes to stamp by height. When this node proposes a
+    /// height that has an entry, the bytes go into the header's arbitrary data field
+    /// exactly as given. Only heights present are stamped; every other height is left
+    /// with an empty field. Entries longer than the header allows are dropped rather
+    /// than stamped, so a note that would be refused never silently truncates.
+    pub fn set_block_messages(&mut self, messages: HashMap<u64, Vec<u8>>) {
+        self.block_messages = messages
+            .into_iter()
+            .filter(|(_, bytes)| bytes.len() <= qtv_block::MAX_EXTRA_DATA)
+            .collect();
+    }
+
     /// Build the block for the current height from the mempool and stage it. The
     /// leader runs this, then gossips the returned proposal.
     pub fn build_proposal(&mut self, selection: &Selection) -> Proposal {
@@ -419,7 +436,7 @@ impl DevNode {
         let candidates = self.mempool.candidates();
         let mut ledger = self.ledger.clone();
         let included = execute_ordered(&mut ledger, &candidates, &self.fee_params);
-        let header = Header::new(
+        let mut header = Header::new(
             height,
             self.parent_header_hash,
             ledger.state_root(),
@@ -429,6 +446,13 @@ impl DevNode {
             proposer,
             self.genesis_time + height * qtv_bft::params::SLOT_MS,
         );
+        // Stamp the operator's note for this height, if any, into the header's
+        // arbitrary data field. The set was filtered to the size limit, so this
+        // never refuses; the bytes commit into the header hash and so into the block
+        // id, retrievable from chain data unchanged.
+        if let Some(note) = self.block_messages.get(&height) {
+            let _ = header.set_extra_data(note.clone());
+        }
         let block = ConsensusBlock::new(height, header_value(&header.hash()), self.parent_val);
         let included_ids = included.iter().map(Wrapper::id).collect();
         self.staged = Some(Staged {

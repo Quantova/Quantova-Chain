@@ -53,6 +53,7 @@ name = "qtv-daemon"
 version = "0.1.0"
 dependencies = [
  "qtv-account",
+ "qtv-block",
  "qtv-crypto",
  "qtv-devnet",
  "qtv-gateway",

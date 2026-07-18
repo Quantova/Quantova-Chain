@@ -23,6 +23,7 @@ mod genesis;
 mod mesh;
 mod util;
 
+use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -94,7 +95,22 @@ fn run() -> Result<(), String> {
         address: settings.listen.clone(),
     };
 
-    let node = DevNode::open(&my_node, &devnet).map_err(|e| format!("opening the node: {e:?}"))?;
+    let mut node =
+        DevNode::open(&my_node, &devnet).map_err(|e| format!("opening the node: {e:?}"))?;
+
+    // Load any local header notes and hand them to the node, so the blocks this node
+    // proposes carry them by height. The file is a local operator file, never part of
+    // the genesis or a repository, so its contents reach the chain only through the
+    // blocks produced here.
+    if let Some(msg_path) = &settings.block_messages_path {
+        let messages = load_block_messages(msg_path)?;
+        util::log(&format!(
+            "loaded {} header notes from {}, stamped into the blocks this node proposes",
+            messages.len(),
+            msg_path.display()
+        ));
+        node.set_block_messages(messages);
+    }
 
     // Place each configured peer's dial address at its validator index. A peer that is
     // this node, or not a genesis validator, is a config error caught here.
@@ -239,6 +255,47 @@ fn log_startup(
     } else {
         util::log(&format!("{} peers configured", settings.peers.len()));
     }
+}
+
+/// Load header notes from a local file, one per line as `QTV|<height>|<note>`. The
+/// whole line, prefix and index included, is the note stamped into that height's
+/// block, exactly as written. Blank lines and lines starting with a hash are skipped.
+/// A line longer than the header allows is refused with its number rather than
+/// silently trimmed, so a note that would not fit is a clear error, not a surprise.
+/// The file stays local and its contents reach the chain only through produced blocks.
+fn load_block_messages(path: &PathBuf) -> Result<HashMap<u64, Vec<u8>>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("reading block messages {}: {e}", path.display()))?;
+    let mut messages = HashMap::new();
+    for (index, raw) in text.lines().enumerate() {
+        let line = raw.trim_end_matches(['\r', '\n']);
+        let number = index + 1;
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(3, '|');
+        if parts.next() != Some("QTV") {
+            return Err(format!(
+                "block messages line {number} is not 'QTV|<height>|<note>': {line}"
+            ));
+        }
+        let height: u64 = parts
+            .next()
+            .ok_or_else(|| format!("block messages line {number} has no height"))?
+            .trim()
+            .parse()
+            .map_err(|_| format!("block messages line {number} has a non numeric height"))?;
+        let note = line.as_bytes().to_vec();
+        if note.len() > qtv_block::MAX_EXTRA_DATA {
+            return Err(format!(
+                "block messages line {number} is {} bytes, over the {} byte header limit",
+                note.len(),
+                qtv_block::MAX_EXTRA_DATA
+            ));
+        }
+        messages.insert(height, note);
+    }
+    Ok(messages)
 }
 
 /// The port of a `host:port` address, the one this process binds on every interface.

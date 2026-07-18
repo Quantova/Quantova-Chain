@@ -302,6 +302,18 @@ fn block(node: &DevNode, selector: BlockSelector) -> Result<Json, ClientError> {
         ("proposer", Json::str(header.proposer())),
         ("time", Json::Int(header.time())),
         ("tx_count", Json::Int(block.body().len() as u64)),
+        // The header's arbitrary data note as hex, byte exact, empty string when none.
+        // A reader recovers the bytes by decoding the hex.
+        (
+            "extra_data",
+            Json::str(
+                header
+                    .extra_data()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>(),
+            ),
+        ),
         ("tx_ids", Json::Array(tx_ids)),
     ]))
 }
