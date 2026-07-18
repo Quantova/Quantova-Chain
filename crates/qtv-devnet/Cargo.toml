@@ -14,6 +14,7 @@ qtv-tx = { path = "../qtv-tx" }
 qtv-block = { path = "../qtv-block" }
 qtv-state = { path = "../qtv-state" }
 qtv-node = { path = "../qtv-node" }
+qtv-staking = { path = "../qtv-staking" }
 qtv-net = { path = "../qtv-net" }
 qtv-store = { path = "../qtv-store" }
 qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", tag = "v0.3.0" }

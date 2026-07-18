@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const NATIVE_UNIT: u128 = 1_000_000;
 pub const MIN_STAKE: u64 = 2_000 * NATIVE_UNIT as u64;
+pub const STAKING_POOL: u64 = 685_714 * NATIVE_UNIT as u64;
 
 pub const HIGH_SESSION_TX: u64 = 50_000_000_000;
 pub const SESSION_DAYS: u64 = 182;

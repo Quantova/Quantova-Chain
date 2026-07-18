@@ -296,6 +296,8 @@ impl DevNode {
             self.state_store
                 .put_account(account_key(&account.address), to_bytes(&funded))?;
         }
+        let (pool_key, pool_value) = self.ledger.seed_stake_pool(qtv_staking::STAKING_POOL);
+        self.state_store.put_account(pool_key, pool_value)?;
         self.state_store.commit(self.ledger.state_root())?;
         Ok(())
     }
