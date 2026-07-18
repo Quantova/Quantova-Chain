@@ -39,14 +39,14 @@ pub const DIGEST_LEN: usize = 32;
 /// The Bech32 base 32 alphabet.
 const CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 /// The Bech32m checksum constant from the modern standard.
-const BECH32M_CONST: u32 = 0x2bc8_30a3;
+const BECH32M_CONST: u32 = 734539939;
 /// The five generator coefficients of the Bech32 checksum polynomial.
 const GENERATOR: [u32; 5] = [
-    0x3b6a_57b2,
-    0x2650_8e6d,
-    0x1ea1_19fa,
-    0x3d42_33dd,
-    0x2a14_62b3,
+    996825010,
+    642813549,
+    513874426,
+    1027748829,
+    705979059,
 ];
 
 /// A reason a render or parse step refused its input.
@@ -112,7 +112,7 @@ fn polymod(values: &[u8]) -> u32 {
     let mut chk: u32 = 1;
     for &value in values {
         let top = chk >> 25;
-        chk = ((chk & 0x01ff_ffff) << 5) ^ u32::from(value);
+        chk = ((chk & 33554431) << 5) ^ u32::from(value);
         for (bit, coefficient) in GENERATOR.iter().enumerate() {
             if (top >> bit) & 1 == 1 {
                 chk ^= coefficient;
