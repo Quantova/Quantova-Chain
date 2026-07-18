@@ -1,3 +1,4 @@
+use qtv_codec::{Decode, Decoder, Encode, Encoder, Error};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const NATIVE_UNIT: u128 = 1_000_000;
@@ -120,6 +121,22 @@ impl Bond {
 
     pub fn slashable_until(&self, exit_requested_day: u64) -> u64 {
         exit_requested_day + UNBONDING_DAYS
+    }
+}
+
+impl Encode for Bond {
+    fn encode(&self, encoder: &mut Encoder) {
+        self.amount.encode(encoder);
+        self.bonded_at_day.encode(encoder);
+    }
+}
+
+impl Decode for Bond {
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
+        Ok(Bond {
+            amount: u64::decode(decoder)?,
+            bonded_at_day: u64::decode(decoder)?,
+        })
     }
 }
 
@@ -348,5 +365,12 @@ mod tests {
         l.slash(&id(1), Fault::Attributable);
         assert_eq!(l.treasury(), 2_000 * QTOV);
         assert!(l.bond_of(&id(1)).is_none());
+    }
+
+    #[test]
+    fn a_bond_round_trips_through_the_codec() {
+        let bond = Bond::new(2_000 * QTOV, 42).unwrap();
+        let bytes = qtv_codec::to_bytes(&bond);
+        assert_eq!(qtv_codec::from_bytes::<Bond>(&bytes).unwrap(), bond);
     }
 }
