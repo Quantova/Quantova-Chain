@@ -62,10 +62,11 @@ pub fn genesis_beacon() -> Beacon {
 }
 
 /// The consensus block value that reconciles with a real chain header. It is the
-/// header hash folded to a single word, so the committee attests over the real
-/// header and a verifier can match the two.
-pub fn header_value(header_hash: &[u8; 32]) -> u64 {
-    qtv_bft::hash::digest_u64(header_hash)
+/// header hash itself, the full 256-bit digest, so the committee attests over the
+/// real header and forging a certificate onto a different header requires a full
+/// SHA3-256 collision rather than a birthday grind over a short fold.
+pub fn header_value(header_hash: &[u8; 32]) -> [u8; 32] {
+    *header_hash
 }
 
 /// The consensus committee driver. It holds one sampler registry and one attester

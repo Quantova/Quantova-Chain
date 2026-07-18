@@ -114,7 +114,7 @@ fn a_coded_proposal_shard_round_trips_and_still_verifies() {
 fn an_attestation_message_round_trips_and_still_verifies() {
     let attester = Attester::new(1, 2_000);
     let beacon = Beacon::genesis();
-    let block = Block::new(1, 5, Parent::Genesis);
+    let block = Block::new(1, [5u8; 32], Parent::Genesis);
     let attestation = attester.attest(1, 1, block, &beacon);
 
     let bytes = Message::Attest(Box::new(attestation.clone())).encode();
@@ -180,7 +180,7 @@ fn a_certificate_carrying_block_round_trips_and_still_verifies() {
     let c = Attester::new(3, 100);
     let d = Attester::new(4, 100);
     let beacon = Beacon::genesis();
-    let block = Block::new(1, 9, Parent::Genesis);
+    let block = Block::new(1, [9u8; 32], Parent::Genesis);
     let commitment = CommitteeCommitment::from_attesters_with_budget(0, &[&a, &b, &c, &d], 4);
     let atts = vec![
         a.attest(1, 0, block, &beacon),

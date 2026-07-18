@@ -531,18 +531,35 @@ fn decode_commitment(decoder: &mut Decoder<'_>) -> Result<Commitment, DecodeErro
     })
 }
 
+/// Append a 32-byte consensus value as raw fixed-width bytes, so the encoding
+/// stays canonical and the value carries its full 256-bit width on the wire.
+fn put_value(encoder: &mut Encoder, value: &[u8; 32]) {
+    for &byte in value {
+        encoder.put_u8(byte);
+    }
+}
+
+/// Read a 32-byte consensus value.
+fn get_value(decoder: &mut Decoder<'_>) -> Result<[u8; 32], DecodeError> {
+    let mut value = [0u8; 32];
+    for slot in value.iter_mut() {
+        *slot = decoder.get_u8()?;
+    }
+    Ok(value)
+}
+
 /// Append the canonical encoding of a consensus block.
 fn encode_block(encoder: &mut Encoder, block: &Block) {
     encoder.put_u64(block.height);
-    encoder.put_u64(block.val);
+    put_value(encoder, &block.val);
     match block.parent {
         Parent::Genesis => {
             encoder.put_u8(PARENT_GENESIS);
-            encoder.put_u64(0);
+            put_value(encoder, &[0u8; 32]);
         }
         Parent::Value(value) => {
             encoder.put_u8(PARENT_VALUE);
-            encoder.put_u64(value);
+            put_value(encoder, &value);
         }
     }
     encoder.put_u64(block.cost);
@@ -552,9 +569,9 @@ fn encode_block(encoder: &mut Encoder, block: &Block) {
 /// value.
 fn decode_block(decoder: &mut Decoder<'_>) -> Result<Block, DecodeError> {
     let height = decoder.get_u64()?;
-    let val = decoder.get_u64()?;
+    let val = get_value(decoder)?;
     let parent_tag = decoder.get_u8()?;
-    let parent_value = decoder.get_u64()?;
+    let parent_value = get_value(decoder)?;
     let parent = match parent_tag {
         PARENT_GENESIS => Parent::Genesis,
         PARENT_VALUE => Parent::Value(parent_value),
