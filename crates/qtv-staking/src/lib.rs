@@ -97,6 +97,7 @@ pub fn slash(bond: u64, fault: Fault) -> u64 {
 pub struct Bond {
     pub amount: u64,
     pub bonded_at_day: u64,
+    pub exit_requested_at: Option<u64>,
 }
 
 impl Bond {
@@ -105,9 +106,26 @@ impl Bond {
             Some(Bond {
                 amount,
                 bonded_at_day,
+                exit_requested_at: None,
             })
         } else {
             None
+        }
+    }
+
+    pub fn request_exit(&mut self, now_day: u64) -> bool {
+        if self.exit_requested_at.is_none() && self.can_request_exit(now_day) {
+            self.exit_requested_at = Some(now_day);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn can_withdraw(&self, now_day: u64) -> bool {
+        match self.exit_requested_at {
+            Some(day) => now_day >= day + UNBONDING_DAYS,
+            None => false,
         }
     }
 
@@ -128,6 +146,7 @@ impl Encode for Bond {
     fn encode(&self, encoder: &mut Encoder) {
         self.amount.encode(encoder);
         self.bonded_at_day.encode(encoder);
+        self.exit_requested_at.encode(encoder);
     }
 }
 
@@ -136,6 +155,7 @@ impl Decode for Bond {
         Ok(Bond {
             amount: u64::decode(decoder)?,
             bonded_at_day: u64::decode(decoder)?,
+            exit_requested_at: Option::<u64>::decode(decoder)?,
         })
     }
 }
@@ -242,6 +262,22 @@ impl StakeLedger {
         } else {
             None
         }
+    }
+
+    pub fn request_exit(&mut self, id: &[u8; 32], now_day: u64) -> bool {
+        match self.bonds.get_mut(id) {
+            Some(bond) => bond.request_exit(now_day),
+            None => false,
+        }
+    }
+
+    pub fn withdraw_to_balance(&mut self, id: &[u8; 32], balance: u64, now_day: u64) -> Option<u64> {
+        let amount = match self.bonds.get(id) {
+            Some(bond) if bond.can_withdraw(now_day) => bond.amount,
+            _ => return None,
+        };
+        self.bonds.remove(id);
+        Some(balance + amount)
     }
 }
 
@@ -396,6 +432,31 @@ mod tests {
         assert_eq!(l.bond_from_balance(id(2), 5_000 * QTOV, 1_999 * QTOV, 0), None);
         l.slash(&id(1), Fault::Attributable);
         assert_eq!(l.bond_from_balance(id(1), 5_000 * QTOV, 2_000 * QTOV, 0), None);
+    }
+
+    #[test]
+    fn exit_runs_the_lock_then_the_unbonding_then_returns_the_stake() {
+        let mut l = StakeLedger::new(0);
+        l.bond_from_balance(id(1), 5_000 * QTOV, 2_000 * QTOV, 0);
+        assert!(!l.request_exit(&id(1), 89));
+        assert!(l.request_exit(&id(1), 90));
+        assert!(!l.request_exit(&id(1), 90));
+        assert_eq!(l.withdraw_to_balance(&id(1), 3_000 * QTOV, 90 + 20), None);
+        assert_eq!(
+            l.withdraw_to_balance(&id(1), 3_000 * QTOV, 90 + 21),
+            Some(5_000 * QTOV)
+        );
+        assert!(l.bond_of(&id(1)).is_none());
+    }
+
+    #[test]
+    fn a_bond_stays_slashable_through_the_unbonding() {
+        let mut l = StakeLedger::new(0);
+        l.bond_from_balance(id(1), 5_000 * QTOV, 2_000 * QTOV, 0);
+        l.request_exit(&id(1), 90);
+        assert_eq!(l.slash(&id(1), Fault::Attributable), 2_000 * QTOV);
+        assert_eq!(l.treasury(), 2_000 * QTOV);
+        assert!(l.bond_of(&id(1)).is_none());
     }
 
     #[test]
