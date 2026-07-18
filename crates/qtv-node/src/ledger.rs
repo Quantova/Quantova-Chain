@@ -11,6 +11,9 @@
 
 use qtv_codec::{from_bytes, to_bytes, Decode, Decoder, Encode, Encoder, Error};
 use qtv_crypto::sha3;
+use qtv_governance::{
+    check_enactment, Action, Ballot, Conviction, Lock, Referendum, Status, Track, Violation,
+};
 use qtv_staking::{Bond, Session, SessionMeter};
 use qtv_state::{Key, Trie, HASH_LEN, KEY_LEN};
 
@@ -163,6 +166,81 @@ fn address_id(address: &str) -> Option<[u8; 32]> {
 pub fn stake_system_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/stake/system"))
         .expect("a full hash reaches the address floor")
+}
+
+const GOV_NEXT_TAG: &[u8] = b"qtv/gov/next";
+const GOV_LOCKED_TAG: &[u8] = b"qtv/gov/locked";
+const GOV_REF_TAG: &[u8] = b"qtv/gov/ref/";
+const GOV_ACTION_TAG: &[u8] = b"qtv/gov/action/";
+const GOV_BALLOT_TAG: &[u8] = b"qtv/gov/ballot/";
+const GOV_LOCK_TAG: &[u8] = b"qtv/gov/lock/";
+
+fn gov_referendum_key(id: u64) -> Key {
+    let mut input = Vec::with_capacity(GOV_REF_TAG.len() + 8);
+    input.extend_from_slice(GOV_REF_TAG);
+    input.extend_from_slice(&id.to_le_bytes());
+    sha3::sha3_256(&input)
+}
+
+fn gov_action_key(id: u64) -> Key {
+    let mut input = Vec::with_capacity(GOV_ACTION_TAG.len() + 8);
+    input.extend_from_slice(GOV_ACTION_TAG);
+    input.extend_from_slice(&id.to_le_bytes());
+    sha3::sha3_256(&input)
+}
+
+fn gov_ballot_key(referendum: u64, voter: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(GOV_BALLOT_TAG.len() + 8 + voter.len());
+    input.extend_from_slice(GOV_BALLOT_TAG);
+    input.extend_from_slice(&referendum.to_le_bytes());
+    input.extend_from_slice(voter);
+    sha3::sha3_256(&input)
+}
+
+fn gov_lock_key(voter: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(GOV_LOCK_TAG.len() + voter.len());
+    input.extend_from_slice(GOV_LOCK_TAG);
+    input.extend_from_slice(voter);
+    sha3::sha3_256(&input)
+}
+
+pub fn gov_system_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/gov/system"))
+        .expect("a full hash reaches the address floor")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnactError {
+    Unknown,
+    NotApproved,
+    Constitution(Violation),
+    BadAddress,
+    UnknownParameter,
+    BadValue,
+}
+
+fn id_bytes_to_address(id: &[u8]) -> Option<String> {
+    if id.len() != KEY_LEN {
+        return None;
+    }
+    qtv_idfmt::render_address(id).ok()
+}
+
+fn id_from_slice(id: &[u8]) -> Option<[u8; 32]> {
+    if id.len() != KEY_LEN {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(id);
+    Some(out)
+}
+
+fn u64_from_le(bytes: &[u8]) -> Option<u64> {
+    bytes.try_into().ok().map(u64::from_le_bytes)
+}
+
+fn u128_from_le(bytes: &[u8]) -> Option<u128> {
+    bytes.try_into().ok().map(u128::from_le_bytes)
 }
 
 impl Ledger {
@@ -411,6 +489,322 @@ impl Ledger {
         closed
     }
 
+    fn gov_next_id(&self) -> u64 {
+        self.trie
+            .get(&stake_singleton_key(GOV_NEXT_TAG))
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical referendum counter"))
+            .unwrap_or(1)
+    }
+
+    fn set_gov_next_id(&mut self, id: u64) {
+        self.trie
+            .insert(stake_singleton_key(GOV_NEXT_TAG), to_bytes(&id));
+    }
+
+    /// The governance electorate, the total value locked for voting across every
+    /// live ballot. It is the denominator the support threshold is measured
+    /// against, and it moves only as locks open and release, never as a referendum
+    /// tallies, so support reads as the share of the locked electorate that voted.
+    pub fn gov_total_locked(&self) -> u128 {
+        self.trie
+            .get(&stake_singleton_key(GOV_LOCKED_TAG))
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical locked total"))
+            .unwrap_or(0)
+    }
+
+    fn set_gov_total_locked(&mut self, amount: u128) {
+        self.trie
+            .insert(stake_singleton_key(GOV_LOCKED_TAG), to_bytes(&amount));
+    }
+
+    pub fn gov_referendum(&self, id: u64) -> Option<Referendum> {
+        self.trie
+            .get(&gov_referendum_key(id))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical referendum"))
+    }
+
+    fn set_gov_referendum(&mut self, id: u64, referendum: &Referendum) {
+        self.trie
+            .insert(gov_referendum_key(id), to_bytes(referendum));
+    }
+
+    fn gov_action(&self, id: u64) -> Option<Action> {
+        self.trie
+            .get(&gov_action_key(id))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical action"))
+    }
+
+    fn set_gov_action(&mut self, id: u64, action: &Action) {
+        self.trie.insert(gov_action_key(id), to_bytes(action));
+    }
+
+    fn clear_gov_action(&mut self, id: u64) {
+        self.trie.insert(gov_action_key(id), Vec::new());
+    }
+
+    pub fn gov_ballot(&self, referendum: u64, voter: &[u8; 32]) -> Option<Ballot> {
+        self.trie
+            .get(&gov_ballot_key(referendum, voter))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical ballot"))
+    }
+
+    fn set_gov_ballot(&mut self, referendum: u64, voter: &[u8; 32], ballot: &Ballot) {
+        self.trie
+            .insert(gov_ballot_key(referendum, voter), to_bytes(ballot));
+    }
+
+    pub fn gov_lock(&self, voter: &[u8; 32]) -> Option<Lock> {
+        self.trie
+            .get(&gov_lock_key(voter))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical lock"))
+    }
+
+    fn set_gov_lock(&mut self, voter: &[u8; 32], lock: &Lock) {
+        self.trie.insert(gov_lock_key(voter), to_bytes(lock));
+    }
+
+    fn clear_gov_lock(&mut self, voter: &[u8; 32]) {
+        self.trie.insert(gov_lock_key(voter), Vec::new());
+    }
+
+    /// Whether recovery, freeze, or blacklist may never reach this account. The
+    /// second constitutional invariant shields validator stake and governance
+    /// locks, and the two protocol system accounts are shielded with them. An
+    /// account carrying a bond or a lock is therefore untouchable by the recovery
+    /// tracks, so a referendum can never seize consensus or voting collateral.
+    fn is_protected_account(&self, addr: &[u8]) -> bool {
+        let id = match id_from_slice(addr) {
+            Some(id) => id,
+            None => return false,
+        };
+        if self.stake_bond(&id).is_some() || self.gov_lock(&id).is_some() {
+            return true;
+        }
+        let stake_id = sha3::sha3_256(b"qtv/stake/system");
+        let gov_id = sha3::sha3_256(b"qtv/gov/system");
+        id == stake_id || id == gov_id
+    }
+
+    /// Open a referendum on a track, debiting the track deposit from the proposer.
+    /// The action must belong to the track, and the deposit is held until the
+    /// referendum concludes, when it returns on reaching support or is forfeit to
+    /// the treasury on spam or a kill. Returns the new referendum id.
+    pub fn gov_propose(
+        &mut self,
+        proposer: &str,
+        track: Track,
+        action: Action,
+        now: u64,
+    ) -> Option<u64> {
+        if action.track() != track {
+            return None;
+        }
+        let proposer_id = address_id(proposer)?;
+        let deposit = track.deposit();
+        let mut account = self.account(proposer);
+        if account.balance < deposit {
+            return None;
+        }
+        account.balance -= deposit;
+        self.set_account(proposer, &account);
+        let id = self.gov_next_id();
+        let referendum = Referendum::open(id, track, proposer_id.to_vec(), now);
+        self.set_gov_referendum(id, &referendum);
+        self.set_gov_action(id, &action);
+        self.set_gov_next_id(id + 1);
+        Some(id)
+    }
+
+    /// Cast a ballot on a live referendum. The stake is locked from the voter's
+    /// balance into a governance lock, separate from any validator bond, so voting
+    /// weight never draws on consensus collateral. Weight is the stake times the
+    /// conviction factor; a voter votes once per referendum. The lock releases on
+    /// the conviction schedule.
+    pub fn gov_vote(
+        &mut self,
+        voter: &str,
+        referendum_id: u64,
+        aye: bool,
+        conviction: Conviction,
+        stake: u64,
+        now: u64,
+    ) -> bool {
+        let voter_id = match address_id(voter) {
+            Some(id) => id,
+            None => return false,
+        };
+        let mut referendum = match self.gov_referendum(referendum_id) {
+            Some(referendum) => referendum,
+            None => return false,
+        };
+        if referendum.status != Status::Deciding || referendum.ready(now) {
+            return false;
+        }
+        if self.gov_ballot(referendum_id, &voter_id).is_some() {
+            return false;
+        }
+        let mut account = self.account(voter);
+        if account.balance < stake {
+            return false;
+        }
+        account.balance -= stake;
+        self.set_account(voter, &account);
+        let mut lock = self.gov_lock(&voter_id).unwrap_or(Lock { amount: 0, until: 0 });
+        lock.amount = lock.amount.saturating_add(stake);
+        let release = now.saturating_add(conviction.lock_seconds());
+        if release > lock.until {
+            lock.until = release;
+        }
+        self.set_gov_lock(&voter_id, &lock);
+        self.set_gov_total_locked(self.gov_total_locked() + stake as u128);
+        referendum.tally.record(aye, conviction, stake);
+        self.set_gov_referendum(referendum_id, &referendum);
+        self.set_gov_ballot(
+            referendum_id,
+            &voter_id,
+            &Ballot {
+                aye,
+                conviction,
+                stake,
+            },
+        );
+        true
+    }
+
+    /// Resolve a referendum once its window closes, settling the deposit on the
+    /// first resolution: returned to the proposer on reaching support, or forfeit
+    /// to the treasury on spam or a kill. Idempotent once decided.
+    pub fn gov_conclude(&mut self, referendum_id: u64, now: u64) -> Option<Status> {
+        let mut referendum = self.gov_referendum(referendum_id)?;
+        if referendum.status != Status::Deciding {
+            return Some(referendum.status);
+        }
+        let electorate = self.gov_total_locked();
+        let status = referendum.resolve(now, electorate);
+        if status == Status::Deciding {
+            return Some(status);
+        }
+        if referendum.deposit_refunded(electorate) {
+            if let Some(addr) = id_bytes_to_address(&referendum.proposer) {
+                let mut account = self.account(&addr);
+                account.balance = account.balance.saturating_add(referendum.deposit);
+                self.set_account(&addr, &account);
+            }
+        } else {
+            self.set_stake_treasury(self.stake_treasury() + referendum.deposit);
+        }
+        self.set_gov_referendum(referendum_id, &referendum);
+        Some(status)
+    }
+
+    /// Enact an approved referendum. It concludes first, then the constitution gate
+    /// checks the action against its track, the committed recovery scope, and the
+    /// protected accounts, and only a clean action executes. The action record is
+    /// tombstoned on success so a referendum enacts exactly once.
+    pub fn gov_enact(&mut self, referendum_id: u64, now: u64) -> Result<(), EnactError> {
+        let status = self.gov_conclude(referendum_id, now).ok_or(EnactError::Unknown)?;
+        if status != Status::Approved {
+            return Err(EnactError::NotApproved);
+        }
+        let action = self.gov_action(referendum_id).ok_or(EnactError::Unknown)?;
+        let referendum = self.gov_referendum(referendum_id).ok_or(EnactError::Unknown)?;
+        let scope_ok = match &action {
+            Action::FreezeRecovery {
+                scope,
+                victim,
+                seizures,
+            } => sha3::sha3_256(&Action::recovery_scope_preimage(victim, seizures)) == *scope,
+            _ => true,
+        };
+        check_enactment(referendum.track, &action, scope_ok, |addr| {
+            self.is_protected_account(addr)
+        })
+        .map_err(EnactError::Constitution)?;
+        self.execute_action(&action)?;
+        self.clear_gov_action(referendum_id);
+        Ok(())
+    }
+
+    fn execute_action(&mut self, action: &Action) -> Result<(), EnactError> {
+        match action {
+            Action::Mint { to, amount } => {
+                let addr = id_bytes_to_address(to).ok_or(EnactError::BadAddress)?;
+                let mut account = self.account(&addr);
+                account.balance = account.balance.saturating_add(*amount);
+                self.set_account(&addr, &account);
+                Ok(())
+            }
+            Action::Parameter { key, value } => self.apply_parameter(key, value),
+            Action::Blacklist { target } => {
+                if let Some(id) = id_from_slice(target) {
+                    self.set_stake_banned(&id);
+                }
+                Ok(())
+            }
+            Action::FreezeRecovery {
+                victim, seizures, ..
+            } => {
+                let victim_addr = id_bytes_to_address(victim).ok_or(EnactError::BadAddress)?;
+                let mut recovered = 0u64;
+                for seizure in seizures {
+                    if let Some(from_addr) = id_bytes_to_address(&seizure.from) {
+                        let mut from = self.account(&from_addr);
+                        let take = from.balance.min(seizure.amount);
+                        from.balance -= take;
+                        self.set_account(&from_addr, &from);
+                        recovered = recovered.saturating_add(take);
+                    }
+                }
+                let mut account = self.account(&victim_addr);
+                account.balance = account.balance.saturating_add(recovered);
+                self.set_account(&victim_addr, &account);
+                Ok(())
+            }
+            Action::Upgrade { .. }
+            | Action::BridgeMigration { .. }
+            | Action::AddAsset { .. }
+            | Action::Freeze { .. } => Ok(()),
+        }
+    }
+
+    fn apply_parameter(&mut self, key: &[u8], value: &[u8]) -> Result<(), EnactError> {
+        match key {
+            b"price" => {
+                self.set_stake_price(u128_from_le(value).ok_or(EnactError::BadValue)?);
+                Ok(())
+            }
+            b"mainnet_start" => {
+                self.set_stake_mainnet_start(u64_from_le(value).ok_or(EnactError::BadValue)?);
+                Ok(())
+            }
+            _ => Err(EnactError::UnknownParameter),
+        }
+    }
+
+    /// Return a released governance lock to the voter's balance and drop it from the
+    /// electorate. Nothing moves while the conviction lock still holds.
+    pub fn gov_release(&mut self, voter: &str, now: u64) -> u64 {
+        let voter_id = match address_id(voter) {
+            Some(id) => id,
+            None => return 0,
+        };
+        let lock = match self.gov_lock(&voter_id) {
+            Some(lock) if lock.withdrawable(now) => lock,
+            _ => return 0,
+        };
+        self.clear_gov_lock(&voter_id);
+        let locked = self.gov_total_locked();
+        self.set_gov_total_locked(locked.saturating_sub(lock.amount as u128));
+        let mut account = self.account(voter);
+        account.balance = account.balance.saturating_add(lock.amount);
+        self.set_account(voter, &account);
+        lock.amount
+    }
+
     pub fn bond(&mut self, address: &str, amount: u64, day: u64) -> bool {
         let id = match address_id(address) {
             Some(id) => id,
@@ -543,6 +937,159 @@ impl Ledger {
 #[cfg(test)]
 mod stake_state_tests {
     use super::*;
+
+    fn gov_addr(tag: u8) -> String {
+        qtv_idfmt::render_address(&[tag; 32]).unwrap()
+    }
+
+    fn fund(l: &mut Ledger, address: &str, amount: u64) {
+        l.set_account(address, &Account::funded(amount, 1, vec![]));
+    }
+
+    #[test]
+    fn a_qip_deposit_returns_on_support_and_a_spam_deposit_is_forfeit() {
+        let mut l = Ledger::new();
+        let proposer = gov_addr(20);
+        fund(&mut l, &proposer, 20_000 * 1_000_000);
+        let action = qtv_governance::Action::Parameter {
+            key: b"price".to_vec(),
+            value: 70_000_000u128.to_le_bytes().to_vec(),
+        };
+        let id = l
+            .gov_propose(&proposer, qtv_governance::Track::Parameter, action, 0)
+            .unwrap();
+        assert_eq!(id, 1);
+        assert_eq!(l.balance(&proposer), 5_000 * 1_000_000);
+
+        let voter = gov_addr(21);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+        assert!(l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0));
+        assert_eq!(l.balance(&voter), 5_000 * 1_000_000);
+        assert_eq!(l.gov_total_locked(), 5_000 * 1_000_000);
+        // A voter votes once per referendum.
+        assert!(!l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 100, 0));
+
+        let close = 7 * 86_400 + 1;
+        assert_eq!(l.gov_conclude(id, close), Some(qtv_governance::Status::Approved));
+        assert_eq!(l.balance(&proposer), 20_000 * 1_000_000);
+
+        // A second proposal that no one votes on forfeits its deposit to the treasury.
+        let spam_action = qtv_governance::Action::Parameter {
+            key: b"price".to_vec(),
+            value: 1u128.to_le_bytes().to_vec(),
+        };
+        let spam = l
+            .gov_propose(&proposer, qtv_governance::Track::Parameter, spam_action, 0)
+            .unwrap();
+        assert_eq!(l.gov_conclude(spam, close), Some(qtv_governance::Status::Rejected));
+        assert_eq!(l.balance(&proposer), 5_000 * 1_000_000);
+        assert_eq!(l.stake_treasury(), 15_000 * 1_000_000);
+    }
+
+    #[test]
+    fn governance_enacts_a_parameter_change_that_sets_the_reward_price() {
+        let mut l = Ledger::new();
+        let proposer = gov_addr(22);
+        fund(&mut l, &proposer, 20_000 * 1_000_000);
+        let action = qtv_governance::Action::Parameter {
+            key: b"price".to_vec(),
+            value: 70_000_000u128.to_le_bytes().to_vec(),
+        };
+        let id = l
+            .gov_propose(&proposer, qtv_governance::Track::Parameter, action, 0)
+            .unwrap();
+        let voter = gov_addr(23);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+        l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+
+        assert_eq!(l.stake_price(), 0);
+        l.gov_enact(id, 7 * 86_400 + 1).unwrap();
+        assert_eq!(l.stake_price(), 70_000_000);
+        // A referendum enacts exactly once.
+        assert!(l.gov_enact(id, 7 * 86_400 + 1).is_err());
+    }
+
+    #[test]
+    fn governance_mints_uncapped_to_the_target_on_the_mint_track() {
+        let mut l = Ledger::new();
+        let proposer = gov_addr(24);
+        fund(&mut l, &proposer, 300_000 * 1_000_000);
+        let target = gov_addr(30);
+        let action = qtv_governance::Action::Mint {
+            to: [30u8; 32].to_vec(),
+            amount: 1_000_000 * 1_000_000,
+        };
+        let id = l
+            .gov_propose(&proposer, qtv_governance::Track::Mint, action, 0)
+            .unwrap();
+        let voter = gov_addr(25);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+        l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        l.gov_enact(id, 3 * 86_400 + 1).unwrap();
+        assert_eq!(l.balance(&target), 1_000_000 * 1_000_000);
+    }
+
+    #[test]
+    fn the_constitution_refuses_a_recovery_that_reaches_bonded_stake() {
+        let mut l = Ledger::new();
+        let proposer = gov_addr(26);
+        fund(&mut l, &proposer, 200_000 * 1_000_000);
+        let bonded = gov_addr(41);
+        l.seed_validator_bond(&bonded, 2_000 * 1_000_000);
+
+        let seizures = vec![qtv_governance::Seizure {
+            from: [41u8; 32].to_vec(),
+            amount: 100,
+        }];
+        let scope = sha3::sha3_256(&qtv_governance::Action::recovery_scope_preimage(
+            &[40u8; 32],
+            &seizures,
+        ));
+        let action = qtv_governance::Action::FreezeRecovery {
+            scope,
+            victim: [40u8; 32].to_vec(),
+            seizures,
+        };
+        let id = l
+            .gov_propose(&proposer, qtv_governance::Track::FreezeRecovery, action, 0)
+            .unwrap();
+        let voter = gov_addr(27);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+        l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        assert_eq!(
+            l.gov_enact(id, 6 * 3_600 + 1),
+            Err(EnactError::Constitution(
+                qtv_governance::Violation::RecoveryTouchesProtected
+            ))
+        );
+    }
+
+    #[test]
+    fn a_governance_lock_returns_to_balance_only_after_its_conviction_expires() {
+        let mut l = Ledger::new();
+        let proposer = gov_addr(28);
+        fund(&mut l, &proposer, 20_000 * 1_000_000);
+        let action = qtv_governance::Action::Parameter {
+            key: b"price".to_vec(),
+            value: 70_000_000u128.to_le_bytes().to_vec(),
+        };
+        let id = l
+            .gov_propose(&proposer, qtv_governance::Track::Parameter, action, 0)
+            .unwrap();
+        let voter = gov_addr(29);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+        // A one year conviction locks the stake for a year.
+        l.gov_vote(&voter, id, true, qtv_governance::Conviction::Year, 4_000 * 1_000_000, 0);
+        assert_eq!(l.balance(&voter), 6_000 * 1_000_000);
+        // Before the lock expires nothing returns.
+        assert_eq!(l.gov_release(&voter, 100), 0);
+        assert_eq!(l.balance(&voter), 6_000 * 1_000_000);
+        // After a year the whole lock returns and leaves the electorate.
+        let year = 365 * 86_400;
+        assert_eq!(l.gov_release(&voter, year), 4_000 * 1_000_000);
+        assert_eq!(l.balance(&voter), 10_000 * 1_000_000);
+        assert_eq!(l.gov_total_locked(), 0);
+    }
 
     #[test]
     fn staking_keys_are_namespaced_off_the_account_space() {
