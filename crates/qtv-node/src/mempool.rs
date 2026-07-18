@@ -319,7 +319,17 @@ impl Mempool {
         ledger: &Ledger,
         fee_params: &FeeParams,
     ) -> Result<Admitted, Reject> {
-        validate(&wrapper, ledger, fee_params)?;
+        if wrapper.body().call().target() == crate::ledger::gov_system_address() {
+            let account = ledger.account(wrapper.body().sender());
+            let signature_ok = qtv_tx::verify(&wrapper, &account.public_key);
+            if crate::node::governance_admissible(&wrapper, &account, fee_params, signature_ok)
+                .is_none()
+            {
+                return Err(Reject::BadCall);
+            }
+        } else {
+            validate(&wrapper, ledger, fee_params)?;
+        }
         let id = wrapper.id();
         if self.pending.iter().any(|w| w.id() == id) {
             return Ok(Admitted::Known);
@@ -371,7 +381,16 @@ impl Mempool {
         let verified = verify_signatures(ledger, &batch, verify_cores);
         let mut admitted = Vec::new();
         for (index, wrapper) in batch.into_iter().enumerate() {
-            if validate_verified(&wrapper, ledger, fee_params, verified[index]).is_err() {
+            let admissible = if wrapper.body().call().target()
+                == crate::ledger::gov_system_address()
+            {
+                let account = ledger.account(wrapper.body().sender());
+                crate::node::governance_admissible(&wrapper, &account, fee_params, verified[index])
+                    .is_some()
+            } else {
+                validate_verified(&wrapper, ledger, fee_params, verified[index]).is_ok()
+            };
+            if !admissible {
                 continue;
             }
             let id = wrapper.id();

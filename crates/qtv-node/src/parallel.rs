@@ -209,10 +209,11 @@ pub fn execute_parallel(
     day: u64,
 ) -> Vec<Wrapper> {
     let stake_address = crate::ledger::stake_system_address();
-    if candidates
-        .iter()
-        .any(|wrapper| access(wrapper).1 == stake_address.as_str())
-    {
+    let gov_address = crate::ledger::gov_system_address();
+    if candidates.iter().any(|wrapper| {
+        let target = access(wrapper).1;
+        target == stake_address.as_str() || target == gov_address.as_str()
+    }) {
         return crate::node::execute_ordered(ledger, candidates, fee_params, day);
     }
     let layers = plan_layers(candidates);

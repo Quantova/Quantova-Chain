@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 use std::thread;
 
 use qtv_block::{Block as ChainBlock, Header};
+use qtv_codec::{Decode, Decoder};
+use qtv_governance::{Action, Conviction};
 use qtv_tx::Wrapper;
 
 use crate::consensus::{header_value, Beacon, Consensus, ConsensusValidator, Parent};
@@ -187,6 +189,125 @@ pub fn day_of_height(height: u64) -> u64 {
 /// explicit, so the sequential path is `verify_cores` of one and the equivalence
 /// across core counts can be exercised directly. The public entry passes the core
 /// count the machine reports.
+/// A governance operation carried in the arguments of a transaction whose target is
+/// the reserved governance system address. The leading argument byte selects the
+/// operation and the rest is its payload.
+pub(crate) enum GovOp {
+    Propose(Action),
+    Vote {
+        referendum: u64,
+        aye: bool,
+        conviction: Conviction,
+        stake: u64,
+    },
+    Enact(u64),
+    Conclude(u64),
+    Release,
+}
+
+fn decode_gov_op(op: u8, payload: &[u8]) -> Option<GovOp> {
+    let mut decoder = Decoder::new(payload);
+    let operation = match op {
+        1 => GovOp::Propose(Action::decode(&mut decoder).ok()?),
+        2 => GovOp::Vote {
+            referendum: decoder.get_u64().ok()?,
+            aye: decoder.get_u8().ok()? != 0,
+            conviction: Conviction::decode(&mut decoder).ok()?,
+            stake: decoder.get_u64().ok()?,
+        },
+        3 => GovOp::Enact(decoder.get_u64().ok()?),
+        4 => GovOp::Conclude(decoder.get_u64().ok()?),
+        5 => GovOp::Release,
+        _ => return None,
+    };
+    decoder.finish().ok()?;
+    Some(operation)
+}
+
+/// Whether a transaction is a well formed governance call: its target is the
+/// governance system address, its sender holds a key, its scheme and signature and
+/// nonce and meter and fee clear the same floors a transfer clears, and its
+/// arguments decode to a governance operation. This is the shared gate the mempool
+/// admits by and the executor dispatches by, so a governance call the mempool
+/// accepts is one the executor runs.
+pub(crate) fn governance_admissible(
+    wrapper: &Wrapper,
+    account: &Account,
+    fee_params: &FeeParams,
+    signature_ok: bool,
+) -> Option<GovOp> {
+    let body = wrapper.body();
+    if body.call().target() != crate::ledger::gov_system_address() {
+        return None;
+    }
+    if !account.has_key() || !qtv_tx::scheme_supported(wrapper.scheme()) || !signature_ok {
+        return None;
+    }
+    if body.nonce() != account.nonce || body.meter_limit() < crate::execution::TRANSFER_METER {
+        return None;
+    }
+    if body.fee() < u128::from(fee_params.transfer_fee()) {
+        return None;
+    }
+    let charged = u64::try_from(body.fee().min(u128::from(fee_params.ceiling_fee())))
+        .unwrap_or_else(|_| fee_params.ceiling_fee());
+    if account.balance < charged {
+        return None;
+    }
+    let args = body.call().args();
+    let op = *args.first()?;
+    decode_gov_op(op, &args[1..])
+}
+
+/// Charge a governance call's fee, bump its nonce, and apply its operation. The
+/// operation runs on the post fee account, and a submit or a vote that cannot cover
+/// its own deposit or stake is a no op while the fee still applies, so a well formed
+/// governance call that reaches here is always included. Returns false only when the
+/// call is not an admissible governance call at all.
+fn dispatch_governance(
+    ledger: &mut Ledger,
+    wrapper: &Wrapper,
+    signature_ok: bool,
+    fee_params: &FeeParams,
+    now: u64,
+) -> bool {
+    let sender = wrapper.body().sender().to_string();
+    let account = ledger.account(&sender);
+    let operation = match governance_admissible(wrapper, &account, fee_params, signature_ok) {
+        Some(operation) => operation,
+        None => return false,
+    };
+    let charged = u64::try_from(wrapper.body().fee().min(u128::from(fee_params.ceiling_fee())))
+        .unwrap_or_else(|_| fee_params.ceiling_fee());
+    let mut charged_account = account;
+    charged_account.balance -= charged;
+    charged_account.nonce += 1;
+    ledger.set_account(&sender, &charged_account);
+    match operation {
+        GovOp::Propose(action) => {
+            ledger.gov_propose(&sender, action.track(), action, now);
+        }
+        GovOp::Vote {
+            referendum,
+            aye,
+            conviction,
+            stake,
+        } => {
+            ledger.gov_vote(&sender, referendum, aye, conviction, stake, now);
+        }
+        GovOp::Enact(referendum) => {
+            let _ = ledger.gov_enact(referendum, now);
+        }
+        GovOp::Conclude(referendum) => {
+            ledger.gov_conclude(referendum, now);
+        }
+        GovOp::Release => {
+            ledger.gov_release(&sender, now);
+        }
+    }
+    true
+}
+
 fn execute_ordered_across(
     ledger: &mut Ledger,
     candidates: &[Wrapper],
@@ -196,8 +317,16 @@ fn execute_ordered_across(
 ) -> Vec<Wrapper> {
     let verified = verify_signatures(ledger, candidates, verify_cores);
     let stake_address = crate::ledger::stake_system_address();
+    let gov_address = crate::ledger::gov_system_address();
+    let now_seconds = day.saturating_mul(86_400);
     let mut included = Vec::new();
     for (index, wrapper) in candidates.iter().enumerate() {
+        if wrapper.body().call().target() == gov_address {
+            if dispatch_governance(ledger, wrapper, verified[index], fee_params, now_seconds) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
         let plan = match validate_verified(wrapper, ledger, fee_params, verified[index]) {
             Ok(plan) => plan,
             Err(_) => continue,
@@ -598,6 +727,92 @@ mod tests {
             call,
         );
         sign(from, &body)
+    }
+
+    fn gov_call_tx(from: &KeyAccount, args: Vec<u8>, nonce: u64, fee: &FeeParams) -> Wrapper {
+        let call = qtv_tx::Call::new(crate::ledger::gov_system_address(), args);
+        let body = Body::new(
+            from.address(),
+            nonce,
+            TRANSFER_METER,
+            u128::from(fee.transfer_fee()),
+            call,
+        );
+        sign(from, &body)
+    }
+
+    fn propose_price_args(rate: u128) -> Vec<u8> {
+        let action = Action::Parameter {
+            key: b"price".to_vec(),
+            value: rate.to_le_bytes().to_vec(),
+        };
+        let mut args = vec![1u8];
+        args.extend_from_slice(&qtv_codec::to_bytes(&action));
+        args
+    }
+
+    fn vote_args(referendum: u64, aye: bool, conviction_code: u8, stake: u64) -> Vec<u8> {
+        let mut encoder = qtv_codec::Encoder::new();
+        encoder.put_u8(2);
+        encoder.put_u64(referendum);
+        encoder.put_u8(aye as u8);
+        encoder.put_u8(conviction_code);
+        encoder.put_u64(stake);
+        encoder.into_bytes()
+    }
+
+    #[test]
+    fn a_governance_transaction_drives_a_referendum_through_the_executor() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let proposer = keypair(100);
+        let voter = keypair(101);
+        fund(&mut ledger, &proposer, 30_000 * 1_000_000);
+        fund(&mut ledger, &voter, 10_000 * 1_000_000);
+
+        let propose = gov_call_tx(&proposer, propose_price_args(70_000_000), 0, &fee);
+        let vote = gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee);
+        let included = execute_ordered(&mut ledger, &[propose, vote], &fee, 0);
+        assert_eq!(included.len(), 2);
+        assert!(ledger.gov_referendum(1).is_some());
+        assert_eq!(ledger.gov_total_locked(), 5_000 * 1_000_000);
+        assert_eq!(ledger.stake_price(), 0);
+
+        // Enact after the seven day QIP window: day 8 is 691,200s, past 604,800s.
+        let mut enact = qtv_codec::Encoder::new();
+        enact.put_u8(3);
+        enact.put_u64(1);
+        let enact_tx = gov_call_tx(&proposer, enact.into_bytes(), 1, &fee);
+        let included = execute_ordered(&mut ledger, &[enact_tx], &fee, 8);
+        assert_eq!(included.len(), 1);
+        assert_eq!(ledger.stake_price(), 70_000_000);
+
+        // A malformed governance operation is refused, not included.
+        let bad = gov_call_tx(&proposer, vec![99u8], 2, &fee);
+        assert!(execute_ordered(&mut ledger, &[bad], &fee, 8).is_empty());
+    }
+
+    #[test]
+    fn the_parallel_path_routes_a_governance_block_to_the_same_result() {
+        let fee = FeeParams::devnet();
+        let proposer = keypair(102);
+        let voter = keypair(103);
+        let base = {
+            let mut ledger = Ledger::new();
+            fund(&mut ledger, &proposer, 30_000 * 1_000_000);
+            fund(&mut ledger, &voter, 10_000 * 1_000_000);
+            ledger
+        };
+        let block = vec![
+            gov_call_tx(&proposer, propose_price_args(70_000_000), 0, &fee),
+            gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee),
+        ];
+        let mut sequential = base.clone();
+        execute_ordered(&mut sequential, &block, &fee, 0);
+        let mut parallel = base.clone();
+        crate::parallel::execute_parallel(&mut parallel, &block, &fee, 8, 0);
+        assert_eq!(sequential.state_root(), parallel.state_root());
+        assert!(parallel.gov_referendum(1).is_some());
     }
 
     fn corrupt_signature(tx: Wrapper) -> Wrapper {
