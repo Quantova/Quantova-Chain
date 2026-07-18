@@ -734,7 +734,7 @@ impl DevNode {
                 };
                 (staged.view, value, true, Some(block))
             }
-            None => (0, 0, false, None),
+            None => (0, [0u8; 32], false, None),
         };
         let subject =
             view_change_subject(self.height, target_view, lock_view, locked_value, has_lock);
@@ -776,7 +776,7 @@ impl DevNode {
         };
         let (has_lock, locked_value, lock_view) = match &record.locked {
             Some(block) => (true, header_value(&block.header.hash()), record.lock_view),
-            None => (false, 0, 0),
+            None => (false, [0u8; 32], 0),
         };
         let subject = view_change_subject(
             record.height,
@@ -945,7 +945,7 @@ impl DevNode {
 
     /// The consensus value of the currently staged block, the value the lock holds,
     /// if any. Two competing blocks at one height carry different values.
-    pub fn staged_value(&self) -> Option<u64> {
+    pub fn staged_value(&self) -> Option<[u8; 32]> {
         self.staged
             .as_ref()
             .map(|staged| header_value(&staged.header.hash()))
@@ -1268,17 +1268,17 @@ fn view_change_subject(
     height: Height,
     target_view: View,
     lock_view: View,
-    locked_value: u64,
+    locked_value: [u8; 32],
     has_lock: bool,
 ) -> ConsensusBlock {
-    let mut buf = Vec::with_capacity(21 + 8 * 4 + 1);
+    let mut buf = Vec::with_capacity(21 + 8 * 3 + 32 + 1);
     buf.extend_from_slice(b"QTV-DEVNET-VIEWCHANGE");
     buf.extend_from_slice(&height.to_le_bytes());
     buf.extend_from_slice(&target_view.to_le_bytes());
     buf.extend_from_slice(&lock_view.to_le_bytes());
-    buf.extend_from_slice(&locked_value.to_le_bytes());
+    buf.extend_from_slice(&locked_value);
     buf.push(has_lock as u8);
-    let commitment = qtv_bft::hash::digest_u64(&buf);
+    let commitment = qtv_bft::hash::digest_256(&buf);
     ConsensusBlock::new(height, commitment, Parent::Genesis)
 }
 
