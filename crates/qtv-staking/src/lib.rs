@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 pub const NATIVE_UNIT: u128 = 1_000_000;
 pub const MIN_STAKE: u64 = 2_000 * NATIVE_UNIT as u64;
 
@@ -121,6 +123,94 @@ impl Bond {
     }
 }
 
+pub struct StakeLedger {
+    bonds: BTreeMap<[u8; 32], Bond>,
+    banned: BTreeSet<[u8; 32]>,
+    pool: u64,
+    treasury: u64,
+}
+
+impl StakeLedger {
+    pub fn new(pool: u64) -> StakeLedger {
+        StakeLedger {
+            bonds: BTreeMap::new(),
+            banned: BTreeSet::new(),
+            pool,
+            treasury: 0,
+        }
+    }
+
+    pub fn pool(&self) -> u64 {
+        self.pool
+    }
+
+    pub fn treasury(&self) -> u64 {
+        self.treasury
+    }
+
+    pub fn bond_of(&self, id: &[u8; 32]) -> Option<&Bond> {
+        self.bonds.get(id)
+    }
+
+    pub fn is_banned(&self, id: &[u8; 32]) -> bool {
+        self.banned.contains(id)
+    }
+
+    pub fn total_staked(&self) -> u64 {
+        self.bonds.values().map(|b| b.amount).sum()
+    }
+
+    pub fn bond(&mut self, id: [u8; 32], amount: u64, day: u64) -> bool {
+        if self.banned.contains(&id) {
+            return false;
+        }
+        match Bond::new(amount, day) {
+            Some(bond) => {
+                self.bonds.insert(id, bond);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn accrue(
+        &mut self,
+        id: &[u8; 32],
+        session: Session,
+        rate_micro_usd_per_qtov: u128,
+        now_day: u64,
+        mainnet_start_day: u64,
+    ) -> u64 {
+        if in_blackout(now_day, mainnet_start_day) {
+            return 0;
+        }
+        let stake = match self.bonds.get(id) {
+            Some(bond) => bond.amount,
+            None => return 0,
+        };
+        let paid = session_reward(stake, session, rate_micro_usd_per_qtov).min(self.pool);
+        self.pool -= paid;
+        paid
+    }
+
+    pub fn slash(&mut self, id: &[u8; 32], fault: Fault) -> u64 {
+        let taken = match self.bonds.get_mut(id) {
+            Some(bond) => {
+                let amount = slash(bond.amount, fault);
+                bond.amount -= amount;
+                amount
+            }
+            None => return 0,
+        };
+        self.treasury += taken;
+        if let Fault::Attributable = fault {
+            self.bonds.remove(id);
+            self.banned.insert(*id);
+        }
+        taken
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +302,51 @@ mod tests {
         assert!(bond.can_request_exit(10 + 90));
         assert_eq!(bond.earliest_exit_day(), 10 + 111);
         assert_eq!(bond.slashable_until(10 + 90), 10 + 90 + 21);
+    }
+
+    fn id(n: u8) -> [u8; 32] {
+        [n; 32]
+    }
+
+    #[test]
+    fn ledger_bonds_only_eligible_and_never_the_banned() {
+        let mut l = StakeLedger::new(100_000 * QTOV);
+        assert!(!l.bond(id(1), 1_999 * QTOV, 0));
+        assert!(l.bond(id(1), 2_000 * QTOV, 0));
+        assert_eq!(l.total_staked(), 2_000 * QTOV);
+        l.slash(&id(1), Fault::Attributable);
+        assert!(l.is_banned(&id(1)));
+        assert!(!l.bond(id(1), 2_000 * QTOV, 0));
+    }
+
+    #[test]
+    fn rewards_come_from_the_pool_and_never_overdraw() {
+        let mut l = StakeLedger::new(50 * QTOV);
+        l.bond(id(1), 2_000 * QTOV, 0);
+        assert_eq!(l.accrue(&id(1), Session::High, PRICE_70, 400, 0), 35 * QTOV);
+        assert_eq!(l.pool(), 15 * QTOV);
+        assert_eq!(l.accrue(&id(1), Session::High, PRICE_70, 400, 0), 15 * QTOV);
+        assert_eq!(l.pool(), 0);
+    }
+
+    #[test]
+    fn the_blackout_pays_nothing_in_the_first_year() {
+        let mut l = StakeLedger::new(100_000 * QTOV);
+        l.bond(id(1), 2_000 * QTOV, 0);
+        assert_eq!(l.accrue(&id(1), Session::High, PRICE_70, 364, 0), 0);
+        assert_eq!(l.pool(), 100_000 * QTOV);
+        assert_eq!(l.accrue(&id(1), Session::High, PRICE_70, 365, 0), 35 * QTOV);
+    }
+
+    #[test]
+    fn slashing_moves_stake_to_the_treasury() {
+        let mut l = StakeLedger::new(0);
+        l.bond(id(1), 2_000 * QTOV, 0);
+        assert_eq!(l.slash(&id(1), Fault::LivenessMinor), 20 * QTOV);
+        assert_eq!(l.treasury(), 20 * QTOV);
+        assert_eq!(l.bond_of(&id(1)).unwrap().amount, 1_980 * QTOV);
+        l.slash(&id(1), Fault::Attributable);
+        assert_eq!(l.treasury(), 2_000 * QTOV);
+        assert!(l.bond_of(&id(1)).is_none());
     }
 }
