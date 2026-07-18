@@ -5,6 +5,7 @@ pub const NATIVE_UNIT: u128 = 1_000_000;
 pub const MIN_STAKE: u64 = 2_000 * NATIVE_UNIT as u64;
 
 pub const HIGH_SESSION_TX: u64 = 50_000_000_000;
+pub const SESSION_DAYS: u64 = 182;
 
 pub const LOW_SESSION_BPS: u128 = 100;
 pub const HIGH_SESSION_BPS: u128 = 175;
@@ -281,6 +282,59 @@ impl StakeLedger {
     }
 }
 
+pub struct SessionMeter {
+    window_start_day: u64,
+    count: u64,
+}
+
+impl SessionMeter {
+    pub fn new(start_day: u64) -> SessionMeter {
+        SessionMeter {
+            window_start_day: start_day,
+            count: 0,
+        }
+    }
+
+    pub fn record(&mut self, transactions: u64) {
+        self.count = self.count.saturating_add(transactions);
+    }
+
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    pub fn window_closed(&self, now_day: u64) -> bool {
+        now_day.saturating_sub(self.window_start_day) >= SESSION_DAYS
+    }
+
+    pub fn close(&mut self, now_day: u64) -> Option<Session> {
+        if self.window_closed(now_day) {
+            let session = Session::classify(self.count);
+            self.window_start_day = now_day;
+            self.count = 0;
+            Some(session)
+        } else {
+            None
+        }
+    }
+}
+
+impl Encode for SessionMeter {
+    fn encode(&self, encoder: &mut Encoder) {
+        self.window_start_day.encode(encoder);
+        self.count.encode(encoder);
+    }
+}
+
+impl Decode for SessionMeter {
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
+        Ok(SessionMeter {
+            window_start_day: u64::decode(decoder)?,
+            count: u64::decode(decoder)?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +511,20 @@ mod tests {
         assert_eq!(l.slash(&id(1), Fault::Attributable), 2_000 * QTOV);
         assert_eq!(l.treasury(), 2_000 * QTOV);
         assert!(l.bond_of(&id(1)).is_none());
+    }
+
+    #[test]
+    fn the_session_meter_counts_a_window_then_classifies_and_resets() {
+        let mut m = SessionMeter::new(0);
+        m.record(30_000_000_000);
+        m.record(15_000_000_000);
+        assert_eq!(m.count(), 45_000_000_000);
+        assert!(!m.window_closed(181));
+        assert_eq!(m.close(181), None);
+        assert_eq!(m.close(182), Some(Session::Low));
+        assert_eq!(m.count(), 0);
+        m.record(50_000_000_000);
+        assert_eq!(m.close(182 + 182), Some(Session::High));
     }
 
     #[test]
