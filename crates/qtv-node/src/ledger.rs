@@ -119,6 +119,11 @@ fn address_id(address: &str) -> Option<[u8; 32]> {
     Some(id)
 }
 
+pub fn stake_system_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/stake/system"))
+        .expect("a full hash reaches the address floor")
+}
+
 impl Ledger {
     pub fn stake_bond(&self, id: &[u8; 32]) -> Option<Bond> {
         match self.trie.get(&stake_bond_key(id)) {
@@ -192,6 +197,44 @@ impl Ledger {
             return false;
         }
         account.balance -= amount;
+        self.set_account(address, &account);
+        self.set_stake_bond(
+            &id,
+            &Bond {
+                amount: total,
+                bonded_at_day: day,
+                exit_requested_at: None,
+            },
+        );
+        true
+    }
+
+    pub fn bond_with_fee(&mut self, address: &str, amount: u64, fee: u64, day: u64) -> bool {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return false,
+        };
+        if self.is_stake_banned(&id) {
+            return false;
+        }
+        let debit = match amount.checked_add(fee) {
+            Some(debit) => debit,
+            None => return false,
+        };
+        let mut account = self.account(address);
+        if account.balance < debit {
+            return false;
+        }
+        let existing = self.stake_bond(&id).map(|b| b.amount).unwrap_or(0);
+        let total = match existing.checked_add(amount) {
+            Some(total) => total,
+            None => return false,
+        };
+        if !qtv_staking::eligible(total) {
+            return false;
+        }
+        account.balance -= debit;
+        account.nonce += 1;
         self.set_account(address, &account);
         self.set_stake_bond(
             &id,
@@ -354,6 +397,30 @@ mod stake_state_tests {
         assert!(l.stake_bond(&id).is_none());
         assert!(l.is_stake_banned(&id));
         assert!(!l.bond(&addr, 1_000 * 1_000_000, 0));
+    }
+
+    #[test]
+    fn bond_with_fee_charges_the_fee_and_bonds_atomically() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[6u8; 32]).unwrap();
+        let id = [6u8; 32];
+        l.set_account(&addr, &Account::funded(3_000 * 1_000_000, 1, vec![]));
+        assert!(!l.bond_with_fee(&addr, 2_999 * 1_000_000, 2 * 1_000_000, 0));
+        assert_eq!(l.balance(&addr), 3_000 * 1_000_000);
+        assert_eq!(l.account(&addr).nonce, 0);
+        assert!(l.bond_with_fee(&addr, 2_000 * 1_000_000, 1_000_000, 7));
+        assert_eq!(l.balance(&addr), 999 * 1_000_000);
+        assert_eq!(l.stake_bond(&id).unwrap().amount, 2_000 * 1_000_000);
+        assert_eq!(l.stake_bond(&id).unwrap().bonded_at_day, 7);
+        assert_eq!(l.account(&addr).nonce, 1);
+    }
+
+    #[test]
+    fn the_stake_system_address_is_fixed_and_reserved() {
+        let a = stake_system_address();
+        assert!(a.starts_with("Q1"));
+        assert_eq!(stake_system_address(), a);
+        assert!(qtv_idfmt::parse_address(&a).is_ok());
     }
 }
 
