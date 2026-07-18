@@ -10,6 +10,8 @@
 //! whole account set and is fixed by that set, independent of insertion order.
 
 use qtv_codec::{from_bytes, to_bytes, Decode, Decoder, Encode, Encoder, Error};
+use qtv_crypto::sha3;
+use qtv_staking::Bond;
 use qtv_state::{Key, Trie, HASH_LEN, KEY_LEN};
 
 /// An account record: the nonce, the native balance, the signature scheme, and
@@ -81,6 +83,97 @@ fn state_key(address: &str) -> Key {
 /// reloads into the identical trie position.
 pub fn account_key(address: &str) -> Key {
     state_key(address)
+}
+
+const STAKE_BOND_TAG: &[u8] = b"qtv/stake/bond/";
+const STAKE_POOL_TAG: &[u8] = b"qtv/stake/pool";
+const STAKE_TREASURY_TAG: &[u8] = b"qtv/stake/treasury";
+
+fn stake_bond_key(id: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(STAKE_BOND_TAG.len() + id.len());
+    input.extend_from_slice(STAKE_BOND_TAG);
+    input.extend_from_slice(id);
+    sha3::sha3_256(&input)
+}
+
+fn stake_singleton_key(tag: &[u8]) -> Key {
+    sha3::sha3_256(tag)
+}
+
+impl Ledger {
+    pub fn stake_bond(&self, id: &[u8; 32]) -> Option<Bond> {
+        match self.trie.get(&stake_bond_key(id)) {
+            Some(bytes) if !bytes.is_empty() => {
+                Some(from_bytes(bytes).expect("state holds a canonical bond record"))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn set_stake_bond(&mut self, id: &[u8; 32], bond: &Bond) {
+        self.trie.insert(stake_bond_key(id), to_bytes(bond));
+    }
+
+    pub fn clear_stake_bond(&mut self, id: &[u8; 32]) {
+        self.trie.insert(stake_bond_key(id), Vec::new());
+    }
+
+    pub fn stake_pool(&self) -> u64 {
+        self.trie
+            .get(&stake_singleton_key(STAKE_POOL_TAG))
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical pool balance"))
+            .unwrap_or(0)
+    }
+
+    pub fn set_stake_pool(&mut self, amount: u64) {
+        self.trie
+            .insert(stake_singleton_key(STAKE_POOL_TAG), to_bytes(&amount));
+    }
+
+    pub fn stake_treasury(&self) -> u64 {
+        self.trie
+            .get(&stake_singleton_key(STAKE_TREASURY_TAG))
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical treasury balance"))
+            .unwrap_or(0)
+    }
+
+    pub fn set_stake_treasury(&mut self, amount: u64) {
+        self.trie
+            .insert(stake_singleton_key(STAKE_TREASURY_TAG), to_bytes(&amount));
+    }
+}
+
+#[cfg(test)]
+mod stake_state_tests {
+    use super::*;
+
+    #[test]
+    fn staking_keys_are_namespaced_off_the_account_space() {
+        let id = [7u8; 32];
+        assert_ne!(stake_bond_key(&id), id);
+        assert_ne!(stake_bond_key(&id), stake_singleton_key(STAKE_POOL_TAG));
+        assert_ne!(
+            stake_singleton_key(STAKE_POOL_TAG),
+            stake_singleton_key(STAKE_TREASURY_TAG)
+        );
+        assert_ne!(stake_bond_key(&[1u8; 32]), stake_bond_key(&[2u8; 32]));
+    }
+
+    #[test]
+    fn a_bond_and_the_pool_persist_and_reload_from_the_trie() {
+        let mut l = Ledger::new();
+        let id = [9u8; 32];
+        assert!(l.stake_bond(&id).is_none());
+        let bond = Bond::new(2_000 * 1_000_000, 5).unwrap();
+        l.set_stake_bond(&id, &bond);
+        assert_eq!(l.stake_bond(&id), Some(bond));
+        l.set_stake_pool(685_714 * 1_000_000);
+        assert_eq!(l.stake_pool(), 685_714 * 1_000_000);
+        l.set_stake_treasury(1_000);
+        assert_eq!(l.stake_treasury(), 1_000);
+        l.clear_stake_bond(&id);
+        assert!(l.stake_bond(&id).is_none());
+    }
 }
 
 /// The account state of the chain over the sparse Merkle trie.

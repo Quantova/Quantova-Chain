@@ -13,6 +13,8 @@ qtv-account = { path = "../qtv-account" }
 qtv-tx = { path = "../qtv-tx" }
 qtv-block = { path = "../qtv-block" }
 qtv-state = { path = "../qtv-state" }
+qtv-staking = { path = "../qtv-staking" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", tag = "v0.3.0" }
 qtv-vm = { git = "https://github.com/Quantova/QVM.git", tag = "v0.3.0" }
 qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", tag = "v0.6.0" }
 qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", tag = "v0.6.0" }
