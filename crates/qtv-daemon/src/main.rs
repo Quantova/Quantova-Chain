@@ -203,6 +203,9 @@ fn log_startup(
     util::log("starting quantovad");
     util::log(&format!("chain_id {}", genesis_file.chain_id));
     util::log(&format!("genesis_hash {}", util::hex(&genesis_file.hash)));
+    if !genesis_file.message.is_empty() {
+        util::log(&format!("genesis message, {}", genesis_file.message));
+    }
     util::log(&format!("node id {my_id} of {n} validators, index {idx}"));
     util::log(&format!("stores {}", settings.store_dir.display()));
     util::log(&format!(
@@ -221,6 +224,10 @@ fn log_startup(
     util::log(&format!(
         "slot budget {}, the heights before the one time sortition keys are spent",
         genesis_file.slots
+    ));
+    util::log(&format!(
+        "fee band five hundredths to one tenth of a cent, native ceiling {} base units",
+        genesis_file.genesis.fee_params.max_fee_native
     ));
     util::log(&format!(
         "block interval {} ms, view timeout {} ms",
