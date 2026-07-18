@@ -614,6 +614,54 @@ impl Decode for Referendum {
     }
 }
 
+/// The permanent record the constitution's fifth invariant requires for every
+/// enacted referendum: the referendum it settles, the hash of the action that was
+/// run, the recovery scope it was bound to (zero when it was not a recovery), the
+/// final tally, and the day it enacted. Once written it is never cleared, so the
+/// enactment of any decision can be audited against the action and the vote that
+/// carried it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnactmentReceipt {
+    pub referendum: u64,
+    pub proposal_hash: [u8; 32],
+    pub scope: [u8; 32],
+    pub tally: Tally,
+    pub enacted_at: u64,
+}
+
+impl Encode for EnactmentReceipt {
+    fn encode(&self, encoder: &mut Encoder) {
+        encoder.put_u64(self.referendum);
+        encoder.put_bytes(&self.proposal_hash);
+        encoder.put_bytes(&self.scope);
+        self.tally.encode(encoder);
+        encoder.put_u64(self.enacted_at);
+    }
+}
+
+impl Decode for EnactmentReceipt {
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
+        let referendum = decoder.get_u64()?;
+        let proposal_hash: [u8; 32] = decoder
+            .get_bytes()?
+            .try_into()
+            .map_err(|_| Error::UnknownTag { tag: 0 })?;
+        let scope: [u8; 32] = decoder
+            .get_bytes()?
+            .try_into()
+            .map_err(|_| Error::UnknownTag { tag: 0 })?;
+        let tally = Tally::decode(decoder)?;
+        let enacted_at = decoder.get_u64()?;
+        Ok(EnactmentReceipt {
+            referendum,
+            proposal_hash,
+            scope,
+            tally,
+            enacted_at,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -812,6 +860,21 @@ mod tests {
             },
         ];
         assert_ne!(a, Action::recovery_scope_preimage(&[2; 32], &widened));
+    }
+
+    #[test]
+    fn an_enactment_receipt_round_trips_through_the_codec() {
+        let mut tally = Tally::default();
+        tally.record(true, Conviction::TwoYear, 3_000);
+        let receipt = EnactmentReceipt {
+            referendum: 7,
+            proposal_hash: [9u8; 32],
+            scope: [4u8; 32],
+            tally,
+            enacted_at: 123_456,
+        };
+        let back: EnactmentReceipt = from_bytes(&to_bytes(&receipt)).unwrap();
+        assert_eq!(receipt, back);
     }
 
     #[test]
