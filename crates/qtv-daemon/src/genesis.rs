@@ -106,6 +106,21 @@ impl GenesisFile {
                 .ok_or("the genesis is missing 'fee_rate_micro_usd_per_qtov'")?,
             native_unit: native_unit.ok_or("the genesis is missing 'fee_native_unit'")?,
         };
+        if fee_params.rate_micro_usd_per_qtov == 0 {
+            return Err("the genesis 'fee_rate_micro_usd_per_qtov' is zero, so the fee \
+                        conversion would divide by zero on the first transaction"
+                .to_string());
+        }
+        if fee_params.native_unit == 0 {
+            return Err("the genesis 'fee_native_unit' is zero, so every fee rounds away and \
+                        transfers would be free"
+                .to_string());
+        }
+        if fee_params.transfer_fee() == 0 {
+            return Err("the genesis fee schedule rounds a transfer fee to zero at this rate \
+                        and native unit, so a transfer would carry no fee"
+                .to_string());
+        }
         if validators.is_empty() {
             return Err("the genesis names no validators, so no committee can form".to_string());
         }
