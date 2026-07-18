@@ -149,4 +149,38 @@ mod tests {
         let err = execute_transfer(1_000, 0, 200, 10, TRANSFER_METER - 1).unwrap_err();
         assert_eq!(err, ExecError::MeterExhausted);
     }
+
+    #[test]
+    fn the_transfer_meter_is_constant_so_it_cannot_be_exceeded() {
+        // The transfer program is straight line with no data dependent branch, so
+        // the meter it spends does not depend on the amount, the fee, or the
+        // balances. Across a spread of inputs that each reach a clean halt, the
+        // meter spent is always exactly TRANSFER_METER, so a limit of TRANSFER_METER
+        // is enough for every transfer and no transfer, whatever its values, spends
+        // past it. The extreme case sits at the edge of the checked debit, amount
+        // plus fee one below the sender balance.
+        let cases = [
+            (u64::MAX, 0u64, 0u64),
+            (1_000, 1, 1),
+            (1_000, 998, 1),
+            (u64::MAX, u64::MAX / 2, u64::MAX / 2),
+            (500, 200, 300),
+        ];
+        for (balance, amount, fee) in cases {
+            let out = execute_transfer(balance, 0, amount, fee, TRANSFER_METER).expect("halt");
+            assert_eq!(out.meter_used, TRANSFER_METER);
+        }
+    }
+
+    #[test]
+    fn no_transfer_commits_below_its_meter_limit() {
+        // The dual of the constant cost: at every limit below that cost the run
+        // faults rather than completing, so there is no path that runs past the
+        // limit and still moves a balance. We sweep every limit from zero up to one
+        // below the cost, and each one faults.
+        for limit in 0..TRANSFER_METER {
+            let err = execute_transfer(1_000, 0, 1, 1, limit).unwrap_err();
+            assert_eq!(err, ExecError::MeterExhausted);
+        }
+    }
 }
