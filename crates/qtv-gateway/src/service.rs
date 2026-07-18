@@ -191,16 +191,30 @@ fn account(node: &DevNode, address: &str) -> Result<Json, ClientError> {
 
 fn transaction(node: &DevNode, tx_id: &str) -> Json {
     if let Some(height) = node.finalized_height(tx_id) {
-        let block = node
-            .block_at_height(height)
-            .map(|b| Json::str(b.id()))
-            .unwrap_or(Json::Null);
-        object(vec![
+        let mut fields = vec![
             ("tx_id", Json::str(tx_id)),
             ("status", Json::str("finalised")),
             ("height", Json::Int(height)),
-            ("block", block),
-        ])
+        ];
+        // Pull the transaction's own fields out of the block it finalised in, so a
+        // reader gets the sender, the recipient, the amount, the fee, and the nonce,
+        // not only where it landed. Money is a decimal string, as everywhere, so a
+        // JavaScript client never rounds a large value through a double.
+        if let Some(block) = node.block_at_height(height) {
+            fields.push(("block", Json::str(block.id())));
+            if let Some(wrapper) = block.body().iter().find(|w| w.id() == tx_id) {
+                let body = wrapper.body();
+                let amount = qtv_node::execution::transfer_amount(body.call()).unwrap_or(0);
+                fields.push(("from", Json::str(body.sender())));
+                fields.push(("to", Json::str(body.call().target())));
+                fields.push(("value", Json::str(amount.to_string())));
+                fields.push(("fee", Json::str(body.fee().to_string())));
+                fields.push(("nonce", Json::Int(body.nonce())));
+                fields.push(("meter_limit", Json::Int(body.meter_limit())));
+                fields.push(("scheme", Json::Int(u64::from(wrapper.scheme()))));
+            }
+        }
+        object(fields)
     } else if node.is_pending(tx_id) {
         object(vec![
             ("tx_id", Json::str(tx_id)),
