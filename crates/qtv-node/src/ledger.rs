@@ -198,6 +198,66 @@ impl Ledger {
         );
         true
     }
+
+    pub fn slash_stake(&mut self, address: &str, fault: qtv_staking::Fault) -> u64 {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return 0,
+        };
+        let bond = match self.stake_bond(&id) {
+            Some(bond) => bond,
+            None => return 0,
+        };
+        let taken = qtv_staking::slash(bond.amount, fault);
+        let treasury = self.stake_treasury() + taken;
+        self.set_stake_treasury(treasury);
+        if let qtv_staking::Fault::Attributable = fault {
+            self.clear_stake_bond(&id);
+            self.set_stake_banned(&id);
+        } else {
+            self.set_stake_bond(
+                &id,
+                &Bond {
+                    amount: bond.amount - taken,
+                    ..bond
+                },
+            );
+        }
+        taken
+    }
+
+    pub fn request_stake_exit(&mut self, address: &str, now_day: u64) -> bool {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return false,
+        };
+        let mut bond = match self.stake_bond(&id) {
+            Some(bond) => bond,
+            None => return false,
+        };
+        if bond.request_exit(now_day) {
+            self.set_stake_bond(&id, &bond);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn withdraw_stake(&mut self, address: &str, now_day: u64) -> bool {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return false,
+        };
+        let bond = match self.stake_bond(&id) {
+            Some(bond) if bond.can_withdraw(now_day) => bond,
+            _ => return false,
+        };
+        self.clear_stake_bond(&id);
+        let mut account = self.account(address);
+        account.balance += bond.amount;
+        self.set_account(address, &account);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -251,6 +311,44 @@ mod stake_state_tests {
         assert_eq!(l.balance(&addr), 2_000 * 1_000_000);
         l.set_stake_banned(&id);
         assert!(!l.bond(&addr, 100 * 1_000_000, 0));
+    }
+
+    #[test]
+    fn the_bond_slash_exit_lifecycle_keeps_balance_and_stake_in_step() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[4u8; 32]).unwrap();
+        let id = [4u8; 32];
+        l.set_account(&addr, &Account::funded(5_000 * 1_000_000, 1, vec![]));
+        l.bond(&addr, 2_000 * 1_000_000, 0);
+        assert_eq!(
+            l.slash_stake(&addr, qtv_staking::Fault::LivenessMinor),
+            20 * 1_000_000
+        );
+        assert_eq!(l.stake_treasury(), 20 * 1_000_000);
+        assert_eq!(l.stake_bond(&id).unwrap().amount, 1_980 * 1_000_000);
+        assert!(!l.request_stake_exit(&addr, 89));
+        assert!(l.request_stake_exit(&addr, 90));
+        assert!(!l.withdraw_stake(&addr, 90 + 20));
+        assert!(l.withdraw_stake(&addr, 90 + 21));
+        assert_eq!(l.balance(&addr), 3_000 * 1_000_000 + 1_980 * 1_000_000);
+        assert!(l.stake_bond(&id).is_none());
+    }
+
+    #[test]
+    fn an_attributable_slash_empties_the_bond_and_bans() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[5u8; 32]).unwrap();
+        let id = [5u8; 32];
+        l.set_account(&addr, &Account::funded(3_000 * 1_000_000, 1, vec![]));
+        l.bond(&addr, 2_000 * 1_000_000, 0);
+        assert_eq!(
+            l.slash_stake(&addr, qtv_staking::Fault::Attributable),
+            2_000 * 1_000_000
+        );
+        assert_eq!(l.stake_treasury(), 2_000 * 1_000_000);
+        assert!(l.stake_bond(&id).is_none());
+        assert!(l.is_stake_banned(&id));
+        assert!(!l.bond(&addr, 1_000 * 1_000_000, 0));
     }
 }
 
