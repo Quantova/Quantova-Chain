@@ -100,6 +100,25 @@ fn stake_singleton_key(tag: &[u8]) -> Key {
     sha3::sha3_256(tag)
 }
 
+const STAKE_BANNED_TAG: &[u8] = b"qtv/stake/banned/";
+
+fn stake_banned_key(id: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(STAKE_BANNED_TAG.len() + id.len());
+    input.extend_from_slice(STAKE_BANNED_TAG);
+    input.extend_from_slice(id);
+    sha3::sha3_256(&input)
+}
+
+fn address_id(address: &str) -> Option<[u8; 32]> {
+    let payload = qtv_idfmt::parse_address(address).ok()?;
+    if payload.len() != KEY_LEN {
+        return None;
+    }
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&payload);
+    Some(id)
+}
+
 impl Ledger {
     pub fn stake_bond(&self, id: &[u8; 32]) -> Option<Bond> {
         match self.trie.get(&stake_bond_key(id)) {
@@ -141,6 +160,44 @@ impl Ledger {
         self.trie
             .insert(stake_singleton_key(STAKE_TREASURY_TAG), to_bytes(&amount));
     }
+
+    pub fn is_stake_banned(&self, id: &[u8; 32]) -> bool {
+        matches!(self.trie.get(&stake_banned_key(id)), Some(bytes) if !bytes.is_empty())
+    }
+
+    pub fn set_stake_banned(&mut self, id: &[u8; 32]) {
+        self.trie.insert(stake_banned_key(id), vec![1]);
+    }
+
+    pub fn bond(&mut self, address: &str, amount: u64, day: u64) -> bool {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return false,
+        };
+        if self.is_stake_banned(&id) {
+            return false;
+        }
+        let mut account = self.account(address);
+        if account.balance < amount {
+            return false;
+        }
+        let existing = self.stake_bond(&id).map(|b| b.amount).unwrap_or(0);
+        let total = existing + amount;
+        if !qtv_staking::eligible(total) {
+            return false;
+        }
+        account.balance -= amount;
+        self.set_account(address, &account);
+        self.set_stake_bond(
+            &id,
+            &Bond {
+                amount: total,
+                bonded_at_day: day,
+                exit_requested_at: None,
+            },
+        );
+        true
+    }
 }
 
 #[cfg(test)]
@@ -173,6 +230,27 @@ mod stake_state_tests {
         assert_eq!(l.stake_treasury(), 1_000);
         l.clear_stake_bond(&id);
         assert!(l.stake_bond(&id).is_none());
+    }
+
+    #[test]
+    fn bonding_debits_the_account_and_persists_the_bond() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[3u8; 32]).unwrap();
+        let id = [3u8; 32];
+        l.set_account(&addr, &Account::funded(5_000 * 1_000_000, 1, vec![]));
+        assert!(!l.bond(&addr, 1_999 * 1_000_000, 0));
+        assert_eq!(l.balance(&addr), 5_000 * 1_000_000);
+        assert!(l.bond(&addr, 2_000 * 1_000_000, 0));
+        assert_eq!(l.balance(&addr), 3_000 * 1_000_000);
+        assert_eq!(l.stake_bond(&id).unwrap().amount, 2_000 * 1_000_000);
+        assert!(!l.bond(&addr, 4_000 * 1_000_000, 0));
+        assert!(l.bond(&addr, 1_000 * 1_000_000, 30));
+        let bond = l.stake_bond(&id).unwrap();
+        assert_eq!(bond.amount, 3_000 * 1_000_000);
+        assert_eq!(bond.bonded_at_day, 30);
+        assert_eq!(l.balance(&addr), 2_000 * 1_000_000);
+        l.set_stake_banned(&id);
+        assert!(!l.bond(&addr, 100 * 1_000_000, 0));
     }
 }
 
