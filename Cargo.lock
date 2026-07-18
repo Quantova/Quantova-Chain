@@ -148,6 +148,7 @@ dependencies = [
  "qtv-block",
  "qtv-codec",
  "qtv-crypto",
+ "qtv-governance",
  "qtv-idfmt",
  "qtv-sampler",
  "qtv-staking",

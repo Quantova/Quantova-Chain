@@ -170,6 +170,68 @@ impl Decode for Conviction {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ballot {
+    pub aye: bool,
+    pub conviction: Conviction,
+    pub stake: u64,
+}
+
+impl Ballot {
+    pub fn weight(&self) -> u128 {
+        self.conviction.weight(self.stake)
+    }
+}
+
+impl Encode for Ballot {
+    fn encode(&self, encoder: &mut Encoder) {
+        encoder.put_u8(self.aye as u8);
+        self.conviction.encode(encoder);
+        encoder.put_u64(self.stake);
+    }
+}
+
+impl Decode for Ballot {
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
+        let aye = decoder.get_u8()? != 0;
+        let conviction = Conviction::decode(decoder)?;
+        let stake = decoder.get_u64()?;
+        Ok(Ballot {
+            aye,
+            conviction,
+            stake,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lock {
+    pub amount: u64,
+    pub until: u64,
+}
+
+impl Lock {
+    pub fn withdrawable(&self, now: u64) -> bool {
+        now >= self.until
+    }
+}
+
+impl Encode for Lock {
+    fn encode(&self, encoder: &mut Encoder) {
+        encoder.put_u64(self.amount);
+        encoder.put_u64(self.until);
+    }
+}
+
+impl Decode for Lock {
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
+        Ok(Lock {
+            amount: decoder.get_u64()?,
+            until: decoder.get_u64()?,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Tally {
     pub aye_weight: u128,
@@ -281,6 +343,111 @@ impl Action {
             seizure.encode(&mut encoder);
         }
         encoder.into_bytes()
+    }
+}
+
+impl Encode for Action {
+    fn encode(&self, encoder: &mut Encoder) {
+        match self {
+            Action::Upgrade { blob } => {
+                encoder.put_u8(1);
+                blob.encode(encoder);
+            }
+            Action::Mint { to, amount } => {
+                encoder.put_u8(2);
+                to.encode(encoder);
+                encoder.put_u64(*amount);
+            }
+            Action::BridgeMigration { vault } => {
+                encoder.put_u8(3);
+                vault.encode(encoder);
+            }
+            Action::FreezeRecovery {
+                scope,
+                victim,
+                seizures,
+            } => {
+                encoder.put_u8(4);
+                encoder.put_bytes(scope);
+                victim.encode(encoder);
+                (seizures.len() as u64).encode(encoder);
+                for seizure in seizures {
+                    seizure.encode(encoder);
+                }
+            }
+            Action::Freeze { targets } => {
+                encoder.put_u8(5);
+                (targets.len() as u64).encode(encoder);
+                for target in targets {
+                    target.encode(encoder);
+                }
+            }
+            Action::Blacklist { target } => {
+                encoder.put_u8(6);
+                target.encode(encoder);
+            }
+            Action::AddAsset { asset } => {
+                encoder.put_u8(7);
+                asset.encode(encoder);
+            }
+            Action::Parameter { key, value } => {
+                encoder.put_u8(8);
+                key.encode(encoder);
+                value.encode(encoder);
+            }
+        }
+    }
+}
+
+impl Decode for Action {
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
+        let tag = decoder.get_u8()?;
+        match tag {
+            1 => Ok(Action::Upgrade {
+                blob: Vec::<u8>::decode(decoder)?,
+            }),
+            2 => Ok(Action::Mint {
+                to: Vec::<u8>::decode(decoder)?,
+                amount: decoder.get_u64()?,
+            }),
+            3 => Ok(Action::BridgeMigration {
+                vault: Vec::<u8>::decode(decoder)?,
+            }),
+            4 => {
+                let scope_bytes = decoder.get_bytes()?;
+                let scope: [u8; 32] = scope_bytes.try_into().map_err(|_| Error::UnknownTag { tag })?;
+                let victim = Vec::<u8>::decode(decoder)?;
+                let count = u64::decode(decoder)?;
+                let mut seizures = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    seizures.push(Seizure::decode(decoder)?);
+                }
+                Ok(Action::FreezeRecovery {
+                    scope,
+                    victim,
+                    seizures,
+                })
+            }
+            5 => {
+                let count = u64::decode(decoder)?;
+                let mut targets = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    targets.push(Vec::<u8>::decode(decoder)?);
+                }
+                Ok(Action::Freeze { targets })
+            }
+            6 => Ok(Action::Blacklist {
+                target: Vec::<u8>::decode(decoder)?,
+            }),
+            7 => Ok(Action::AddAsset {
+                asset: Vec::<u8>::decode(decoder)?,
+            }),
+            8 => Ok(Action::Parameter {
+                key: Vec::<u8>::decode(decoder)?,
+                value: Vec::<u8>::decode(decoder)?,
+            }),
+            other => Err(Error::UnknownTag { tag: other }),
+        }
     }
 }
 
@@ -645,6 +812,66 @@ mod tests {
             },
         ];
         assert_ne!(a, Action::recovery_scope_preimage(&[2; 32], &widened));
+    }
+
+    #[test]
+    fn a_ballot_and_a_lock_round_trip_through_the_codec() {
+        let ballot = Ballot {
+            aye: true,
+            conviction: Conviction::TwoYear,
+            stake: 5_000,
+        };
+        assert_eq!(ballot.weight(), 12_500);
+        let back: Ballot = from_bytes(&to_bytes(&ballot)).unwrap();
+        assert_eq!(ballot, back);
+
+        let lock = Lock {
+            amount: 5_000,
+            until: 63_072_000,
+        };
+        assert!(!lock.withdrawable(100));
+        assert!(lock.withdrawable(63_072_000));
+        let back: Lock = from_bytes(&to_bytes(&lock)).unwrap();
+        assert_eq!(lock, back);
+    }
+
+    #[test]
+    fn every_action_round_trips_through_the_codec() {
+        let actions = [
+            Action::Upgrade { blob: vec![1, 2, 3] },
+            Action::Mint {
+                to: vec![9; 32],
+                amount: 12_345,
+            },
+            Action::BridgeMigration { vault: vec![4; 32] },
+            Action::FreezeRecovery {
+                scope: [7u8; 32],
+                victim: vec![2; 32],
+                seizures: vec![
+                    Seizure {
+                        from: vec![1; 32],
+                        amount: 100,
+                    },
+                    Seizure {
+                        from: vec![3; 32],
+                        amount: 50,
+                    },
+                ],
+            },
+            Action::Freeze {
+                targets: vec![vec![1; 32], vec![2; 32]],
+            },
+            Action::Blacklist { target: vec![5; 32] },
+            Action::AddAsset { asset: vec![6; 32] },
+            Action::Parameter {
+                key: b"price".to_vec(),
+                value: 70_000_000u128.to_le_bytes().to_vec(),
+            },
+        ];
+        for action in actions {
+            let back: Action = from_bytes(&to_bytes(&action)).unwrap();
+            assert_eq!(action, back);
+        }
     }
 
     #[test]
