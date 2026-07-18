@@ -320,6 +320,7 @@ fn execute_ordered_across(
 ) -> Vec<Wrapper> {
     let verified = verify_signatures(ledger, candidates, verify_cores);
     let stake_address = crate::ledger::stake_system_address();
+    let claim_address = crate::ledger::stake_claim_address();
     let gov_address = crate::ledger::gov_system_address();
     let now_seconds = day.saturating_mul(86_400);
     let mut included = Vec::new();
@@ -336,6 +337,12 @@ fn execute_ordered_across(
         };
         if plan.recipient == stake_address {
             if ledger.bond_with_fee(&plan.sender, plan.amount, plan.fee, day) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
+        if plan.recipient == claim_address {
+            if ledger.claim_with_fee(&plan.sender, plan.fee, day) {
                 included.push(wrapper.clone());
             }
             continue;
@@ -362,6 +369,7 @@ fn execute_ordered_across(
         ledger.set_account(&plan.recipient, &recipient);
         included.push(wrapper.clone());
     }
+    ledger.settle_session(day, included.len() as u64);
     included
 }
 
@@ -500,12 +508,20 @@ impl Node {
             .iter()
             .map(|v| (v.id, validator_address(v.id)))
             .collect();
+        let mut validator_ids: Vec<[u8; 32]> = Vec::new();
         for v in &validators {
+            let address = validator_address(v.id);
             ledger.seed_validator_bond(
-                &validator_address(v.id),
+                &address,
                 v.stake.saturating_mul(qtv_staking::NATIVE_UNIT as u64),
             );
+            if let Ok(payload) = qtv_idfmt::parse_address(&address) {
+                if let Ok(id) = <[u8; 32]>::try_from(payload) {
+                    validator_ids.push(id);
+                }
+            }
         }
+        ledger.seed_validator_set(&validator_ids);
 
         Node {
             ledger,
@@ -845,6 +861,32 @@ mod tests {
         let mut parallel = ledger.clone();
         assert!(crate::parallel::execute_parallel(&mut parallel, &[out], &fee, 8, 3).is_empty());
         assert_eq!(parallel.state_root(), ledger.state_root());
+    }
+
+    #[test]
+    fn a_claim_transaction_withdraws_vested_rewards_through_the_executor() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let validator = keypair(120);
+        fund(&mut ledger, &validator, 1_000 * 1_000_000);
+        ledger.seed_stake_pool(700_000 * 1_000_000);
+        ledger.seed_validator_bond(&validator.address(), 2_000 * 1_000_000);
+        // Mainnet on with a price, then accrue one session directly to the validator.
+        ledger.set_stake_mainnet_start(0);
+        ledger.set_stake_price(70 * 1_000_000);
+        ledger.accrue_reward(&validator.address(), qtv_staking::Session::Low, 400);
+
+        // At the cliff a quarter is vested and claimable.
+        let claim_day = 400 + 365;
+        assert!(ledger.claimable_reward(&validator.address(), claim_day) > 0);
+        let before = ledger.balance(&validator.address());
+
+        // An empty transfer to the reserved claim address withdraws the vested reward.
+        let claim = transfer(&validator, &crate::ledger::stake_claim_address(), 0, 0, &fee);
+        let included = execute_ordered(&mut ledger, &[claim], &fee, claim_day);
+        assert_eq!(included.len(), 1);
+        assert!(ledger.balance(&validator.address()) > before);
+        assert_eq!(ledger.claimable_reward(&validator.address(), claim_day), 0);
     }
 
     #[test]

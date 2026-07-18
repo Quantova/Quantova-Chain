@@ -302,14 +302,23 @@ impl DevNode {
         }
         let (pool_key, pool_value) = self.ledger.seed_stake_pool(qtv_staking::STAKING_POOL);
         self.state_store.put_account(pool_key, pool_value)?;
+        let mut validator_ids: Vec<[u8; 32]> = Vec::new();
         for v in &self.base_validators {
+            let address = validator_address(v.id);
             if let Some((bond_key, bond_value)) = self.ledger.seed_validator_bond(
-                &validator_address(v.id),
+                &address,
                 v.stake.saturating_mul(qtv_staking::NATIVE_UNIT as u64),
             ) {
                 self.state_store.put_account(bond_key, bond_value)?;
             }
+            if let Ok(payload) = qtv_idfmt::parse_address(&address) {
+                if let Ok(id) = <[u8; 32]>::try_from(payload) {
+                    validator_ids.push(id);
+                }
+            }
         }
+        let (validators_key, validators_value) = self.ledger.seed_validator_set(&validator_ids);
+        self.state_store.put_account(validators_key, validators_value)?;
         self.state_store.commit(self.ledger.state_root())?;
         self.refresh_committee();
         Ok(())
