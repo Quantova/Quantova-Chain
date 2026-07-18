@@ -11,7 +11,7 @@
 
 use qtv_codec::{from_bytes, to_bytes, Decode, Decoder, Encode, Encoder, Error};
 use qtv_crypto::sha3;
-use qtv_staking::Bond;
+use qtv_staking::{Bond, Session, SessionMeter};
 use qtv_state::{Key, Trie, HASH_LEN, KEY_LEN};
 
 /// An account record: the nonce, the native balance, the signature scheme, and
@@ -86,14 +86,55 @@ pub fn account_key(address: &str) -> Key {
 }
 
 const STAKE_BOND_TAG: &[u8] = b"qtv/stake/bond/";
+const STAKE_REWARDS_TAG: &[u8] = b"qtv/stake/rewards/";
 const STAKE_POOL_TAG: &[u8] = b"qtv/stake/pool";
 const STAKE_TREASURY_TAG: &[u8] = b"qtv/stake/treasury";
+const STAKE_PRICE_TAG: &[u8] = b"qtv/stake/price";
+const STAKE_MAINNET_TAG: &[u8] = b"qtv/stake/mainnet";
+const STAKE_METER_TAG: &[u8] = b"qtv/stake/meter";
 
 fn stake_bond_key(id: &[u8; 32]) -> Key {
     let mut input = Vec::with_capacity(STAKE_BOND_TAG.len() + id.len());
     input.extend_from_slice(STAKE_BOND_TAG);
     input.extend_from_slice(id);
     sha3::sha3_256(&input)
+}
+
+fn stake_rewards_key(id: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(STAKE_REWARDS_TAG.len() + id.len());
+    input.extend_from_slice(STAKE_REWARDS_TAG);
+    input.extend_from_slice(id);
+    sha3::sha3_256(&input)
+}
+
+/// A validator's persisted reward record: the tranches accrued to it, each dated
+/// by the session it was earned and carrying how much of it has been claimed. The
+/// list is length prefixed so it round trips through one trie leaf, and it stays
+/// short because a tranche is added at most once per session and a fully claimed,
+/// fully vested tranche is pruned on claim.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RewardBook {
+    pub tranches: Vec<qtv_staking::RewardTranche>,
+}
+
+impl Encode for RewardBook {
+    fn encode(&self, encoder: &mut Encoder) {
+        (self.tranches.len() as u64).encode(encoder);
+        for tranche in &self.tranches {
+            tranche.encode(encoder);
+        }
+    }
+}
+
+impl Decode for RewardBook {
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
+        let count = u64::decode(decoder)?;
+        let mut tranches = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            tranches.push(qtv_staking::RewardTranche::decode(decoder)?);
+        }
+        Ok(RewardBook { tranches })
+    }
 }
 
 fn stake_singleton_key(tag: &[u8]) -> Key {
@@ -212,6 +253,162 @@ impl Ledger {
 
     pub fn set_stake_banned(&mut self, id: &[u8; 32]) {
         self.trie.insert(stake_banned_key(id), vec![1]);
+    }
+
+    /// The native to dollar rate governance publishes, in base dollar units per
+    /// whole native unit, the figure the session reward cap is measured against. It
+    /// is zero until governance sets it, and a zero rate holds every accrual to
+    /// nothing, so no reward is ever paid on an unpublished rate.
+    pub fn stake_price(&self) -> u128 {
+        self.trie
+            .get(&stake_singleton_key(STAKE_PRICE_TAG))
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical price"))
+            .unwrap_or(0)
+    }
+
+    pub fn set_stake_price(&mut self, rate_micro_usd_per_qtov: u128) {
+        self.trie.insert(
+            stake_singleton_key(STAKE_PRICE_TAG),
+            to_bytes(&rate_micro_usd_per_qtov),
+        );
+    }
+
+    /// The day mainnet began, the anchor the reward blackout is measured from. It
+    /// defaults to the maximum day, which holds the whole validator set in blackout
+    /// so no reward accrues until governance sets the real mainnet start. This is
+    /// what keeps a test network, which never sets it, from ever paying a reward.
+    pub fn stake_mainnet_start(&self) -> u64 {
+        self.trie
+            .get(&stake_singleton_key(STAKE_MAINNET_TAG))
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical mainnet start"))
+            .unwrap_or(u64::MAX)
+    }
+
+    pub fn set_stake_mainnet_start(&mut self, day: u64) {
+        self.trie
+            .insert(stake_singleton_key(STAKE_MAINNET_TAG), to_bytes(&day));
+    }
+
+    /// The session meter, the running count of transactions in the open session
+    /// window and the day the window opened. It defaults to a window that opened on
+    /// day zero, so the first session runs from genesis.
+    pub fn session_meter(&self) -> SessionMeter {
+        self.trie
+            .get(&stake_singleton_key(STAKE_METER_TAG))
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical session meter"))
+            .unwrap_or_else(|| SessionMeter::new(0))
+    }
+
+    pub fn set_session_meter(&mut self, meter: &SessionMeter) {
+        self.trie
+            .insert(stake_singleton_key(STAKE_METER_TAG), to_bytes(meter));
+    }
+
+    fn stake_rewards(&self, id: &[u8; 32]) -> RewardBook {
+        self.trie
+            .get(&stake_rewards_key(id))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical reward book"))
+            .unwrap_or_default()
+    }
+
+    fn set_stake_rewards(&mut self, id: &[u8; 32], book: &RewardBook) {
+        self.trie.insert(stake_rewards_key(id), to_bytes(book));
+    }
+
+    /// Accrue one session's reward to a validator from the pool. Nothing accrues
+    /// during the mainnet blackout, on an unpublished rate, to an account with no
+    /// bond, or beyond what the pool holds. The paid amount leaves the pool and
+    /// lands as a tranche dated to the accrual day, from which it vests on the
+    /// released schedule. Returns the amount paid, so a caller can total the round.
+    pub fn accrue_reward(&mut self, address: &str, session: Session, now_day: u64) -> u64 {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return 0,
+        };
+        if qtv_staking::in_blackout(now_day, self.stake_mainnet_start()) {
+            return 0;
+        }
+        let rate = self.stake_price();
+        if rate == 0 {
+            return 0;
+        }
+        let stake = match self.stake_bond(&id) {
+            Some(bond) => bond.amount,
+            None => return 0,
+        };
+        let paid = qtv_staking::session_reward(stake, session, rate).min(self.stake_pool());
+        if paid == 0 {
+            return 0;
+        }
+        self.set_stake_pool(self.stake_pool() - paid);
+        let mut book = self.stake_rewards(&id);
+        book.tranches.push(qtv_staking::RewardTranche {
+            earned_day: now_day,
+            amount: paid,
+            claimed: 0,
+        });
+        self.set_stake_rewards(&id, &book);
+        paid
+    }
+
+    /// The reward a validator could claim on a given day, the vested but unclaimed
+    /// amount summed over its tranches. It is read only and moves no balance.
+    pub fn claimable_reward(&self, address: &str, now_day: u64) -> u64 {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return 0,
+        };
+        self.stake_rewards(&id)
+            .tranches
+            .iter()
+            .map(|tranche| {
+                qtv_staking::released(tranche.amount, now_day.saturating_sub(tranche.earned_day))
+                    .saturating_sub(tranche.claimed)
+            })
+            .sum()
+    }
+
+    /// Claim a validator's vested rewards into its balance on a given day. Each
+    /// tranche releases the vested amount not yet claimed, the total credits the
+    /// account, and a tranche that is fully vested and fully claimed is pruned so
+    /// the book cannot grow without bound. Returns the amount credited.
+    pub fn claim_reward(&mut self, address: &str, now_day: u64) -> u64 {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return 0,
+        };
+        let mut book = self.stake_rewards(&id);
+        let mut credited = 0u64;
+        for tranche in book.tranches.iter_mut() {
+            let vested = qtv_staking::released(tranche.amount, now_day.saturating_sub(tranche.earned_day));
+            credited += vested.saturating_sub(tranche.claimed);
+            tranche.claimed = vested;
+        }
+        if credited == 0 {
+            return 0;
+        }
+        book.tranches
+            .retain(|tranche| tranche.claimed < tranche.amount);
+        self.set_stake_rewards(&id, &book);
+        let mut account = self.account(address);
+        account.balance = account.balance.saturating_add(credited);
+        self.set_account(address, &account);
+        credited
+    }
+
+    /// Feed a block's transaction count into the session meter and, when the session
+    /// window closes, classify it and reset the window. Returns the classification
+    /// of the session that just closed, or None while the window is still open. The
+    /// meter is persisted, so the count carries across blocks and reloads, and the
+    /// classification is a pure function of committed state, so every node closes the
+    /// same session on the same day with the same verdict.
+    pub fn record_session(&mut self, transactions: u64, now_day: u64) -> Option<Session> {
+        let mut meter = self.session_meter();
+        meter.record(transactions);
+        let closed = meter.close(now_day);
+        self.set_session_meter(&meter);
+        closed
     }
 
     pub fn bond(&mut self, address: &str, amount: u64, day: u64) -> bool {
@@ -373,6 +570,72 @@ mod stake_state_tests {
         assert_eq!(l.stake_treasury(), 1_000);
         l.clear_stake_bond(&id);
         assert!(l.stake_bond(&id).is_none());
+    }
+
+    #[test]
+    fn rewards_accrue_vest_and_claim_only_after_the_blackout_and_a_set_rate() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[12u8; 32]).unwrap();
+        l.seed_stake_pool(700_000 * 1_000_000);
+        l.seed_validator_bond(&addr, 2_000 * 1_000_000);
+
+        // In the default blackout nothing accrues, whatever the session classifies as.
+        assert_eq!(l.accrue_reward(&addr, qtv_staking::Session::Low, 400), 0);
+        assert_eq!(l.stake_pool(), 700_000 * 1_000_000);
+
+        // Past the blackout but with no published rate, still nothing accrues.
+        l.set_stake_mainnet_start(0);
+        assert_eq!(l.accrue_reward(&addr, qtv_staking::Session::Low, 400), 0);
+
+        // With a rate published, a low session pays one percent of the bond, twenty
+        // whole units on a two thousand unit bond, and it leaves the pool.
+        l.set_stake_price(70 * 1_000_000);
+        let paid = l.accrue_reward(&addr, qtv_staking::Session::Low, 400);
+        assert_eq!(paid, 20 * 1_000_000);
+        assert_eq!(l.stake_pool(), 700_000 * 1_000_000 - 20 * 1_000_000);
+
+        // It is locked through the year long cliff: nothing is claimable inside it.
+        assert_eq!(l.claimable_reward(&addr, 400 + 364), 0);
+        // At the cliff a quarter releases, and a claim moves exactly that to balance.
+        assert_eq!(l.claimable_reward(&addr, 400 + 365), 5 * 1_000_000);
+        assert_eq!(l.claim_reward(&addr, 400 + 365), 5 * 1_000_000);
+        assert_eq!(l.balance(&addr), 5 * 1_000_000);
+        // A second claim on the same day moves nothing more.
+        assert_eq!(l.claim_reward(&addr, 400 + 365), 0);
+        // The whole amount releases after the last tranche day, and the book prunes.
+        let full_day = 400 + 365 + 3 * 120;
+        assert_eq!(l.claim_reward(&addr, full_day), 15 * 1_000_000);
+        assert_eq!(l.balance(&addr), 20 * 1_000_000);
+        assert_eq!(l.claimable_reward(&addr, full_day + 1_000), 0);
+    }
+
+    #[test]
+    fn the_reward_cap_binds_when_the_price_climbs() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[13u8; 32]).unwrap();
+        l.seed_stake_pool(700_000 * 1_000_000);
+        l.seed_validator_bond(&addr, 2_000 * 1_000_000);
+        l.set_stake_mainnet_start(0);
+        // At a high price the four thousand dollar per session cap bites, so the
+        // reward is the cap converted to native units, not one percent of the bond.
+        l.set_stake_price(2_000 * 1_000_000);
+        assert_eq!(
+            l.accrue_reward(&addr, qtv_staking::Session::Low, 400),
+            2 * 1_000_000
+        );
+    }
+
+    #[test]
+    fn the_session_meter_counts_across_blocks_and_closes_on_the_window() {
+        let mut l = Ledger::new();
+        // The window opens on day zero and transactions accumulate while it is open.
+        assert_eq!(l.record_session(10, 100), None);
+        assert_eq!(l.record_session(20, 150), None);
+        assert_eq!(l.session_meter().count(), 30);
+        // At the window length the session closes, classifies by the total count, and
+        // the meter resets for the next window.
+        assert_eq!(l.record_session(5, 182), Some(qtv_staking::Session::Low));
+        assert_eq!(l.session_meter().count(), 0);
     }
 
     #[test]
