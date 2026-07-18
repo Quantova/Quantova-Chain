@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/qtv-idfmt", "crates/qtv-codec", "crates/qtv-account", "crates/qtv-tx", "crates/qtv-block", "crates/qtv-state", "crates/qtv-store", "crates/qtv-node", "crates/qtv-net", "crates/qtv-devnet", "crates/qtv-live", "crates/qtv-loopback", "crates/qtv-widearea", "crates/qtv-daemon", "crates/qtv-gateway"]
+members = ["crates/qtv-idfmt", "crates/qtv-codec", "crates/qtv-account", "crates/qtv-tx", "crates/qtv-block", "crates/qtv-state", "crates/qtv-staking", "crates/qtv-store", "crates/qtv-node", "crates/qtv-net", "crates/qtv-devnet", "crates/qtv-live", "crates/qtv-loopback", "crates/qtv-widearea", "crates/qtv-daemon", "crates/qtv-gateway"]
 
 [workspace.package]
 edition = "2021"
