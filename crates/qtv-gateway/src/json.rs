@@ -111,7 +111,7 @@ fn write_string(s: &str, out: &mut String) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 32 => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
     }
@@ -325,7 +325,7 @@ pub fn to_hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         s.push(char::from_digit((b >> 4) as u32, 16).expect("a nibble is a hex digit"));
-        s.push(char::from_digit((b & 0xf) as u32, 16).expect("a nibble is a hex digit"));
+        s.push(char::from_digit((b & 15) as u32, 16).expect("a nibble is a hex digit"));
     }
     s
 }

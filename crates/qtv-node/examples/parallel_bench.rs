@@ -46,9 +46,9 @@ const SENDER_BALANCE: u64 = 1_000_000_000;
 
 /// A small deterministic mixer so a workload is varied yet identical run to run.
 fn mix(x: u64) -> u64 {
-    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    let mut z = x.wrapping_add(11400714819323198485);
+    z = (z ^ (z >> 30)).wrapping_mul(13787848793156543929);
+    z = (z ^ (z >> 27)).wrapping_mul(10723151780598845931);
     z ^ (z >> 31)
 }
 
@@ -109,9 +109,9 @@ fn build_block(
     parallel_build(senders.len(), threads, |i| {
         let roll = mix(i as u64) % 100;
         let recipient = if roll < conflict_percent {
-            tagged_address(0xC0, mix(i as u64 ^ 0x5A5A) % HOT_ACCOUNTS)
+            tagged_address(192, mix(i as u64 ^ 23130) % HOT_ACCOUNTS)
         } else {
-            tagged_address(0x01, i as u64)
+            tagged_address(1, i as u64)
         };
         let call = transfer_call(&recipient, 100);
         let body = Body::new(senders[i].address(), 0, TRANSFER_METER, fee_amount, call);

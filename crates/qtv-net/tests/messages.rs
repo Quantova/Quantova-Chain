@@ -39,7 +39,7 @@ fn an_empty_and_a_large_message_round_trip() {
     client.send(b"").unwrap();
     assert_eq!(server.recv().unwrap(), b"");
 
-    let large = vec![0xa5u8; 200_000];
+    let large = vec![165u8; 200_000];
     client.send(&large).unwrap();
     assert_eq!(server.recv().unwrap(), large);
 }

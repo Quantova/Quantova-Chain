@@ -385,12 +385,12 @@ mod tests {
 
         // A small deterministic generator so the blocks are varied but the test is
         // reproducible without a dependency.
-        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut state = 1311768467463790320u64;
         let mut next = || {
-            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            state = state.wrapping_add(11400714819323198485);
             let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z = (z ^ (z >> 30)).wrapping_mul(13787848793156543929);
+            z = (z ^ (z >> 27)).wrapping_mul(10723151780598845931);
             z ^ (z >> 31)
         };
 

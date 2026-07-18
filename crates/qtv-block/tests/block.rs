@@ -57,7 +57,7 @@ fn header_round_trips_through_the_codec() {
 fn header_decode_rejects_trailing_bytes() {
     let header = sample_header(&[]);
     let mut bytes = to_bytes(&header);
-    bytes.push(0x00);
+    bytes.push(0);
     assert!(header_from_bytes(&bytes).is_err());
 }
 
@@ -90,7 +90,7 @@ fn empty_body_has_a_defined_transaction_root() {
 fn block_id_round_trips_through_the_format() {
     let body = vec![wrapper_with_nonce(1), wrapper_with_nonce(2)];
     let header = sample_header(&body);
-    let block = Block::new(header, vec![0xAA, 0xBB, 0xCC], body);
+    let block = Block::new(header, vec![170, 187, 204], body);
     let id = block.id();
     let payload = qtv_idfmt::parse_block(&id).unwrap();
     let again = qtv_idfmt::render_block(&payload).unwrap();

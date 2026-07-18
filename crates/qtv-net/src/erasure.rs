@@ -85,8 +85,8 @@ impl Field {
             exp[power] = x as u8;
             log[x as usize] = power as u8;
             x <<= 1;
-            if x & 0x100 != 0 {
-                x ^= 0x11d;
+            if x & 256 != 0 {
+                x ^= 285;
             }
             power += 1;
         }
@@ -511,12 +511,12 @@ mod tests {
     /// rather than a constant pattern the code could special case.
     fn payload(len: usize, seed: u64) -> Vec<u8> {
         let mut out = Vec::with_capacity(len);
-        let mut state = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut state = seed.wrapping_add(11400714819323198485);
         for _ in 0..len {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
-            out.push((state & 0xff) as u8);
+            out.push((state & 255) as u8);
         }
         out
     }

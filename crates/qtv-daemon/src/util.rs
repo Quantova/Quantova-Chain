@@ -11,7 +11,7 @@ pub fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         s.push(char::from_digit((b >> 4) as u32, 16).expect("a nibble is a hex digit"));
-        s.push(char::from_digit((b & 0xf) as u32, 16).expect("a nibble is a hex digit"));
+        s.push(char::from_digit((b & 15) as u32, 16).expect("a nibble is a hex digit"));
     }
     s
 }

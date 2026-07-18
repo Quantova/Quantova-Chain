@@ -278,9 +278,9 @@ mod tests {
         let depth = atts[0].membership.path.siblings.len();
         atts[0].membership = Credential {
             position: 1,
-            preimage: [0xAB; 32],
+            preimage: [171; 32],
             path: MerklePath {
-                siblings: vec![[0xCD; 32]; depth],
+                siblings: vec![[205; 32]; depth],
             },
         };
         let forged =

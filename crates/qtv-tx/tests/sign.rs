@@ -66,7 +66,7 @@ fn tampered_signature_is_rejected() {
     let account = derive(&master(), 0);
     let wrapper = sign(&account, &sample_body());
     let mut signature = wrapper.signature().to_vec();
-    signature[0] ^= 0xFF;
+    signature[0] ^= 255;
     let forged = Wrapper::new(wrapper.body().clone(), wrapper.scheme(), signature);
     assert!(!verify(&forged, account.public_key()));
 }
