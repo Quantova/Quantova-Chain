@@ -149,6 +149,11 @@ impl Ledger {
             .insert(stake_singleton_key(STAKE_POOL_TAG), to_bytes(&amount));
     }
 
+    pub fn seed_stake_pool(&mut self, amount: u64) -> (Key, Vec<u8>) {
+        self.set_stake_pool(amount);
+        (stake_singleton_key(STAKE_POOL_TAG), to_bytes(&amount))
+    }
+
     pub fn stake_treasury(&self) -> u64 {
         self.trie
             .get(&stake_singleton_key(STAKE_TREASURY_TAG))
