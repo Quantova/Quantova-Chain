@@ -226,6 +226,23 @@ impl StakeLedger {
         }
         taken
     }
+
+    pub fn bond_from_balance(
+        &mut self,
+        id: [u8; 32],
+        balance: u64,
+        amount: u64,
+        day: u64,
+    ) -> Option<u64> {
+        if amount > balance {
+            return None;
+        }
+        if self.bond(id, amount, day) {
+            Some(balance - amount)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -365,6 +382,20 @@ mod tests {
         l.slash(&id(1), Fault::Attributable);
         assert_eq!(l.treasury(), 2_000 * QTOV);
         assert!(l.bond_of(&id(1)).is_none());
+    }
+
+    #[test]
+    fn bonding_moves_coins_out_of_the_spendable_balance() {
+        let mut l = StakeLedger::new(0);
+        assert_eq!(
+            l.bond_from_balance(id(1), 5_000 * QTOV, 2_000 * QTOV, 0),
+            Some(3_000 * QTOV)
+        );
+        assert_eq!(l.total_staked(), 2_000 * QTOV);
+        assert_eq!(l.bond_from_balance(id(2), 1_000 * QTOV, 2_000 * QTOV, 0), None);
+        assert_eq!(l.bond_from_balance(id(2), 5_000 * QTOV, 1_999 * QTOV, 0), None);
+        l.slash(&id(1), Fault::Attributable);
+        assert_eq!(l.bond_from_balance(id(1), 5_000 * QTOV, 2_000 * QTOV, 0), None);
     }
 
     #[test]
