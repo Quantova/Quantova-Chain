@@ -28,7 +28,7 @@
 
 use std::path::Path;
 
-use qtv_account::{address_for_key, Tier};
+use qtv_account::address_for_key;
 use qtv_crypto::sha3;
 use qtv_devnet::config::DEFAULT_SLOTS;
 use qtv_node::fee::FeeParams;
@@ -201,7 +201,7 @@ fn parse_account(field: &Field) -> Result<GenesisAccount, String> {
     let balance: u64 = parts[2]
         .parse()
         .map_err(|_| field.error("the account balance is not a number"))?;
-    let address = address_for_key(scheme, &public_key, Tier::Canonical);
+    let address = address_for_key(scheme, &public_key);
     Ok(GenesisAccount {
         address,
         balance,

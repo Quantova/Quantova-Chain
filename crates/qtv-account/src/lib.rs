@@ -35,29 +35,9 @@ pub const SCHEME_FALCON: u8 = 3;
 pub const MASTER_SEED_LEN: usize = 32;
 /// The length in bytes of an account seed, the stored secret.
 pub const SEED_LEN: usize = 32;
-/// The payload length in bytes of a canonical address, the default tier.
+/// The payload length of an address, the full 256-bit hash. There is one width
+/// and a shorter payload is not representable.
 pub const CANONICAL_LEN: usize = 32;
-/// The payload length in bytes of a compact address.
-pub const COMPACT_LEN: usize = 24;
-
-/// The width of an address payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tier {
-    /// The canonical thirty two byte payload, the default tier.
-    Canonical,
-    /// The compact twenty four byte payload.
-    Compact,
-}
-
-impl Tier {
-    /// The payload length in bytes this tier keeps from the address hash.
-    pub fn payload_len(self) -> usize {
-        match self {
-            Tier::Canonical => CANONICAL_LEN,
-            Tier::Compact => COMPACT_LEN,
-        }
-    }
-}
 
 /// Fold a master seed, a scheme identifier and an index into an account seed.
 /// The input is the master seed followed by the scheme identifier followed by
@@ -107,13 +87,11 @@ fn address_hash(scheme: u8, public_key: &[u8]) -> [u8; 32] {
     sha3::sha3_256(&input)
 }
 
-/// Render an address for a scheme identifier and a public key at a tier. The
-/// payload is the leading bytes of the address hash for that tier, and it never
-/// falls below the floor, so the format render always holds.
-pub fn address_for_key(scheme: u8, public_key: &[u8], tier: Tier) -> String {
+/// Render an address for a scheme identifier and a public key. The payload is the
+/// full address hash, so every address is the canonical 256-bit width.
+pub fn address_for_key(scheme: u8, public_key: &[u8]) -> String {
     let hash = address_hash(scheme, public_key);
-    let payload = &hash[..tier.payload_len()];
-    qtv_idfmt::render_address(payload).expect("an address tier payload reaches the key floor")
+    qtv_idfmt::render_address(&hash).expect("a full address hash reaches the key floor")
 }
 
 /// A derived account. The stored secret is the account seed and never the
@@ -147,14 +125,9 @@ impl Account {
         &self.public_key
     }
 
-    /// The address in the canonical tier, the default.
+    /// The address, the full 256-bit hash of the scheme and public key.
     pub fn address(&self) -> String {
-        self.address_at(Tier::Canonical)
-    }
-
-    /// The address in the requested tier.
-    pub fn address_at(&self, tier: Tier) -> String {
-        address_for_key(self.scheme, &self.public_key, tier)
+        address_for_key(self.scheme, &self.public_key)
     }
 
     /// The secret export, the secret family render of the account seed.
