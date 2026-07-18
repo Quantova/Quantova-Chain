@@ -15,7 +15,7 @@ fn pattern(len: usize) -> Vec<u8> {
 
 #[test]
 fn round_trip_address_at_floor() {
-    let raw = pattern(24);
+    let raw = pattern(32);
     let text = render_address(&raw).unwrap();
     assert_eq!(parse_address(&text).unwrap(), raw);
 }
@@ -29,7 +29,7 @@ fn round_trip_address_full_width() {
 
 #[test]
 fn round_trip_secret() {
-    let raw = pattern(24);
+    let raw = pattern(32);
     let text = render_secret(&raw).unwrap();
     assert_eq!(parse_secret(&text).unwrap(), raw);
 }
@@ -89,10 +89,10 @@ fn reject_wrong_prefix() {
 
 #[test]
 fn reject_short_address_payload() {
-    let raw = pattern(23);
+    let raw = pattern(31);
     assert_eq!(
         render_address(&raw),
-        Err(Error::TooShort { min: 24, got: 23 })
+        Err(Error::TooShort { min: 32, got: 31 })
     );
 }
 
@@ -110,7 +110,7 @@ fn reject_wrong_digest_length() {
 
 #[test]
 fn address_string_begins_with_q1() {
-    let raw = pattern(24);
+    let raw = pattern(32);
     let text = render_address(&raw).unwrap();
     assert!(text.starts_with("q1"));
 }

@@ -1,7 +1,7 @@
-//! Coverage for the account derivation pipeline and the address tiers.
+//! Coverage for the account derivation pipeline and the address format.
 
 use qtv_account::{
-    address_for_key, derive, derive_with_scheme, rotate, Tier, SCHEME_HASH, SCHEME_LATTICE,
+    address_for_key, derive, derive_with_scheme, rotate, SCHEME_HASH, SCHEME_LATTICE,
 };
 use qtv_idfmt::{parse_address, parse_secret, KEY_FLOOR};
 
@@ -53,19 +53,17 @@ fn changing_the_index_changes_the_address() {
 fn changing_the_scheme_changes_the_address() {
     let account = derive(&master(), 0);
     let key = account.public_key();
-    let lattice = address_for_key(SCHEME_LATTICE, key, Tier::Canonical);
-    let other = address_for_key(SCHEME_LATTICE + 1, key, Tier::Canonical);
+    let lattice = address_for_key(SCHEME_LATTICE, key);
+    let other = address_for_key(SCHEME_LATTICE + 1, key);
     assert_ne!(lattice, other);
 }
 
 #[test]
-fn compact_tier_is_shorter_and_both_hold_the_floor() {
+fn an_address_is_the_full_width_and_holds_the_floor() {
     let account = derive(&master(), 7);
-    let canonical = parse_address(&account.address_at(Tier::Canonical)).unwrap();
-    let compact = parse_address(&account.address_at(Tier::Compact)).unwrap();
-    assert!(compact.len() < canonical.len());
-    assert!(compact.len() >= KEY_FLOOR);
-    assert!(canonical.len() >= KEY_FLOOR);
+    let payload = parse_address(&account.address()).unwrap();
+    assert_eq!(payload.len(), 32);
+    assert!(payload.len() >= KEY_FLOOR);
 }
 
 #[test]

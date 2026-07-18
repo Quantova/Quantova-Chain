@@ -29,9 +29,9 @@ pub const HRP_CID: &str = "qcid";
 /// Human readable part for a proof digest.
 pub const HRP_PROOF: &str = "qpf";
 
-/// The security floor in bytes for the address and secret families. A payload
-/// shorter than this is a broken key and is refused.
-pub const KEY_FLOOR: usize = 24;
+/// The security floor in bytes for the address and secret families. Every
+/// payload is the full 256-bit width, and a shorter one is refused.
+pub const KEY_FLOOR: usize = 32;
 /// The fixed digest length in bytes for the transaction, block, state,
 /// interface, and proof families.
 pub const DIGEST_LEN: usize = 32;
