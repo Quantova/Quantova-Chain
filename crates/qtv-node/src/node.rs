@@ -318,13 +318,24 @@ pub fn committee_weights(
     ledger: &Ledger,
     base: &[ConsensusValidator],
 ) -> Vec<ConsensusValidator> {
-    base.iter()
+    let derived: Vec<ConsensusValidator> = base
+        .iter()
         .map(|v| ConsensusValidator {
             id: v.id,
             stake: ledger.staked_weight(&validator_address(v.id)),
             online: v.online,
         })
-        .collect()
+        .collect();
+    // Safety net against an empty committee. If committed state carries no bonded
+    // stake for any base validator, there is no staking record to weigh, either
+    // because the chain predates staking or because every validator has left. In
+    // that case the base genesis weights stand, so the committee never empties and
+    // the chain cannot halt for want of a drawable member. As soon as one validator
+    // holds a bond, the live weights take over and the base weights are ignored.
+    if derived.iter().all(|v| v.stake == 0) {
+        return base.to_vec();
+    }
+    derived
 }
 
 impl Node {
@@ -544,6 +555,30 @@ mod tests {
 
     fn keypair(index: u64) -> KeyAccount {
         derive(&SEED, index)
+    }
+
+    #[test]
+    fn committee_weights_use_live_bonds_and_fall_back_when_state_is_bare() {
+        let base = vec![
+            ConsensusValidator::online(1, 2_000),
+            ConsensusValidator::online(2, 2_000),
+            ConsensusValidator::online(3, 2_000),
+        ];
+
+        // A bare ledger with no staking records falls back to the genesis weights,
+        // so a node reloading a store that predates staking keeps its committee and
+        // does not halt for want of a drawable member.
+        let bare = Ledger::new();
+        assert_eq!(committee_weights(&bare, &base), base);
+
+        // Once a single validator holds a bond the live weights take over: the
+        // bonded validator carries its whole unit weight and the rest weigh zero.
+        let mut live = Ledger::new();
+        live.seed_validator_bond(&validator_address(2), 5_000 * 1_000_000);
+        let weights = committee_weights(&live, &base);
+        assert_eq!(weights[0].stake, 0);
+        assert_eq!(weights[1].stake, 5_000);
+        assert_eq!(weights[2].stake, 0);
     }
 
     fn fund(ledger: &mut Ledger, account: &KeyAccount, balance: u64) {
