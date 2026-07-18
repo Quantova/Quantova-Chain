@@ -43,6 +43,12 @@ pub struct GenesisFile {
     /// The human chain id, reported in logs and carried for the operator's eye. The
     /// binding check is the hash, which commits to this and to every other field.
     pub chain_id: String,
+    /// The genesis message, a free line folded into the genesis hash so it is a
+    /// permanent and unforgeable part of this network's identity, the way a headline
+    /// sits in the first block. Empty when the genesis sets none. The founder writes
+    /// the words; this carries them, and the same field carries them on testnet and
+    /// mainnet so the two test the same structure and differ only in what it says.
+    pub message: String,
     /// The genesis every node funds and draws its committee from.
     pub genesis: Genesis,
     /// The one time sortition slot budget every validator tree is sized to. One slot
@@ -69,17 +75,20 @@ impl GenesisFile {
         let fields = parse_kv(&text, path)?;
 
         let mut chain_id: Option<String> = None;
+        let mut message = String::new();
         let mut genesis_time: Option<u64> = None;
         let mut slots: u64 = DEFAULT_SLOTS;
         let mut transfer_micro_usd: Option<u128> = None;
         let mut rate_micro_usd_per_qtov: Option<u128> = None;
         let mut native_unit: Option<u128> = None;
+        let mut max_fee_native: Option<u64> = None;
         let mut validators: Vec<ValidatorSpec> = Vec::new();
         let mut accounts: Vec<GenesisAccount> = Vec::new();
 
         for field in &fields {
             match field.key.as_str() {
                 "chain_id" => chain_id = Some(field.value.clone()),
+                "message" => message = field.value.clone(),
                 "genesis_time" => genesis_time = Some(field.u64("genesis_time")?),
                 "slots" => slots = field.u64("slots")?,
                 "fee_transfer_micro_usd" => {
@@ -89,6 +98,7 @@ impl GenesisFile {
                     rate_micro_usd_per_qtov = Some(field.u128("fee_rate_micro_usd_per_qtov")?)
                 }
                 "fee_native_unit" => native_unit = Some(field.u128("fee_native_unit")?),
+                "fee_max_native" => max_fee_native = Some(field.u64("fee_max_native")?),
                 "validator" => validators.push(parse_validator(field)?),
                 "account" => accounts.push(parse_account(field)?),
                 other => {
@@ -105,6 +115,7 @@ impl GenesisFile {
             rate_micro_usd_per_qtov: rate_micro_usd_per_qtov
                 .ok_or("the genesis is missing 'fee_rate_micro_usd_per_qtov'")?,
             native_unit: native_unit.ok_or("the genesis is missing 'fee_native_unit'")?,
+            max_fee_native: max_fee_native.ok_or("the genesis is missing 'fee_max_native'")?,
         };
         if fee_params.rate_micro_usd_per_qtov == 0 {
             return Err("the genesis 'fee_rate_micro_usd_per_qtov' is zero, so the fee \
@@ -121,6 +132,13 @@ impl GenesisFile {
                         and native unit, so a transfer would carry no fee"
                 .to_string());
         }
+        if fee_params.max_fee_native < fee_params.floor_native_uncapped() {
+            return Err("the genesis 'fee_max_native' is below the band floor at this rate, \
+                        so the native ceiling would clamp a transfer below the advertised \
+                        floor fee. Set it to at least the floor, and to the band ceiling at \
+                        this rate for the band to work fully before the rate goes stale"
+                .to_string());
+        }
         if validators.is_empty() {
             return Err("the genesis names no validators, so no committee can form".to_string());
         }
@@ -134,9 +152,10 @@ impl GenesisFile {
             validators,
             genesis_time,
         };
-        let hash = genesis_hash(&chain_id, slots, &genesis);
+        let hash = genesis_hash(&chain_id, &message, slots, &genesis);
         Ok(GenesisFile {
             chain_id,
+            message,
             genesis,
             slots,
             hash,
@@ -197,15 +216,20 @@ fn parse_account(field: &Field) -> Result<GenesisAccount, String> {
 /// different line order still hash equal and name the same network. Every field is
 /// length prefixed or fixed width, so no two distinct genesis inputs collide onto
 /// one hash.
-fn genesis_hash(chain_id: &str, slots: u64, genesis: &Genesis) -> [u8; 32] {
+fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) -> [u8; 32] {
     let mut buf: Vec<u8> = Vec::new();
-    buf.extend_from_slice(b"QTV-GENESIS-V1");
+    // Version two folds in the genesis message and the native fee ceiling. Both are
+    // part of the network identity a peer is pinned against, so a node that carries a
+    // different message or a different ceiling names a different network.
+    buf.extend_from_slice(b"QTV-GENESIS-V2");
     put_bytes(&mut buf, chain_id.as_bytes());
+    put_bytes(&mut buf, message.as_bytes());
     buf.extend_from_slice(&genesis.genesis_time.to_le_bytes());
     buf.extend_from_slice(&slots.to_le_bytes());
     buf.extend_from_slice(&genesis.fee_params.transfer_micro_usd.to_le_bytes());
     buf.extend_from_slice(&genesis.fee_params.rate_micro_usd_per_qtov.to_le_bytes());
     buf.extend_from_slice(&genesis.fee_params.native_unit.to_le_bytes());
+    buf.extend_from_slice(&genesis.fee_params.max_fee_native.to_le_bytes());
 
     let mut validators = genesis.validators.clone();
     validators.sort_by_key(|v| v.id);
