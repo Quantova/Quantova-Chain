@@ -12,7 +12,8 @@
 use qtv_codec::{from_bytes, to_bytes, Decode, Decoder, Encode, Encoder, Error};
 use qtv_crypto::sha3;
 use qtv_governance::{
-    check_enactment, Action, Ballot, Conviction, Lock, Referendum, Status, Track, Violation,
+    check_enactment, Action, Ballot, Conviction, EnactmentReceipt, Lock, Referendum, Status, Track,
+    Violation,
 };
 use qtv_staking::{Bond, Session, SessionMeter};
 use qtv_state::{Key, Trie, HASH_LEN, KEY_LEN};
@@ -175,11 +176,19 @@ const GOV_ACTION_TAG: &[u8] = b"qtv/gov/action/";
 const GOV_BALLOT_TAG: &[u8] = b"qtv/gov/ballot/";
 const GOV_LOCK_TAG: &[u8] = b"qtv/gov/lock/";
 const GOV_BLACKLIST_TAG: &[u8] = b"qtv/gov/blacklist/";
+const GOV_RECEIPT_TAG: &[u8] = b"qtv/gov/receipt/";
 
 fn gov_blacklist_key(id: &[u8; 32]) -> Key {
     let mut input = Vec::with_capacity(GOV_BLACKLIST_TAG.len() + id.len());
     input.extend_from_slice(GOV_BLACKLIST_TAG);
     input.extend_from_slice(id);
+    sha3::sha3_256(&input)
+}
+
+fn gov_receipt_key(id: u64) -> Key {
+    let mut input = Vec::with_capacity(GOV_RECEIPT_TAG.len() + 8);
+    input.extend_from_slice(GOV_RECEIPT_TAG);
+    input.extend_from_slice(&id.to_le_bytes());
     sha3::sha3_256(&input)
 }
 
@@ -572,6 +581,20 @@ impl Ledger {
         self.trie.insert(gov_action_key(id), Vec::new());
     }
 
+    /// The permanent enactment record for a referendum, written when it enacts and
+    /// never cleared, so any enacted decision can be audited against the action hash,
+    /// the recovery scope it was bound to, and the tally that carried it.
+    pub fn gov_receipt(&self, id: u64) -> Option<EnactmentReceipt> {
+        self.trie
+            .get(&gov_receipt_key(id))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical receipt"))
+    }
+
+    fn set_gov_receipt(&mut self, id: u64, receipt: &EnactmentReceipt) {
+        self.trie.insert(gov_receipt_key(id), to_bytes(receipt));
+    }
+
     pub fn gov_ballot(&self, referendum: u64, voter: &[u8; 32]) -> Option<Ballot> {
         self.trie
             .get(&gov_ballot_key(referendum, voter))
@@ -753,6 +776,18 @@ impl Ledger {
         })
         .map_err(EnactError::Constitution)?;
         self.execute_action(&action)?;
+        let scope = match &action {
+            Action::FreezeRecovery { scope, .. } => *scope,
+            _ => [0u8; 32],
+        };
+        let receipt = EnactmentReceipt {
+            referendum: referendum_id,
+            proposal_hash: sha3::sha3_256(&to_bytes(&action)),
+            scope,
+            tally: referendum.tally,
+            enacted_at: now,
+        };
+        self.set_gov_receipt(referendum_id, &receipt);
         self.clear_gov_action(referendum_id);
         Ok(())
     }
@@ -1046,10 +1081,23 @@ mod stake_state_tests {
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
 
         assert_eq!(l.stake_price(), 0);
+        let action = qtv_governance::Action::Parameter {
+            key: b"price".to_vec(),
+            value: 70_000_000u128.to_le_bytes().to_vec(),
+        };
         l.gov_enact(id, 7 * 86_400 + 1).unwrap();
         assert_eq!(l.stake_price(), 70_000_000);
         // A referendum enacts exactly once.
         assert!(l.gov_enact(id, 7 * 86_400 + 1).is_err());
+        // The enactment is recorded permanently against the action hash and the tally.
+        let receipt = l.gov_receipt(id).unwrap();
+        assert_eq!(receipt.referendum, id);
+        assert_eq!(
+            receipt.proposal_hash,
+            sha3::sha3_256(&qtv_codec::to_bytes(&action))
+        );
+        assert_eq!(receipt.enacted_at, 7 * 86_400 + 1);
+        assert!(receipt.tally.turnout_stake > 0);
     }
 
     #[test]
