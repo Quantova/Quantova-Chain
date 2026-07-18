@@ -123,5 +123,5 @@ fn transaction_id_round_trips_through_the_format() {
     let payload = qtv_idfmt::parse_tx(&id).unwrap();
     let again = qtv_idfmt::render_tx(&payload).unwrap();
     assert_eq!(id, again);
-    assert!(id.starts_with("qtx1"));
+    assert!(id.starts_with("QTX1"));
 }

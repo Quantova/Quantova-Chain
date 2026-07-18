@@ -75,7 +75,7 @@ fn reject_corrupted_checksum() {
     let text = render_tx(&raw).unwrap();
     let mut symbols: Vec<char> = text.chars().collect();
     let last = symbols.len() - 1;
-    symbols[last] = if symbols[last] == 'q' { 'p' } else { 'q' };
+    symbols[last] = if symbols[last] == 'Q' { 'P' } else { 'Q' };
     let corrupted: String = symbols.into_iter().collect();
     assert_eq!(parse_tx(&corrupted), Err(Error::BadChecksum));
 }
@@ -112,5 +112,5 @@ fn reject_wrong_digest_length() {
 fn address_string_begins_with_q1() {
     let raw = pattern(32);
     let text = render_address(&raw).unwrap();
-    assert!(text.starts_with("q1"));
+    assert!(text.starts_with("Q1"));
 }

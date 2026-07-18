@@ -95,6 +95,6 @@ fn block_id_round_trips_through_the_format() {
     let payload = qtv_idfmt::parse_block(&id).unwrap();
     let again = qtv_idfmt::render_block(&payload).unwrap();
     assert_eq!(id, again);
-    assert!(id.starts_with("qbk1"));
+    assert!(id.starts_with("QBK1"));
     assert_eq!(payload, block.header_hash().to_vec());
 }

@@ -191,7 +191,7 @@ fn encode(hrp: &str, data: &[u8]) -> String {
 fn render(hrp: &str, payload: &[u8]) -> String {
     let groups =
         convert_bits(payload, 8, 5, true).expect("eight to five padded regrouping is total");
-    encode(hrp, &groups)
+    encode(hrp, &groups).to_ascii_uppercase()
 }
 
 /// Split a Bech32m string, verify its checksum, and return the raw bytes with
