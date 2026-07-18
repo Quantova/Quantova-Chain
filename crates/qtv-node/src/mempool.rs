@@ -187,11 +187,19 @@ fn plan_from_account_checks(
         return Err(Reject::MeterLimitTooLow);
     }
 
-    let fee = fee_params.transfer_fee();
-    if body.fee() < u128::from(fee) {
+    let floor = fee_params.transfer_fee();
+    if body.fee() < u128::from(floor) {
         return Err(Reject::FeeTooLow);
     }
-    let debit = amount.checked_add(fee).ok_or(Reject::InsufficientFunds)?;
+    // Pay what you bid, clamped to the band ceiling. A higher declared fee orders
+    // the transaction earlier and is charged, up to the ceiling, so a bid is no
+    // longer free below the ceiling and every rational sender no longer bids the
+    // maximum for nothing. At and above the ceiling the charge pins to the band, so
+    // rationing past that point is not the dollar charge but the meter, which is the
+    // saturation lever recorded in RECORD-fee-cap.md.
+    let ceiling = fee_params.ceiling_fee();
+    let charged = u64::try_from(body.fee().min(u128::from(ceiling))).unwrap_or(ceiling);
+    let debit = amount.checked_add(charged).ok_or(Reject::InsufficientFunds)?;
     if account.balance < debit {
         return Err(Reject::InsufficientFunds);
     }
@@ -200,7 +208,7 @@ fn plan_from_account_checks(
         sender,
         recipient,
         amount,
-        fee,
+        fee: charged,
     })
 }
 
@@ -481,6 +489,46 @@ mod tests {
         assert_eq!(
             pool.admit(tx, &ledger, &params),
             Err(Reject::InsufficientFunds)
+        );
+    }
+
+    #[test]
+    fn pay_what_you_bid_charges_the_bid_clamped_to_the_ceiling() {
+        let params = FeeParams::devnet();
+        let alice = keypair(0);
+        let bob = keypair(1);
+        let account =
+            Account::funded(1_000_000, alice.scheme(), alice.public_key().to_vec());
+        let floor = params.transfer_fee();
+        let ceiling = params.ceiling_fee();
+        assert!(ceiling > floor);
+
+        // A bid at the floor is charged the floor.
+        let at_floor = signed_transfer(&alice, &bob.address(), 100, 0, u128::from(floor));
+        assert_eq!(
+            plan_from_account(&at_floor, &account, &params).unwrap().fee,
+            floor
+        );
+
+        // A bid between the floor and the ceiling is charged that bid, so the bid is
+        // no longer free.
+        let mid = floor + (ceiling - floor) / 2;
+        let at_mid = signed_transfer(&alice, &bob.address(), 100, 0, u128::from(mid));
+        assert_eq!(plan_from_account(&at_mid, &account, &params).unwrap().fee, mid);
+
+        // A bid above the ceiling is charged the ceiling, never more.
+        let over =
+            signed_transfer(&alice, &bob.address(), 100, 0, u128::from(ceiling) * 100);
+        assert_eq!(
+            plan_from_account(&over, &account, &params).unwrap().fee,
+            ceiling
+        );
+
+        // A bid below the floor is refused.
+        let under = signed_transfer(&alice, &bob.address(), 100, 0, u128::from(floor) - 1);
+        assert_eq!(
+            plan_from_account(&under, &account, &params),
+            Err(Reject::FeeTooLow)
         );
     }
 
