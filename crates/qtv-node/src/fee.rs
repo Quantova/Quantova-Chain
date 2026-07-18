@@ -2,18 +2,31 @@
 //!
 //! The fee schedule is stated in dollar micro units, one millionth of a United
 //! States dollar, and never in a raw native amount. Every fee falls within the
-//! band from one hundredth of a cent to one tenth of a cent, which is USD 0.0001
-//! to USD 0.0010. At charge time the dollar figure is converted to the native
-//! asset by a governance rate, the price of one whole QTOV in dollar micro units.
-//! The one tenth of a cent ceiling is a runtime invariant, so the charged figure
-//! is clamped into the band before conversion and can never exceed the ceiling.
+//! band from five hundredths of a cent to one tenth of a cent, which is USD 0.0005
+//! to USD 0.0010: a transfer sits at the floor when traffic is light and rises
+//! toward the ceiling under contention, and never above the ceiling at any load.
+//! At charge time the dollar figure is converted to the native asset by a
+//! governance rate, the price of one whole QTOV in dollar micro units.
+//!
+//! WHAT THE CEILING BINDS, AND WHAT IT DOES NOT. The dollar figure is clamped into
+//! the band before conversion, so the charge measured at the governance rate can
+//! never exceed the ceiling. That is the invariant this module enforces, and the
+//! conversion saturates rather than panics so no rate can overflow the native word
+//! on the path every transaction takes. The invariant does not extend to the
+//! charge measured against the true market price of QTOV, because the chain
+//! observes no price other than the governance rate. If the rate lags a real move
+//! the realized cost drifts with the market. Binding that needs either a price
+//! oracle or a hard native ceiling, a monetary decision that belongs in
+//! SPEC-economics and governance, not a silent default here. See RECORD-fee-cap.md.
 
-/// One hundredth of a cent, USD 0.0001, in dollar micro units. The band floor
-/// and the fee of a simple transfer, which sits at the low end of the band.
-pub const MICRO_USD_FLOOR: u128 = 100;
+/// Five hundredths of a cent, USD 0.0005, in dollar micro units. The band floor
+/// and the fee of a simple transfer when traffic is light, a nonzero charge that
+/// never rounds away.
+pub const MICRO_USD_FLOOR: u128 = 500;
 
 /// One tenth of a cent, USD 0.0010, in dollar micro units. The band ceiling and
-/// the hard runtime invariant a charged fee can never exceed.
+/// the hard invariant a charged fee can never exceed when measured at the
+/// governance rate.
 pub const MICRO_USD_CEILING: u128 = 1000;
 
 /// The protocol fee parameters. Every value is a genesis setting changed only
@@ -30,7 +43,7 @@ pub struct FeeParams {
 
 impl FeeParams {
     /// The devnet parameters. One QTOV is worth one dollar and holds one million
-    /// base units, so a transfer at the band floor costs one hundred base units,
+    /// base units, so a transfer at the band floor costs five hundred base units,
     /// a nonzero charge that never rounds away.
     pub fn devnet() -> Self {
         FeeParams {
@@ -41,13 +54,22 @@ impl FeeParams {
     }
 
     /// The native charge for a scheduled dollar micro fee. The figure is clamped
-    /// into the band before conversion, so the ceiling binds however the rate
-    /// moves, and the floor keeps the charge nonzero. The result is the dollar
+    /// into the band before conversion, so the charge at the governance rate never
+    /// exceeds the ceiling and the floor keeps it nonzero. The result is the dollar
     /// figure divided by the rate, expressed in native base units.
+    ///
+    /// The arithmetic cannot panic. The multiply saturates and the divide is
+    /// checked, so a rate small enough to overflow the native word yields the
+    /// largest representable charge rather than aborting the block, and a rate the
+    /// genesis loader should have rejected as zero yields zero rather than dividing
+    /// by it. The genesis loader is the real guard on both, this is the belt.
     pub fn native_fee(&self, micro_usd: u128) -> u64 {
         let banded = micro_usd.clamp(MICRO_USD_FLOOR, MICRO_USD_CEILING);
-        let native = banded * self.native_unit / self.rate_micro_usd_per_qtov;
-        u64::try_from(native).expect("a banded fee stays within the native word")
+        let native = banded
+            .saturating_mul(self.native_unit)
+            .checked_div(self.rate_micro_usd_per_qtov)
+            .unwrap_or(0);
+        u64::try_from(native).unwrap_or(u64::MAX)
     }
 
     /// The native charge for a simple transfer, taken from the schedule.
@@ -68,6 +90,32 @@ mod tests {
         assert!(floor > 0);
         assert_eq!(p.transfer_fee(), floor);
         assert!(p.transfer_fee() <= ceiling);
+    }
+
+    #[test]
+    fn a_tiny_rate_saturates_rather_than_panics() {
+        // A rate of one dollar micro unit per whole QTOV would overflow the native
+        // word under the old multiply. The charge saturates to the native maximum
+        // instead of aborting the block, so a misconfigured or extreme rate cannot
+        // take the fee path, which every transaction crosses, down with it.
+        let p = FeeParams {
+            transfer_micro_usd: MICRO_USD_FLOOR,
+            rate_micro_usd_per_qtov: 1,
+            native_unit: u128::from(u64::MAX),
+        };
+        assert_eq!(p.transfer_fee(), u64::MAX);
+    }
+
+    #[test]
+    fn a_zero_rate_does_not_divide_by_zero() {
+        // The genesis loader rejects a zero rate, but the charge path still refuses
+        // to divide by it, yielding zero rather than panicking.
+        let p = FeeParams {
+            transfer_micro_usd: MICRO_USD_FLOOR,
+            rate_micro_usd_per_qtov: 0,
+            native_unit: 1_000_000,
+        };
+        assert_eq!(p.transfer_fee(), 0);
     }
 
     #[test]
