@@ -161,9 +161,35 @@ impl Decode for Bond {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RewardTranche {
+    pub earned_day: u64,
+    pub amount: u64,
+    pub claimed: u64,
+}
+
+impl Encode for RewardTranche {
+    fn encode(&self, encoder: &mut Encoder) {
+        self.earned_day.encode(encoder);
+        self.amount.encode(encoder);
+        self.claimed.encode(encoder);
+    }
+}
+
+impl Decode for RewardTranche {
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
+        Ok(RewardTranche {
+            earned_day: u64::decode(decoder)?,
+            amount: u64::decode(decoder)?,
+            claimed: u64::decode(decoder)?,
+        })
+    }
+}
+
 pub struct StakeLedger {
     bonds: BTreeMap<[u8; 32], Bond>,
     banned: BTreeSet<[u8; 32]>,
+    rewards: BTreeMap<[u8; 32], Vec<RewardTranche>>,
     pool: u64,
     treasury: u64,
 }
@@ -173,6 +199,7 @@ impl StakeLedger {
         StakeLedger {
             bonds: BTreeMap::new(),
             banned: BTreeSet::new(),
+            rewards: BTreeMap::new(),
             pool,
             treasury: 0,
         }
@@ -228,7 +255,38 @@ impl StakeLedger {
         };
         let paid = session_reward(stake, session, rate_micro_usd_per_qtov).min(self.pool);
         self.pool -= paid;
+        if paid > 0 {
+            self.rewards.entry(*id).or_default().push(RewardTranche {
+                earned_day: now_day,
+                amount: paid,
+                claimed: 0,
+            });
+        }
         paid
+    }
+
+    pub fn claimable(&self, id: &[u8; 32], now_day: u64) -> u64 {
+        self.rewards.get(id).map_or(0, |tranches| {
+            tranches
+                .iter()
+                .map(|t| {
+                    released(t.amount, now_day.saturating_sub(t.earned_day))
+                        .saturating_sub(t.claimed)
+                })
+                .sum()
+        })
+    }
+
+    pub fn claim(&mut self, id: &[u8; 32], now_day: u64) -> u64 {
+        let mut total = 0;
+        if let Some(tranches) = self.rewards.get_mut(id) {
+            for t in tranches.iter_mut() {
+                let unlocked = released(t.amount, now_day.saturating_sub(t.earned_day));
+                total += unlocked.saturating_sub(t.claimed);
+                t.claimed = unlocked;
+            }
+        }
+        total
     }
 
     pub fn slash(&mut self, id: &[u8; 32], fault: Fault) -> u64 {
@@ -525,6 +583,19 @@ mod tests {
         assert_eq!(m.count(), 0);
         m.record(50_000_000_000);
         assert_eq!(m.close(182 + 182), Some(Session::High));
+    }
+
+    #[test]
+    fn rewards_vest_then_claim_a_quarter_at_a_time() {
+        let mut l = StakeLedger::new(1_000 * QTOV);
+        l.bond(id(1), 2_000 * QTOV, 0);
+        assert_eq!(l.accrue(&id(1), Session::High, PRICE_70, 400, 0), 35 * QTOV);
+        assert_eq!(l.claimable(&id(1), 400 + 364), 0);
+        assert_eq!(l.claimable(&id(1), 400 + 365), 35 * QTOV / 4);
+        assert_eq!(l.claim(&id(1), 400 + 365), 35 * QTOV / 4);
+        assert_eq!(l.claimable(&id(1), 400 + 365), 0);
+        assert_eq!(l.claim(&id(1), 400 + 725), 35 * QTOV - 35 * QTOV / 4);
+        assert_eq!(l.claim(&id(1), 400 + 5_000), 0);
     }
 
     #[test]
