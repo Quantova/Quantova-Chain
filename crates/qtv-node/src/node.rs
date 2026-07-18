@@ -295,6 +295,7 @@ pub struct Node {
     ledger: Ledger,
     mempool: Mempool,
     consensus: Consensus,
+    base_validators: Vec<ConsensusValidator>,
     fee_params: FeeParams,
     validator_addresses: BTreeMap<u64, String>,
     beacon: Beacon,
@@ -305,6 +306,25 @@ pub struct Node {
     chain: Vec<Finalized>,
     slashed: Vec<u64>,
     exec_threads: usize,
+}
+
+/// The committee weight set read from committed state. Each base validator keeps
+/// its consensus id and liveness flag and takes its weight from its live bonded
+/// stake on the ledger, so the sortition draws on the stake that is actually
+/// locked rather than a genesis constant. It is a pure function of committed
+/// state, so every node that has applied the same blocks builds the identical set
+/// and draws the identical committee.
+pub fn committee_weights(
+    ledger: &Ledger,
+    base: &[ConsensusValidator],
+) -> Vec<ConsensusValidator> {
+    base.iter()
+        .map(|v| ConsensusValidator {
+            id: v.id,
+            stake: ledger.staked_weight(&validator_address(v.id)),
+            online: v.online,
+        })
+        .collect()
 }
 
 impl Node {
@@ -334,11 +354,18 @@ impl Node {
             .iter()
             .map(|v| (v.id, validator_address(v.id)))
             .collect();
+        for v in &validators {
+            ledger.seed_validator_bond(
+                &validator_address(v.id),
+                v.stake.saturating_mul(qtv_staking::NATIVE_UNIT as u64),
+            );
+        }
 
         Node {
             ledger,
             mempool: Mempool::new(),
             consensus: Consensus::new(&validators),
+            base_validators: validators,
             fee_params: genesis.fee_params,
             validator_addresses,
             beacon: crate::consensus::genesis_beacon(),
@@ -383,6 +410,8 @@ impl Node {
         let height = self.height;
         let slot = height;
 
+        self.consensus
+            .reweight(&committee_weights(&self.ledger, &self.base_validators));
         let selection = self
             .consensus
             .select(&self.beacon, slot)

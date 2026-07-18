@@ -76,6 +76,7 @@ pub struct Consensus {
     attesters: BTreeMap<u64, Attester>,
     online: BTreeMap<u64, bool>,
     budget: u64,
+    slots: u64,
 }
 
 impl Consensus {
@@ -108,7 +109,28 @@ impl Consensus {
             attesters,
             online,
             budget: COMMITTEE_BUDGET,
+            slots,
         }
+    }
+
+    /// Replace the weighted set the committee draws from, keeping the one time slot
+    /// count and budget fixed. Called at an epoch boundary with the validator set
+    /// read from committed state, so every node that has applied the same blocks
+    /// rebuilds the identical registry and draws the identical committee. The slot
+    /// count is held constant across the rebuild because the one time sortition keys
+    /// are indexed by the height, not by the epoch, so the count remains the ceiling
+    /// on total finalised heights and must not be reset mid run.
+    pub fn reweight(&mut self, validators: &[ConsensusValidator]) {
+        let sampler = validators
+            .iter()
+            .map(|v| SamplerValidator::with_slots(v.id, v.stake, self.slots))
+            .collect();
+        self.registry = Registry::new(sampler);
+        self.attesters = validators
+            .iter()
+            .map(|v| (v.id, Attester::with_slots(v.id, v.stake, self.slots)))
+            .collect();
+        self.online = validators.iter().map(|v| (v.id, v.online)).collect();
     }
 
     /// Select the committee and elect the leader for a slot over the beacon. None
@@ -292,5 +314,44 @@ mod tests {
             forged.verify(&selection.commitment, &beacon),
             Verdict::Rejected(RejectReason::NotEntitled)
         );
+    }
+
+    #[test]
+    fn reweight_matches_a_fresh_build_and_drops_a_zeroed_member() {
+        let beacon = genesis_beacon();
+        // The fourth validator has been slashed to zero weight, below the
+        // eligibility floor.
+        let mut zeroed = set(&[true, true, true, true]);
+        zeroed[3].stake = 0;
+
+        // Reweighting a running driver onto the zeroed set lands on the identical
+        // committee and leader, height by height, as building a fresh driver over
+        // that set. The epoch rebuild is therefore exactly a reconstruction, so a
+        // node that reweights and a node that started fresh draw the same committee.
+        let mut reweighted = Consensus::new(&set(&[true, true, true, true]));
+        reweighted.reweight(&zeroed);
+        let fresh = Consensus::new(&zeroed);
+        for slot in 1..=8 {
+            let a = reweighted.select(&beacon, slot).map(|s| (s.members, s.leader));
+            let b = fresh.select(&beacon, slot).map(|s| (s.members, s.leader));
+            assert_eq!(a, b, "committee differs at slot {slot}");
+        }
+
+        // The zeroed member is below the floor, so it is never drawn.
+        for slot in 1..=8 {
+            if let Some(selection) = reweighted.select(&beacon, slot) {
+                assert!(
+                    !selection.members.contains(&4),
+                    "a zero weight validator was drawn at slot {slot}"
+                );
+            }
+        }
+
+        // A validator kept at full weight is still drawn, so reweight narrows the set
+        // to the funded validators rather than emptying it.
+        let drawn = (1..=8)
+            .filter_map(|slot| reweighted.select(&beacon, slot))
+            .any(|selection| selection.members.contains(&1));
+        assert!(drawn, "a fully weighted validator was never drawn");
     }
 }

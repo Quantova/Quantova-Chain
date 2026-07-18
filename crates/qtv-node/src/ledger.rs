@@ -142,6 +142,41 @@ impl Ledger {
         self.trie.insert(stake_bond_key(id), Vec::new());
     }
 
+    /// The committee weight of an address in whole native units, the unit the
+    /// sortition sampler weighs a validator by. A banned account or one with no
+    /// bond weighs zero. The base unit remainder below one whole unit is dropped,
+    /// which can never cross the eligibility floor because the minimum bond is
+    /// thousands of whole units, so the truncation only ever discards dust.
+    pub fn staked_weight(&self, address: &str) -> u64 {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return 0,
+        };
+        if self.is_stake_banned(&id) {
+            return 0;
+        }
+        self.stake_bond(&id)
+            .map(|bond| bond.amount / qtv_staking::NATIVE_UNIT as u64)
+            .unwrap_or(0)
+    }
+
+    /// Seed a genesis validator's bond directly, returning the state key and value
+    /// so a persisting node can write it under the genesis root. The amount is in
+    /// base units and the bond dates from day zero. This puts the stake the
+    /// committee already assumed onto the ledger, so every later reweight reads the
+    /// live bond rather than a genesis constant, and a slash or a top up moves the
+    /// committee weight with it.
+    pub fn seed_validator_bond(&mut self, address: &str, amount: u64) -> Option<(Key, Vec<u8>)> {
+        let id = address_id(address)?;
+        let bond = Bond {
+            amount,
+            bonded_at_day: 0,
+            exit_requested_at: None,
+        };
+        self.set_stake_bond(&id, &bond);
+        Some((stake_bond_key(&id), to_bytes(&bond)))
+    }
+
     pub fn stake_pool(&self) -> u64 {
         self.trie
             .get(&stake_singleton_key(STAKE_POOL_TAG))
@@ -338,6 +373,26 @@ mod stake_state_tests {
         assert_eq!(l.stake_treasury(), 1_000);
         l.clear_stake_bond(&id);
         assert!(l.stake_bond(&id).is_none());
+    }
+
+    #[test]
+    fn committee_weight_tracks_the_live_bond_in_whole_units() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[8u8; 32]).unwrap();
+        let id = [8u8; 32];
+        assert_eq!(l.staked_weight(&addr), 0);
+        // A genesis style seed of 2,000 whole units reads back as a weight of 2,000,
+        // the unit the sortition sampler weighs a validator by.
+        l.seed_validator_bond(&addr, 2_000 * 1_000_000).unwrap();
+        assert_eq!(l.staked_weight(&addr), 2_000);
+        // Base unit dust below one whole unit is dropped and never lifts the weight.
+        l.set_stake_bond(&id, &Bond::new(2_000 * 1_000_000 + 999_999, 0).unwrap());
+        assert_eq!(l.staked_weight(&addr), 2_000);
+        // An attributable slash clears the bond and bans the account, so its weight
+        // falls to zero and it can never be drawn into a committee again.
+        l.slash_stake(&addr, qtv_staking::Fault::Attributable);
+        assert_eq!(l.staked_weight(&addr), 0);
+        assert!(l.is_stake_banned(&id));
     }
 
     #[test]
