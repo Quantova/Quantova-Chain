@@ -55,6 +55,11 @@ pub struct Driver {
     up: Vec<bool>,
     assembler: ProposalAssembler,
     buffered: Vec<Vec<u8>>,
+    /// The one time sortition slot budget from the genesis. A height at or past this
+    /// count has no committed slot, and the sampler asserts rather than returns none, so
+    /// the driver stops one height short of the budget and halts cleanly rather than let
+    /// that assert panic the node. u64::MAX means no budget was set.
+    budget: u64,
     /// The RPC seam, present when the daemon was configured with a gateway. The static
     /// context node info reports, and the queue of client requests the gateway threads
     /// feed. The round loop drains this between round steps and answers each against the
@@ -75,9 +80,17 @@ impl Driver {
             up: mesh.up,
             assembler: ProposalAssembler::new(),
             buffered: Vec::new(),
+            budget: u64::MAX,
             rpc_context: None,
             rpc_requests: None,
         }
+    }
+
+    /// Set the one time slot budget the genesis committed, the number of heights the
+    /// sortition can serve before its keys are spent. The driver halts cleanly one height
+    /// short of this rather than let the sampler assert past its committed count.
+    pub fn set_budget(&mut self, budget: u64) {
+        self.budget = budget;
     }
 
     /// Attach the RPC seam, the node info context and the queue of client requests the
@@ -104,10 +117,11 @@ impl Driver {
         }
     }
 
-    /// Run the round until the stop flag is set or a height cannot select a committee.
-    /// Each iteration drives one height to finality; the loop then advances to the
-    /// next. A committee that cannot be selected, the sortition slot budget spent,
-    /// ends the run with a message rather than a silent hang.
+    /// Run the round until the stop flag is set or the slot budget is reached. Each
+    /// iteration drives one height to finality; the loop then advances to the next. The
+    /// budget is reached one height short of the committed slot count, so the sampler is
+    /// never asked for a slot it does not serve, and the daemon halts cleanly with a
+    /// message rather than panicking on the assert past the count.
     pub fn run(
         &mut self,
         block_interval: Duration,
@@ -115,6 +129,15 @@ impl Driver {
         stopped: &AtomicBool,
     ) -> Result<(), String> {
         while !stopped.load(Ordering::SeqCst) {
+            if self.node.height() >= self.budget {
+                log(&format!(
+                    "reached the one time slot budget at height {}, halting cleanly. The \
+                     sortition keys are spent; a larger budget in the genesis, or the epoch \
+                     and key rotation mechanism, is needed to run further",
+                    self.budget.saturating_sub(1)
+                ));
+                return Ok(());
+            }
             self.drive_one_height(block_interval, view_timeout, stopped)?;
         }
         Ok(())
