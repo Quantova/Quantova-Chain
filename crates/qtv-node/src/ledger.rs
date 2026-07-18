@@ -96,6 +96,7 @@ const STAKE_TREASURY_TAG: &[u8] = b"qtv/stake/treasury";
 const STAKE_PRICE_TAG: &[u8] = b"qtv/stake/price";
 const STAKE_MAINNET_TAG: &[u8] = b"qtv/stake/mainnet";
 const STAKE_METER_TAG: &[u8] = b"qtv/stake/meter";
+const STAKE_VALIDATORS_TAG: &[u8] = b"qtv/stake/validators";
 
 fn stake_bond_key(id: &[u8; 32]) -> Key {
     let mut input = Vec::with_capacity(STAKE_BOND_TAG.len() + id.len());
@@ -166,6 +167,14 @@ fn address_id(address: &str) -> Option<[u8; 32]> {
 
 pub fn stake_system_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/stake/system"))
+        .expect("a full hash reaches the address floor")
+}
+
+/// The reserved address a validator sends an empty transfer to in order to claim
+/// its vested rewards into its balance. The amount is ignored; the transfer is the
+/// claim intent.
+pub fn stake_claim_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/stake/claim"))
         .expect("a full hash reaches the address floor")
 }
 
@@ -437,10 +446,13 @@ impl Ledger {
     /// lands as a tranche dated to the accrual day, from which it vests on the
     /// released schedule. Returns the amount paid, so a caller can total the round.
     pub fn accrue_reward(&mut self, address: &str, session: Session, now_day: u64) -> u64 {
-        let id = match address_id(address) {
-            Some(id) => id,
-            None => return 0,
-        };
+        match address_id(address) {
+            Some(id) => self.accrue_reward_by_id(&id, session, now_day),
+            None => 0,
+        }
+    }
+
+    fn accrue_reward_by_id(&mut self, id: &[u8; 32], session: Session, now_day: u64) -> u64 {
         if qtv_staking::in_blackout(now_day, self.stake_mainnet_start()) {
             return 0;
         }
@@ -448,7 +460,7 @@ impl Ledger {
         if rate == 0 {
             return 0;
         }
-        let stake = match self.stake_bond(&id) {
+        let stake = match self.stake_bond(id) {
             Some(bond) => bond.amount,
             None => return 0,
         };
@@ -457,13 +469,13 @@ impl Ledger {
             return 0;
         }
         self.set_stake_pool(self.stake_pool() - paid);
-        let mut book = self.stake_rewards(&id);
+        let mut book = self.stake_rewards(id);
         book.tranches.push(qtv_staking::RewardTranche {
             earned_day: now_day,
             amount: paid,
             claimed: 0,
         });
-        self.set_stake_rewards(&id, &book);
+        self.set_stake_rewards(id, &book);
         paid
     }
 
@@ -512,6 +524,22 @@ impl Ledger {
         credited
     }
 
+    /// Charge a claim transaction's fee, bump the nonce, and credit the vested
+    /// rewards into the sender's balance. The fee applies whether or not anything
+    /// was vested, so a claim with nothing to release is a fee paying no op rather
+    /// than a free retry. Returns false only when the sender cannot cover the fee.
+    pub fn claim_with_fee(&mut self, address: &str, fee: u64, now_day: u64) -> bool {
+        let mut account = self.account(address);
+        if account.balance < fee {
+            return false;
+        }
+        account.balance -= fee;
+        account.nonce += 1;
+        self.set_account(address, &account);
+        self.claim_reward(address, now_day);
+        true
+    }
+
     /// Feed a block's transaction count into the session meter and, when the session
     /// window closes, classify it and reset the window. Returns the classification
     /// of the session that just closed, or None while the window is still open. The
@@ -524,6 +552,53 @@ impl Ledger {
         let closed = meter.close(now_day);
         self.set_session_meter(&meter);
         closed
+    }
+
+    /// The reward earning validator set, the ids the session accrual pays. It is
+    /// written at genesis from the committee set and read at every session close, so
+    /// the accrual pays exactly the validators the chain committed to.
+    pub fn validator_ids(&self) -> Vec<[u8; 32]> {
+        let bytes = match self.trie.get(&stake_singleton_key(STAKE_VALIDATORS_TAG)) {
+            Some(bytes) if !bytes.is_empty() => bytes,
+            _ => return Vec::new(),
+        };
+        let mut ids = Vec::with_capacity(bytes.len() / KEY_LEN);
+        for chunk in bytes.chunks_exact(KEY_LEN) {
+            let mut id = [0u8; 32];
+            id.copy_from_slice(chunk);
+            ids.push(id);
+        }
+        ids
+    }
+
+    /// Record the validator id set, returning the state key and value so a
+    /// persisting node can write it under the genesis root.
+    pub fn seed_validator_set(&mut self, ids: &[[u8; 32]]) -> (Key, Vec<u8>) {
+        let mut bytes = Vec::with_capacity(ids.len() * KEY_LEN);
+        for id in ids {
+            bytes.extend_from_slice(id);
+        }
+        let key = stake_singleton_key(STAKE_VALIDATORS_TAG);
+        self.trie.insert(key, bytes.clone());
+        (key, bytes)
+    }
+
+    /// Tick the session meter for a block and, when the session window closes, pay
+    /// each validator its session reward from the pool. It is inert until governance
+    /// sets the mainnet start, so a test network never meters or pays, and once
+    /// mainnet is set it meters every block and pays at each window close, all a pure
+    /// function of committed state so every node settles the session alike. The
+    /// transaction count is the block's included count, identical on the builder and
+    /// on every validator that re-executes the same body.
+    pub fn settle_session(&mut self, now_day: u64, transactions: u64) {
+        if self.stake_mainnet_start() == u64::MAX {
+            return;
+        }
+        if let Some(session) = self.record_session(transactions, now_day) {
+            for id in self.validator_ids() {
+                self.accrue_reward_by_id(&id, session, now_day);
+            }
+        }
     }
 
     fn gov_next_id(&self) -> u64 {
@@ -841,7 +916,11 @@ impl Ledger {
                 Ok(())
             }
             b"mainnet_start" => {
-                self.set_stake_mainnet_start(u64_from_le(value).ok_or(EnactError::BadValue)?);
+                let day = u64_from_le(value).ok_or(EnactError::BadValue)?;
+                self.set_stake_mainnet_start(day);
+                // Open the first session window on the mainnet start so the six month
+                // sessions align to mainnet rather than to genesis.
+                self.set_session_meter(&SessionMeter::new(day));
                 Ok(())
             }
             _ => Err(EnactError::UnknownParameter),
@@ -1261,6 +1340,36 @@ mod stake_state_tests {
             l.accrue_reward(&addr, qtv_staking::Session::Low, 400),
             2 * 1_000_000
         );
+    }
+
+    #[test]
+    fn the_session_trigger_is_inert_until_mainnet_then_pays_after_the_blackout() {
+        let mut l = Ledger::new();
+        let v = gov_addr(60);
+        let vid = [60u8; 32];
+        l.seed_stake_pool(700_000 * 1_000_000);
+        l.seed_validator_bond(&v, 2_000 * 1_000_000);
+        l.seed_validator_set(&[vid]);
+
+        // Inert while mainnet is unset: a session close pays nothing and the pool holds.
+        l.settle_session(182, 5);
+        l.settle_session(400, 5);
+        assert_eq!(l.stake_pool(), 700_000 * 1_000_000);
+        assert_eq!(l.claimable_reward(&v, 1_000), 0);
+
+        // Governance turns mainnet on at day zero with a published price.
+        l.set_stake_mainnet_start(0);
+        l.set_stake_price(70 * 1_000_000);
+
+        // The first two closes fall in the twelve month blackout, so still nothing.
+        l.settle_session(182, 5);
+        l.settle_session(364, 5);
+        assert_eq!(l.stake_pool(), 700_000 * 1_000_000);
+
+        // The close past the blackout pays one percent of the bond into a tranche.
+        l.settle_session(546, 5);
+        assert_eq!(l.stake_pool(), 700_000 * 1_000_000 - 20 * 1_000_000);
+        assert_eq!(l.claimable_reward(&v, 546 + 365), 5 * 1_000_000);
     }
 
     #[test]
