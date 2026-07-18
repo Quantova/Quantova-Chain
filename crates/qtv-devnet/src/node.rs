@@ -37,7 +37,7 @@ use qtv_node::consensus::{
 use qtv_node::fee::FeeParams;
 use qtv_node::ledger::{account_key, Account, Ledger};
 use qtv_node::mempool::{Admitted, Mempool, Reject};
-use qtv_node::node::{execute_ordered, validator_address, Genesis};
+use qtv_node::node::{day_of_height, execute_ordered, validator_address, Genesis};
 use qtv_store::{BlockStore, StateStore};
 use qtv_tx::Wrapper;
 
@@ -437,7 +437,7 @@ impl DevNode {
         let proposer = validator_address(leader_for(selection, view));
         let candidates = self.mempool.candidates();
         let mut ledger = self.ledger.clone();
-        let included = execute_ordered(&mut ledger, &candidates, &self.fee_params);
+        let included = execute_ordered(&mut ledger, &candidates, &self.fee_params, day_of_height(height));
         let mut header = Header::new(
             height,
             self.parent_header_hash,
@@ -508,7 +508,7 @@ impl DevNode {
             return Err(RoundError::ProposalRejected);
         }
         let mut ledger = self.ledger.clone();
-        let included = execute_ordered(&mut ledger, body, &self.fee_params);
+        let included = execute_ordered(&mut ledger, body, &self.fee_params, day_of_height(header.height()));
         if included.len() != body.len()
             || ledger.state_root() != *header.state_root()
             || transaction_root(&included) != *header.transaction_root()
@@ -1221,7 +1221,7 @@ impl DevNode {
         // Re-execute the body against a copy of the state, so a block that fails
         // the root check leaves the committed ledger untouched.
         let mut ledger = self.ledger.clone();
-        let included = execute_ordered(&mut ledger, block.body(), &self.fee_params);
+        let included = execute_ordered(&mut ledger, block.body(), &self.fee_params, day_of_height(header.height()));
         if included.len() != block.body().len()
             || ledger.state_root() != *header.state_root()
             || transaction_root(&included) != *header.transaction_root()

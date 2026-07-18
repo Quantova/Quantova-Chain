@@ -171,11 +171,16 @@ pub fn execute_ordered(
     ledger: &mut Ledger,
     candidates: &[Wrapper],
     fee_params: &FeeParams,
+    day: u64,
 ) -> Vec<Wrapper> {
     let cores = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    execute_ordered_across(ledger, candidates, fee_params, cores)
+    execute_ordered_across(ledger, candidates, fee_params, cores, day)
+}
+
+pub fn day_of_height(height: u64) -> u64 {
+    height.saturating_mul(qtv_bft::params::SLOT_MS) / 86_400_000
 }
 
 /// `execute_ordered` with the number of cores the signature pre pass may use made
@@ -187,14 +192,22 @@ fn execute_ordered_across(
     candidates: &[Wrapper],
     fee_params: &FeeParams,
     verify_cores: usize,
+    day: u64,
 ) -> Vec<Wrapper> {
     let verified = verify_signatures(ledger, candidates, verify_cores);
+    let stake_address = crate::ledger::stake_system_address();
     let mut included = Vec::new();
     for (index, wrapper) in candidates.iter().enumerate() {
         let plan = match validate_verified(wrapper, ledger, fee_params, verified[index]) {
             Ok(plan) => plan,
             Err(_) => continue,
         };
+        if plan.recipient == stake_address {
+            if ledger.bond_with_fee(&plan.sender, plan.amount, plan.fee, day) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
         let mut sender = ledger.account(&plan.sender);
         let mut recipient = ledger.account(&plan.recipient);
         let transferred = match execute_transfer(
@@ -439,15 +452,17 @@ impl Node {
     /// disjoint state concurrently.
     fn execute_block(&mut self) -> Vec<Wrapper> {
         let candidates = self.mempool.candidates();
+        let day = day_of_height(self.height);
         if self.exec_threads > 1 {
             execute_parallel(
                 &mut self.ledger,
                 &candidates,
                 &self.fee_params,
                 self.exec_threads,
+                day,
             )
         } else {
-            execute_ordered(&mut self.ledger, &candidates, &self.fee_params)
+            execute_ordered(&mut self.ledger, &candidates, &self.fee_params, day)
         }
     }
 
@@ -639,7 +654,7 @@ mod tests {
 
         for cores in [1usize, 2, 3, 4, 8, 16, 24] {
             let mut ledger = base.clone();
-            let included = execute_ordered_across(&mut ledger, &block, &fee, cores);
+            let included = execute_ordered_across(&mut ledger, &block, &fee, cores, 0);
             assert_eq!(
                 ids(&included),
                 ids(&reference_included),
@@ -655,7 +670,7 @@ mod tests {
         // The public entry, driven by the core count the machine reports, matches
         // the same reference.
         let mut public = base.clone();
-        let public_included = execute_ordered(&mut public, &block, &fee);
+        let public_included = execute_ordered(&mut public, &block, &fee, 0);
         assert_eq!(ids(&public_included), ids(&reference_included));
         assert_eq!(public.state_root(), reference_root);
     }

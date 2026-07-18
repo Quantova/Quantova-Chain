@@ -75,6 +75,7 @@ dependencies = [
  "qtv-net",
  "qtv-node",
  "qtv-sampler",
+ "qtv-staking",
  "qtv-state",
  "qtv-store",
  "qtv-tx",
@@ -139,8 +140,10 @@ dependencies = [
  "qtv-bft",
  "qtv-block",
  "qtv-codec",
+ "qtv-crypto",
  "qtv-idfmt",
  "qtv-sampler",
+ "qtv-staking",
  "qtv-state",
  "qtv-tx",
  "qtv-vm",
@@ -152,6 +155,13 @@ version = "0.1.0"
 source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?tag=v0.6.0#df3eeedfdfe30a0675c825f4bb7d934dc3138bcb"
 dependencies = [
  "qtv-crypto",
+]
+
+[[package]]
+name = "qtv-staking"
+version = "0.1.0"
+dependencies = [
+ "qtv-codec",
 ]
 
 [[package]]
