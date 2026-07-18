@@ -94,6 +94,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "qtv-governance"
+version = "0.1.0"
+dependencies = [
+ "qtv-codec",
+]
+
+[[package]]
 name = "qtv-idfmt"
 version = "0.1.0"
 
