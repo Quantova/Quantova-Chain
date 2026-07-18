@@ -37,7 +37,9 @@ use qtv_node::consensus::{
 use qtv_node::fee::FeeParams;
 use qtv_node::ledger::{account_key, Account, Ledger};
 use qtv_node::mempool::{Admitted, Mempool, Reject};
-use qtv_node::node::{day_of_height, execute_ordered, validator_address, Genesis};
+use qtv_node::node::{
+    committee_weights, day_of_height, execute_ordered, validator_address, Genesis,
+};
 use qtv_store::{BlockStore, StateStore};
 use qtv_tx::Wrapper;
 
@@ -201,6 +203,7 @@ pub struct DevNode {
     ledger: Ledger,
     mempool: Mempool,
     consensus: Consensus,
+    base_validators: Vec<ConsensusValidator>,
     attester: Attester,
     fee_params: FeeParams,
     beacon: Beacon,
@@ -256,6 +259,7 @@ impl DevNode {
             ledger: Ledger::new(),
             mempool: Mempool::new(),
             consensus: Consensus::with_slots(&validators, devnet.slots),
+            base_validators: validators.clone(),
             attester: Attester::with_slots(node.id, node.stake, devnet.slots),
             fee_params: devnet.fee_params,
             beacon: genesis_beacon(),
@@ -298,8 +302,30 @@ impl DevNode {
         }
         let (pool_key, pool_value) = self.ledger.seed_stake_pool(qtv_staking::STAKING_POOL);
         self.state_store.put_account(pool_key, pool_value)?;
+        for v in &self.base_validators {
+            if let Some((bond_key, bond_value)) = self.ledger.seed_validator_bond(
+                &validator_address(v.id),
+                v.stake.saturating_mul(qtv_staking::NATIVE_UNIT as u64),
+            ) {
+                self.state_store.put_account(bond_key, bond_value)?;
+            }
+        }
         self.state_store.commit(self.ledger.state_root())?;
+        self.refresh_committee();
         Ok(())
+    }
+
+    /// Rebuild the committee weight set from committed state. Each validator's
+    /// weight is its live bonded stake on the ledger, so a bond, a slash, or an exit
+    /// moves the committee weight with it at the next height. It is a pure function
+    /// of committed state, so every node that has applied the same blocks rebuilds
+    /// the identical set and draws the identical committee. It runs at genesis, on
+    /// reload, and whenever the height advances, always over the state that is final
+    /// for the parent height, and it holds the one time slot count fixed so the
+    /// sortition keys stay valid across the rebuild.
+    fn refresh_committee(&mut self) {
+        self.consensus
+            .reweight(&committee_weights(&self.ledger, &self.base_validators));
     }
 
     /// Rebuild the ledger, the beacon, and the parent link from the last finalized
@@ -318,6 +344,7 @@ impl DevNode {
         self.beacon = Beacon::from_seed(*header.beacon_seed()).advance(&cert_digest, head);
         self.height = head + 1;
         *self.selection_cache.borrow_mut() = None;
+        self.refresh_committee();
         self.rebuild_tx_index(head);
         Ok(())
     }
@@ -580,6 +607,7 @@ impl DevNode {
         self.future_props.clear();
         self.view_changes.clear();
         *self.selection_cache.borrow_mut() = None;
+        self.refresh_committee();
         self.mempool.remove_included(&staged.included_ids);
         self.chain.push(FinalizedBlock {
             block: chain_block,
@@ -1251,6 +1279,7 @@ impl DevNode {
         self.future_props.clear();
         self.view_changes.clear();
         *self.selection_cache.borrow_mut() = None;
+        self.refresh_committee();
         self.mempool.remove_included(&included_ids);
         self.chain.push(FinalizedBlock {
             block,
