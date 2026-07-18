@@ -129,6 +129,7 @@ fn run() -> Result<(), String> {
     spawn_stop_watcher(stop_path, stopped.clone());
 
     let mut driver = driver::Driver::new(node, idx, mesh);
+    driver.set_budget(genesis_file.slots);
 
     // Stand up the RPC gateway when the config asks for it. It binds its own port and
     // feeds client requests to the round loop over a channel, so the node stays the
