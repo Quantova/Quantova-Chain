@@ -206,7 +206,15 @@ pub fn execute_parallel(
     candidates: &[Wrapper],
     fee_params: &FeeParams,
     threads: usize,
+    day: u64,
 ) -> Vec<Wrapper> {
+    let stake_address = crate::ledger::stake_system_address();
+    if candidates
+        .iter()
+        .any(|wrapper| access(wrapper).1 == stake_address.as_str())
+    {
+        return crate::node::execute_ordered(ledger, candidates, fee_params, day);
+    }
     let layers = plan_layers(candidates);
     let mut included: Vec<usize> = Vec::new();
 
@@ -312,11 +320,11 @@ mod tests {
     /// thread count so the equivalence does not ride on one worker layout.
     fn assert_matches(base: &Ledger, block: &[Wrapper], fee_params: &FeeParams) {
         let mut sequential = base.clone();
-        let sequential_included = execute_ordered(&mut sequential, block, fee_params);
+        let sequential_included = execute_ordered(&mut sequential, block, fee_params, 0);
 
         for threads in [1usize, 2, 4, 8, 16] {
             let mut parallel = base.clone();
-            let parallel_included = execute_parallel(&mut parallel, block, fee_params, threads);
+            let parallel_included = execute_parallel(&mut parallel, block, fee_params, threads, 0);
             assert_eq!(
                 sequential.state_root(),
                 parallel.state_root(),
@@ -438,10 +446,10 @@ mod tests {
             .collect();
 
         let mut first = ledger.clone();
-        let first_included = execute_parallel(&mut first, &block, &fee, 8);
+        let first_included = execute_parallel(&mut first, &block, &fee, 8, 0);
         for _ in 0..8 {
             let mut again = ledger.clone();
-            let again_included = execute_parallel(&mut again, &block, &fee, 8);
+            let again_included = execute_parallel(&mut again, &block, &fee, 8, 0);
             assert_eq!(first.state_root(), again.state_root());
             assert_eq!(included_ids(&first_included), included_ids(&again_included));
         }
@@ -453,7 +461,7 @@ mod tests {
         let (ledger, _) = population(4, 1_000);
         assert!(plan_layers(&[]).is_empty());
         let mut parallel = ledger.clone();
-        let included = execute_parallel(&mut parallel, &[], &fee, 8);
+        let included = execute_parallel(&mut parallel, &[], &fee, 8, 0);
         assert!(included.is_empty());
         assert_eq!(parallel.state_root(), ledger.state_root());
     }

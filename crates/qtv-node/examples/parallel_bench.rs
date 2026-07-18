@@ -138,7 +138,7 @@ fn measure_full(base: &Ledger, block: &[Wrapper], fee: &FeeParams, threads: usiz
         .map(|_| {
             let mut ledger = base.clone();
             let start = Instant::now();
-            let included = execute_ordered(&mut ledger, block, fee);
+            let included = execute_ordered(&mut ledger, block, fee, 0);
             let elapsed = start.elapsed().as_secs_f64();
             black_box(&included);
             sequential_root = Some(ledger.state_root());
@@ -151,7 +151,7 @@ fn measure_full(base: &Ledger, block: &[Wrapper], fee: &FeeParams, threads: usiz
         .map(|_| {
             let mut ledger = base.clone();
             let start = Instant::now();
-            let included = execute_parallel(&mut ledger, block, fee, threads);
+            let included = execute_parallel(&mut ledger, block, fee, threads, 0);
             let elapsed = start.elapsed().as_secs_f64();
             black_box(&included);
             parallel_root = Some(ledger.state_root());
@@ -306,11 +306,11 @@ fn main() {
     // The serial cost of folding the post state into a root, printed on its own so
     // it is never mistaken for part of the parallel execution figure.
     let mut ledger = base.clone();
-    let _ = execute_ordered(&mut ledger, &independent, &fee);
+    let _ = execute_ordered(&mut ledger, &independent, &fee, 0);
     let mut samples = Vec::new();
     for _ in 0..5 {
         let mut probe = base.clone();
-        let _ = execute_ordered(&mut probe, &independent, &fee);
+        let _ = execute_ordered(&mut probe, &independent, &fee, 0);
         let start = Instant::now();
         black_box(probe.state_root());
         samples.push(start.elapsed().as_secs_f64());
