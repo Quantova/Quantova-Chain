@@ -32,7 +32,7 @@ fn address_round_trips_through_the_format() {
     let payload = parse_address(&text).unwrap();
     let again = qtv_idfmt::render_address(&payload).unwrap();
     assert_eq!(text, again);
-    assert!(text.starts_with("q1"));
+    assert!(text.starts_with("Q1"));
 }
 
 #[test]
@@ -78,8 +78,8 @@ fn two_schemes_differ_only_in_scheme_yet_hide_it() {
     let hash_payload = parse_address(&hash.address()).unwrap();
     assert_eq!(lattice_payload.len(), hash_payload.len());
     assert_ne!(lattice_payload, hash_payload);
-    assert!(lattice.address().starts_with("q1"));
-    assert!(hash.address().starts_with("q1"));
+    assert!(lattice.address().starts_with("Q1"));
+    assert!(hash.address().starts_with("Q1"));
 }
 
 #[test]
