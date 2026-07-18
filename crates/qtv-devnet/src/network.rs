@@ -86,7 +86,7 @@ impl Default for Network {
 /// A deterministic scramble of a counter, spreading consecutive counters across
 /// the window so consecutive records do not keep their send order across edges.
 fn scramble(seq: u64) -> Time {
-    seq.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29)
+    seq.wrapping_mul(11400714819323198485).rotate_left(29)
 }
 
 #[cfg(test)]

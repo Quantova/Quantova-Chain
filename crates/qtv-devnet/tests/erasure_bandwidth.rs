@@ -63,7 +63,7 @@ fn realistic_block(count: usize) -> (ChainBlock, usize) {
     );
     // A certificate slot the size of a finality certificate, so the coded block is
     // the whole finalized block, not only its body.
-    let block = ChainBlock::new(header, vec![0x5au8; 4096], body);
+    let block = ChainBlock::new(header, vec![90u8; 4096], body);
     (block, per_tx)
 }
 

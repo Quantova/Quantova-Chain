@@ -544,7 +544,7 @@ mod tests {
 
         // A single corrupted shard fails the commitment on its own.
         let (mut shard, proof) = coded.piece(3);
-        shard.bytes[0] ^= 0xff;
+        shard.bytes[0] ^= 255;
         assert!(!coded.commitment().verify_shard(&shard, &proof));
 
         // A set that mixes the corrupted shard with enough clean shards drops the
@@ -660,7 +660,7 @@ mod tests {
         // A shard with a flipped byte fails its commitment and is dropped, never
         // entering the reassembly.
         let mut corrupt = shards[0].clone();
-        corrupt.shard.bytes[0] ^= 0xff;
+        corrupt.shard.bytes[0] ^= 255;
         assert!(
             assembler.admit(corrupt).is_none(),
             "a corrupted shard was admitted"

@@ -101,9 +101,9 @@ fn subtree_end(prefix: &Key, level: usize) -> Key {
         return *prefix;
     }
     let mut out = *prefix;
-    out[byte] |= 0xFFu8 >> (level & 7);
+    out[byte] |= 255u8 >> (level & 7);
     for slot in out.iter_mut().skip(byte + 1) {
-        *slot = 0xFF;
+        *slot = 255;
     }
     out
 }
@@ -433,10 +433,10 @@ mod incremental {
 
     impl Rng {
         fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            self.0 = self.0.wrapping_add(11400714819323198485);
             let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z = (z ^ (z >> 30)).wrapping_mul(13787848793156543929);
+            z = (z ^ (z >> 27)).wrapping_mul(10723151780598845931);
             z ^ (z >> 31)
         }
 
@@ -486,7 +486,7 @@ mod incremental {
         let mut out = *key;
         let byte = level >> 3;
         if byte < KEY_LEN {
-            out[byte] &= !(0xFFu8 >> (level & 7));
+            out[byte] &= !(255u8 >> (level & 7));
             for slot in out.iter_mut().skip(byte + 1) {
                 *slot = 0;
             }
@@ -504,7 +504,7 @@ mod incremental {
 
     #[test]
     fn incremental_root_equals_full_recompute_across_random_change_sets() {
-        let mut rng = Rng(0x0102_0304_0506_0708);
+        let mut rng = Rng(72623859790382856);
         let mut trie = Trie::new();
         let mut mirror: BTreeMap<Key, Vec<u8>> = BTreeMap::new();
         let mut keys: Vec<Key> = Vec::new();
@@ -543,7 +543,7 @@ mod incremental {
 
     #[test]
     fn a_block_that_changes_nothing_leaves_the_root_where_it_was() {
-        let mut rng = Rng(0x2222_3333_4444_5555);
+        let mut rng = Rng(2459584641779389781);
         let mut trie = Trie::new();
         for _ in 0..250 {
             trie.insert(rng.key(), rng.value());
@@ -568,7 +568,7 @@ mod incremental {
 
     #[test]
     fn a_single_change_rehashes_only_its_path_over_a_deep_tree() {
-        let mut rng = Rng(0x9999_8888_7777_6666);
+        let mut rng = Rng(11068027678940948070);
         let count = 20_000usize;
         let mut trie = Trie::new();
         let mut keys: Vec<Key> = Vec::with_capacity(count);
@@ -636,7 +636,7 @@ mod incremental {
 
     #[test]
     fn a_new_account_added_to_a_large_state_matches_a_full_recompute() {
-        let mut rng = Rng(0xABCD_1234_5678_9F01);
+        let mut rng = Rng(12379570966709706497);
         let mut trie = Trie::new();
         let mut mirror: BTreeMap<Key, Vec<u8>> = BTreeMap::new();
         for _ in 0..5_000 {

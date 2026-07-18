@@ -217,8 +217,8 @@ mod tests {
     #[test]
     fn a_block_round_trips_by_height_and_by_hash_across_a_reopen() {
         let path = temp_path("roundtrip");
-        let first = block(1, 0xA1);
-        let second = block(2, 0xB2);
+        let first = block(1, 161);
+        let second = block(2, 178);
         {
             let mut store = BlockStore::open(&path).unwrap();
             store.put_block(&first).unwrap();

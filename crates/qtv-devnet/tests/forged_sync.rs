@@ -48,7 +48,7 @@ fn a_forged_block_is_rejected_and_does_not_advance_the_node() {
 
     // A wrong parent link: the same block re-linked to a head it does not follow.
     let mut wrong_parent_hash = *header.parent_hash();
-    wrong_parent_hash[0] ^= 0xFF;
+    wrong_parent_hash[0] ^= 255;
     let forged_parent = ChainBlock::new(
         Header::new(
             header.height(),
@@ -84,7 +84,7 @@ fn a_forged_block_is_rejected_and_does_not_advance_the_node() {
     // aggregate no longer proves an entitled supermajority.
     let mut cert = genuine.certificate().to_vec();
     let last = cert.len() - 1;
-    cert[last] ^= 0x01;
+    cert[last] ^= 1;
     let forged_cert = ChainBlock::new(header.clone(), cert, genuine.body().to_vec());
     assert!(devnet.apply_synced(victim, forged_cert).is_err());
     assert_eq!(

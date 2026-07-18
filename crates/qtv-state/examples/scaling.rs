@@ -21,10 +21,10 @@ struct Rng(u64);
 
 impl Rng {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        self.0 = self.0.wrapping_add(11400714819323198485);
         let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z = (z ^ (z >> 30)).wrapping_mul(13787848793156543929);
+        z = (z ^ (z >> 27)).wrapping_mul(10723151780598845931);
         z ^ (z >> 31)
     }
 
@@ -73,7 +73,7 @@ fn main() {
     println!("full recompute over the whole state");
     let mut full_us_per_account = 0.0;
     for &count in &[2_000usize, 20_000, 200_000] {
-        let mut rng = Rng(0x1111 ^ count as u64);
+        let mut rng = Rng(4369 ^ count as u64);
         let (trie, _keys) = build(count, &mut rng);
         let start = Instant::now();
         let _ = trie.root();
@@ -95,7 +95,7 @@ fn main() {
     let changed_counts = [1usize, 8, 64, 256, 1024];
     let mut incremental_block_at_large_b64 = Duration::ZERO;
     for &count in &[2_000usize, 200_000] {
-        let mut rng = Rng(0x2222 ^ count as u64);
+        let mut rng = Rng(8738 ^ count as u64);
         let (mut trie, keys) = build(count, &mut rng);
         let _ = trie.root(); // commit the whole state once, up front
         for &batch in &changed_counts {

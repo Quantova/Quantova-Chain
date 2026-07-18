@@ -87,7 +87,7 @@ fn sample_header() -> Header {
 
 #[test]
 fn round_trip_u8() {
-    let value = 0xA5u8;
+    let value = 165u8;
     let bytes = to_bytes(&value);
     assert_eq!(bytes.len(), 1);
     assert_eq!(from_bytes::<u8>(&bytes).unwrap(), value);
@@ -95,7 +95,7 @@ fn round_trip_u8() {
 
 #[test]
 fn round_trip_u16() {
-    let value = 0xBEEFu16;
+    let value = 48879u16;
     let bytes = to_bytes(&value);
     assert_eq!(bytes.len(), 2);
     assert_eq!(from_bytes::<u16>(&bytes).unwrap(), value);
@@ -103,7 +103,7 @@ fn round_trip_u16() {
 
 #[test]
 fn round_trip_u32() {
-    let value = 0x0102_0304u32;
+    let value = 16909060u32;
     let bytes = to_bytes(&value);
     assert_eq!(bytes.len(), 4);
     assert_eq!(from_bytes::<u32>(&bytes).unwrap(), value);
@@ -111,7 +111,7 @@ fn round_trip_u32() {
 
 #[test]
 fn round_trip_u64() {
-    let value = 0x0102_0304_0506_0708u64;
+    let value = 72623859790382856u64;
     let bytes = to_bytes(&value);
     assert_eq!(bytes.len(), 8);
     assert_eq!(from_bytes::<u64>(&bytes).unwrap(), value);
@@ -119,7 +119,7 @@ fn round_trip_u64() {
 
 #[test]
 fn round_trip_u128() {
-    let value = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10u128;
+    let value = 1339673755198158349044581307228491536u128;
     let bytes = to_bytes(&value);
     assert_eq!(bytes.len(), 16);
     assert_eq!(from_bytes::<u128>(&bytes).unwrap(), value);
@@ -127,8 +127,8 @@ fn round_trip_u128() {
 
 #[test]
 fn little_endian_layout() {
-    assert_eq!(to_bytes(&0x0102u16), vec![0x02, 0x01]);
-    assert_eq!(to_bytes(&0x0102_0304u32), vec![0x04, 0x03, 0x02, 0x01]);
+    assert_eq!(to_bytes(&258u16), vec![2, 1]);
+    assert_eq!(to_bytes(&16909060u32), vec![4, 3, 2, 1]);
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn round_trip_empty_byte_string() {
 
 #[test]
 fn round_trip_option_present() {
-    let value = Some(0x1122_3344u32);
+    let value = Some(287454020u32);
     let bytes = to_bytes(&value);
     assert_eq!(bytes[0], 1);
     assert_eq!(from_bytes::<Option<u32>>(&bytes).unwrap(), value);
@@ -180,7 +180,7 @@ fn round_trip_tagged_ping() {
 
 #[test]
 fn round_trip_tagged_echo() {
-    let value = Frame::Echo(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    let value = Frame::Echo(vec![222, 173, 190, 239]);
     let bytes = to_bytes(&value);
     assert_eq!(bytes[0], TAG_ECHO);
     assert_eq!(from_bytes::<Frame>(&bytes).unwrap(), value);
@@ -196,7 +196,7 @@ fn round_trip_tagged_seq() {
 
 #[test]
 fn reject_truncated_integer() {
-    let bytes = [0x01u8, 0x02];
+    let bytes = [1u8, 2];
     assert_eq!(
         from_bytes::<u32>(&bytes),
         Err(Error::Truncated {
@@ -221,8 +221,8 @@ fn reject_truncated_length() {
 
 #[test]
 fn reject_trailing_bytes() {
-    let mut bytes = to_bytes(&0x42u8);
-    bytes.push(0x99);
+    let mut bytes = to_bytes(&66u8);
+    bytes.push(153);
     assert_eq!(
         from_bytes::<u8>(&bytes),
         Err(Error::TrailingBytes { count: 1 })
@@ -257,7 +257,7 @@ fn encoding_is_byte_identical() {
 
 #[test]
 fn encoder_appends_onto_a_buffer() {
-    let mut encoder = Encoder::with_buffer(vec![0xAA, 0xBB]);
-    encoder.put_u8(0xCC);
-    assert_eq!(encoder.into_bytes(), vec![0xAA, 0xBB, 0xCC]);
+    let mut encoder = Encoder::with_buffer(vec![170, 187]);
+    encoder.put_u8(204);
+    assert_eq!(encoder.into_bytes(), vec![170, 187, 204]);
 }
