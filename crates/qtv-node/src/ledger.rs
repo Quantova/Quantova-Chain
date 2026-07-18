@@ -174,6 +174,14 @@ const GOV_REF_TAG: &[u8] = b"qtv/gov/ref/";
 const GOV_ACTION_TAG: &[u8] = b"qtv/gov/action/";
 const GOV_BALLOT_TAG: &[u8] = b"qtv/gov/ballot/";
 const GOV_LOCK_TAG: &[u8] = b"qtv/gov/lock/";
+const GOV_BLACKLIST_TAG: &[u8] = b"qtv/gov/blacklist/";
+
+fn gov_blacklist_key(id: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(GOV_BLACKLIST_TAG.len() + id.len());
+    input.extend_from_slice(GOV_BLACKLIST_TAG);
+    input.extend_from_slice(id);
+    sha3::sha3_256(&input)
+}
 
 fn gov_referendum_key(id: u64) -> Key {
     let mut input = Vec::with_capacity(GOV_REF_TAG.len() + 8);
@@ -271,7 +279,7 @@ impl Ledger {
             Some(id) => id,
             None => return 0,
         };
-        if self.is_stake_banned(&id) {
+        if self.is_stake_banned(&id) || self.is_gov_blacklisted(&id) {
             return 0;
         }
         self.stake_bond(&id)
@@ -331,6 +339,26 @@ impl Ledger {
 
     pub fn set_stake_banned(&mut self, id: &[u8; 32]) {
         self.trie.insert(stake_banned_key(id), vec![1]);
+    }
+
+    fn is_gov_blacklisted(&self, id: &[u8; 32]) -> bool {
+        matches!(self.trie.get(&gov_blacklist_key(id)), Some(bytes) if !bytes.is_empty())
+    }
+
+    fn set_gov_blacklisted(&mut self, id: &[u8; 32]) {
+        self.trie.insert(gov_blacklist_key(id), vec![1]);
+    }
+
+    /// Whether an address has been retired by the blacklist and kill track. A
+    /// blacklisted address is refused as the sender or the recipient of a transfer,
+    /// as a governance caller, and as a staker, so a compromised or hostile address
+    /// stops moving value the block after the referendum enacts. It is a pure read
+    /// of committed state, so every node refuses the same address at the same height.
+    pub fn is_blacklisted(&self, address: &str) -> bool {
+        match address_id(address) {
+            Some(id) => self.is_gov_blacklisted(&id),
+            None => false,
+        }
     }
 
     /// The native to dollar rate governance publishes, in base dollar units per
@@ -741,7 +769,7 @@ impl Ledger {
             Action::Parameter { key, value } => self.apply_parameter(key, value),
             Action::Blacklist { target } => {
                 if let Some(id) = id_from_slice(target) {
-                    self.set_stake_banned(&id);
+                    self.set_gov_blacklisted(&id);
                 }
                 Ok(())
             }
@@ -810,7 +838,7 @@ impl Ledger {
             Some(id) => id,
             None => return false,
         };
-        if self.is_stake_banned(&id) {
+        if self.is_stake_banned(&id) || self.is_gov_blacklisted(&id) {
             return false;
         }
         let mut account = self.account(address);
@@ -840,7 +868,7 @@ impl Ledger {
             Some(id) => id,
             None => return false,
         };
-        if self.is_stake_banned(&id) {
+        if self.is_stake_banned(&id) || self.is_gov_blacklisted(&id) {
             return false;
         }
         let debit = match amount.checked_add(fee) {
@@ -944,6 +972,21 @@ mod stake_state_tests {
 
     fn fund(l: &mut Ledger, address: &str, amount: u64) {
         l.set_account(address, &Account::funded(amount, 1, vec![]));
+    }
+
+    #[test]
+    fn a_blacklisted_address_is_barred_from_staking_and_carries_no_weight() {
+        let mut l = Ledger::new();
+        let addr = gov_addr(50);
+        let id = [50u8; 32];
+        fund(&mut l, &addr, 10_000 * 1_000_000);
+        l.set_gov_blacklisted(&id);
+        assert!(l.is_blacklisted(&addr));
+        // It can no longer bond.
+        assert!(!l.bond(&addr, 2_000 * 1_000_000, 0));
+        // Even a bond already on the books carries zero committee weight.
+        l.seed_validator_bond(&addr, 2_000 * 1_000_000);
+        assert_eq!(l.staked_weight(&addr), 0);
     }
 
     #[test]

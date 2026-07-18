@@ -272,6 +272,9 @@ fn dispatch_governance(
     now: u64,
 ) -> bool {
     let sender = wrapper.body().sender().to_string();
+    if ledger.is_blacklisted(&sender) {
+        return false;
+    }
     let account = ledger.account(&sender);
     let operation = match governance_admissible(wrapper, &account, fee_params, signature_ok) {
         Some(operation) => operation,
@@ -335,6 +338,9 @@ fn execute_ordered_across(
             if ledger.bond_with_fee(&plan.sender, plan.amount, plan.fee, day) {
                 included.push(wrapper.clone());
             }
+            continue;
+        }
+        if ledger.is_blacklisted(&plan.sender) || ledger.is_blacklisted(&plan.recipient) {
             continue;
         }
         let mut sender = ledger.account(&plan.sender);
@@ -790,6 +796,55 @@ mod tests {
         // A malformed governance operation is refused, not included.
         let bad = gov_call_tx(&proposer, vec![99u8], 2, &fee);
         assert!(execute_ordered(&mut ledger, &[bad], &fee, 8).is_empty());
+    }
+
+    #[test]
+    fn a_governance_blacklist_stops_the_address_from_transacting() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let proposer = keypair(112);
+        let voter = keypair(113);
+        let hostile = keypair(114);
+        let peer = keypair(115);
+        fund(&mut ledger, &proposer, 300_000 * 1_000_000);
+        fund(&mut ledger, &voter, 10_000 * 1_000_000);
+        fund(&mut ledger, &hostile, 10_000 * 1_000_000);
+        fund(&mut ledger, &peer, 10_000 * 1_000_000);
+
+        let target = qtv_idfmt::parse_address(&hostile.address()).unwrap();
+        let action = Action::Blacklist { target };
+        let mut propose_args = vec![1u8];
+        propose_args.extend_from_slice(&qtv_codec::to_bytes(&action));
+        let propose = gov_call_tx(&proposer, propose_args, 0, &fee);
+        let vote = gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee);
+        execute_ordered(&mut ledger, &[propose, vote], &fee, 0);
+
+        // Enact after the two day blacklist window: day 3 is 259,200s, past 172,800s.
+        let mut enact = qtv_codec::Encoder::new();
+        enact.put_u8(3);
+        enact.put_u64(1);
+        execute_ordered(
+            &mut ledger,
+            &[gov_call_tx(&proposer, enact.into_bytes(), 1, &fee)],
+            &fee,
+            3,
+        );
+        assert!(ledger.is_blacklisted(&hostile.address()));
+
+        // A transfer out of the blacklisted address is refused.
+        let out = transfer(&hostile, &peer.address(), 100 * 1_000_000, 0, &fee);
+        assert!(execute_ordered(&mut ledger, &[out.clone()], &fee, 3).is_empty());
+        // So is a transfer into it.
+        let into = transfer(&peer, &hostile.address(), 100 * 1_000_000, 0, &fee);
+        assert!(execute_ordered(&mut ledger, &[into], &fee, 3).is_empty());
+        // A transfer between two clean addresses still goes through.
+        let clean = transfer(&peer, &voter.address(), 100 * 1_000_000, 0, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[clean], &fee, 3).len(), 1);
+
+        // The parallel path refuses the blacklisted transfer through the same fallback.
+        let mut parallel = ledger.clone();
+        assert!(crate::parallel::execute_parallel(&mut parallel, &[out], &fee, 8, 3).is_empty());
+        assert_eq!(parallel.state_root(), ledger.state_root());
     }
 
     #[test]
