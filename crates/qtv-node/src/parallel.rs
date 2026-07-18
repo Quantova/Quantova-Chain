@@ -211,8 +211,11 @@ pub fn execute_parallel(
     let stake_address = crate::ledger::stake_system_address();
     let gov_address = crate::ledger::gov_system_address();
     if candidates.iter().any(|wrapper| {
-        let target = access(wrapper).1;
-        target == stake_address.as_str() || target == gov_address.as_str()
+        let (sender, target) = access(wrapper);
+        target == stake_address.as_str()
+            || target == gov_address.as_str()
+            || ledger.is_blacklisted(sender)
+            || ledger.is_blacklisted(target)
     }) {
         return crate::node::execute_ordered(ledger, candidates, fee_params, day);
     }
