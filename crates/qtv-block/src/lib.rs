@@ -4,9 +4,11 @@
 //! position of the block and commits to its contents. It holds the height, the
 //! hash of the parent header, the state root, the transaction root over the
 //! transactions in order, the event root over the emitted events, the beacon
-//! seed, the proposer, and the time. The parent hash, each root, and the beacon
-//! seed are thirty two byte values. Every field enters the encoding through the
-//! canonical codec, so one header has exactly one encoded form.
+//! seed, the proposer, the time, and a short arbitrary data field the proposer
+//! may set, the equivalent of a coinbase note. The parent hash, each root, and
+//! the beacon seed are thirty two byte values. Every field enters the encoding
+//! through the canonical codec, so one header has exactly one encoded form, and
+//! the arbitrary data field folds into the header hash like every other field.
 //!
 //! The certificate slot is a variable length byte field that carries the
 //! aggregated certificate over the header. It sits outside the header so that
@@ -34,13 +36,20 @@ use qtv_tx::Wrapper;
 /// beacon seed.
 pub const ROOT_LEN: usize = 32;
 
-/// A reason a header decode refused its input.
+/// The most bytes the header's arbitrary data field may carry. Held small on
+/// purpose, the field is a short note and not a place to park data, so a proposer
+/// cannot bloat a header with it. A coinbase style line fits well inside this.
+pub const MAX_EXTRA_DATA: usize = 32;
+
+/// A reason a header decode refused its input, or a value it refused to hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// A codec step refused the input.
     Codec(qtv_codec::Error),
     /// The proposer field did not hold valid text.
     Proposer,
+    /// The arbitrary data field was longer than the header allows.
+    ExtraDataTooLong,
 }
 
 impl fmt::Display for Error {
@@ -50,6 +59,10 @@ impl fmt::Display for Error {
                 write!(f, "a codec step refused the header and reported {error}")
             }
             Error::Proposer => write!(f, "the proposer field did not hold valid text"),
+            Error::ExtraDataTooLong => write!(
+                f,
+                "the header arbitrary data field is longer than {MAX_EXTRA_DATA} bytes"
+            ),
         }
     }
 }
@@ -91,6 +104,9 @@ pub struct Header {
     beacon_seed: [u8; ROOT_LEN],
     proposer: String,
     time: u64,
+    /// A short arbitrary note the proposer may set, empty by default. It commits
+    /// into the header hash like every other field. Bounded by MAX_EXTRA_DATA.
+    extra_data: Vec<u8>,
 }
 
 impl Header {
@@ -116,6 +132,7 @@ impl Header {
             beacon_seed,
             proposer,
             time,
+            extra_data: Vec::new(),
         }
     }
 
@@ -159,6 +176,21 @@ impl Header {
         self.time
     }
 
+    /// The arbitrary data the proposer set on this header, empty when none.
+    pub fn extra_data(&self) -> &[u8] {
+        &self.extra_data
+    }
+
+    /// Set the arbitrary data note, refusing anything past MAX_EXTRA_DATA so a
+    /// proposer cannot bloat the header. The bytes go in exactly as given.
+    pub fn set_extra_data(&mut self, data: Vec<u8>) -> Result<(), Error> {
+        if data.len() > MAX_EXTRA_DATA {
+            return Err(Error::ExtraDataTooLong);
+        }
+        self.extra_data = data;
+        Ok(())
+    }
+
     /// The header hash, the sha3 256 hash of the canonical header encoding.
     pub fn hash(&self) -> [u8; ROOT_LEN] {
         sha3::sha3_256(&to_bytes(self))
@@ -175,6 +207,10 @@ impl Header {
         let proposer_bytes = decoder.get_bytes()?;
         let proposer = String::from_utf8(proposer_bytes.to_vec()).map_err(|_| Error::Proposer)?;
         let time = u64::decode(decoder)?;
+        let extra_data = decoder.get_bytes()?.to_vec();
+        if extra_data.len() > MAX_EXTRA_DATA {
+            return Err(Error::ExtraDataTooLong);
+        }
         Ok(Header {
             height,
             parent_hash,
@@ -184,6 +220,7 @@ impl Header {
             beacon_seed,
             proposer,
             time,
+            extra_data,
         })
     }
 }
@@ -198,6 +235,7 @@ impl Encode for Header {
         put_root(encoder, &self.beacon_seed);
         encoder.put_bytes(self.proposer.as_bytes());
         self.time.encode(encoder);
+        encoder.put_bytes(&self.extra_data);
     }
 }
 

@@ -106,6 +106,11 @@ pub struct NodeSettings {
     /// RPC. Absent leaves the node running with no client facing surface, the posture
     /// item one shipped in.
     pub rpc_listen: Option<String>,
+    /// An optional local file of header notes to stamp by height, one line per
+    /// block as `QTV|<height>|<note>`. The whole line is the note. It stays a local
+    /// operator file and is never part of the genesis or any repository, so its
+    /// contents reach the chain only through the blocks this node produces.
+    pub block_messages_path: Option<PathBuf>,
 }
 
 impl NodeSettings {
@@ -125,6 +130,7 @@ impl NodeSettings {
         let mut view_timeout_ms = DEFAULT_VIEW_TIMEOUT_MS;
         let mut peers: Vec<(u64, String)> = Vec::new();
         let mut rpc_listen: Option<String> = None;
+        let mut block_messages_path: Option<PathBuf> = None;
 
         for field in &fields {
             match field.key.as_str() {
@@ -136,12 +142,14 @@ impl NodeSettings {
                 "view_timeout_ms" => view_timeout_ms = field.u64("view_timeout_ms")?,
                 "peer" => peers.push(parse_peer(field)?),
                 "rpc" => rpc_listen = Some(field.value.clone()),
+                "block_messages" => block_messages_path = Some(PathBuf::from(&field.value)),
                 other => return Err(field.error(&format!("unknown config key '{other}'"))),
             }
         }
 
         let genesis_path = genesis_path.ok_or("the config is missing 'genesis'")?;
         let genesis_path = resolve(path, genesis_path);
+        let block_messages_path = block_messages_path.map(|p| resolve(path, p));
 
         Ok(NodeSettings {
             id: id.ok_or("the config is missing 'id'")?,
@@ -152,6 +160,7 @@ impl NodeSettings {
             view_timeout_ms,
             peers,
             rpc_listen,
+            block_messages_path,
         })
     }
 }

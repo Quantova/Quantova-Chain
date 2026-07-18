@@ -19,6 +19,10 @@ qtv-account = { path = "../qtv-account" }
 # and the committee selection the daemon drives.
 qtv-node = { path = "../qtv-node" }
 
+# The block model, for the header arbitrary data limit the daemon checks a note
+# against before handing it to the node.
+qtv-block = { path = "../qtv-block" }
+
 # The real post quantum secure channel the mesh is built from.
 qtv-net = { path = "../qtv-net" }
 
