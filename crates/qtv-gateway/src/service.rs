@@ -21,6 +21,7 @@ use crate::json::{object, Json};
 pub struct NodeContext {
     pub chain_id: String,
     pub genesis_hash_hex: String,
+    pub asset: String,
     pub fee_params: FeeParams,
     pub version: String,
 }
@@ -140,6 +141,7 @@ fn node_info(ctx: &NodeContext, node: &DevNode) -> Json {
         ("chain_id", Json::str(&ctx.chain_id)),
         ("genesis_hash", Json::str(&ctx.genesis_hash_hex)),
         ("head_height", Json::Int(node.height().saturating_sub(1))),
+        ("asset", Json::str(&ctx.asset)),
         ("denomination", Json::str("Qgas")),
         (
             "fee",

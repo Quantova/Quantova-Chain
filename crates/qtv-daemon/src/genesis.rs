@@ -59,6 +59,11 @@ pub struct GenesisFile {
     /// over. The daemon logs the budget and the heights remaining so the boundary is
     /// never a surprise.
     pub slots: u64,
+    /// The native asset symbol the network presents, `TQTOV` on a test network and
+    /// `QTOV` on mainnet. It is a display label for clients and the explorer; the
+    /// ledger keeps balances in base units regardless. It defaults to `QTOV` when the
+    /// genesis names none.
+    pub asset: String,
     /// The SHA3 hash over the whole genesis, chain id included. This is the network
     /// identity the mesh pins a peer against.
     pub hash: [u8; 32],
@@ -76,6 +81,7 @@ impl GenesisFile {
 
         let mut chain_id: Option<String> = None;
         let mut message = String::new();
+        let mut asset = String::from("QTOV");
         let mut genesis_time: Option<u64> = None;
         let mut slots: u64 = DEFAULT_SLOTS;
         let mut transfer_micro_usd: Option<u128> = None;
@@ -89,6 +95,7 @@ impl GenesisFile {
             match field.key.as_str() {
                 "chain_id" => chain_id = Some(field.value.clone()),
                 "message" => message = field.value.clone(),
+                "asset" => asset = field.value.clone(),
                 "genesis_time" => genesis_time = Some(field.u64("genesis_time")?),
                 "slots" => slots = field.u64("slots")?,
                 "fee_transfer_micro_usd" => {
@@ -158,6 +165,7 @@ impl GenesisFile {
             message,
             genesis,
             slots,
+            asset,
             hash,
         })
     }
