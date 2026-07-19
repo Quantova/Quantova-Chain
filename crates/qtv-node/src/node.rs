@@ -311,6 +311,79 @@ fn dispatch_governance(
     true
 }
 
+/// Whether a transaction is a virtual machine operation: a deploy to the reserved deploy address, or a
+/// call to an address that already holds a deployed contract. A pure read of committed state, so the
+/// mempool, the sequential executor, and the parallel fallback all classify a transaction the same.
+pub(crate) fn is_vm_op(ledger: &Ledger, wrapper: &Wrapper) -> bool {
+    let target = wrapper.body().call().target();
+    target == crate::ledger::vm_deploy_address() || ledger.is_contract(target)
+}
+
+/// Whether a virtual machine transaction clears the same sender, scheme, signature, nonce, meter, fee,
+/// and balance floors a transfer clears. The deploy or call payload itself is validated at execution,
+/// so admission gates only on the envelope. This is the shared gate the mempool admits by and the
+/// executor dispatches by.
+pub(crate) fn vm_admissible(
+    wrapper: &Wrapper,
+    account: &Account,
+    fee_params: &FeeParams,
+    signature_ok: bool,
+) -> bool {
+    let body = wrapper.body();
+    if !account.has_key() || !qtv_tx::scheme_supported(wrapper.scheme()) || !signature_ok {
+        return false;
+    }
+    if body.nonce() != account.nonce || body.meter_limit() < crate::execution::TRANSFER_METER {
+        return false;
+    }
+    if body.fee() < u128::from(fee_params.transfer_fee()) {
+        return false;
+    }
+    let charged = u64::try_from(body.fee().min(u128::from(fee_params.ceiling_fee())))
+        .unwrap_or_else(|_| fee_params.ceiling_fee());
+    account.balance >= charged
+}
+
+/// Charge a virtual machine transaction's fee, bump its nonce, and run its operation: deploy the
+/// container in its arguments to the contract address its sender and nonce derive, or call the entry
+/// its leading selector names on the contract it targets with the rest of its arguments as the call
+/// memory. The fee applies whether or not the operation commits, so a deploy or a call that faults is
+/// still included with its fee spent. A blacklisted sender is refused. Returns false only when the
+/// transaction is not an admissible virtual machine call.
+fn dispatch_vm(
+    ledger: &mut Ledger,
+    wrapper: &Wrapper,
+    signature_ok: bool,
+    fee_params: &FeeParams,
+    now_seconds: u64,
+) -> bool {
+    let sender = wrapper.body().sender().to_string();
+    if ledger.is_blacklisted(&sender) {
+        return false;
+    }
+    let account = ledger.account(&sender);
+    if !vm_admissible(wrapper, &account, fee_params, signature_ok) {
+        return false;
+    }
+    let charged = u64::try_from(wrapper.body().fee().min(u128::from(fee_params.ceiling_fee())))
+        .unwrap_or_else(|_| fee_params.ceiling_fee());
+    let target = wrapper.body().call().target().to_string();
+    let args = wrapper.body().call().args().to_vec();
+    let nonce = account.nonce;
+    let meter = wrapper.body().meter_limit();
+    let mut charged_account = account;
+    charged_account.balance -= charged;
+    charged_account.nonce += 1;
+    ledger.set_account(&sender, &charged_account);
+    if target == crate::ledger::vm_deploy_address() {
+        ledger.deploy_contract(&sender, nonce, &args);
+    } else if args.len() >= 4 {
+        let selector = [args[0], args[1], args[2], args[3]];
+        ledger.call_contract(&sender, &target, selector, &args[4..], now_seconds, meter);
+    }
+    true
+}
+
 fn execute_ordered_across(
     ledger: &mut Ledger,
     candidates: &[Wrapper],
@@ -325,6 +398,12 @@ fn execute_ordered_across(
     let now_seconds = day.saturating_mul(86_400);
     let mut included = Vec::new();
     for (index, wrapper) in candidates.iter().enumerate() {
+        if is_vm_op(ledger, wrapper) {
+            if dispatch_vm(ledger, wrapper, verified[index], fee_params, now_seconds) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
         if wrapper.body().call().target() == gov_address {
             if dispatch_governance(ledger, wrapper, verified[index], fee_params, now_seconds) {
                 included.push(wrapper.clone());
@@ -749,6 +828,94 @@ mod tests {
             call,
         );
         sign(from, &body)
+    }
+
+    fn system_tx(
+        from: &KeyAccount,
+        target: &str,
+        args: Vec<u8>,
+        nonce: u64,
+        meter: u64,
+        fee: &FeeParams,
+    ) -> Wrapper {
+        let call = qtv_tx::Call::new(target.to_string(), args);
+        let body = Body::new(
+            from.address(),
+            nonce,
+            meter,
+            u128::from(fee.transfer_fee()),
+            call,
+        );
+        sign(from, &body)
+    }
+
+    fn address_bytes(address: &str) -> [u8; 32] {
+        let payload = qtv_idfmt::parse_address(address).expect("a full address");
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&payload);
+        id
+    }
+
+    #[test]
+    fn a_contract_deploys_and_a_call_runs_it_through_the_executor() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let deployer = keypair(130);
+        fund(&mut ledger, &deployer, 10_000 * 1_000_000);
+
+        // A container whose entry stores the caller word it is called with into slot zero.
+        let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 0\nSSTORE r2, r0\nHALT")
+            .expect("the program assembles");
+        let selector = [1u8, 2, 3, 4];
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![0],
+                },
+            }],
+        );
+
+        // Deploy: a transaction to the deploy address carrying the container bytes.
+        let deploy = system_tx(
+            &deployer,
+            &crate::ledger::vm_deploy_address(),
+            container.canonical_bytes(),
+            0,
+            100_000,
+            &fee,
+        );
+        assert_eq!(execute_ordered(&mut ledger, &[deploy], &fee, 0).len(), 1);
+        let contract = crate::ledger::contract_address(&deployer.address(), 0).unwrap();
+        assert!(ledger.is_contract(&contract));
+
+        // Call: a transaction to the contract carrying the selector, the deployer as caller.
+        let call = system_tx(&deployer, &contract, selector.to_vec(), 1, 100_000, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[call], &fee, 0).len(), 1);
+        let stored = ledger.contract_storage(&address_bytes(&contract));
+        let expected = crate::ledger::address_word(&deployer.address()).unwrap();
+        assert_eq!(stored.get(&0), Some(&expected), "the injected caller was stored");
+
+        // The parallel path reaches the identical state through the fallback.
+        let mut parallel = {
+            let mut l = Ledger::new();
+            fund(&mut l, &deployer, 10_000 * 1_000_000);
+            l
+        };
+        let deploy2 = system_tx(
+            &deployer,
+            &crate::ledger::vm_deploy_address(),
+            container.canonical_bytes(),
+            0,
+            100_000,
+            &fee,
+        );
+        crate::parallel::execute_parallel(&mut parallel, &[deploy2], &fee, 8, 0);
+        assert!(parallel.is_contract(&contract));
     }
 
     fn gov_call_tx(from: &KeyAccount, args: Vec<u8>, nonce: u64, fee: &FeeParams) -> Wrapper {
