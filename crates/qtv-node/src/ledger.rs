@@ -643,6 +643,45 @@ impl Ledger {
             .insert(contract_store_key(id), encode_storage(storage));
     }
 
+    /// Call an entry of a deployed contract. The contract's code and whole storage load from state, and
+    /// the argument memory is the caller supplied words with the two trusted context words overwritten
+    /// in place: the caller's reduced address at offset zero and the consensus time at offset eight, so
+    /// a caller can never forge either. A clean halt commits the post execution storage. A call that
+    /// records a native transfer effect is refused and commits nothing, because moving native value out
+    /// of a contract needs the reduced word bridged back to a full address, which is a later step; so
+    /// only a pure state contract runs today. Returns true when the call committed.
+    pub fn call_contract(
+        &mut self,
+        caller: &str,
+        contract: &str,
+        selector: [u8; 4],
+        user_memory: &[u8],
+        now_seconds: u64,
+        meter: u64,
+    ) -> bool {
+        let contract_id = match address_id(contract) {
+            Some(id) => id,
+            None => return false,
+        };
+        let code = match self.contract_code(&contract_id) {
+            Some(code) => code,
+            None => return false,
+        };
+        let storage = self.contract_storage(&contract_id);
+        let mut memory = vec![0u8; user_memory.len().max(16)];
+        memory[..user_memory.len()].copy_from_slice(user_memory);
+        let caller_word = address_word(caller).unwrap_or(0);
+        memory[0..8].copy_from_slice(&caller_word.to_be_bytes());
+        memory[8..16].copy_from_slice(&now_seconds.to_be_bytes());
+        match crate::execution::execute_contract_call(&code, selector, storage, &memory, meter) {
+            Ok(outcome) if outcome.effects.is_empty() => {
+                self.set_contract_storage(&contract_id, &outcome.storage);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// The reward earning validator set, the ids the session accrual pays. It is
     /// written at genesis from the committee set and read at every session close, so
     /// the accrual pays exactly the validators the chain committed to.
@@ -1175,6 +1214,41 @@ mod stake_state_tests {
 
     fn fund(l: &mut Ledger, address: &str, amount: u64) {
         l.set_account(address, &Account::funded(amount, 1, vec![]));
+    }
+
+    #[test]
+    fn a_contract_call_injects_the_trusted_caller_and_persists_storage() {
+        // An entry that reads the caller word at memory offset zero and stores it into slot zero.
+        let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 0\nSSTORE r2, r0\nHALT")
+            .expect("the program assembles");
+        let selector = [1u8, 2, 3, 4];
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![0],
+                },
+            }],
+        );
+
+        let mut l = Ledger::new();
+        let contract = qtv_idfmt::render_address(&[70u8; 32]).unwrap();
+        let contract_id = [70u8; 32];
+        l.set_contract_code(&contract_id, &container.canonical_bytes());
+
+        let caller = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
+        assert!(l.call_contract(&caller, &contract, selector, &[], 0, 100_000));
+        // The stored word is the caller's reduced address, the node injected it, not the caller.
+        let expected = u64::from_be_bytes([9u8; 8]);
+        assert_eq!(l.contract_storage(&contract_id).get(&0), Some(&expected));
+
+        // A call to an address that holds no contract is refused.
+        let empty = qtv_idfmt::render_address(&[71u8; 32]).unwrap();
+        assert!(!l.call_contract(&caller, &empty, selector, &[], 0, 100_000));
     }
 
     #[test]
