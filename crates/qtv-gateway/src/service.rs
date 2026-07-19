@@ -32,7 +32,7 @@ pub enum BlockSelector {
     Id(String),
 }
 
-/// One of the six methods, with its parameters.
+/// One of the methods, with its parameters.
 pub enum Request {
     NodeInfo,
     Account(String),
@@ -40,6 +40,7 @@ pub enum Request {
     Transaction(String),
     Block(BlockSelector),
     Head,
+    Validators,
 }
 
 /// A request the gateway could not carry out because the client sent it wrong, a
@@ -85,6 +86,7 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
     match method {
         "node_info" => Ok(Request::NodeInfo),
         "head" => Ok(Request::Head),
+        "validators" => Ok(Request::Validators),
         "get_account" => Ok(Request::Account(string_field(body, "address")?)),
         "get_transaction" => Ok(Request::Transaction(string_field(body, "tx_id")?)),
         "submit_transaction" => {
@@ -132,7 +134,31 @@ pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result
         Request::Transaction(tx_id) => Ok(transaction(node, &tx_id)),
         Request::Submit(bytes) => Ok(submit(node, bytes)),
         Request::Block(selector) => block(node, selector),
+        Request::Validators => Ok(validators(node)),
     }
+}
+
+/// The validator set with each validator's committee address and its live bonded weight in whole
+/// native units, read from committed state. A weight of zero is a validator that has fallen below the
+/// stake floor or been blacklisted, so it is present but carries no committee weight. This is what an
+/// explorer or an operator reads to see who validates and with how much stake.
+fn validators(node: &DevNode) -> Json {
+    let ledger = node.ledger();
+    let mut list = Vec::new();
+    for id in ledger.validator_ids() {
+        let Ok(address) = qtv_idfmt::render_address(&id) else {
+            continue;
+        };
+        let stake = ledger.staked_weight(&address);
+        list.push(object(vec![
+            ("address", Json::str(&address)),
+            ("stake", Json::Int(stake)),
+        ]));
+    }
+    object(vec![
+        ("count", Json::Int(list.len() as u64)),
+        ("validators", Json::Array(list)),
+    ])
 }
 
 fn node_info(ctx: &NodeContext, node: &DevNode) -> Json {
