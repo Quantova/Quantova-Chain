@@ -235,6 +235,62 @@ pub fn gov_system_address() -> String {
         .expect("a full hash reaches the address floor")
 }
 
+const VM_CODE_TAG: &[u8] = b"qtv/vm/code/";
+const VM_STORE_TAG: &[u8] = b"qtv/vm/store/";
+
+fn contract_code_key(id: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(VM_CODE_TAG.len() + id.len());
+    input.extend_from_slice(VM_CODE_TAG);
+    input.extend_from_slice(id);
+    sha3::sha3_256(&input)
+}
+
+fn contract_store_key(id: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(VM_STORE_TAG.len() + id.len());
+    input.extend_from_slice(VM_STORE_TAG);
+    input.extend_from_slice(id);
+    sha3::sha3_256(&input)
+}
+
+/// The reduction of a full account address to the one machine word a contract sees it as. The virtual
+/// machine works in sixty four bit words, so an address a contract stores as an owner or reads as its
+/// caller is this word, not the whole thirty two byte payload. The word is the leading eight bytes of
+/// the address payload read big endian, a pure function of the address, so the same address always
+/// reduces to the same word for a storage key, a caller check, and an argument alike. It is lossy, so
+/// it is an internal handle for a pure state contract and never a route back to a full address.
+pub fn address_word(address: &str) -> Option<u64> {
+    let id = address_id(address)?;
+    Some(u64::from_be_bytes(id[..8].try_into().expect("eight bytes")))
+}
+
+/// Encode a contract's whole storage as one length prefixed run of slot and value words, so a
+/// contract's state is one trie leaf that loads and stores in one read and one write regardless of how
+/// its keyed maps scatter across the word space.
+fn encode_storage(storage: &std::collections::BTreeMap<u64, u64>) -> Vec<u8> {
+    let mut encoder = qtv_codec::Encoder::new();
+    (storage.len() as u64).encode(&mut encoder);
+    for (slot, value) in storage {
+        slot.encode(&mut encoder);
+        value.encode(&mut encoder);
+    }
+    encoder.into_bytes()
+}
+
+fn decode_storage(bytes: &[u8]) -> std::collections::BTreeMap<u64, u64> {
+    let mut decoder = qtv_codec::Decoder::new(bytes);
+    let mut storage = std::collections::BTreeMap::new();
+    let count = u64::decode(&mut decoder).unwrap_or(0);
+    for _ in 0..count {
+        match (u64::decode(&mut decoder), u64::decode(&mut decoder)) {
+            (Ok(slot), Ok(value)) => {
+                storage.insert(slot, value);
+            }
+            _ => break,
+        }
+    }
+    storage
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnactError {
     Unknown,
@@ -552,6 +608,39 @@ impl Ledger {
         let closed = meter.close(now_day);
         self.set_session_meter(&meter);
         closed
+    }
+
+    /// The deployed container of a contract, its bytecode, or None when the id holds no contract.
+    pub fn contract_code(&self, id: &[u8; 32]) -> Option<Vec<u8>> {
+        self.trie
+            .get(&contract_code_key(id))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| bytes.to_vec())
+    }
+
+    /// Deploy a container at a contract id. The container is the compiled contract the virtual machine
+    /// runs; it is written once and read on every call.
+    pub fn set_contract_code(&mut self, id: &[u8; 32], code: &[u8]) {
+        self.trie.insert(contract_code_key(id), code.to_vec());
+    }
+
+    /// The whole storage of a contract, loaded as the slot to value map the virtual machine reads. An
+    /// absent contract reads as empty, so a first call sees a clean slate.
+    pub fn contract_storage(&self, id: &[u8; 32]) -> std::collections::BTreeMap<u64, u64> {
+        match self.trie.get(&contract_store_key(id)) {
+            Some(bytes) if !bytes.is_empty() => decode_storage(bytes),
+            _ => std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Write back a contract's whole storage after a call, as one trie leaf.
+    pub fn set_contract_storage(
+        &mut self,
+        id: &[u8; 32],
+        storage: &std::collections::BTreeMap<u64, u64>,
+    ) {
+        self.trie
+            .insert(contract_store_key(id), encode_storage(storage));
     }
 
     /// The reward earning validator set, the ids the session accrual pays. It is

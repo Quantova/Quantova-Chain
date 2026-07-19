@@ -68,6 +68,8 @@ pub enum ExecError {
     MeterExhausted,
     /// Any other virtual machine fault, which a native transfer never reaches.
     Vm(Fault),
+    /// The deployed container did not decode, or it names no entry for the call selector.
+    BadContainer,
 }
 
 /// The outcome of a transfer: the post execution balances and the meter spent.
@@ -113,9 +115,156 @@ pub fn execute_transfer(
     })
 }
 
+/// The outcome of a contract call: the contract's whole post execution storage, the native transfer
+/// effects the call recorded through `send`, and the meter it spent.
+#[derive(Debug)]
+pub struct ContractOutcome {
+    pub storage: std::collections::BTreeMap<u64, u64>,
+    pub effects: Vec<qtv_vm::interp::Effect>,
+    pub meter_used: u64,
+}
+
+fn read_be_u32(bytes: &[u8], pos: &mut usize) -> Option<u32> {
+    let end = pos.checked_add(4)?;
+    let word = bytes.get(*pos..end)?;
+    *pos = end;
+    Some(u32::from_be_bytes(word.try_into().ok()?))
+}
+
+fn read_be_u64(bytes: &[u8], pos: &mut usize) -> Option<u64> {
+    let end = pos.checked_add(8)?;
+    let word = bytes.get(*pos..end)?;
+    *pos = end;
+    Some(u64::from_be_bytes(word.try_into().ok()?))
+}
+
+fn read_slots(bytes: &[u8], pos: &mut usize) -> Option<Vec<u64>> {
+    let count = read_be_u32(bytes, pos)?;
+    let mut slots = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        slots.push(read_be_u64(bytes, pos)?);
+    }
+    Some(slots)
+}
+
+/// Rebuild a container from its canonical bytes, the inverse of the machine's `canonical_bytes`. The
+/// tagged qtv-vm serializes a container but does not read one back, and the chain must, so a deployed
+/// container can run. The format is the `QVM1` tag, then the length prefixed code, the constant pool,
+/// and the entries, each an entry selector, its code offset, and its declared reads and writes. It is
+/// a pure function of the bytes, so every node rebuilds the identical container from the same deploy.
+pub fn decode_container(bytes: &[u8]) -> Option<qtv_vm::container::Container> {
+    use qtv_vm::container::{Container, Entry, StateAccess, SELECTOR_BYTES};
+    if bytes.len() < 4 || &bytes[0..4] != b"QVM1" {
+        return None;
+    }
+    let mut pos = 4usize;
+    let code_len = read_be_u32(bytes, &mut pos)? as usize;
+    let code_end = pos.checked_add(code_len)?;
+    let code = bytes.get(pos..code_end)?.to_vec();
+    pos = code_end;
+    let consts_len = read_be_u32(bytes, &mut pos)?;
+    let mut consts = Vec::with_capacity(consts_len as usize);
+    for _ in 0..consts_len {
+        consts.push(read_be_u64(bytes, &mut pos)?);
+    }
+    let entries_len = read_be_u32(bytes, &mut pos)?;
+    let mut entries = Vec::with_capacity(entries_len as usize);
+    for _ in 0..entries_len {
+        let sel_end = pos.checked_add(SELECTOR_BYTES)?;
+        let mut selector = [0u8; SELECTOR_BYTES];
+        selector.copy_from_slice(bytes.get(pos..sel_end)?);
+        pos = sel_end;
+        let offset = read_be_u32(bytes, &mut pos)?;
+        let reads = read_slots(bytes, &mut pos)?;
+        let writes = read_slots(bytes, &mut pos)?;
+        entries.push(Entry {
+            selector,
+            offset,
+            access: StateAccess { reads, writes },
+        });
+    }
+    Some(Container::new(code, consts, entries))
+}
+
+/// Run one entry of a deployed contract through the virtual machine. The container's canonical bytes
+/// rebuild the container, the entry is selected by its selector, the contract's whole storage seeds
+/// the machine, and the argument memory carries the call arguments and the host context words the
+/// caller placed. A clean halt yields the post execution storage, the recorded native transfer
+/// effects, and the meter spent; a fault, an undecodable container, or an unknown selector is refused
+/// and no state moves.
+pub fn execute_contract_call(
+    container_bytes: &[u8],
+    selector: [u8; qtv_vm::container::SELECTOR_BYTES],
+    storage: std::collections::BTreeMap<u64, u64>,
+    memory: &[u8],
+    meter_limit: u64,
+) -> Result<ContractOutcome, ExecError> {
+    let container = decode_container(container_bytes).ok_or(ExecError::BadContainer)?;
+    let outcome = Interpreter::for_entry(&container, selector, meter_limit)
+        .map_err(|_| ExecError::BadContainer)?
+        .with_storage(storage)
+        .with_memory(memory)
+        .run()
+        .map_err(|fault| match fault {
+            Fault::Overflow => ExecError::InsufficientFunds,
+            Fault::OutOfGas => ExecError::MeterExhausted,
+            other => ExecError::Vm(other),
+        })?;
+    Ok(ContractOutcome {
+        storage: outcome.storage,
+        effects: outcome.effects,
+        meter_used: outcome.gas_used,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_contract_call_runs_a_decoded_container_and_persists_storage() {
+        use qtv_vm::container::{Container, Entry, StateAccess};
+        // Load constant zero, the value forty two, and store it into slot seven, then halt.
+        let code = qtv_vm::asm::assemble("LDC r0, 0\nLDI r1, 7\nSSTORE r1, r0\nHALT")
+            .expect("the program assembles");
+        let selector = [1u8, 2, 3, 4];
+        let container = Container::new(
+            code,
+            vec![42],
+            vec![Entry {
+                selector,
+                offset: 0,
+                access: StateAccess {
+                    reads: vec![],
+                    writes: vec![7],
+                },
+            }],
+        );
+        let bytes = container.canonical_bytes();
+
+        // The chain rebuilds the container from its canonical bytes and runs the entry.
+        let out = execute_contract_call(
+            &bytes,
+            selector,
+            std::collections::BTreeMap::new(),
+            &[],
+            100_000,
+        )
+        .expect("the call halts");
+        assert_eq!(out.storage.get(&7), Some(&42));
+
+        // An unknown selector and an undecodable container are both refused.
+        assert_eq!(
+            execute_contract_call(&bytes, [9, 9, 9, 9], std::collections::BTreeMap::new(), &[], 100_000)
+                .unwrap_err(),
+            ExecError::BadContainer
+        );
+        assert_eq!(
+            execute_contract_call(b"nope", selector, std::collections::BTreeMap::new(), &[], 100_000)
+                .unwrap_err(),
+            ExecError::BadContainer
+        );
+    }
 
     #[test]
     fn a_call_round_trips_its_amount() {
