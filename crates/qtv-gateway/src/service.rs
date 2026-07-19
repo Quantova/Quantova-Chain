@@ -42,6 +42,7 @@ pub enum Request {
     Head,
     Validators,
     ChainParams,
+    StakingState,
 }
 
 /// A request the gateway could not carry out because the client sent it wrong, a
@@ -89,6 +90,7 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
         "head" => Ok(Request::Head),
         "validators" => Ok(Request::Validators),
         "chain_params" => Ok(Request::ChainParams),
+        "staking_state" => Ok(Request::StakingState),
         "get_account" => Ok(Request::Account(string_field(body, "address")?)),
         "get_transaction" => Ok(Request::Transaction(string_field(body, "tx_id")?)),
         "submit_transaction" => {
@@ -138,7 +140,32 @@ pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result
         Request::Block(selector) => block(node, selector),
         Request::Validators => Ok(validators(node)),
         Request::ChainParams => Ok(chain_params()),
+        Request::StakingState => Ok(staking_state(node)),
     }
+}
+
+/// The live staking and governance state read from committed ledger state: the reward pool and the
+/// treasury balances, the governance published price and the mainnet start the reward blackout
+/// measures from, and the total value locked for governance voting. A mainnet start at its maximum
+/// means governance has not opened the reward schedule, so nothing accrues yet. This is the moving
+/// counterpart to the fixed chain parameters, what an explorer polls to show the pool and the
+/// electorate as they change.
+fn staking_state(node: &DevNode) -> Json {
+    let ledger = node.ledger();
+    let mainnet_start = ledger.stake_mainnet_start();
+    object(vec![
+        ("reward_pool", Json::Int(ledger.stake_pool())),
+        ("treasury", Json::Int(ledger.stake_treasury())),
+        (
+            "price_micro_usd_per_qtov",
+            Json::str(&ledger.stake_price().to_string()),
+        ),
+        ("mainnet_started", Json::Bool(mainnet_start != u64::MAX)),
+        (
+            "governance_locked",
+            Json::str(&ledger.gov_total_locked().to_string()),
+        ),
+    ])
 }
 
 /// The economic and governance parameters the chain runs under, read from the staking and governance
