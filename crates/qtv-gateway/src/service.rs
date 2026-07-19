@@ -254,7 +254,7 @@ fn node_info(ctx: &NodeContext, node: &DevNode) -> Json {
         ("genesis_hash", Json::str(&ctx.genesis_hash_hex)),
         ("head_height", Json::Int(node.height().saturating_sub(1))),
         ("asset", Json::str(&ctx.asset)),
-        ("denomination", Json::str("Qgas")),
+        ("denomination", Json::str("Quon")),
         (
             "fee",
             object(vec![
@@ -263,8 +263,8 @@ fn node_info(ctx: &NodeContext, node: &DevNode) -> Json {
                     "rate_micro_usd_per_qtov",
                     Json::str(fee.rate_micro_usd_per_qtov.to_string()),
                 ),
-                ("native_unit_qgas", Json::str(fee.native_unit.to_string())),
-                ("transfer_qgas", Json::str(fee.transfer_fee().to_string())),
+                ("quon_per_qtov", Json::str(fee.native_unit.to_string())),
+                ("transfer_quon", Json::str(fee.transfer_fee().to_string())),
             ]),
         ),
         ("version", Json::str(&ctx.version)),
