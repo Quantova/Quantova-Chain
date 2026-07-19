@@ -218,6 +218,7 @@ pub fn execute_parallel(
             || target == gov_address.as_str()
             || ledger.is_blacklisted(sender)
             || ledger.is_blacklisted(target)
+            || crate::node::is_vm_op(ledger, wrapper)
     }) {
         return crate::node::execute_ordered(ledger, candidates, fee_params, day);
     }

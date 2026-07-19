@@ -238,6 +238,26 @@ pub fn gov_system_address() -> String {
 const VM_CODE_TAG: &[u8] = b"qtv/vm/code/";
 const VM_STORE_TAG: &[u8] = b"qtv/vm/store/";
 
+/// The reserved address a deploy transaction targets. A transfer style call whose target is this
+/// address, carrying a container in its arguments, deploys that container to a fresh contract address.
+pub fn vm_deploy_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/vm/deploy"))
+        .expect("a full hash reaches the address floor")
+}
+
+/// The address a deploy from a given account at a given nonce lands the contract at. It is a pure
+/// function of the deployer and the nonce, so the deployer computes the same address the chain does
+/// and can call the contract immediately, and two deploys from the same account never collide because
+/// the nonce differs.
+pub fn contract_address(deployer: &str, nonce: u64) -> Option<String> {
+    let id = address_id(deployer)?;
+    let mut input = Vec::with_capacity(16 + id.len() + 8);
+    input.extend_from_slice(b"qtv/vm/contract/");
+    input.extend_from_slice(&id);
+    input.extend_from_slice(&nonce.to_le_bytes());
+    qtv_idfmt::render_address(&sha3::sha3_256(&input)).ok()
+}
+
 fn contract_code_key(id: &[u8; 32]) -> Key {
     let mut input = Vec::with_capacity(VM_CODE_TAG.len() + id.len());
     input.extend_from_slice(VM_CODE_TAG);
@@ -610,6 +630,15 @@ impl Ledger {
         closed
     }
 
+    /// Whether an address holds a deployed contract, so a transaction to it is a call rather than a
+    /// transfer. It is a pure read of committed state.
+    pub fn is_contract(&self, address: &str) -> bool {
+        match address_id(address) {
+            Some(id) => self.contract_code(&id).is_some(),
+            None => false,
+        }
+    }
+
     /// The deployed container of a contract, its bytecode, or None when the id holds no contract.
     pub fn contract_code(&self, id: &[u8; 32]) -> Option<Vec<u8>> {
         self.trie
@@ -622,6 +651,15 @@ impl Ledger {
     /// runs; it is written once and read on every call.
     pub fn set_contract_code(&mut self, id: &[u8; 32], code: &[u8]) {
         self.trie.insert(contract_code_key(id), code.to_vec());
+    }
+
+    /// Deploy a container from a deployer at a nonce, storing it at the derived contract address and
+    /// returning that address so the caller records where the contract lives.
+    pub fn deploy_contract(&mut self, deployer: &str, nonce: u64, code: &[u8]) -> Option<String> {
+        let contract = contract_address(deployer, nonce)?;
+        let id = address_id(&contract)?;
+        self.set_contract_code(&id, code);
+        Some(contract)
     }
 
     /// The whole storage of a contract, loaded as the slot to value map the virtual machine reads. An
