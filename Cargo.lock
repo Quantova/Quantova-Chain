@@ -88,8 +88,10 @@ dependencies = [
  "qtv-bft",
  "qtv-block",
  "qtv-devnet",
+ "qtv-governance",
  "qtv-idfmt",
  "qtv-node",
+ "qtv-staking",
  "qtv-tx",
 ]
 

@@ -41,6 +41,7 @@ pub enum Request {
     Block(BlockSelector),
     Head,
     Validators,
+    ChainParams,
 }
 
 /// A request the gateway could not carry out because the client sent it wrong, a
@@ -87,6 +88,7 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
         "node_info" => Ok(Request::NodeInfo),
         "head" => Ok(Request::Head),
         "validators" => Ok(Request::Validators),
+        "chain_params" => Ok(Request::ChainParams),
         "get_account" => Ok(Request::Account(string_field(body, "address")?)),
         "get_transaction" => Ok(Request::Transaction(string_field(body, "tx_id")?)),
         "submit_transaction" => {
@@ -135,7 +137,64 @@ pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result
         Request::Submit(bytes) => Ok(submit(node, bytes)),
         Request::Block(selector) => block(node, selector),
         Request::Validators => Ok(validators(node)),
+        Request::ChainParams => Ok(chain_params()),
     }
+}
+
+/// The economic and governance parameters the chain runs under, read from the staking and governance
+/// rules. These are fixed by the code the network runs, so an explorer or a wallet reads them once to
+/// show the stake floor, the reward schedule, and the seven governance tracks with their deposits and
+/// thresholds, rather than hard coding them and drifting from the running chain.
+fn chain_params() -> Json {
+    let tracks: Vec<Json> = qtv_governance::Track::all()
+        .iter()
+        .map(|track| {
+            object(vec![
+                ("code", Json::Int(u64::from(track.code()))),
+                ("deposit", Json::Int(track.deposit())),
+                ("approval_bps", Json::Int(track.approval_bps() as u64)),
+                ("support_bps", Json::Int(track.support_bps() as u64)),
+                ("period_seconds", Json::Int(track.period_seconds())),
+            ])
+        })
+        .collect();
+    object(vec![
+        (
+            "staking",
+            object(vec![
+                ("native_unit", Json::Int(qtv_staking::NATIVE_UNIT as u64)),
+                ("min_stake", Json::Int(qtv_staking::MIN_STAKE)),
+                ("staking_pool", Json::Int(qtv_staking::STAKING_POOL)),
+                ("session_days", Json::Int(qtv_staking::SESSION_DAYS)),
+                ("high_session_tx", Json::Int(qtv_staking::HIGH_SESSION_TX)),
+                ("low_session_bps", Json::Int(qtv_staking::LOW_SESSION_BPS as u64)),
+                ("high_session_bps", Json::Int(qtv_staking::HIGH_SESSION_BPS as u64)),
+                (
+                    "reward_cap_micro_usd_per_session",
+                    Json::Int(qtv_staking::REWARD_CAP_MICRO_USD_PER_SESSION as u64),
+                ),
+                (
+                    "mainnet_blackout_days",
+                    Json::Int(qtv_staking::MAINNET_BLACKOUT_DAYS),
+                ),
+                ("bond_lock_days", Json::Int(qtv_staking::BOND_LOCK_DAYS)),
+                ("unbonding_days", Json::Int(qtv_staking::UNBONDING_DAYS)),
+                ("vest_cliff_days", Json::Int(qtv_staking::VEST_CLIFF_DAYS)),
+                ("vest_tranche_days", Json::Int(qtv_staking::VEST_TRANCHE_DAYS)),
+                ("vest_tranches", Json::Int(qtv_staking::VEST_TRANCHES)),
+            ]),
+        ),
+        (
+            "governance",
+            object(vec![
+                (
+                    "conviction_max_x10",
+                    Json::Int(qtv_governance::Conviction::TwoYear.factor_x10() as u64),
+                ),
+                ("tracks", Json::Array(tracks)),
+            ]),
+        ),
+    ])
 }
 
 /// The validator set with each validator's committee address and its live bonded weight in whole

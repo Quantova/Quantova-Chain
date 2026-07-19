@@ -11,6 +11,8 @@ description = "The Quantova RPC gateway. It serves the six read and write method
 # built from. The gateway holds no consensus itself, it only reads a running node.
 qtv-devnet = { path = "../qtv-devnet" }
 qtv-node = { path = "../qtv-node" }
+qtv-staking = { path = "../qtv-staking" }
+qtv-governance = { path = "../qtv-governance" }
 qtv-tx = { path = "../qtv-tx" }
 qtv-block = { path = "../qtv-block" }
 qtv-idfmt = { path = "../qtv-idfmt" }
