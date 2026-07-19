@@ -157,6 +157,7 @@ fn run() -> Result<(), String> {
         let context = qtv_gateway::NodeContext {
             chain_id: genesis_file.chain_id.clone(),
             genesis_hash_hex: util::hex(&genesis_file.hash),
+            asset: genesis_file.asset.clone(),
             fee_params: genesis_file.genesis.fee_params,
             version: env!("CARGO_PKG_VERSION").to_string(),
         };
