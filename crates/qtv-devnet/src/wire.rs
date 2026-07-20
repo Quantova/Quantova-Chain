@@ -9,8 +9,7 @@
 //! dropped at the edge, which is where a classical or malformed artifact is
 //! refused.
 
-use qtv_attest::certificate::SuccinctProof;
-use qtv_attest::{Attestation, Block, Body as CertBody, Certificate, Envelope, Parent};
+use qtv_attest::{Attestation, Block, Certificate, Envelope, Parent};
 use qtv_block::{Block as ChainBlock, Header};
 use qtv_codec::{Decoder, Encode, Encoder, Error as CodecError};
 use qtv_crypto::ml_dsa::SIGNATURE_BYTES;
@@ -48,10 +47,8 @@ const PARENT_GENESIS: u8 = 0;
 /// The tag that marks a value parent link.
 const PARENT_VALUE: u8 = 1;
 
-/// The stage tag of a stage one certificate body, the aggregated attestations.
+/// The version tag of a certificate body, the aggregated attestations.
 const STAGE_ONE: u8 = 1;
-/// The stage tag of a stage two certificate body, a single succinct proof.
-const STAGE_TWO: u8 = 2;
 
 /// A block proposal: the view it is offered in, the real chain header the
 /// committee attests over, and the ordered body the header commits to. The view
@@ -593,19 +590,10 @@ fn decode_block(decoder: &mut Decoder<'_>) -> Result<Block, DecodeError> {
 pub fn certificate_to_bytes(certificate: &Certificate) -> Vec<u8> {
     let mut encoder = Encoder::new();
     encode_envelope(&mut encoder, &certificate.envelope);
-    match &certificate.body {
-        CertBody::Stage1(body) => {
-            encoder.put_u8(STAGE_ONE);
-            encoder.put_u64(body.attestations.len() as u64);
-            for attestation in &body.attestations {
-                encode_attestation(&mut encoder, attestation);
-            }
-        }
-        CertBody::Stage2(body) => {
-            encoder.put_u8(STAGE_TWO);
-            encoder.put_u64(body.attester_count as u64);
-            encoder.put_bytes(&body.proof.bytes);
-        }
+    encoder.put_u8(STAGE_ONE);
+    encoder.put_u64(certificate.attestations.len() as u64);
+    for attestation in &certificate.attestations {
+        encode_attestation(&mut encoder, attestation);
     }
     encoder.into_bytes()
 }
@@ -621,12 +609,7 @@ pub fn certificate_from_bytes(bytes: &[u8]) -> Result<Certificate, DecodeError> 
             for _ in 0..count {
                 attestations.push(decode_attestation(&mut decoder)?);
             }
-            Certificate::stage_one(envelope, attestations)
-        }
-        STAGE_TWO => {
-            let attester_count = decoder.get_u64()? as usize;
-            let proof = decoder.get_bytes()?.to_vec();
-            Certificate::stage_two(envelope, attester_count, SuccinctProof { bytes: proof })
+            Certificate::new(envelope, attestations)
         }
         stage => return Err(DecodeError::BadStage(stage)),
     };

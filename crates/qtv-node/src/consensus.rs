@@ -306,7 +306,7 @@ mod tests {
             },
         };
         let forged =
-            Certificate::stage_one(Envelope::new(1, 1, block, &selection.commitment), atts);
+            Certificate::new(Envelope::new(1, 1, block, &selection.commitment), atts);
 
         // The running consensus verification refuses the forged certificate.
         assert!(!consensus.verify(&forged, &selection, &beacon));

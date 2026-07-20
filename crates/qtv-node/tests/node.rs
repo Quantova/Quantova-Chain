@@ -327,3 +327,37 @@ fn a_parallel_node_finalizes_the_identical_chain_as_the_sequential_node() {
         );
     }
 }
+
+#[test]
+fn a_validator_is_hard_wired_to_use_at_least_half_its_cores() {
+    use qtv_node::node::min_validator_cores;
+    let machine = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    // The floor is half the machine's cores, rounded down, and never below one.
+    assert_eq!(min_validator_cores(), (machine / 2).max(1));
+    assert!(min_validator_cores() >= 1);
+
+    let alice = user(1);
+    let build = || {
+        Node::new(genesis(
+            vec![GenesisAccount::from_account(&alice, 1_000_000)],
+            &[true, true, true, true],
+        ))
+    };
+
+    // A default validator already executes at the floor.
+    assert!(build().exec_cores() >= min_validator_cores());
+    // Configuring fewer cores than the floor cannot lower a validator below it.
+    assert_eq!(
+        build().with_parallelism(1).exec_cores(),
+        min_validator_cores(),
+        "a validator cannot run below the core floor"
+    );
+    // Configuring more than the floor is honoured.
+    assert_eq!(
+        build().with_parallelism(4096).exec_cores(),
+        4096,
+        "a validator may use more than the floor"
+    );
+}

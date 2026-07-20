@@ -427,6 +427,18 @@ impl Ledger {
             .insert(stake_singleton_key(STAKE_TREASURY_TAG), to_bytes(&amount));
     }
 
+    /// Route a charged transaction fee into the governance controlled treasury, so a fee is never
+    /// burned and the total supply stays fixed. The frozen economics is that fees reach the treasury
+    /// and the validators, and the exact split between them is a governance parameter still to be set,
+    /// so until it is the whole fee accrues to the treasury rather than vanishing (SPEC-economics).
+    pub fn collect_fee(&mut self, fee: u64) {
+        if fee == 0 {
+            return;
+        }
+        let treasury = self.stake_treasury().saturating_add(fee);
+        self.set_stake_treasury(treasury);
+    }
+
     pub fn is_stake_banned(&self, id: &[u8; 32]) -> bool {
         matches!(self.trie.get(&stake_banned_key(id)), Some(bytes) if !bytes.is_empty())
     }
@@ -612,6 +624,7 @@ impl Ledger {
         account.balance -= fee;
         account.nonce += 1;
         self.set_account(address, &account);
+        self.collect_fee(fee);
         self.claim_reward(address, now_day);
         true
     }
@@ -712,11 +725,30 @@ impl Ledger {
         memory[0..8].copy_from_slice(&caller_word.to_be_bytes());
         memory[8..16].copy_from_slice(&now_seconds.to_be_bytes());
         match crate::execution::execute_contract_call(&code, selector, storage, &memory, meter) {
-            Ok(outcome) if outcome.effects.is_empty() => {
+            Ok(outcome) => {
+                // A contract initiated native transfer is not applied by the node yet, so a call that
+                // records one is refused and no state moves. A call that only records events commits,
+                // and its events are collected in emission order for the block event root.
+                if outcome
+                    .effects
+                    .iter()
+                    .any(|effect| matches!(effect, qtv_vm::interp::Effect::Transfer { .. }))
+                {
+                    return false;
+                }
+                for effect in &outcome.effects {
+                    if let qtv_vm::interp::Effect::Event { selector, data } = effect {
+                        self.block_events.push(BlockEvent {
+                            contract: contract.to_string(),
+                            selector: *selector,
+                            data: data.clone(),
+                        });
+                    }
+                }
                 self.set_contract_storage(&contract_id, &outcome.storage);
                 true
             }
-            _ => false,
+            Err(_) => false,
         }
     }
 
@@ -1170,6 +1202,7 @@ impl Ledger {
         account.balance -= debit;
         account.nonce += 1;
         self.set_account(address, &account);
+        self.collect_fee(fee);
         self.set_stake_bond(
             &id,
             &Bond {
@@ -1690,23 +1723,66 @@ mod stake_state_tests {
     }
 }
 
+/// A typed event a contract emitted in the block: the contract that emitted it, the four byte event
+/// selector, and the operand payload. The block commits to these through the event root in the header,
+/// so a light client proves an event without the full state (SPEC-blocks, SPEC-container).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockEvent {
+    pub contract: String,
+    pub selector: [u8; 4],
+    pub data: Vec<u8>,
+}
+
+impl BlockEvent {
+    /// The canonical encoding of the event, the leaf the event root hashes. Each field is length
+    /// prefixed so no two distinct events share an encoding.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut encoder = Encoder::new();
+        encoder.put_bytes(self.contract.as_bytes());
+        encoder.put_bytes(&self.selector);
+        encoder.put_bytes(&self.data);
+        encoder.into_bytes()
+    }
+}
+
 /// The account state of the chain over the sparse Merkle trie.
 #[derive(Debug, Clone, Default)]
 pub struct Ledger {
     trie: Trie,
+    /// The events emitted so far in the block being executed, in emission order. Transient and never
+    /// part of the trie or the state root, it is committed to the block through the header event root
+    /// and cleared at the start of each block.
+    block_events: Vec<BlockEvent>,
 }
 
 impl Ledger {
     /// An empty ledger with no accounts.
     pub fn new() -> Self {
-        Ledger { trie: Trie::new() }
+        Ledger {
+            trie: Trie::new(),
+            block_events: Vec::new(),
+        }
     }
 
     /// A ledger over a trie loaded from disk. The trie holds the account leaves a
     /// store reopened, so a node restarted from its store rebuilds the exact state
     /// it committed, with the same state root.
     pub fn from_trie(trie: Trie) -> Self {
-        Ledger { trie }
+        Ledger {
+            trie,
+            block_events: Vec::new(),
+        }
+    }
+
+    /// Clear the block event buffer at the start of a block, so each block's event root covers only the
+    /// events that block emitted.
+    pub fn clear_block_events(&mut self) {
+        self.block_events.clear();
+    }
+
+    /// The events emitted so far in the block being executed, in emission order.
+    pub fn block_events(&self) -> &[BlockEvent] {
+        &self.block_events
     }
 
     /// The account an address holds, or the default fresh account when the

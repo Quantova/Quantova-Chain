@@ -13,18 +13,17 @@ dependencies = [
 [[package]]
 name = "qtv-attest"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?tag=v0.6.0#df3eeedfdfe30a0675c825f4bb7d934dc3138bcb"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?tag=v0.7.0#d9e62738032765b81dcf65fd0c398711f2591682"
 dependencies = [
  "qtv-bft",
  "qtv-crypto",
  "qtv-sampler",
- "qtv-stark",
 ]
 
 [[package]]
 name = "qtv-bft"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?tag=v0.6.0#df3eeedfdfe30a0675c825f4bb7d934dc3138bcb"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?tag=v0.7.0#d9e62738032765b81dcf65fd0c398711f2591682"
 dependencies = [
  "qtv-crypto",
 ]
@@ -162,7 +161,7 @@ dependencies = [
 [[package]]
 name = "qtv-sampler"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?tag=v0.6.0#df3eeedfdfe30a0675c825f4bb7d934dc3138bcb"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?tag=v0.7.0#d9e62738032765b81dcf65fd0c398711f2591682"
 dependencies = [
  "qtv-crypto",
 ]
@@ -172,14 +171,6 @@ name = "qtv-staking"
 version = "0.1.0"
 dependencies = [
  "qtv-codec",
-]
-
-[[package]]
-name = "qtv-stark"
-version = "0.1.0"
-source = "git+https://github.com/Quantova/q-prover.git?tag=v0.8.0#b1984582cb4b242568bb344018ca01770dd5f31d"
-dependencies = [
- "qtv-crypto",
 ]
 
 [[package]]
@@ -213,7 +204,7 @@ dependencies = [
 [[package]]
 name = "qtv-vm"
 version = "0.2.0"
-source = "git+https://github.com/Quantova/QVM.git?tag=v0.3.0#e6acea206b93c7b2c1312bb26ff5d0b4ce635294"
+source = "git+https://github.com/Quantova/QVM.git?tag=v0.4.0#a4bf64ab737b9da2aa91e4b36d8ea53f865f5f5b"
 dependencies = [
  "qtv-crypto",
 ]

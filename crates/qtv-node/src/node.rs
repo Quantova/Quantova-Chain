@@ -181,6 +181,17 @@ pub fn execute_ordered(
     execute_ordered_across(ledger, candidates, fee_params, cores, day)
 }
 
+/// The minimum number of cores a validator runs block execution across: half the machine's cores,
+/// rounded down, and never below one. A validator must use at least this many cores so the measured
+/// throughput holds, and the node enforces this floor at block execution no matter how parallelism was
+/// configured. This is the frozen performance requirement, hard wired rather than left to the operator.
+pub fn min_validator_cores() -> usize {
+    let machine = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    (machine / 2).max(1)
+}
+
 pub fn day_of_height(height: u64) -> u64 {
     height.saturating_mul(qtv_bft::params::SLOT_MS) / 86_400_000
 }
@@ -286,6 +297,7 @@ fn dispatch_governance(
     charged_account.balance -= charged;
     charged_account.nonce += 1;
     ledger.set_account(&sender, &charged_account);
+    ledger.collect_fee(charged);
     match operation {
         GovOp::Propose(action) => {
             ledger.gov_propose(&sender, action.track(), action, now);
@@ -375,6 +387,7 @@ fn dispatch_vm(
     charged_account.balance -= charged;
     charged_account.nonce += 1;
     ledger.set_account(&sender, &charged_account);
+    ledger.collect_fee(charged);
     if target == crate::ledger::vm_deploy_address() {
         ledger.deploy_contract(&sender, nonce, &args);
     } else if args.len() >= 4 {
@@ -446,6 +459,7 @@ fn execute_ordered_across(
         recipient.balance = transferred.recipient_balance;
         ledger.set_account(&plan.sender, &sender);
         ledger.set_account(&plan.recipient, &recipient);
+        ledger.collect_fee(plan.fee);
         included.push(wrapper.clone());
     }
     ledger.settle_session(day, included.len() as u64);
@@ -616,7 +630,7 @@ impl Node {
             genesis_time: genesis.genesis_time,
             chain: Vec::new(),
             slashed: Vec::new(),
-            exec_threads: 1,
+            exec_threads: min_validator_cores(),
         }
     }
 
@@ -634,6 +648,13 @@ impl Node {
     pub fn with_parallelism(mut self, threads: usize) -> Self {
         self.set_parallelism(threads);
         self
+    }
+
+    /// The number of cores this node executes a block across: the configured parallelism raised to the
+    /// validator floor, so it is never below `min_validator_cores`. A validator that configures fewer
+    /// still runs at the floor, which is how the performance requirement is enforced.
+    pub fn exec_cores(&self) -> usize {
+        self.exec_threads.max(min_validator_cores())
     }
 
     /// Submit a signed transaction to the mempool. It is admitted only when valid,
@@ -668,7 +689,13 @@ impl Node {
 
         let state_root = self.ledger.state_root();
         let transaction_root = qtv_block::transaction_root(&included);
-        let event_root = qtv_block::empty_transaction_root();
+        let event_leaves: Vec<Vec<u8>> = self
+            .ledger
+            .block_events()
+            .iter()
+            .map(crate::ledger::BlockEvent::encode)
+            .collect();
+        let event_root = qtv_block::event_root(&event_leaves);
         let time = self.genesis_time + height * qtv_bft::params::SLOT_MS;
 
         let header = Header::new(
@@ -721,16 +748,15 @@ impl Node {
     /// produces the identical post state and root while running transactions with
     /// disjoint state concurrently.
     fn execute_block(&mut self) -> Vec<Wrapper> {
+        self.ledger.clear_block_events();
         let candidates = self.mempool.candidates();
         let day = day_of_height(self.height);
-        if self.exec_threads > 1 {
-            execute_parallel(
-                &mut self.ledger,
-                &candidates,
-                &self.fee_params,
-                self.exec_threads,
-                day,
-            )
+        // A validator must use at least half its cores, so block execution never runs below the floor
+        // however parallelism was configured. This is the frozen performance requirement, hard wired
+        // at the point of execution rather than left to the operator.
+        let threads = self.exec_cores();
+        if threads > 1 {
+            execute_parallel(&mut self.ledger, &candidates, &self.fee_params, threads, day)
         } else {
             execute_ordered(&mut self.ledger, &candidates, &self.fee_params, day)
         }
@@ -857,6 +883,39 @@ mod tests {
     }
 
     #[test]
+    fn a_transfer_fee_reaches_the_treasury_and_burns_nothing() {
+        // The frozen economics is that a fee is never burned: it reaches the governance treasury, so
+        // the total supply is fixed. The charged fee must show up in the treasury and the sum of every
+        // balance plus the treasury must be unchanged by the transfer.
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let alice = keypair(200);
+        let bob = keypair(201);
+        fund(&mut ledger, &alice, 10_000 * 1_000_000);
+
+        let charged = fee.transfer_fee();
+        let treasury_before = ledger.stake_treasury();
+        let supply_before = ledger.account(&alice.address()).balance
+            + ledger.account(&bob.address()).balance
+            + treasury_before;
+
+        let tx = transfer(&alice, &bob.address(), 1_000, 0, &fee);
+        let included = execute_ordered(&mut ledger, &[tx], &fee, 0);
+        assert_eq!(included.len(), 1, "the transfer is included");
+
+        let treasury_after = ledger.stake_treasury();
+        assert_eq!(
+            treasury_after,
+            treasury_before + charged,
+            "the charged fee reaches the treasury"
+        );
+        let supply_after = ledger.account(&alice.address()).balance
+            + ledger.account(&bob.address()).balance
+            + treasury_after;
+        assert_eq!(supply_after, supply_before, "no value is burned");
+    }
+
+    #[test]
     fn a_contract_deploys_and_a_call_runs_it_through_the_executor() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
@@ -916,6 +975,66 @@ mod tests {
         );
         crate::parallel::execute_parallel(&mut parallel, &[deploy2], &fee, 8, 0);
         assert!(parallel.is_contract(&contract));
+    }
+
+    #[test]
+    fn a_contract_emit_records_a_block_event_and_a_nonempty_event_root() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let deployer = keypair(140);
+        fund(&mut ledger, &deployer, 10_000 * 1_000_000);
+
+        // A container whose entry emits one event: an eight byte payload of the value forty two,
+        // written into scratch and recorded under the event selector 0xABCD1234.
+        let code = qtv_vm::asm::assemble(
+            "LDI r0, 64\nLDI r3, 42\nMSTORE r0, r3\nLDI r1, 8\nLDI r2, 2882343476\nEMIT r0, r1, r2\nHALT",
+        )
+        .expect("the program assembles");
+        let selector = [5u8, 6, 7, 8];
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![],
+                },
+            }],
+        );
+
+        let deploy = system_tx(
+            &deployer,
+            &crate::ledger::vm_deploy_address(),
+            container.canonical_bytes(),
+            0,
+            100_000,
+            &fee,
+        );
+        assert_eq!(execute_ordered(&mut ledger, &[deploy], &fee, 0).len(), 1);
+        let contract = crate::ledger::contract_address(&deployer.address(), 0).unwrap();
+        // The deploy itself emits nothing.
+        assert!(ledger.block_events().is_empty());
+
+        let call = system_tx(&deployer, &contract, selector.to_vec(), 1, 100_000, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[call], &fee, 0).len(), 1);
+
+        // The call recorded exactly the emitted event, tagged with the contract that emitted it, its
+        // four byte selector, and its eight byte payload.
+        let events = ledger.block_events();
+        assert_eq!(events.len(), 1, "one event recorded");
+        assert_eq!(events[0].contract, contract);
+        assert_eq!(events[0].selector, [0xAB, 0xCD, 0x12, 0x34]);
+        assert_eq!(events[0].data, 42u64.to_be_bytes().to_vec());
+
+        // The event root over the block's events is committed and is not the empty root.
+        let leaves: Vec<Vec<u8>> = events.iter().map(crate::ledger::BlockEvent::encode).collect();
+        assert_ne!(
+            qtv_block::event_root(&leaves),
+            qtv_block::empty_transaction_root(),
+            "a block that emitted an event has a nonempty event root"
+        );
     }
 
     fn gov_call_tx(from: &KeyAccount, args: Vec<u8>, nonce: u64, fee: &FeeParams) -> Wrapper {
@@ -1249,6 +1368,7 @@ mod tests {
             recipient.balance = transferred.recipient_balance;
             ledger.set_account(&plan.sender, &sender);
             ledger.set_account(&plan.recipient, &recipient);
+            ledger.collect_fee(plan.fee);
             included.push(wrapper.clone());
         }
         included
