@@ -122,6 +122,9 @@ struct Write {
     sender: Account,
     recipient_address: String,
     recipient: Account,
+    /// The fee this transfer charged, routed to the treasury in block order when the write lands, so
+    /// the parallel path collects fees exactly as the sequential path does.
+    fee: u64,
 }
 
 /// Run one task exactly as the sequential path would: validate against the sender
@@ -152,6 +155,7 @@ fn run_task(task: &Task<'_>, fee_params: &FeeParams) -> Option<Write> {
         sender,
         recipient_address: task.recipient_address.clone(),
         recipient,
+        fee: plan.fee,
     })
 }
 
@@ -257,6 +261,7 @@ pub fn execute_parallel(
         for write in writes {
             ledger.set_account(&write.sender_address, &write.sender);
             ledger.set_account(&write.recipient_address, &write.recipient);
+            ledger.collect_fee(write.fee);
             included.push(write.index);
         }
     }

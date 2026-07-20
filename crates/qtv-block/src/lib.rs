@@ -253,6 +253,34 @@ pub fn empty_transaction_root() -> [u8; ROOT_LEN] {
     sha3::sha3_256(&[])
 }
 
+/// The event root, a sha3 256 Merkle root over the canonical encodings of the events a block emitted,
+/// in emission order, built exactly like the transaction root. Each leaf is the sha3 256 hash of one
+/// event's canonical encoding, and the leaves reduce in pairs under sha3 256 until one value remains,
+/// an odd node pairing with itself. An empty block carries the empty root, so a light client verifies
+/// an event against this root in the header without holding the full state.
+pub fn event_root(events: &[Vec<u8>]) -> [u8; ROOT_LEN] {
+    if events.is_empty() {
+        return empty_transaction_root();
+    }
+    let mut level: Vec<[u8; ROOT_LEN]> = events.iter().map(|event| sha3::sha3_256(event)).collect();
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity((level.len() + 1) / 2);
+        let mut index = 0;
+        while index < level.len() {
+            let left = level[index];
+            let right = if index + 1 < level.len() {
+                level[index + 1]
+            } else {
+                left
+            };
+            next.push(pair_hash(&left, &right));
+            index += 2;
+        }
+        level = next;
+    }
+    level[0]
+}
+
 /// The sha3 256 hash of a left node followed by a right node.
 fn pair_hash(left: &[u8; ROOT_LEN], right: &[u8; ROOT_LEN]) -> [u8; ROOT_LEN] {
     let mut input = [0u8; ROOT_LEN * 2];
