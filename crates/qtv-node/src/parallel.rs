@@ -53,15 +53,17 @@
 //! they were written, so the post state and its root are bit identical to the
 //! sequential path on every input.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
+use qtv_codec::{from_bytes, to_bytes};
+use qtv_state::Key;
 use qtv_tx::Wrapper;
 
 use crate::execution::execute_transfer;
 use crate::fee::FeeParams;
-use crate::ledger::{Account, Ledger};
+use crate::ledger::{state_key, Account, Ledger};
 use crate::mempool::plan_from_account;
 
 /// The two addresses a transfer declares it reads and writes: the sender and the
@@ -102,59 +104,77 @@ pub fn plan_layers(candidates: &[Wrapper]) -> Vec<Vec<usize>> {
     layers
 }
 
-/// The state a single transaction reads at the start of its layer: its block
-/// index, the transaction, and the sender and recipient accounts as they stood
-/// then. The accounts are owned so the run touches no shared trie.
+/// The declared work of one transaction: its block index, the transaction, and the two addresses it
+/// touches. The accounts themselves are read by the worker from the layer's leaf snapshot, so the read
+/// and the decode run across the cores rather than serially before them.
 struct Task<'a> {
     index: usize,
     wrapper: &'a Wrapper,
     sender_address: String,
     recipient_address: String,
-    sender: Account,
-    recipient: Account,
 }
 
-/// The write a transaction commits: the two accounts to store back, named by
-/// address. A transaction the block order skips produces no write.
+/// The write a transaction commits: the two account records already encoded and already keyed, so the
+/// serial apply is a pair of trie inserts with no encode or key derivation left in it. A transaction
+/// the block order skips produces no write.
 struct Write {
     index: usize,
-    sender_address: String,
-    sender: Account,
-    recipient_address: String,
-    recipient: Account,
-    /// The fee this transfer charged, routed to the treasury in block order when the write lands, so
-    /// the parallel path collects fees exactly as the sequential path does.
+    sender_key: Key,
+    sender_bytes: Vec<u8>,
+    recipient_key: Key,
+    recipient_bytes: Vec<u8>,
+    /// The fee this transfer charged. The shares are summed across the block and credited once, so the
+    /// parallel path lands on the identical pool values as crediting each fee in turn.
     fee: u64,
 }
 
-/// Run one task exactly as the sequential path would: validate against the sender
-/// account read for the layer, execute the transfer through the virtual machine,
-/// and on a clean run return the two updated accounts to store back. A failed
-/// validation or a fault returns nothing, which moves no state, the same skip the
-/// sequential path takes.
-fn run_task(task: &Task<'_>, fee_params: &FeeParams) -> Option<Write> {
-    let plan = plan_from_account(task.wrapper, &task.sender, fee_params).ok()?;
+/// Read and decode an account from a layer's leaf snapshot, an absent key reading as the default
+/// account. This is the same read Ledger::account does against the trie, run here against the shared
+/// leaf map so many workers read at once.
+fn account_at(leaves: &BTreeMap<Key, Vec<u8>>, key: &Key) -> Account {
+    match leaves.get(key) {
+        Some(bytes) => from_bytes(bytes).expect("state holds a canonical account record"),
+        None => Account::default(),
+    }
+}
+
+/// Run one task exactly as the sequential path would, but reading its two accounts from the layer's
+/// leaf snapshot and returning the updated records already encoded and keyed. Validate against the
+/// sender account, execute the transfer through the virtual machine, and on a clean run return the two
+/// writes to store back. A failed validation or a fault returns nothing, which moves no state, the
+/// same skip the sequential path takes. The accounts in a layer are disjoint, so reading them from the
+/// snapshot in parallel is exactly what each transaction would read in block order.
+fn run_task(
+    task: &Task<'_>,
+    leaves: &BTreeMap<Key, Vec<u8>>,
+    fee_params: &FeeParams,
+) -> Option<Write> {
+    let sender_key = state_key(&task.sender_address);
+    let sender = account_at(leaves, &sender_key);
+    let plan = plan_from_account(task.wrapper, &sender, fee_params).ok()?;
+    let recipient_key = state_key(&task.recipient_address);
+    let recipient = account_at(leaves, &recipient_key);
     let transferred = execute_transfer(
-        task.sender.balance,
-        task.recipient.balance,
+        sender.balance,
+        recipient.balance,
         plan.amount,
         plan.fee,
         task.wrapper.body().meter_limit(),
     )
     .ok()?;
 
-    let mut sender = task.sender.clone();
-    sender.balance = transferred.sender_balance;
-    sender.nonce += 1;
-    let mut recipient = task.recipient.clone();
-    recipient.balance = transferred.recipient_balance;
+    let mut new_sender = sender;
+    new_sender.balance = transferred.sender_balance;
+    new_sender.nonce += 1;
+    let mut new_recipient = recipient;
+    new_recipient.balance = transferred.recipient_balance;
 
     Some(Write {
         index: task.index,
-        sender_address: task.sender_address.clone(),
-        sender,
-        recipient_address: task.recipient_address.clone(),
-        recipient,
+        sender_key,
+        sender_bytes: to_bytes(&new_sender),
+        recipient_key,
+        recipient_bytes: to_bytes(&new_recipient),
         fee: plan.fee,
     })
 }
@@ -164,12 +184,17 @@ fn run_task(task: &Task<'_>, fee_params: &FeeParams) -> Option<Write> {
 /// state and the writes carry no ordering between them. Workers pull the next
 /// task from a shared counter, which balances an uneven layer without any unsafe
 /// code or an external pool. A single task or a single worker runs inline.
-fn run_layer(tasks: &[Task<'_>], fee_params: &FeeParams, threads: usize) -> Vec<Write> {
+fn run_layer(
+    tasks: &[Task<'_>],
+    leaves: &BTreeMap<Key, Vec<u8>>,
+    fee_params: &FeeParams,
+    threads: usize,
+) -> Vec<Write> {
     let workers = threads.clamp(1, tasks.len().max(1));
     if workers <= 1 || tasks.len() <= 1 {
         return tasks
             .iter()
-            .filter_map(|t| run_task(t, fee_params))
+            .filter_map(|t| run_task(t, leaves, fee_params))
             .collect();
     }
 
@@ -185,7 +210,7 @@ fn run_layer(tasks: &[Task<'_>], fee_params: &FeeParams, threads: usize) -> Vec<
                         if i >= tasks.len() {
                             break;
                         }
-                        if let Some(write) = run_task(&tasks[i], fee_params) {
+                        if let Some(write) = run_task(&tasks[i], leaves, fee_params) {
                             local.push(write);
                         }
                     }
@@ -228,43 +253,52 @@ pub fn execute_parallel(
     }
     let layers = plan_layers(candidates);
     let mut included: Vec<usize> = Vec::new();
+    // The fee shares are summed across the whole block and credited to the pools once at the end. This
+    // lands on the identical pool values as crediting each fee in turn, since addition is associative,
+    // while it turns two pool writes per transaction into two for the whole block, which is a large
+    // part of the serial writeback cost.
+    let mut fee_validators: u64 = 0;
+    let mut fee_grants: u64 = 0;
 
     for layer in &layers {
-        // Read every account the layer touches as it stands now, before any of
-        // the layer's writes land. The accounts are disjoint across the layer, so
-        // this snapshot is exactly what each transaction would read in order.
+        // Name the two addresses each transaction touches. The accounts themselves are read inside the
+        // workers from a snapshot of the leaves as they stand now, before any of the layer's writes
+        // land, which is exactly what each transaction would read in block order since a layer's
+        // accounts are disjoint.
         let tasks: Vec<Task<'_>> = layer
             .iter()
             .map(|&index| {
                 let wrapper = &candidates[index];
                 let (sender_address, recipient_address) = access(wrapper);
-                let sender_address = sender_address.to_string();
-                let recipient_address = recipient_address.to_string();
-                let sender = ledger.account(&sender_address);
-                let recipient = ledger.account(&recipient_address);
                 Task {
                     index,
                     wrapper,
-                    sender_address,
-                    recipient_address,
-                    sender,
-                    recipient,
+                    sender_address: sender_address.to_string(),
+                    recipient_address: recipient_address.to_string(),
                 }
             })
             .collect();
 
-        let mut writes = run_layer(&tasks, fee_params, threads);
-        // Apply the layer's writes in block order. The accounts are disjoint, so
-        // the order does not change the state, but it keeps the apply itself a
-        // pure function of the block for a clean, reviewable trace.
+        // Read, validate, execute, and encode across the cores against a leaf snapshot. The immutable
+        // borrow of the leaves ends before the writes below take a mutable borrow to apply them.
+        let mut writes = {
+            let leaves = ledger.leaves();
+            run_layer(&tasks, leaves, fee_params, threads)
+        };
+        // Apply the layer's writes in block order. The accounts are disjoint, so the order does not
+        // change the state, but it keeps the apply a pure function of the block. Each write is already
+        // encoded and keyed, so this serial section is a pair of trie inserts and nothing more.
         writes.sort_by_key(|write| write.index);
         for write in writes {
-            ledger.set_account(&write.sender_address, &write.sender);
-            ledger.set_account(&write.recipient_address, &write.recipient);
-            ledger.collect_fee(write.fee);
+            ledger.insert_raw(write.sender_key, write.sender_bytes);
+            ledger.insert_raw(write.recipient_key, write.recipient_bytes);
+            let (validators, grants) = Ledger::fee_shares(write.fee);
+            fee_validators = fee_validators.saturating_add(validators);
+            fee_grants = fee_grants.saturating_add(grants);
             included.push(write.index);
         }
     }
+    ledger.credit_pools(fee_validators, fee_grants);
 
     included.sort_unstable();
     included

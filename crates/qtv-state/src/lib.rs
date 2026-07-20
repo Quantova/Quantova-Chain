@@ -339,6 +339,14 @@ impl Trie {
         self.leaves.get(key).map(|value| value.as_slice())
     }
 
+    /// The whole leaf map, for a reader that wants to snapshot many keys across threads. This borrows
+    /// the leaves immutably and never touches the root cache, so it is a pure read and safe to share
+    /// across threads, unlike the trie itself which holds a single threaded root cache. A block
+    /// executor uses this to read a layer's accounts in parallel before it applies the layer's writes.
+    pub fn leaves(&self) -> &BTreeMap<Key, Vec<u8>> {
+        &self.leaves
+    }
+
     /// The root of the trie, fixed by the set of key and value pairs it holds.
     /// Only the paths from the keys changed since the last root are recomputed,
     /// and every other subtree hash is read from the cache, so the root is bit

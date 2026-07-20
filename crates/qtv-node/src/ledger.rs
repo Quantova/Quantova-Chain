@@ -73,7 +73,7 @@ impl Decode for Account {
 /// the payload fills the key. A shorter payload is left padded space, and an
 /// address that does not parse maps to the zero key, which the caller rules out
 /// by validating the address before it reaches state.
-fn state_key(address: &str) -> Key {
+pub(crate) fn state_key(address: &str) -> Key {
     let mut key = [0u8; KEY_LEN];
     if let Ok(payload) = qtv_idfmt::parse_address(address) {
         let n = payload.len().min(KEY_LEN);
@@ -472,6 +472,33 @@ impl Ledger {
         let validators = ((fee as u128) * (FEE_VALIDATORS_BPS as u128) / 10_000) as u64;
         let grants = ((fee as u128) * (FEE_GRANTS_BPS as u128) / 10_000) as u64;
         fee - validators - grants
+    }
+
+    /// The validators and grants shares of a single fee, split exactly as collect_fee splits it, but
+    /// without touching the pools. A block executor accumulates these across its transactions and
+    /// credits the pools once, which lands on the identical pool values as crediting per transaction,
+    /// since addition is associative, while doing two pool writes for the whole block instead of two
+    /// per transaction.
+    pub fn fee_shares(fee: u64) -> (u64, u64) {
+        if fee == 0 {
+            return (0, 0);
+        }
+        let validators = ((fee as u128) * (FEE_VALIDATORS_BPS as u128) / 10_000) as u64;
+        let grants = ((fee as u128) * (FEE_GRANTS_BPS as u128) / 10_000) as u64;
+        (validators, grants)
+    }
+
+    /// Credit already split validators and grants shares to their pools in one pair of writes. Used by
+    /// the block executor after it has summed the per transaction shares, so the pools are read and
+    /// written once for the whole block rather than once per transaction.
+    pub fn credit_pools(&mut self, validators: u64, grants: u64) {
+        if validators == 0 && grants == 0 {
+            return;
+        }
+        let pool = self.stake_pool().saturating_add(validators);
+        self.set_stake_pool(pool);
+        let grants_pool = self.grants_pool().saturating_add(grants);
+        self.set_grants_pool(grants_pool);
     }
 
     /// The keys changed since the last call and their current values, so a persisting node writes back
@@ -1854,6 +1881,20 @@ impl Ledger {
     /// Bind an address to an account record, replacing any prior record.
     pub fn set_account(&mut self, address: &str, account: &Account) {
         self.trie.insert(state_key(address), to_bytes(account));
+    }
+
+    /// The whole leaf map, for a reader that snapshots many account keys across threads. Used by the
+    /// block executor to read a layer's accounts in parallel. It is a pure read and never touches the
+    /// root cache.
+    pub(crate) fn leaves(&self) -> &std::collections::BTreeMap<Key, Vec<u8>> {
+        self.trie.leaves()
+    }
+
+    /// Store an already encoded account record under an already derived key, the write half of the
+    /// parallel path once the encode and the key derivation have been done off the critical section.
+    /// It lands on the identical trie state as set_account, which derives the key and encodes inline.
+    pub(crate) fn insert_raw(&mut self, key: Key, bytes: Vec<u8>) {
+        self.trie.insert(key, bytes);
     }
 
     /// The balance an address holds.
