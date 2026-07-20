@@ -411,6 +411,15 @@ fn execute_ordered_across(
     let now_seconds = day.saturating_mul(86_400);
     let mut included = Vec::new();
     for (index, wrapper) in candidates.iter().enumerate() {
+        // A blacklisted sender has been retired by the blacklist and kill track and may take no
+        // action of any kind. Refuse it here, above the operation branches, so a contract call, a
+        // governance action, a bond, a claim, and a transfer are all blocked alike, and a hostile
+        // proposer cannot slip a blacklisted sender's transaction past the mempool admit into a block
+        // that honest validators would otherwise apply. The parallel path routes any block carrying a
+        // blacklisted address to this sequential path, so the two agree.
+        if ledger.is_blacklisted(wrapper.body().sender()) {
+            continue;
+        }
         if is_vm_op(ledger, wrapper) {
             if dispatch_vm(ledger, wrapper, verified[index], fee_params, now_seconds) {
                 included.push(wrapper.clone());
@@ -439,7 +448,8 @@ fn execute_ordered_across(
             }
             continue;
         }
-        if ledger.is_blacklisted(&plan.sender) || ledger.is_blacklisted(&plan.recipient) {
+        // The sender was already refused above if blacklisted; a blacklisted recipient cannot receive.
+        if ledger.is_blacklisted(&plan.recipient) {
             continue;
         }
         let mut sender = ledger.account(&plan.sender);
@@ -1161,6 +1171,76 @@ mod tests {
         // The parallel path refuses the blacklisted transfer through the same fallback.
         let mut parallel = ledger.clone();
         assert!(crate::parallel::execute_parallel(&mut parallel, &[out], &fee, 8, 3).is_empty());
+        assert_eq!(parallel.state_root(), ledger.state_root());
+    }
+
+    #[test]
+    fn a_blacklisted_sender_is_refused_for_every_operation_not_only_a_transfer() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let proposer = keypair(130);
+        let voter = keypair(131);
+        let hostile = keypair(132);
+        fund(&mut ledger, &proposer, 300_000 * 1_000_000);
+        fund(&mut ledger, &voter, 10_000 * 1_000_000);
+        fund(&mut ledger, &hostile, 10_000 * 1_000_000);
+
+        // Blacklist the hostile address through a governance referendum, the same route as the
+        // transfer test above.
+        let target = qtv_idfmt::parse_address(&hostile.address()).unwrap();
+        let action = Action::Blacklist { target };
+        let mut propose_args = vec![1u8];
+        propose_args.extend_from_slice(&qtv_codec::to_bytes(&action));
+        execute_ordered(
+            &mut ledger,
+            &[
+                gov_call_tx(&proposer, propose_args, 0, &fee),
+                gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee),
+            ],
+            &fee,
+            0,
+        );
+        let mut enact = qtv_codec::Encoder::new();
+        enact.put_u8(3);
+        enact.put_u64(1);
+        execute_ordered(
+            &mut ledger,
+            &[gov_call_tx(&proposer, enact.into_bytes(), 1, &fee)],
+            &fee,
+            3,
+        );
+        assert!(ledger.is_blacklisted(&hostile.address()));
+
+        let hostile_nonce = ledger.account(&hostile.address()).nonce;
+
+        // A governance action from the blacklisted address is refused by the apply path, not only a
+        // transfer would be. Before the fix this reached dispatch_governance and was applied.
+        let gov = gov_call_tx(&hostile, propose_price_args(70_000_000), hostile_nonce, &fee);
+        assert!(
+            execute_ordered(&mut ledger, &[gov.clone()], &fee, 3).is_empty(),
+            "a blacklisted sender must not drive governance"
+        );
+
+        // A bond from the blacklisted address is refused too.
+        let bond = transfer(
+            &hostile,
+            &crate::ledger::stake_system_address(),
+            100 * 1_000_000,
+            hostile_nonce,
+            &fee,
+        );
+        assert!(
+            execute_ordered(&mut ledger, &[bond], &fee, 3).is_empty(),
+            "a blacklisted sender must not bond"
+        );
+
+        // None of the refused transactions advanced the sender's nonce or moved its balance.
+        assert_eq!(ledger.account(&hostile.address()).nonce, hostile_nonce);
+
+        // The parallel path routes the governance block to the sequential path and reaches the
+        // identical refusal and state root.
+        let mut parallel = ledger.clone();
+        assert!(crate::parallel::execute_parallel(&mut parallel, &[gov], &fee, 8, 3).is_empty());
         assert_eq!(parallel.state_root(), ledger.state_root());
     }
 
