@@ -43,6 +43,12 @@ pub enum Request {
     Validators,
     ChainParams,
     StakingState,
+    /// List the transactions admitted to the pool but not yet finalised.
+    Pending,
+    /// The container of the contract at an address.
+    Container(String),
+    /// The whole storage of the contract at an address.
+    Storage(String),
 }
 
 /// A request the gateway could not carry out because the client sent it wrong, a
@@ -111,6 +117,9 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
                 ))
             }
         }
+        "pending" => Ok(Request::Pending),
+        "get_container" => Ok(Request::Container(string_field(body, "address")?)),
+        "get_storage" => Ok(Request::Storage(string_field(body, "address")?)),
         other => Err(ClientError {
             code: "unknown_method".to_string(),
             message: format!("no method named {other}"),
@@ -141,6 +150,9 @@ pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result
         Request::Validators => Ok(validators(node)),
         Request::ChainParams => Ok(chain_params()),
         Request::StakingState => Ok(staking_state(node)),
+        Request::Pending => Ok(pending(node)),
+        Request::Container(address) => container(node, &address),
+        Request::Storage(address) => storage(node, &address),
     }
 }
 
@@ -303,6 +315,28 @@ fn account(node: &DevNode, address: &str) -> Result<Json, ClientError> {
     ]))
 }
 
+/// The transaction's own fields pulled from its signed wrapper: the sender, recipient, value, fee,
+/// nonce, meter, scheme, the post quantum signature, and the raw bytes. Money is a decimal string so
+/// a JavaScript reader never rounds a large value through a double. The signature is the module
+/// lattice signature a post quantum client verifies, the thing a classical chain has no analogue for,
+/// so an explorer can show it and the raw bytes lets a reader reconstruct and re verify the whole
+/// transaction for itself.
+fn tx_fields(wrapper: &Wrapper) -> Vec<(&'static str, Json)> {
+    let body = wrapper.body();
+    let amount = qtv_node::execution::transfer_amount(body.call()).unwrap_or(0);
+    vec![
+        ("from", Json::str(body.sender())),
+        ("to", Json::str(body.call().target())),
+        ("value", Json::str(amount.to_string())),
+        ("fee", Json::str(body.fee().to_string())),
+        ("nonce", Json::Int(body.nonce())),
+        ("meter_limit", Json::Int(body.meter_limit())),
+        ("scheme", Json::Int(u64::from(wrapper.scheme()))),
+        ("signature", Json::str(crate::json::to_hex(wrapper.signature()))),
+        ("raw", Json::str(crate::json::to_hex(&qtv_codec::to_bytes(wrapper)))),
+    ]
+}
+
 fn transaction(node: &DevNode, tx_id: &str) -> Json {
     if let Some(height) = node.finalized_height(tx_id) {
         let mut fields = vec![
@@ -310,36 +344,96 @@ fn transaction(node: &DevNode, tx_id: &str) -> Json {
             ("status", Json::str("finalised")),
             ("height", Json::Int(height)),
         ];
-        // Pull the transaction's own fields out of the block it finalised in, so a
-        // reader gets the sender, the recipient, the amount, the fee, and the nonce,
-        // not only where it landed. Money is a decimal string, as everywhere, so a
-        // JavaScript client never rounds a large value through a double.
+        // Pull the transaction's own fields out of the block it finalised in, so a reader gets the
+        // sender, recipient, value, fee, nonce, signature, and raw bytes, not only where it landed.
         if let Some(block) = node.block_at_height(height) {
             fields.push(("block", Json::str(block.id())));
             if let Some(wrapper) = block.body().iter().find(|w| w.id() == tx_id) {
-                let body = wrapper.body();
-                let amount = qtv_node::execution::transfer_amount(body.call()).unwrap_or(0);
-                fields.push(("from", Json::str(body.sender())));
-                fields.push(("to", Json::str(body.call().target())));
-                fields.push(("value", Json::str(amount.to_string())));
-                fields.push(("fee", Json::str(body.fee().to_string())));
-                fields.push(("nonce", Json::Int(body.nonce())));
-                fields.push(("meter_limit", Json::Int(body.meter_limit())));
-                fields.push(("scheme", Json::Int(u64::from(wrapper.scheme()))));
+                fields.extend(tx_fields(wrapper));
             }
         }
         object(fields)
     } else if node.is_pending(tx_id) {
-        object(vec![
+        // A pending transaction is not in a block yet, so read it from the pool to show its fields
+        // and its signature while it waits to finalise.
+        let mut fields = vec![
             ("tx_id", Json::str(tx_id)),
             ("status", Json::str("pending")),
-        ])
+        ];
+        if let Some(wrapper) = node
+            .pending_transactions()
+            .iter()
+            .find(|w| w.id() == tx_id)
+        {
+            fields.extend(tx_fields(wrapper));
+        }
+        object(fields)
     } else {
         object(vec![
             ("tx_id", Json::str(tx_id)),
             ("status", Json::str("unknown")),
         ])
     }
+}
+
+/// The transactions admitted to the pool but not yet finalised, each with its own fields, so an
+/// explorer can show a live pending list before a block seals them. The pool is ordered the way the
+/// leader would draw the next block, so the list reads the way the chain will apply it.
+fn pending(node: &DevNode) -> Json {
+    let items: Vec<Json> = node
+        .pending_transactions()
+        .iter()
+        .map(|wrapper| {
+            let mut fields = vec![("tx_id", Json::str(wrapper.id()))];
+            fields.extend(tx_fields(wrapper));
+            object(fields)
+        })
+        .collect();
+    object(vec![
+        ("count", Json::Int(items.len() as u64)),
+        ("transactions", Json::Array(items)),
+    ])
+}
+
+/// The container of the contract at an address, its compiled bytes as hex, or an error when the
+/// address holds no contract. A container is the Quantova machine's unit of deployed code, not a
+/// borrowed bytecode format, so this is how an explorer reads what a contract actually runs.
+fn container(node: &DevNode, address: &str) -> Result<Json, ClientError> {
+    if qtv_idfmt::parse_address(address).is_err() {
+        return Err(ClientError::bad("bad_address", "the address is not a q1 address"));
+    }
+    match node.ledger().contract_code_at(address) {
+        Some(code) => Ok(object(vec![
+            ("address", Json::str(address)),
+            ("container", Json::str(crate::json::to_hex(&code))),
+            ("size", Json::Int(code.len() as u64)),
+        ])),
+        None => Err(ClientError::not_found("the address holds no contract")),
+    }
+}
+
+/// The whole storage of the contract at an address, the slot to value map the machine reads and
+/// writes, so an explorer can show a contract's state. Each value is a decimal string. An address
+/// with no contract reads as empty storage rather than an error.
+fn storage(node: &DevNode, address: &str) -> Result<Json, ClientError> {
+    if qtv_idfmt::parse_address(address).is_err() {
+        return Err(ClientError::bad("bad_address", "the address is not a q1 address"));
+    }
+    let slots: Vec<Json> = node
+        .ledger()
+        .contract_storage_at(address)
+        .into_iter()
+        .map(|(slot, value)| {
+            object(vec![
+                ("slot", Json::str(slot.to_string())),
+                ("value", Json::str(value.to_string())),
+            ])
+        })
+        .collect();
+    Ok(object(vec![
+        ("address", Json::str(address)),
+        ("slots", Json::Array(slots)),
+    ]))
 }
 
 fn submit(node: &mut DevNode, bytes: Vec<u8>) -> Json {
