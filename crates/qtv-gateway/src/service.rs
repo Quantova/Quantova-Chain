@@ -1,6 +1,6 @@
 //! The seam between the wire and the node.
 //!
-//! A request names one of the six methods and carries its parameters. Handling a
+//! A request names one of the methods and carries its parameters. Handling a
 //! request reads or writes the node and returns a JSON value, the body a client
 //! receives. This is the whole of what the node exposes to the outside, and it is a
 //! plain function of a request and the node, so the same handling serves a request

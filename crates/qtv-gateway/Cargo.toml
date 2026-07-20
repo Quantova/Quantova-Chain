@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The Quantova RPC gateway. It serves the six read and write methods a client needs over plain HTTP with our own JSON, reaching the node through a request and reply channel rather than a shared lock, so the node stays single owner of its state and the gateway can later move to its own process by swapping the channel for a socket."
+description = "The Quantova RPC gateway. It serves the read and write methods a client needs over plain HTTP with our own JSON, reaching the node through a request and reply channel rather than a shared lock, so the node stays single owner of its state and the gateway can later move to its own process by swapping the channel for a socket."
 
 [dependencies]
 # The node the gateway reads from and submits to, and the chain types the views are
