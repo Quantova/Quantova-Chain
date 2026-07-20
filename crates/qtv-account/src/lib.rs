@@ -96,12 +96,26 @@ pub fn address_for_key(scheme: u8, public_key: &[u8]) -> String {
 
 /// A derived account. The stored secret is the account seed and never the
 /// expanded key, and the public key is retained for address and signature use.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Account {
     scheme: u8,
     index: u64,
     seed: [u8; SEED_LEN],
     public_key: Vec<u8>,
+}
+
+// The account holds the raw seed, which is a private key. Debug must never print it, so a single
+// stray log line cannot leak a key. The seed is shown as a fixed redaction and the public key as its
+// length rather than its bytes.
+impl std::fmt::Debug for Account {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Account")
+            .field("scheme", &self.scheme)
+            .field("index", &self.index)
+            .field("seed", &"[redacted]")
+            .field("public_key_len", &self.public_key.len())
+            .finish()
+    }
 }
 
 impl Account {
@@ -226,4 +240,17 @@ pub fn rotate(master_seed: &[u8; MASTER_SEED_LEN], current: &Account, next_index
         to: next.address(),
     };
     Rotation { next, binding }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn debug_never_prints_the_seed() {
+        let account = derive(&[7u8; MASTER_SEED_LEN], 0);
+        let shown = format!("{account:?}");
+        assert!(shown.contains("[redacted]"), "seed must be redacted: {shown}");
+        assert!(!shown.contains("seed: ["), "seed must never print as bytes: {shown}");
+    }
 }
