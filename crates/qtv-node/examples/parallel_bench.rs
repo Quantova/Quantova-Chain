@@ -43,6 +43,8 @@ const SEED: [u8; 32] = [42u8; 32];
 const HOT_ACCOUNTS: u64 = 256;
 /// The starting balance of a sender, ample for a run of single transfers.
 const SENDER_BALANCE: u64 = 1_000_000_000;
+/// The throughput target the chain is built to clear, twenty five thousand transactions a second.
+const TARGET_TPS: f64 = 25_000.0;
 
 /// A small deterministic mixer so a workload is varied yet identical run to run.
 fn mix(x: u64) -> u64 {
@@ -284,11 +286,11 @@ fn main() {
     println!(
         "full block execution (module lattice verify + virtual machine transfer + write back)"
     );
-    let (seq, par) = measure_full(&base, &independent, &fee, threads);
+    let (seq, par_independent) = measure_full(&base, &independent, &fee, threads);
     row(
         &format!("independent ({independent_layers} layer)"),
         seq,
-        par,
+        par_independent,
     );
     let (seq, par) = measure_full(&base, &mixed, &fee, threads);
     row(
@@ -296,6 +298,28 @@ fn main() {
         seq,
         par,
     );
+    println!();
+
+    // The enforced floor. A validator must execute across at least half its cores, so measure the
+    // independent workload there too. That floor is the guaranteed throughput, the number a validator
+    // can never fall below however it configures itself, not the best case at full cores.
+    let floor_threads = (cores / 2).max(1);
+    let (_, par_floor) = measure_full(&base, &independent, &fee, floor_threads);
+    println!(
+        "  {:<26} {:>10.0} tx/s   ({floor_threads} threads, the enforced minimum)",
+        "independent at 50% cores", par_floor
+    );
+    println!();
+
+    // The verdict against the target, so a rack run answers the question without arithmetic. The floor
+    // line is the one that matters, it is the throughput the network is guaranteed at any validator.
+    let verdict = |label: &str, tps: f64| {
+        let met = if tps >= TARGET_TPS { "MEETS" } else { "BELOW" };
+        println!("  {met} {TARGET_TPS:.0} tx/s target at {label}: {tps:.0} tx/s");
+    };
+    println!("against the {TARGET_TPS:.0} tx/s target");
+    verdict(&format!("{threads} threads"), par_independent);
+    verdict(&format!("the 50% core floor ({floor_threads} threads)"), par_floor);
     println!();
 
     println!("virtual machine execution component (transfer only, the ~10 us/tx figure)");
