@@ -278,6 +278,16 @@ fn verify_signatures(ledger: &Ledger, batch: &[Wrapper], verify_cores: usize) ->
     verdicts
 }
 
+/// Whether contract deploy and call transactions are admitted on this network. It is off for the
+/// public testnet launch on purpose. Contract execution meters every instruction but the fee is a
+/// flat charge decoupled from the meter and there is no per block compute budget, so an admitted call
+/// carrying a large meter limit over a loop would make every validator do unbounded work for a floor
+/// fee, a liveness attack a public submitter could mount. Native transfers, staking, and governance
+/// are unaffected. Contracts turn on here once compute is priced by the meter and a per block budget
+/// bounds it, which is a deliberate change an operator makes with a rebuild, not a runtime toggle,
+/// since enabling an unpriced execution path to the public must never be accidental.
+const CONTRACTS_ENABLED: bool = false;
+
 /// The mempool of admitted transactions.
 #[derive(Debug, Clone, Default)]
 pub struct Mempool {
@@ -320,6 +330,9 @@ impl Mempool {
         fee_params: &FeeParams,
     ) -> Result<Admitted, Reject> {
         if crate::node::is_vm_op(ledger, &wrapper) {
+            if !CONTRACTS_ENABLED {
+                return Err(Reject::BadCall);
+            }
             let account = ledger.account(wrapper.body().sender());
             let signature_ok = qtv_tx::verify(&wrapper, &account.public_key);
             if !crate::node::vm_admissible(&wrapper, &account, fee_params, signature_ok) {
@@ -388,8 +401,12 @@ impl Mempool {
         let mut admitted = Vec::new();
         for (index, wrapper) in batch.into_iter().enumerate() {
             let admissible = if crate::node::is_vm_op(ledger, &wrapper) {
-                let account = ledger.account(wrapper.body().sender());
-                crate::node::vm_admissible(&wrapper, &account, fee_params, verified[index])
+                if !CONTRACTS_ENABLED {
+                    false
+                } else {
+                    let account = ledger.account(wrapper.body().sender());
+                    crate::node::vm_admissible(&wrapper, &account, fee_params, verified[index])
+                }
             } else if wrapper.body().call().target() == crate::ledger::gov_system_address() {
                 let account = ledger.account(wrapper.body().sender());
                 crate::node::governance_admissible(&wrapper, &account, fee_params, verified[index])
