@@ -140,7 +140,11 @@ fn read_be_u64(bytes: &[u8], pos: &mut usize) -> Option<u64> {
 
 fn read_slots(bytes: &[u8], pos: &mut usize) -> Option<Vec<u64>> {
     let count = read_be_u32(bytes, pos)?;
-    let mut slots = Vec::with_capacity(count as usize);
+    // Start empty rather than reserving `count` up front. The count is attacker controlled in a
+    // deployed container, so a huge value would reserve gigabytes and abort the node before a single
+    // element is read. Growing as each bounded read succeeds caps the allocation at the bytes that
+    // actually follow, so a count larger than the remaining bytes fails fast instead.
+    let mut slots = Vec::new();
     for _ in 0..count {
         slots.push(read_be_u64(bytes, pos)?);
     }
@@ -163,12 +167,14 @@ pub fn decode_container(bytes: &[u8]) -> Option<qtv_vm::container::Container> {
     let code = bytes.get(pos..code_end)?.to_vec();
     pos = code_end;
     let consts_len = read_be_u32(bytes, &mut pos)?;
-    let mut consts = Vec::with_capacity(consts_len as usize);
+    // Start empty and grow as each bounded read succeeds, so an attacker supplied count cannot
+    // reserve a huge allocation before any bytes are read. See read_slots for why.
+    let mut consts = Vec::new();
     for _ in 0..consts_len {
         consts.push(read_be_u64(bytes, &mut pos)?);
     }
     let entries_len = read_be_u32(bytes, &mut pos)?;
-    let mut entries = Vec::with_capacity(entries_len as usize);
+    let mut entries = Vec::new();
     for _ in 0..entries_len {
         let sel_end = pos.checked_add(SELECTOR_BYTES)?;
         let mut selector = [0u8; SELECTOR_BYTES];
@@ -220,6 +226,25 @@ pub fn execute_contract_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_container_with_a_huge_count_is_refused_without_a_giant_allocation() {
+        // The QVM1 tag, a zero length code section, then a constant count of four billion with no
+        // constant bytes following. Before the fix this reserved billions of elements and aborted the
+        // node. Now the decoder grows as it reads and fails the moment the bytes run out, returning
+        // None without a large allocation.
+        let mut bytes = b"QVM1".to_vec();
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // code length zero
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // a hostile constant count
+        assert!(decode_container(&bytes).is_none());
+
+        // The same for a hostile entry count.
+        let mut bytes = b"QVM1".to_vec();
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // code length zero
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // no constants
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // a hostile entry count
+        assert!(decode_container(&bytes).is_none());
+    }
 
     #[test]
     fn a_contract_call_runs_a_decoded_container_and_persists_storage() {
