@@ -119,10 +119,18 @@ fn write_string(s: &str, out: &mut String) {
 }
 
 /// Parse a JSON value from a string, enough for the request bodies a client sends.
+/// The deepest an accepted JSON value may nest. A real gateway request is flat or a level or two
+/// deep, so this is far above any honest body. It exists because the parser recurses to descend into
+/// an array or an object, so without a bound a hostile body of deeply nested brackets would recurse
+/// until the thread's stack overflows, which aborts the whole process and, because the gateway runs
+/// in the node's process, halts the node. Bounding the nesting turns that attack into a clean error.
+const MAX_DEPTH: usize = 64;
+
 pub fn parse(input: &str) -> Result<Json, String> {
     let mut parser = Parser {
         chars: input.chars().collect(),
         pos: 0,
+        depth: 0,
     };
     parser.skip_ws();
     let value = parser.value()?;
@@ -136,6 +144,9 @@ pub fn parse(input: &str) -> Result<Json, String> {
 struct Parser {
     chars: Vec<char>,
     pos: usize,
+    /// How many arrays or objects are open around the value being parsed, so the recursion that
+    /// descends into them can be bounded before it overflows the stack.
+    depth: usize,
 }
 
 impl Parser {
@@ -160,14 +171,27 @@ impl Parser {
     fn value(&mut self) -> Result<Json, String> {
         self.skip_ws();
         match self.peek() {
-            Some('{') => self.object(),
-            Some('[') => self.array(),
+            Some('{') => self.nested(Self::object),
+            Some('[') => self.nested(Self::array),
             Some('"') => Ok(Json::Str(self.string()?)),
             Some('t') | Some('f') => self.boolean(),
             Some('n') => self.null(),
             Some(c) if c == '-' || c.is_ascii_digit() => self.number(),
             _ => Err("expected a JSON value".to_string()),
         }
+    }
+
+    /// Descend into an array or an object one level deeper, refusing to go past the depth bound. The
+    /// depth counts the currently open containers, so it rises on the way in and falls on the way out,
+    /// which bounds the recursion depth without rejecting a wide but shallow value.
+    fn nested(&mut self, parse_container: fn(&mut Self) -> Result<Json, String>) -> Result<Json, String> {
+        if self.depth >= MAX_DEPTH {
+            return Err("the JSON nests deeper than the gateway allows".to_string());
+        }
+        self.depth += 1;
+        let result = parse_container(self);
+        self.depth -= 1;
+        result
     }
 
     fn object(&mut self) -> Result<Json, String> {
@@ -349,6 +373,27 @@ mod tests {
             Json::Object(fields) => fields.len(),
             _ => 0,
         }
+    }
+
+    #[test]
+    fn deeply_nested_json_is_refused_rather_than_overflowing_the_stack() {
+        // A body of many thousand open brackets would recurse the parser to a stack overflow and abort
+        // the node without the depth bound. It must come back as a clean error instead.
+        let deep = "[".repeat(200_000);
+        let result = parse(&deep);
+        assert!(result.is_err(), "deeply nested JSON must be refused");
+        assert!(
+            result.unwrap_err().contains("nests deeper"),
+            "the refusal names the nesting limit"
+        );
+    }
+
+    #[test]
+    fn a_wide_but_shallow_array_still_parses() {
+        // The bound is on nesting depth, not size, so a large flat array is fine.
+        let wide = format!("[{}]", vec!["1"; 10_000].join(","));
+        let value = parse(&wide).expect("a wide flat array parses");
+        assert!(matches!(value, Json::Array(items) if items.len() == 10_000));
     }
 
     #[test]
