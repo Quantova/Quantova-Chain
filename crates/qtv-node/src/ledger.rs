@@ -734,7 +734,23 @@ impl Ledger {
         }
     }
 
-    /// The deployed container of a contract, its bytecode, or None when the id holds no contract.
+    /// The container of the contract at an address, or None when the address holds no contract. This
+    /// is the address facing form of contract_code, so a reader holding a q1 address need not reduce
+    /// it to an id first. The gateway reads a container through this.
+    pub fn contract_code_at(&self, address: &str) -> Option<Vec<u8>> {
+        self.contract_code(&address_id(address)?)
+    }
+
+    /// The whole storage of the contract at an address, empty when the address holds no contract. The
+    /// address facing form of contract_storage.
+    pub fn contract_storage_at(&self, address: &str) -> std::collections::BTreeMap<u64, u64> {
+        match address_id(address) {
+            Some(id) => self.contract_storage(&id),
+            None => std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// The deployed container of a contract, its compiled bytes, or None when the id holds no contract.
     pub fn contract_code(&self, id: &[u8; 32]) -> Option<Vec<u8>> {
         self.trie
             .get(&contract_code_key(id))

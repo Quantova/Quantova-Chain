@@ -1168,6 +1168,13 @@ impl DevNode {
         self.mempool.contains(tx_id)
     }
 
+    /// The transactions waiting in the mempool, ordered the way the leader would draw them, so a
+    /// client can show what is admitted but not yet finalised. This is the live pool behind the
+    /// pending view an explorer renders.
+    pub fn pending_transactions(&self) -> Vec<Wrapper> {
+        self.mempool.candidates()
+    }
+
     /// The finalised block at a height, if the node holds it.
     pub fn block_at_height(&self, height: Height) -> Option<ChainBlock> {
         self.serve_blocks(height, height).into_iter().next()
