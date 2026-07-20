@@ -86,6 +86,7 @@ version = "0.1.0"
 dependencies = [
  "qtv-bft",
  "qtv-block",
+ "qtv-codec",
  "qtv-devnet",
  "qtv-governance",
  "qtv-idfmt",
