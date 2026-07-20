@@ -9,7 +9,9 @@
 
 use std::io::{BufRead, BufReader, Read, Result as IoResult, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Sender};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -31,16 +33,32 @@ const MAX_HEAD: usize = 16 * 1024;
 /// then stalls, the classic slow client, cannot hold a connection thread forever.
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The most connections the gateway serves at once. Each connection is handled on its own thread, so
+/// this bounds the threads a connection flood can spawn. A request is small and the node answers it
+/// quickly, so a real load stays well under this, and a peer beyond it is turned away rather than
+/// letting the process spawn threads without limit.
+const MAX_CONNECTIONS: usize = 512;
+
 /// Serve the RPC on a bound listener, sending each request to the node over the channel.
 /// Each connection is handled on its own thread, and the node serialises the requests, so
-/// concurrency here never reaches the node's state out of order.
+/// concurrency here never reaches the node's state out of order. The number of connections in flight
+/// is capped, and a peer past the cap is turned away at once so the flood cannot exhaust threads.
 pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>) {
     thread::spawn(move || {
+        let active = Arc::new(AtomicUsize::new(0));
         for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
+            let Ok(mut stream) = stream else { continue };
+            if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                active.fetch_sub(1, Ordering::SeqCst);
+                stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
+                let _ = write_error(&mut stream, 503, "busy", "the gateway is at its connection limit");
+                continue;
+            }
             let requests = requests.clone();
+            let active = active.clone();
             thread::spawn(move || {
                 let _ = handle_connection(stream, requests);
+                active.fetch_sub(1, Ordering::SeqCst);
             });
         }
     });
