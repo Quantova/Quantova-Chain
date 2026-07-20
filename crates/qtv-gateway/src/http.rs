@@ -11,6 +11,7 @@ use std::io::{BufRead, BufReader, Read, Result as IoResult, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
+use std::time::Duration;
 
 use crate::json::{self, object, Json};
 use crate::service::build_request;
@@ -19,6 +20,16 @@ use crate::GatewayCall;
 /// The largest request body the gateway reads. A signed transaction is a few kilobytes,
 /// so a couple of megabytes is ample and a larger claim is refused rather than allocated.
 const MAX_BODY: usize = 2 * 1024 * 1024;
+
+/// The largest request head the gateway reads, the request line and all the headers together. A
+/// real request head is a few hundred bytes, so sixteen kilobytes is ample. This is bounded on its
+/// own because the head is read before the body limit is ever consulted, so without it a hostile
+/// peer could stream an endless request line or header and exhaust memory.
+const MAX_HEAD: usize = 16 * 1024;
+
+/// The deadline on reading a request and writing its reply, so a peer that opens a connection and
+/// then stalls, the classic slow client, cannot hold a connection thread forever.
+const IO_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Serve the RPC on a bound listener, sending each request to the node over the channel.
 /// Each connection is handled on its own thread, and the node serialises the requests, so
@@ -36,22 +47,33 @@ pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>) {
 }
 
 fn handle_connection(mut stream: TcpStream, requests: Sender<GatewayCall>) -> IoResult<()> {
+    // Bound how long a read or a write may block, so a stalled peer drops off rather than pinning a
+    // connection thread. A None deadline would let a slow client hold the thread forever.
+    stream.set_read_timeout(Some(IO_TIMEOUT)).ok();
+    stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
     let mut reader = BufReader::new(stream.try_clone()?);
 
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line)? == 0 {
-        return Ok(());
-    }
+    // Read the request line and the headers under one shared byte budget, so the whole head is
+    // bounded and neither an endless line nor a flood of headers can exhaust memory.
+    let mut head_budget = MAX_HEAD;
+    let request_line = match read_capped_line(&mut reader, &mut head_budget) {
+        Ok(Some(line)) => line,
+        Ok(None) => return Ok(()),
+        Err(_) => return write_error(&mut stream, 431, "head_too_large", "the request head is too large"),
+    };
     let mut parts = request_line.split_whitespace();
     let verb = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("").to_string();
 
     let mut content_length = 0usize;
     loop {
-        let mut header = String::new();
-        if reader.read_line(&mut header)? == 0 {
-            break;
-        }
+        let header = match read_capped_line(&mut reader, &mut head_budget) {
+            Ok(Some(header)) => header,
+            Ok(None) => break,
+            Err(_) => {
+                return write_error(&mut stream, 431, "head_too_large", "the request head is too large")
+            }
+        };
         let trimmed = header.trim_end();
         if trimmed.is_empty() {
             break;
@@ -113,6 +135,35 @@ fn handle_connection(mut stream: TcpStream, requests: Sender<GatewayCall>) -> Io
     }
 }
 
+/// Read one line ending in a newline, drawing down a shared byte budget so the request line and the
+/// headers together can never exceed it. Returns the line without its trailing newline, None if the
+/// connection ends before any byte arrives, and an error once the budget is exhausted, which is how
+/// an endless line or an endless run of headers is refused before it can exhaust memory.
+fn read_capped_line<R: BufRead>(reader: &mut R, budget: &mut usize) -> IoResult<Option<String>> {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        if reader.read(&mut byte)? == 0 {
+            return Ok(if line.is_empty() {
+                None
+            } else {
+                Some(String::from_utf8_lossy(&line).into_owned())
+            });
+        }
+        if *budget == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the request head exceeded its budget",
+            ));
+        }
+        *budget -= 1;
+        if byte[0] == b'\n' {
+            return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+        }
+        line.push(byte[0]);
+    }
+}
+
 /// The trimmed value of a header by its lowercase name, if the line names it.
 fn header_value<'a>(line: &'a str, name: &str) -> Option<&'a str> {
     let (key, value) = line.split_once(':')?;
@@ -162,7 +213,52 @@ fn reason(code: u16) -> &'static str {
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
+        431 => "Request Header Fields Too Large",
         503 => "Service Unavailable",
         _ => "OK",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn a_capped_line_reads_a_normal_line_and_draws_down_the_budget() {
+        let raw = b"POST /v1/node_info HTTP/1.1\r\n".to_vec();
+        let spent = raw.len();
+        let mut reader = Cursor::new(raw);
+        let mut budget = MAX_HEAD;
+        let line = read_capped_line(&mut reader, &mut budget).unwrap().unwrap();
+        assert_eq!(line, "POST /v1/node_info HTTP/1.1\r");
+        assert_eq!(budget, MAX_HEAD - spent, "every byte read draws down the budget");
+    }
+
+    #[test]
+    fn a_capped_line_refuses_a_line_that_exhausts_the_budget() {
+        let mut reader = Cursor::new(vec![b'a'; 100]);
+        let mut budget = 16usize;
+        assert!(
+            read_capped_line(&mut reader, &mut budget).is_err(),
+            "an endless line is refused once the budget is spent"
+        );
+    }
+
+    #[test]
+    fn a_capped_line_returns_none_at_end_of_stream() {
+        let mut reader = Cursor::new(Vec::new());
+        let mut budget = MAX_HEAD;
+        assert!(read_capped_line(&mut reader, &mut budget).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_head_budget_is_shared_across_the_lines() {
+        // The two lines together exceed the budget, so the second read fails even though the first
+        // fit, which is how a flood of small headers is refused, not only one endless line.
+        let mut reader = Cursor::new(b"aaaaa\nbbbbb\n".to_vec());
+        let mut budget = 8usize;
+        assert!(read_capped_line(&mut reader, &mut budget).unwrap().is_some());
+        assert!(read_capped_line(&mut reader, &mut budget).is_err());
     }
 }
