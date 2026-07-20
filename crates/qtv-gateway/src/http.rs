@@ -279,4 +279,68 @@ mod tests {
         assert!(read_capped_line(&mut reader, &mut budget).unwrap().is_some());
         assert!(read_capped_line(&mut reader, &mut budget).is_err());
     }
+
+    // Stand up the real server on a loopback port with a responder that answers every call with a
+    // small canned object, so a request can be driven over a real socket. Returns the port.
+    fn serve_stub() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = channel::<GatewayCall>();
+        thread::spawn(move || {
+            for call in rx {
+                let _ = call.reply.send(Ok(object(vec![("ok", Json::Bool(true))])));
+            }
+        });
+        serve(listener, tx);
+        port
+    }
+
+    // Send a raw request over a real connection and read the whole response back.
+    fn round_trip(port: u16, request: &str) -> String {
+        use std::io::{Read, Write};
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).ok();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    #[test]
+    fn a_well_formed_post_is_routed_and_answered_over_the_socket() {
+        let port = serve_stub();
+        let response = round_trip(
+            port,
+            "POST /v1/node_info HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}",
+        );
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("\"ok\""), "{response}");
+    }
+
+    #[test]
+    fn an_oversized_head_is_refused_over_the_socket() {
+        let port = serve_stub();
+        let giant = "x".repeat(MAX_HEAD + 1024);
+        let response = round_trip(port, &format!("POST /v1/node_info HTTP/1.1\r\nBig: {giant}\r\n\r\n"));
+        assert!(response.starts_with("HTTP/1.1 431"), "{response}");
+    }
+
+    #[test]
+    fn an_oversized_body_is_refused_over_the_socket() {
+        let port = serve_stub();
+        // The declared length is above the body cap, so the request is refused before the body is
+        // ever read or allocated.
+        let response = round_trip(
+            port,
+            &format!("POST /v1/node_info HTTP/1.1\r\nContent-Length: {}\r\n\r\n", MAX_BODY + 1),
+        );
+        assert!(response.starts_with("HTTP/1.1 413"), "{response}");
+    }
+
+    #[test]
+    fn an_unknown_method_path_is_a_not_found_over_the_socket() {
+        let port = serve_stub();
+        let response = round_trip(port, "POST /v1/does_not_exist HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}");
+        assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+    }
 }
