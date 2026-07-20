@@ -1110,6 +1110,10 @@ impl DevNode {
                 to_bytes(&self.ledger.account(address)),
             )?;
         }
+        // The treasury is no account but block execution changes it as fees route in, so persist it
+        // too or a restart reloads a stale treasury and the node diverges from its peers.
+        let (treasury_key, treasury_value) = self.ledger.stake_treasury_entry();
+        self.state_store.put_account(treasury_key, treasury_value)?;
         self.state_store.commit(self.ledger.state_root())?;
         Ok(())
     }

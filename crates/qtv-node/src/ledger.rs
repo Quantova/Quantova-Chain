@@ -439,6 +439,17 @@ impl Ledger {
         self.set_stake_treasury(treasury);
     }
 
+    /// The treasury singleton entry, its storage key and current serialized value, so a persisting
+    /// node writes the treasury back alongside the accounts a block touched. The treasury changes as
+    /// fees route to it, and it is no account, so without this a restart reloads a stale treasury and
+    /// the node's state root diverges from its peers.
+    pub fn stake_treasury_entry(&self) -> (Key, Vec<u8>) {
+        (
+            stake_singleton_key(STAKE_TREASURY_TAG),
+            to_bytes(&self.stake_treasury()),
+        )
+    }
+
     pub fn is_stake_banned(&self, id: &[u8; 32]) -> bool {
         matches!(self.trie.get(&stake_banned_key(id)), Some(bytes) if !bytes.is_empty())
     }
