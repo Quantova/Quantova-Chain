@@ -285,6 +285,11 @@ pub struct Trie {
     leaves: BTreeMap<Key, Vec<u8>>,
     defaults: Vec<Hash>,
     cache: RefCell<RootCache>,
+    /// Keys changed since the last persist. A persisting node drains these to write back exactly the
+    /// keys a block changed, accounts and protocol singletons alike, so a reload reconstructs the
+    /// identical state. It is separate from the root cache's changed set, which is cleared on every
+    /// root recomputation and so cannot track what still needs to reach disk.
+    persist_dirty: BTreeSet<Key>,
 }
 
 impl Default for Trie {
@@ -306,7 +311,19 @@ impl Trie {
             leaves: BTreeMap::new(),
             defaults,
             cache: RefCell::new(cache),
+            persist_dirty: BTreeSet::new(),
         }
+    }
+
+    /// Drain the keys changed since the last call. A persisting node writes exactly these back.
+    pub fn take_persist_dirty(&mut self) -> Vec<Key> {
+        std::mem::take(&mut self.persist_dirty).into_iter().collect()
+    }
+
+    /// Clear the persist set without persisting, for after genesis writes the whole state, or after a
+    /// reload where the state is already on disk.
+    pub fn clear_persist_dirty(&mut self) {
+        self.persist_dirty.clear();
     }
 
     /// Bind a key to a value, replacing any value the key already held. The key
@@ -314,6 +331,7 @@ impl Trie {
     pub fn insert(&mut self, key: Key, value: Vec<u8>) {
         self.leaves.insert(key, value);
         self.cache.get_mut().changed.insert(key);
+        self.persist_dirty.insert(key);
     }
 
     /// The value a key holds, or nothing when the key is absent.

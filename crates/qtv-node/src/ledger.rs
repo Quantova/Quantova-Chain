@@ -439,15 +439,24 @@ impl Ledger {
         self.set_stake_treasury(treasury);
     }
 
-    /// The treasury singleton entry, its storage key and current serialized value, so a persisting
-    /// node writes the treasury back alongside the accounts a block touched. The treasury changes as
-    /// fees route to it, and it is no account, so without this a restart reloads a stale treasury and
-    /// the node's state root diverges from its peers.
-    pub fn stake_treasury_entry(&self) -> (Key, Vec<u8>) {
-        (
-            stake_singleton_key(STAKE_TREASURY_TAG),
-            to_bytes(&self.stake_treasury()),
-        )
+    /// The keys changed since the last call and their current values, so a persisting node writes back
+    /// exactly what a block changed, accounts and protocol singletons alike, the treasury, the pool,
+    /// bonds, and any other state. This replaces persisting a hand listed set of touched accounts,
+    /// which silently dropped every singleton a block modified and diverged a node on reload.
+    pub fn take_dirty_entries(&mut self) -> Vec<(Key, Vec<u8>)> {
+        self.trie
+            .take_persist_dirty()
+            .into_iter()
+            .map(|key| {
+                let value = self.trie.get(&key).map(|v| v.to_vec()).unwrap_or_default();
+                (key, value)
+            })
+            .collect()
+    }
+
+    /// Discard the pending persist set, for after genesis has written the whole state explicitly.
+    pub fn clear_dirty(&mut self) {
+        self.trie.clear_persist_dirty();
     }
 
     pub fn is_stake_banned(&self, id: &[u8; 32]) -> bool {
@@ -1778,7 +1787,9 @@ impl Ledger {
     /// A ledger over a trie loaded from disk. The trie holds the account leaves a
     /// store reopened, so a node restarted from its store rebuilds the exact state
     /// it committed, with the same state root.
-    pub fn from_trie(trie: Trie) -> Self {
+    pub fn from_trie(mut trie: Trie) -> Self {
+        // The reloaded state is already on disk, so nothing is pending persistence yet.
+        trie.clear_persist_dirty();
         Ledger {
             trie,
             block_events: Vec::new(),
