@@ -240,11 +240,13 @@ pub fn execute_parallel(
     let stake_address = crate::ledger::stake_system_address();
     let claim_address = crate::ledger::stake_claim_address();
     let gov_address = crate::ledger::gov_system_address();
+    let key_register_address = crate::ledger::key_register_address();
     if candidates.iter().any(|wrapper| {
         let (sender, target) = access(wrapper);
         target == stake_address.as_str()
             || target == claim_address.as_str()
             || target == gov_address.as_str()
+            || target == key_register_address.as_str()
             || ledger.is_blacklisted(sender)
             || ledger.is_blacklisted(target)
             || crate::node::is_vm_op(ledger, wrapper)

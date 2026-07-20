@@ -244,6 +244,17 @@ pub fn gov_system_address() -> String {
         .expect("a full hash reaches the address floor")
 }
 
+/// The reserved address an account sends its public key to in order to register it. A call whose
+/// target is this address carries the account's own public key in its arguments, and the node installs
+/// that key on the account so it can sign from then on. This is how an account funded by a transfer,
+/// which arrives with a balance but no key, becomes able to send. The key is proven to be the
+/// account's own by hashing to the account address under the scheme, and by signing the very
+/// transaction that registers it, so no one can register a key for an address that is not theirs.
+pub fn key_register_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/key/register"))
+        .expect("a full hash reaches the address floor")
+}
+
 const VM_CODE_TAG: &[u8] = b"qtv/vm/code/";
 const VM_STORE_TAG: &[u8] = b"qtv/vm/store/";
 
