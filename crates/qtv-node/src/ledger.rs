@@ -93,6 +93,15 @@ const STAKE_BOND_TAG: &[u8] = b"qtv/stake/bond/";
 const STAKE_REWARDS_TAG: &[u8] = b"qtv/stake/rewards/";
 const STAKE_POOL_TAG: &[u8] = b"qtv/stake/pool";
 const STAKE_TREASURY_TAG: &[u8] = b"qtv/stake/treasury";
+const GRANTS_POOL_TAG: &[u8] = b"qtv/grants/pool";
+
+/// The transaction fee split, in basis points of ten thousand. A portion is burned, credited to no
+/// one so the total supply falls, and the rest funds the validators reward pool and the grants pool.
+/// These are the genesis defaults; governance can change them (SPEC-economics).
+const FEE_BURN_BPS: u64 = 2_000;
+const FEE_VALIDATORS_BPS: u64 = 6_000;
+const FEE_GRANTS_BPS: u64 = 2_000;
+const _: () = assert!(FEE_BURN_BPS + FEE_VALIDATORS_BPS + FEE_GRANTS_BPS == 10_000);
 const STAKE_PRICE_TAG: &[u8] = b"qtv/stake/price";
 const STAKE_MAINNET_TAG: &[u8] = b"qtv/stake/mainnet";
 const STAKE_METER_TAG: &[u8] = b"qtv/stake/meter";
@@ -427,16 +436,42 @@ impl Ledger {
             .insert(stake_singleton_key(STAKE_TREASURY_TAG), to_bytes(&amount));
     }
 
-    /// Route a charged transaction fee into the governance controlled treasury, so a fee is never
-    /// burned and the total supply stays fixed. The frozen economics is that fees reach the treasury
-    /// and the validators, and the exact split between them is a governance parameter still to be set,
-    /// so until it is the whole fee accrues to the treasury rather than vanishing (SPEC-economics).
+    pub fn grants_pool(&self) -> u64 {
+        self.trie
+            .get(&stake_singleton_key(GRANTS_POOL_TAG))
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical grants balance"))
+            .unwrap_or(0)
+    }
+
+    pub fn set_grants_pool(&mut self, amount: u64) {
+        self.trie
+            .insert(stake_singleton_key(GRANTS_POOL_TAG), to_bytes(&amount));
+    }
+
+    /// Split a charged transaction fee: a portion is burned, credited to no one so the total supply
+    /// falls, and the rest funds the validators reward pool and the grants pool. The burned portion is
+    /// the remainder after the two credited shares, so any rounding dust is burned rather than
+    /// misallocated and no unit is ever created. The shares are the genesis defaults and governance
+    /// can change them (SPEC-economics).
     pub fn collect_fee(&mut self, fee: u64) {
         if fee == 0 {
             return;
         }
-        let treasury = self.stake_treasury().saturating_add(fee);
-        self.set_stake_treasury(treasury);
+        let validators = ((fee as u128) * (FEE_VALIDATORS_BPS as u128) / 10_000) as u64;
+        let grants = ((fee as u128) * (FEE_GRANTS_BPS as u128) / 10_000) as u64;
+        // The rest, the burn share plus any rounding dust, is credited nowhere, so it leaves the supply.
+        let pool = self.stake_pool().saturating_add(validators);
+        self.set_stake_pool(pool);
+        let grants_pool = self.grants_pool().saturating_add(grants);
+        self.set_grants_pool(grants_pool);
+    }
+
+    /// The portion of a fee that is burned under the current split, credited to no one. Used to check
+    /// the supply drops by exactly the burned share.
+    pub fn fee_burned(fee: u64) -> u64 {
+        let validators = ((fee as u128) * (FEE_VALIDATORS_BPS as u128) / 10_000) as u64;
+        let grants = ((fee as u128) * (FEE_GRANTS_BPS as u128) / 10_000) as u64;
+        fee - validators - grants
     }
 
     /// The keys changed since the last call and their current values, so a persisting node writes back
