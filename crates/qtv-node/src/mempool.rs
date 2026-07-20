@@ -338,6 +338,13 @@ impl Mempool {
             if !crate::node::vm_admissible(&wrapper, &account, fee_params, signature_ok) {
                 return Err(Reject::BadCall);
             }
+        } else if crate::node::is_key_register(&wrapper) {
+            // A registration installs the sender's first key, so it verifies against the key in its
+            // arguments, not against a state key the account does not have yet.
+            let account = ledger.account(wrapper.body().sender());
+            if crate::node::key_register_admissible(&wrapper, &account, fee_params).is_none() {
+                return Err(Reject::BadCall);
+            }
         } else if wrapper.body().call().target() == crate::ledger::gov_system_address() {
             let account = ledger.account(wrapper.body().sender());
             let signature_ok = qtv_tx::verify(&wrapper, &account.public_key);
@@ -407,6 +414,9 @@ impl Mempool {
                     let account = ledger.account(wrapper.body().sender());
                     crate::node::vm_admissible(&wrapper, &account, fee_params, verified[index])
                 }
+            } else if crate::node::is_key_register(&wrapper) {
+                let account = ledger.account(wrapper.body().sender());
+                crate::node::key_register_admissible(&wrapper, &account, fee_params).is_some()
             } else if wrapper.body().call().target() == crate::ledger::gov_system_address() {
                 let account = ledger.account(wrapper.body().sender());
                 crate::node::governance_admissible(&wrapper, &account, fee_params, verified[index])

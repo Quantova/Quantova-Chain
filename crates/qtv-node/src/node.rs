@@ -270,6 +270,53 @@ pub(crate) fn governance_admissible(
     decode_gov_op(op, &args[1..])
 }
 
+/// Whether a transaction is a key registration, a call to the reserved key register address. A
+/// registration installs the sender's public key, so an account funded by a transfer, which arrives
+/// with a balance but no key, can sign from then on.
+pub(crate) fn is_key_register(wrapper: &Wrapper) -> bool {
+    wrapper.body().call().target() == crate::ledger::key_register_address()
+}
+
+/// Whether a call is an admissible key registration, returning the public key to install. Unlike every
+/// other admission this reads no key from state, because the whole point is to install the first key
+/// for an account that has none. The key is the whole argument, and it is proven to be the account's
+/// own two ways: it hashes to the sender address under the scheme, so a caller can only register the
+/// one key its address commits to, and it signs this very transaction, so only the key's owner can
+/// register it. The nonce, meter, and fee clear the same floors a transfer clears, paid from the
+/// funded account.
+pub(crate) fn key_register_admissible(
+    wrapper: &Wrapper,
+    account: &Account,
+    fee_params: &FeeParams,
+) -> Option<Vec<u8>> {
+    let body = wrapper.body();
+    if body.call().target() != crate::ledger::key_register_address() {
+        return None;
+    }
+    if !qtv_tx::scheme_supported(wrapper.scheme()) {
+        return None;
+    }
+    let public_key = body.call().args().to_vec();
+    if qtv_account::address_for_key(wrapper.scheme(), &public_key).as_str() != body.sender() {
+        return None;
+    }
+    if !qtv_tx::verify(wrapper, &public_key) {
+        return None;
+    }
+    if body.nonce() != account.nonce || body.meter_limit() < crate::execution::TRANSFER_METER {
+        return None;
+    }
+    if body.fee() < u128::from(fee_params.transfer_fee()) {
+        return None;
+    }
+    let charged = u64::try_from(body.fee().min(u128::from(fee_params.ceiling_fee())))
+        .unwrap_or_else(|_| fee_params.ceiling_fee());
+    if account.balance < charged {
+        return None;
+    }
+    Some(public_key)
+}
+
 /// Charge a governance call's fee, bump its nonce, and apply its operation. The
 /// operation runs on the post fee account, and a submit or a vote that cannot cover
 /// its own deposit or stake is a no op while the fee still applies, so a well formed
@@ -320,6 +367,32 @@ fn dispatch_governance(
             ledger.gov_release(&sender, now);
         }
     }
+    true
+}
+
+/// Charge a key registration's fee, bump its nonce, and install the public key on the account, so the
+/// account can sign from then on. Returns false when the call is not an admissible registration. It
+/// verifies the registration itself rather than trusting a pre pass verdict, because the pre pass
+/// verifies against the account's state key, which a registering account does not have yet.
+fn dispatch_key_register(ledger: &mut Ledger, wrapper: &Wrapper, fee_params: &FeeParams) -> bool {
+    let sender = wrapper.body().sender().to_string();
+    if ledger.is_blacklisted(&sender) {
+        return false;
+    }
+    let account = ledger.account(&sender);
+    let public_key = match key_register_admissible(wrapper, &account, fee_params) {
+        Some(key) => key,
+        None => return false,
+    };
+    let charged = u64::try_from(wrapper.body().fee().min(u128::from(fee_params.ceiling_fee())))
+        .unwrap_or_else(|_| fee_params.ceiling_fee());
+    let mut updated = account;
+    updated.balance -= charged;
+    updated.nonce += 1;
+    updated.scheme = wrapper.scheme();
+    updated.public_key = public_key;
+    ledger.set_account(&sender, &updated);
+    ledger.collect_fee(charged);
     true
 }
 
@@ -428,6 +501,12 @@ fn execute_ordered_across(
         }
         if wrapper.body().call().target() == gov_address {
             if dispatch_governance(ledger, wrapper, verified[index], fee_params, now_seconds) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
+        if is_key_register(wrapper) {
+            if dispatch_key_register(ledger, wrapper, fee_params) {
                 included.push(wrapper.clone());
             }
             continue;
@@ -1072,6 +1151,112 @@ mod tests {
             call,
         );
         sign(from, &body)
+    }
+
+    /// A key registration: a call to the reserved register address carrying the sender's own public
+    /// key, signed by the sender.
+    fn register_tx(from: &KeyAccount, nonce: u64, fee: &FeeParams) -> Wrapper {
+        let call = qtv_tx::Call::new(crate::ledger::key_register_address(), from.public_key().to_vec());
+        let body = Body::new(
+            from.address(),
+            nonce,
+            TRANSFER_METER,
+            u128::from(fee.transfer_fee()),
+            call,
+        );
+        sign(from, &body)
+    }
+
+    #[test]
+    fn a_keyless_account_registers_its_key_and_can_then_send() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let user = keypair(140);
+        let friend = keypair(141);
+        // The user account arrives funded but keyless, the state a faucet transfer leaves it in.
+        ledger.set_account(
+            &user.address(),
+            &Account { nonce: 0, balance: 100_000, scheme: 0, public_key: Vec::new() },
+        );
+        assert!(!ledger.account(&user.address()).has_key(), "a funded receiver starts keyless");
+
+        // Before registering, a send from the keyless account is refused, the onboarding blocker.
+        let early = transfer(&user, &friend.address(), 1000, 0, &fee);
+        assert!(
+            execute_ordered(&mut ledger, &[early], &fee, 0).is_empty(),
+            "a keyless account cannot send"
+        );
+
+        // The user registers its key, and the key is installed.
+        let reg = register_tx(&user, 0, &fee);
+        assert_eq!(
+            execute_ordered(&mut ledger, &[reg], &fee, 0).len(),
+            1,
+            "the registration is included"
+        );
+        assert!(ledger.account(&user.address()).has_key(), "the key is now installed");
+        assert_eq!(ledger.account(&user.address()).nonce, 1);
+
+        // Now the user can send.
+        let send = transfer(&user, &friend.address(), 1000, 1, &fee);
+        assert_eq!(
+            execute_ordered(&mut ledger, &[send], &fee, 0).len(),
+            1,
+            "a registered account can send"
+        );
+        assert_eq!(ledger.account(&friend.address()).balance, 1000);
+    }
+
+    #[test]
+    fn a_registration_cannot_install_a_key_for_an_address_that_is_not_the_signers() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let attacker = keypair(150);
+        let victim = keypair(151);
+        ledger.set_account(
+            &victim.address(),
+            &Account { nonce: 0, balance: 100_000, scheme: 0, public_key: Vec::new() },
+        );
+
+        // Forgery one: claim the victim address but carry the attacker's key. The key hashes to the
+        // attacker address, not the victim address, so the match check refuses it.
+        let call = qtv_tx::Call::new(
+            crate::ledger::key_register_address(),
+            attacker.public_key().to_vec(),
+        );
+        let body = Body::new(victim.address(), 0, TRANSFER_METER, u128::from(fee.transfer_fee()), call);
+        let forged_wrong_key = sign(&attacker, &body);
+        assert!(
+            execute_ordered(&mut ledger, &[forged_wrong_key], &fee, 0).is_empty(),
+            "a key that does not hash to the sender is refused"
+        );
+        assert!(!ledger.account(&victim.address()).has_key(), "the victim stays keyless");
+
+        // Forgery two: claim the victim address and carry the victim's real public key, which is
+        // public, but sign with the attacker's secret. The signature does not verify under the
+        // victim key, so it is refused.
+        let call = qtv_tx::Call::new(
+            crate::ledger::key_register_address(),
+            victim.public_key().to_vec(),
+        );
+        let body = Body::new(victim.address(), 0, TRANSFER_METER, u128::from(fee.transfer_fee()), call);
+        let forged_wrong_signer = sign(&attacker, &body);
+        let before = ledger.state_root();
+        assert!(
+            execute_ordered(&mut ledger, &[forged_wrong_signer.clone()], &fee, 0).is_empty(),
+            "a registration not signed by the key owner is refused"
+        );
+        assert!(!ledger.account(&victim.address()).has_key(), "the victim still stays keyless");
+        assert_eq!(ledger.state_root(), before, "a refused registration moves nothing");
+
+        // The parallel path routes the registration to the sequential path and reaches the same
+        // refusal and state root.
+        let mut parallel = ledger.clone();
+        assert!(
+            crate::parallel::execute_parallel(&mut parallel, &[forged_wrong_signer], &fee, 8, 0)
+                .is_empty()
+        );
+        assert_eq!(parallel.state_root(), ledger.state_root());
     }
 
     fn propose_price_args(rate: u128) -> Vec<u8> {
