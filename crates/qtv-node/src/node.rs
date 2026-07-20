@@ -883,10 +883,10 @@ mod tests {
     }
 
     #[test]
-    fn a_transfer_fee_reaches_the_treasury_and_burns_nothing() {
-        // The frozen economics is that a fee is never burned: it reaches the governance treasury, so
-        // the total supply is fixed. The charged fee must show up in the treasury and the sum of every
-        // balance plus the treasury must be unchanged by the transfer.
+    fn a_transfer_fee_burns_a_portion_and_funds_the_pools() {
+        // A fee is split: a portion is burned, and the rest funds the validators reward pool and the
+        // grants pool. The whole fee must be accounted for, both pools gain a share and the rest is
+        // burned, and the total supply must fall by exactly the burned portion, no more and no less.
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
         let alice = keypair(200);
@@ -894,25 +894,40 @@ mod tests {
         fund(&mut ledger, &alice, 10_000 * 1_000_000);
 
         let charged = fee.transfer_fee();
-        let treasury_before = ledger.stake_treasury();
+        let pool_before = ledger.stake_pool();
+        let grants_before = ledger.grants_pool();
         let supply_before = ledger.account(&alice.address()).balance
             + ledger.account(&bob.address()).balance
-            + treasury_before;
+            + pool_before
+            + grants_before;
 
         let tx = transfer(&alice, &bob.address(), 1_000, 0, &fee);
-        let included = execute_ordered(&mut ledger, &[tx], &fee, 0);
-        assert_eq!(included.len(), 1, "the transfer is included");
-
-        let treasury_after = ledger.stake_treasury();
         assert_eq!(
-            treasury_after,
-            treasury_before + charged,
-            "the charged fee reaches the treasury"
+            execute_ordered(&mut ledger, &[tx], &fee, 0).len(),
+            1,
+            "the transfer is included"
         );
+
+        let pool_gain = ledger.stake_pool() - pool_before;
+        let grants_gain = ledger.grants_pool() - grants_before;
+        let burned = Ledger::fee_burned(charged);
+        assert!(pool_gain > 0 && grants_gain > 0, "both pools are funded");
+        assert!(burned > 0, "a portion is burned");
+        assert_eq!(
+            pool_gain + grants_gain + burned,
+            charged,
+            "the whole fee splits into the pools and the burn, nothing created or lost"
+        );
+
         let supply_after = ledger.account(&alice.address()).balance
             + ledger.account(&bob.address()).balance
-            + treasury_after;
-        assert_eq!(supply_after, supply_before, "no value is burned");
+            + ledger.stake_pool()
+            + ledger.grants_pool();
+        assert_eq!(
+            supply_before - supply_after,
+            burned,
+            "the total supply falls by exactly the burned share"
+        );
     }
 
     #[test]
