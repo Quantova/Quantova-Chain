@@ -320,6 +320,8 @@ impl DevNode {
         let (validators_key, validators_value) = self.ledger.seed_validator_set(&validator_ids);
         self.state_store.put_account(validators_key, validators_value)?;
         self.state_store.commit(self.ledger.state_root())?;
+        // Genesis wrote the whole state explicitly, so nothing is pending persistence.
+        self.ledger.clear_dirty();
         self.refresh_committee();
         Ok(())
     }
@@ -1090,30 +1092,19 @@ impl DevNode {
     fn persist(&mut self, block: &ChainBlock) -> Result<(), RoundError> {
         self.block_store.put_block(block)?;
         let height = block.header().height();
-        let mut touched: Vec<String> = Vec::new();
         for wrapper in block.body() {
             // Index the transaction at the height it finalised, so the node can answer
             // whether it landed and where without scanning the chain.
             self.tx_index.insert(wrapper.id(), height);
-            let sender = wrapper.body().sender().to_string();
-            let recipient = wrapper.body().call().target().to_string();
-            if !touched.contains(&sender) {
-                touched.push(sender);
-            }
-            if !touched.contains(&recipient) {
-                touched.push(recipient);
-            }
         }
-        for address in &touched {
-            self.state_store.put_account(
-                account_key(address),
-                to_bytes(&self.ledger.account(address)),
-            )?;
+        // Persist exactly the state keys this block changed, accounts and protocol singletons alike,
+        // the treasury, the pool, bonds, and any other, so a reload reconstructs the identical state.
+        // The state store is a log keyed by state key, so writing back the changed keys keeps the
+        // latest value of every key on disk. Persisting only a hand listed set of touched accounts
+        // silently dropped every singleton a block modified and diverged a node on reload.
+        for (key, value) in self.ledger.take_dirty_entries() {
+            self.state_store.put_account(key, value)?;
         }
-        // The treasury is no account but block execution changes it as fees route in, so persist it
-        // too or a restart reloads a stale treasury and the node diverges from its peers.
-        let (treasury_key, treasury_value) = self.ledger.stake_treasury_entry();
-        self.state_store.put_account(treasury_key, treasury_value)?;
         self.state_store.commit(self.ledger.state_root())?;
         Ok(())
     }
