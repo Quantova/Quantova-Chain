@@ -278,15 +278,12 @@ fn verify_signatures(ledger: &Ledger, batch: &[Wrapper], verify_cores: usize) ->
     verdicts
 }
 
-/// Whether contract deploy and call transactions are admitted on this network. It is off for the
-/// public testnet launch on purpose. Contract execution meters every instruction but the fee is a
-/// flat charge decoupled from the meter and there is no per block compute budget, so an admitted call
-/// carrying a large meter limit over a loop would make every validator do unbounded work for a floor
-/// fee, a liveness attack a public submitter could mount. Native transfers, staking, and governance
-/// are unaffected. Contracts turn on here once compute is priced by the meter and a per block budget
-/// bounds it, which is a deliberate change an operator makes with a rebuild, not a runtime toggle,
-/// since enabling an unpriced execution path to the public must never be accidental.
-const CONTRACTS_ENABLED: bool = false;
+/// Whether contract deploy and call transactions are admitted on this network. It is on. The unpriced
+/// compute risk it once guarded against is now bounded, a contract call declares a meter limit that is
+/// capped at admission and the executor spends a per block meter budget and stops including calls once
+/// it is reached, so no call and no block can make a validator do unbounded work. See
+/// VM_BLOCK_METER_BUDGET in the node module. Native transfers, staking, and governance are unaffected.
+const CONTRACTS_ENABLED: bool = true;
 
 /// The mempool of admitted transactions.
 #[derive(Debug, Clone, Default)]
