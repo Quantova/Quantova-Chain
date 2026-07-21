@@ -443,6 +443,30 @@ pub(crate) fn vm_admissible(
     account.balance >= charged
 }
 
+/// The eight byte tag that marks a deploy transaction's arguments as carrying deploy time parameters
+/// after the container. It is distinct from the container format tag, so the two deploy forms never
+/// collide: a bare container starts with its own `QVM1` tag and a framed deploy starts with this one.
+const DEPLOY_PARAMS_TAG: &[u8; 8] = b"QDEPLOY1";
+
+/// Split a deploy transaction's arguments into the container to store and the deploy time parameter blob
+/// the genesis constructor reads. The framed form is the tag, the container length as a big endian
+/// thirty two bit word, the container bytes, then the parameter blob; anything else is a bare container
+/// with no parameters. A malformed frame falls back to the whole input as the container, which then
+/// fails to decode and deploys a dead contract, the same outcome a corrupt container has today. The
+/// split is a pure function of the bytes, so every node carries the identical parameters into genesis.
+fn split_deploy_args(args: &[u8]) -> (&[u8], &[u8]) {
+    if args.len() >= 12 && &args[0..8] == DEPLOY_PARAMS_TAG {
+        let len = u32::from_be_bytes([args[8], args[9], args[10], args[11]]) as usize;
+        let start = 12usize;
+        if let Some(end) = start.checked_add(len) {
+            if end <= args.len() {
+                return (&args[start..end], &args[end..]);
+            }
+        }
+    }
+    (args, &[])
+}
+
 /// Charge a virtual machine transaction's fee, bump its nonce, and run its operation: deploy the
 /// container in its arguments to the contract address its sender and nonce derive, or call the entry
 /// its leading selector names on the contract it targets with the rest of its arguments as the call
@@ -476,13 +500,24 @@ fn dispatch_vm(
     ledger.set_account(&sender, &charged_account);
     ledger.collect_fee(charged);
     if target == crate::ledger::vm_deploy_address() {
-        if let Some(contract) = ledger.deploy_contract(&sender, nonce, &args) {
+        // A deploy carries the container to store and, optionally, the deploy time parameters the
+        // genesis constructor reads. The framed form splits into the container and a parameter blob; the
+        // bare form is the container alone with no parameters, so a container with no genesis parameters
+        // deploys unchanged. Only the container bytes are stored as the contract's code.
+        let (container, params) = split_deploy_args(&args);
+        if let Some(contract) = ledger.deploy_contract(&sender, nonce, container) {
             // Run the genesis constructor with the deploying account as the caller, so a genesis
-            // `owner = deployer` stores the whole deployer address into the owner field. A container
-            // with no genesis entry carries no such selector, so the call is a metered no op.
-            let genesis =
-                qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
-            ledger.call_contract(&sender, &contract, genesis, &[], now_seconds, meter);
+            // `owner = deployer` stores the whole deployer address into the owner field. The deploy
+            // parameters sit in the constructor's scratch just past the trusted context, at the offsets
+            // the compiler assigned, so a genesis `owner = deploy_params.owner` reads the supplied value.
+            // A container with no genesis entry carries no such selector, so the call is a metered no op.
+            // The constructor itself requires a sentinel word past its parameters, so a deploy that omits
+            // or truncates one faults and commits no storage rather than initializing from a zero.
+            let genesis = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
+            let mut genesis_memory =
+                vec![0u8; crate::ledger::CONTRACT_CONTEXT_BYTES + params.len()];
+            genesis_memory[crate::ledger::CONTRACT_CONTEXT_BYTES..].copy_from_slice(params);
+            ledger.call_contract(&sender, &contract, genesis, &genesis_memory, now_seconds, meter);
         }
     } else if args.len() >= 4 {
         let selector = [args[0], args[1], args[2], args[3]];
@@ -1169,6 +1204,94 @@ mod tests {
                 .get(&qtv_vm::abi::scalar_key(0)),
             Some(&deployer_word),
             "the genesis constructor stored the deployer at deploy"
+        );
+    }
+
+    #[test]
+    fn split_deploy_args_reads_the_frame_and_leaves_a_bare_container_whole() {
+        // A bare container is the container alone with no parameters.
+        let bare = b"QVM1 the whole container".to_vec();
+        let (container, params) = super::split_deploy_args(&bare);
+        assert_eq!(container, &bare[..]);
+        assert!(params.is_empty());
+
+        // A framed deploy splits into the container and the parameter blob after it.
+        let mut framed = Vec::new();
+        framed.extend_from_slice(super::DEPLOY_PARAMS_TAG);
+        framed.extend_from_slice(&3u32.to_be_bytes());
+        framed.extend_from_slice(b"ABC");
+        framed.extend_from_slice(b"the params");
+        let (container, params) = super::split_deploy_args(&framed);
+        assert_eq!(container, b"ABC");
+        assert_eq!(params, b"the params");
+
+        // A frame whose length runs off the end falls back to the whole input as the container.
+        let mut bad = Vec::new();
+        bad.extend_from_slice(super::DEPLOY_PARAMS_TAG);
+        bad.extend_from_slice(&999u32.to_be_bytes());
+        bad.extend_from_slice(b"short");
+        let (container, params) = super::split_deploy_args(&bad);
+        assert_eq!(container, &bad[..]);
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn a_framed_deploy_carries_its_parameters_into_the_genesis_run() {
+        // A genesis that reads a deploy parameter word at offset seventy two, just past the trusted
+        // context, and stores it under the slot zero key. The framed deploy carries the parameter, the
+        // bare deploy does not, so the same container initializes from the parameter only when framed.
+        let fee = FeeParams::devnet();
+        let deployer = keypair(141);
+        let code = qtv_vm::asm::assemble(
+            "LDI r1, 72\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT",
+        )
+        .expect("the program assembles");
+        let genesis_selector = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector: genesis_selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess::default(),
+            }],
+        );
+        let cbytes = container.canonical_bytes();
+        let param: u64 = 0xCAFE_F00D_1234_5678;
+
+        // Framed: the tag, the container length, the container, then the one parameter word.
+        let mut framed = Vec::new();
+        framed.extend_from_slice(super::DEPLOY_PARAMS_TAG);
+        framed.extend_from_slice(&(cbytes.len() as u32).to_be_bytes());
+        framed.extend_from_slice(&cbytes);
+        framed.extend_from_slice(&param.to_be_bytes());
+
+        let mut ledger = Ledger::new();
+        fund(&mut ledger, &deployer, 10_000 * 1_000_000);
+        let deploy = system_tx(&deployer, &crate::ledger::vm_deploy_address(), framed, 0, 100_000, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[deploy], &fee, 0).len(), 1);
+        let contract = crate::ledger::contract_address(&deployer.address(), 0).unwrap();
+        assert_eq!(
+            ledger
+                .contract_storage(&address_bytes(&contract))
+                .get(&qtv_vm::abi::scalar_key(0)),
+            Some(&param),
+            "the framed deploy carried the parameter into the genesis run"
+        );
+
+        // Bare: the same container with no frame carries no parameter, so the constructor reads the
+        // machine's zeroed scratch there and stores a zero, not the value. This is exactly the silent
+        // zero a real contract's sentinel guard turns into a revert, proven in the compiler tests.
+        let mut bare_ledger = Ledger::new();
+        fund(&mut bare_ledger, &deployer, 10_000 * 1_000_000);
+        let bare = system_tx(&deployer, &crate::ledger::vm_deploy_address(), cbytes, 0, 100_000, &fee);
+        assert_eq!(execute_ordered(&mut bare_ledger, &[bare], &fee, 0).len(), 1);
+        assert_eq!(
+            bare_ledger
+                .contract_storage(&address_bytes(&contract))
+                .get(&qtv_vm::abi::scalar_key(0)),
+            Some(&0),
+            "a bare deploy carries no parameter, so the genesis read and stored a zero"
         );
     }
 
