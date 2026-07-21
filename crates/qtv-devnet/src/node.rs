@@ -27,7 +27,7 @@ use std::io;
 
 use qtv_attest::aggregate::aggregate;
 use qtv_attest::{Attestation, Attester};
-use qtv_block::{empty_transaction_root, transaction_root, Block as ChainBlock, Header};
+use qtv_block::{event_root, transaction_root, Block as ChainBlock, Header};
 use qtv_codec::{to_bytes, Decoder};
 use qtv_net::{Identity, PeerId};
 use qtv_node::consensus::{
@@ -35,7 +35,7 @@ use qtv_node::consensus::{
     Parent, Selection,
 };
 use qtv_node::fee::FeeParams;
-use qtv_node::ledger::{account_key, Account, Ledger};
+use qtv_node::ledger::{account_key, Account, BlockEvent, Ledger};
 use qtv_node::mempool::{Admitted, Mempool, Reject};
 use qtv_node::node::{
     committee_weights, day_of_height, execute_ordered, validator_address, Genesis,
@@ -227,6 +227,13 @@ pub struct DevNode {
     /// node answer whether a transaction landed and where without scanning the chain.
     /// It is grown as blocks finalise and rebuilt from the block store on reload.
     tx_index: HashMap<String, Height>,
+    /// The events each finalised block emitted, by height, so a client can read what a contract did in
+    /// a block without re running it. This is a serving index off to the side of consensus, the block
+    /// already commits to its events through the header event root, so it never affects the state root.
+    /// It grows as blocks finalise and starts empty on reload, since events are a product of execution
+    /// and not stored in the block, so a reader after a restart sees events from the blocks produced
+    /// since the restart forward.
+    events_by_height: HashMap<Height, Vec<BlockEvent>>,
     /// Arbitrary header notes to stamp by height, empty unless the operator sets
     /// them. When this node proposes a height that has an entry, the bytes go into
     /// the header's arbitrary data field exactly as given, a coinbase style note.
@@ -280,6 +287,7 @@ impl DevNode {
             chain: Vec::new(),
             slashed: Vec::new(),
             tx_index: HashMap::new(),
+            events_by_height: HashMap::new(),
             block_messages: HashMap::new(),
         };
 
@@ -481,13 +489,19 @@ impl DevNode {
         let proposer = validator_address(leader_for(selection, view));
         let candidates = self.mempool.candidates();
         let mut ledger = self.ledger.clone();
+        // Start the block's event buffer empty so its event root covers only the events this block
+        // emits, then compute the event root over them after execution and commit it in the header.
+        // With no contract calls the buffer stays empty and the event root equals the empty root, so
+        // this is inert on a transfer only chain and correct once a contract emits.
+        ledger.clear_block_events();
         let included = execute_ordered(&mut ledger, &candidates, &self.fee_params, day_of_height(height));
+        let event_leaves: Vec<Vec<u8>> = ledger.block_events().iter().map(BlockEvent::encode).collect();
         let mut header = Header::new(
             height,
             self.parent_header_hash,
             ledger.state_root(),
             transaction_root(&included),
-            empty_transaction_root(),
+            event_root(&event_leaves),
             *self.beacon.seed(),
             proposer,
             self.genesis_time + height * qtv_bft::params::SLOT_MS,
@@ -552,10 +566,13 @@ impl DevNode {
             return Err(RoundError::ProposalRejected);
         }
         let mut ledger = self.ledger.clone();
+        ledger.clear_block_events();
         let included = execute_ordered(&mut ledger, body, &self.fee_params, day_of_height(header.height()));
+        let event_leaves: Vec<Vec<u8>> = ledger.block_events().iter().map(BlockEvent::encode).collect();
         if included.len() != body.len()
             || ledger.state_root() != *header.state_root()
             || transaction_root(&included) != *header.transaction_root()
+            || event_root(&event_leaves) != *header.event_root()
         {
             return Err(RoundError::ProposalRejected);
         }
@@ -609,6 +626,12 @@ impl DevNode {
 
         // Adopt the state the staged block executed to as the confirmed state.
         self.ledger = staged.ledger;
+        // Record this block's events by height for serving, while they are still in the adopted ledger
+        // and before the next block clears the buffer. The header event root already commits to them.
+        let block_events = self.ledger.block_events().to_vec();
+        if !block_events.is_empty() {
+            self.events_by_height.insert(self.height, block_events);
+        }
         let cert_digest = certificate.digest();
         let attesters = certificate.attesters();
         let cert_slot = crate::wire::certificate_to_bytes(&certificate);
@@ -1181,6 +1204,12 @@ impl DevNode {
         self.mempool.candidates()
     }
 
+    /// The events a finalised block emitted, by height, or empty when the block emitted none or the
+    /// node has not held it since its last reload.
+    pub fn events_at(&self, height: Height) -> Vec<BlockEvent> {
+        self.events_by_height.get(&height).cloned().unwrap_or_default()
+    }
+
     /// The finalised block at a height, if the node holds it.
     pub fn block_at_height(&self, height: Height) -> Option<ChainBlock> {
         self.serve_blocks(height, height).into_iter().next()
@@ -1266,16 +1295,23 @@ impl DevNode {
         // Re-execute the body against a copy of the state, so a block that fails
         // the root check leaves the committed ledger untouched.
         let mut ledger = self.ledger.clone();
+        ledger.clear_block_events();
         let included = execute_ordered(&mut ledger, block.body(), &self.fee_params, day_of_height(header.height()));
+        let event_leaves: Vec<Vec<u8>> = ledger.block_events().iter().map(BlockEvent::encode).collect();
         if included.len() != block.body().len()
             || ledger.state_root() != *header.state_root()
             || transaction_root(&included) != *header.transaction_root()
+            || event_root(&event_leaves) != *header.event_root()
         {
             return Err(SyncError::WrongStateRoot);
         }
 
         // Every check passed: adopt the verified state and commit the block.
         self.ledger = ledger;
+        let block_events = self.ledger.block_events().to_vec();
+        if !block_events.is_empty() {
+            self.events_by_height.insert(self.height, block_events);
+        }
         self.persist(&block).map_err(|_| SyncError::Io)?;
         let cert_digest = certificate.digest();
         let leader = selection
