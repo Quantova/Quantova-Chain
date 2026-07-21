@@ -2,7 +2,7 @@
 
 This brings up a Quantova public testnet node with a faucet, so people can create a wallet and receive
 TQTOV to transact with. Everything here is ours. The chain is not a fork of Ethereum or Solidity, the
-addresses are q1, the unit is Quon, and the signatures are post quantum.
+addresses are Q1, the unit is Quon, and the signatures are post quantum.
 
 ## What you need
 
@@ -33,7 +33,7 @@ cd ../Transparency-Website/faucet-service
 FAUCET_OPERATOR_SEED=<the seed setup printed> FAUCET_RPC=http://127.0.0.1:8645 npm start
 ```
 
-The node serves the gateway on the configured RPC address, the faucet dispenses TQTOV to a q1 address
+The node serves the gateway on the configured RPC address, the faucet dispenses TQTOV to a Q1 address
 over that gateway through the QCore SDK, and the explorer indexer reads the same gateway to fill the
 explore page. A person onboards with the QCore SDK or the qcore terminal client. They create a wallet,
 claim from the faucet, and send a transfer.
