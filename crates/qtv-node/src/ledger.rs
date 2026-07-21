@@ -340,6 +340,9 @@ pub enum EnactError {
     BadAddress,
     UnknownParameter,
     BadValue,
+    /// The action passed its vote but the chain has no implementation for it yet, so enacting it must
+    /// fail rather than record a false enactment. It stays approved and can enact once implemented.
+    NotImplemented,
 }
 
 fn id_bytes_to_address(id: &[u8]) -> Option<String> {
@@ -1259,10 +1262,15 @@ impl Ledger {
                 self.set_account(&victim_addr, &account);
                 Ok(())
             }
+            // These actions are defined and can pass a vote, but the chain has no implementation for
+            // them yet, a chain upgrade, a bridge migration, adding an asset to a single asset ledger,
+            // and the standalone freeze. Enacting one must fail rather than tombstone the referendum
+            // with a receipt that falsely says it was carried out. It stays approved and enacts once
+            // the implementation lands.
             Action::Upgrade { .. }
             | Action::BridgeMigration { .. }
             | Action::AddAsset { .. }
-            | Action::Freeze { .. } => Ok(()),
+            | Action::Freeze { .. } => Err(EnactError::NotImplemented),
         }
     }
 
@@ -1570,6 +1578,33 @@ mod stake_state_tests {
         );
         assert_eq!(receipt.enacted_at, 7 * 86_400 + 1);
         assert!(receipt.tally.turnout_stake > 0);
+    }
+
+    #[test]
+    fn an_unimplemented_action_fails_to_enact_rather_than_claiming_success() {
+        let mut l = Ledger::new();
+        let proposer = gov_addr(30);
+        fund(&mut l, &proposer, 2_000_000 * 1_000_000);
+        // A chain upgrade passes its vote but the chain has no implementation for it yet.
+        let action = qtv_governance::Action::Upgrade { blob: vec![1, 2, 3] };
+        let id = l
+            .gov_propose(&proposer, qtv_governance::Track::ChainUpgrade, action, 0)
+            .unwrap();
+        let voter = gov_addr(31);
+        fund(&mut l, &voter, 2_000_000 * 1_000_000);
+        l.gov_vote(
+            &voter,
+            id,
+            true,
+            qtv_governance::Conviction::Liquid,
+            1_000_000 * 1_000_000,
+            0,
+        );
+        // Enacting after the fourteen day chain upgrade period fails rather than recording a receipt
+        // that falsely says the upgrade was carried out.
+        let result = l.gov_enact(id, 14 * 86_400 + 1);
+        assert_eq!(result, Err(EnactError::NotImplemented));
+        assert!(l.gov_receipt(id).is_none(), "a failed enactment writes no receipt");
     }
 
     #[test]
