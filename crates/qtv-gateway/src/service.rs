@@ -472,8 +472,11 @@ fn storage(node: &DevNode, address: &str) -> Result<Json, ClientError> {
         .contract_storage_at(address)
         .into_iter()
         .map(|(slot, value)| {
+            // The slot is the full thirty two byte storage key, rendered as hex so an explorer can show
+            // it, since it is a digest rather than a small integer.
+            let slot_hex: String = slot.iter().map(|b| format!("{b:02x}")).collect();
             object(vec![
-                ("slot", Json::str(slot.to_string())),
+                ("slot", Json::str(slot_hex)),
                 ("value", Json::str(value.to_string())),
             ])
         })
