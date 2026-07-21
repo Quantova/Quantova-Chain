@@ -51,6 +51,8 @@ pub enum Request {
     Storage(String),
     /// The total value in existence, in Quon.
     Supply,
+    /// The events a finalised block emitted, by height.
+    Events(u64),
 }
 
 /// A request the gateway could not carry out because the client sent it wrong, a
@@ -123,6 +125,13 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
         "supply" => Ok(Request::Supply),
         "get_container" => Ok(Request::Container(string_field(body, "address")?)),
         "get_storage" => Ok(Request::Storage(string_field(body, "address")?)),
+        "get_events" => {
+            let height = body
+                .get("height")
+                .and_then(Json::as_u64)
+                .ok_or_else(|| ClientError::bad("bad_request", "get_events needs a height"))?;
+            Ok(Request::Events(height))
+        }
         other => Err(ClientError {
             code: "unknown_method".to_string(),
             message: format!("no method named {other}"),
@@ -157,6 +166,7 @@ pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result
         Request::Supply => Ok(supply(node)),
         Request::Container(address) => container(node, &address),
         Request::Storage(address) => storage(node, &address),
+        Request::Events(height) => Ok(events(node, height)),
     }
 }
 
@@ -407,6 +417,30 @@ fn supply(node: &DevNode) -> Json {
         "supply_quon",
         Json::str(node.ledger().total_supply().to_string()),
     )])
+}
+
+/// The events a finalised block emitted, each naming the contract that emitted it, the four byte entry
+/// selector as hex, and the data as hex. Events are the machine's record of what happened in a call,
+/// committed under the block's event root, so an explorer indexes contract activity from here rather
+/// than re running the block. A height with no events, or one produced before the node last restarted,
+/// reads as an empty list.
+fn events(node: &DevNode, height: u64) -> Json {
+    let items: Vec<Json> = node
+        .events_at(height)
+        .iter()
+        .map(|event| {
+            object(vec![
+                ("contract", Json::str(&event.contract)),
+                ("selector", Json::str(crate::json::to_hex(&event.selector))),
+                ("data", Json::str(crate::json::to_hex(&event.data))),
+            ])
+        })
+        .collect();
+    object(vec![
+        ("height", Json::Int(height)),
+        ("count", Json::Int(items.len() as u64)),
+        ("events", Json::Array(items)),
+    ])
 }
 
 /// The container of the contract at an address, its compiled bytes as hex, or an error when the
