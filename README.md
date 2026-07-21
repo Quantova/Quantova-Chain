@@ -8,11 +8,11 @@ Quantova-Chain is the node and the ledger. It is the integration repository wher
 
 A Cargo workspace of seventeen crates that compose into a state transition and finalization loop. The in repository crates hold the ledger and the formats, and the node crate wires in the three upstream repositories, the Q-Crypto primitives, the QVM execution engine, and the QORUS consensus core, each pinned by an exact git tag. Almost every crate carries `#![forbid(unsafe_code)]`, and a `cargo deny` policy bans classical cryptography from the entire dependency tree.
 
-Nothing here is borrowed. The addresses are q1 Bech32m, never a twenty byte hex string and never SS58. The unit is Quon. The signatures are ML-DSA. The codec, the state trie, the transaction format, and the RPC surface are all Quantova's own.
+Nothing here is borrowed. The addresses are Q1 Bech32m, never a twenty byte hex string and never SS58. The unit is Quon. The signatures are ML-DSA. The codec, the state trie, the transaction format, and the RPC surface are all Quantova's own.
 
 ## The ledger and the formats
 
-- **qtv-idfmt** is the single formatting path for every identifier. Raw bytes become a Bech32m string under a role prefix, an account address under `q`, so an address reads as `q1`, and separate prefixes for secrets, transactions, blocks, state roots, contract interfaces, and proofs. Nothing here emits Ethereum style hex.
+- **qtv-idfmt** is the single formatting path for every identifier. Raw bytes become a Bech32m string under a role prefix, an account address under `q`, so an address reads as `Q1`, and separate prefixes for secrets, transactions, blocks, state roots, contract interfaces, and proofs. Nothing here emits Ethereum style hex.
 - **qtv-codec** is the canonical codec. Every value has exactly one valid encoding, deterministic and length delimited, and the decoder refuses any input that is not the canonical form, no trailing bytes, no overlong length, no unknown tag.
 - **qtv-account** is the account model and key derivation. Keys are scheme tagged, ML-DSA by default with SLH-DSA and a gated Falcon slot, derived through a SHAKE256 pipeline. An address is the 256 bit SHA3-256 commitment over the scheme tag and the full post quantum public key, so the address binds a real key at full width rather than a truncated hash.
 - **qtv-tx** is the transaction body, wrapper, signing, and verification, with domain tagged digests and deterministic signing.
