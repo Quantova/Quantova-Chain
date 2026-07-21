@@ -614,12 +614,6 @@ impl Decode for Referendum {
     }
 }
 
-/// The permanent record the constitution's fifth invariant requires for every
-/// enacted referendum: the referendum it settles, the hash of the action that was
-/// run, the recovery scope it was bound to (zero when it was not a recovery), the
-/// final tally, and the day it enacted. Once written it is never cleared, so the
-/// enactment of any decision can be audited against the action and the vote that
-/// carried it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnactmentReceipt {
     pub referendum: u64,
@@ -713,11 +707,9 @@ mod tests {
         let mut t = Tally::default();
         t.record(true, Conviction::Liquid, 3_000);
         t.record(false, Conviction::Liquid, 2_000);
-        // Sixty percent approval and five percent support clear the QIP bars.
         assert!(t.reached_approval(Track::Parameter));
         assert!(t.reached_support(Track::Parameter, 100_000));
         assert!(t.approved(Track::Parameter, 100_000));
-        // The same tally clears neither of the chain upgrade bars (needs 80% / 40%).
         assert!(!t.reached_approval(Track::ChainUpgrade));
         assert!(!t.reached_support(Track::ChainUpgrade, 100_000));
         assert!(!t.approved(Track::ChainUpgrade, 100_000));
@@ -758,7 +750,6 @@ mod tests {
             Status::Deciding
         );
         assert_eq!(r.resolve(1_000 + 3 * DAY_SECONDS, 100_000), Status::Approved);
-        // Resolving again does not move an already decided referendum.
         assert_eq!(r.resolve(1_000 + 30 * DAY_SECONDS, 100_000), Status::Approved);
 
         let mut thin = Referendum::open(2, Track::Mint, vec![2; 32], 0);
@@ -798,17 +789,14 @@ mod tests {
             victim: vec![2; 32],
             seizures: seizures.clone(),
         };
-        // A recovery whose committed scope no longer matches is unenactable.
         assert_eq!(
             check_enactment(Track::FreezeRecovery, &rec, false, |_| false),
             Err(Violation::RecoveryOutOfScope)
         );
-        // In scope but reaching a protected account (stake, gov lock, treasury) is unenactable.
         assert_eq!(
             check_enactment(Track::FreezeRecovery, &rec, true, |addr| addr == [1u8; 32]),
             Err(Violation::RecoveryTouchesProtected)
         );
-        // In scope and touching no protected account, the recovery stands.
         assert_eq!(
             check_enactment(Track::FreezeRecovery, &rec, true, |_| false),
             Ok(())

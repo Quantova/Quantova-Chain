@@ -1,14 +1,4 @@
-//! A distribution summary over a set of samples, reported as the median, the
-//! ninetieth and ninety ninth percentiles, and the maximum, so a figure carries
-//! its tail rather than a single central point.
-//!
-//! Percentiles are read by linear interpolation between the two nearest ranks of
-//! the sorted samples, the same method a statistics package uses, so a reported
-//! tail is not rounded to a coarse rank when the sample count is small.
 
-/// A summary of a set of samples: the count, the minimum, the median, the
-/// ninetieth and ninety ninth percentiles, the maximum, and the mean. All the
-/// value fields are in the same unit as the samples.
 #[derive(Clone, Copy, Debug)]
 pub struct Distribution {
     pub count: usize,
@@ -21,8 +11,6 @@ pub struct Distribution {
 }
 
 impl Distribution {
-    /// Summarise a set of samples. Returns None for an empty set, since a
-    /// distribution over no samples has no honest central point or tail.
     pub fn of(samples: &[f64]) -> Option<Distribution> {
         if samples.is_empty() {
             return None;
@@ -42,9 +30,6 @@ impl Distribution {
     }
 }
 
-/// The percentile of a sorted, ascending sample set by linear interpolation
-/// between the two nearest ranks. A percentile of zero is the minimum and a
-/// hundred is the maximum.
 fn percentile(sorted: &[f64], pct: f64) -> f64 {
     let n = sorted.len();
     if n == 1 {
@@ -81,7 +66,6 @@ mod tests {
         let d = Distribution::of(&samples).expect("many samples");
         assert_eq!(d.min, 1.0);
         assert_eq!(d.max, 100.0);
-        // Linear interpolation over 1..=100: rank = pct/100 * 99.
         assert!((d.p50 - 50.5).abs() < 1e-9);
         assert!((d.p90 - 90.1).abs() < 1e-9);
         assert!((d.p99 - 99.01).abs() < 1e-9);

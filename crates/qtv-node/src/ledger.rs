@@ -1,13 +1,3 @@
-//! Chain state held in the qtv-state sparse Merkle trie, following SPEC-state.md
-//! and SPEC-accounts.md.
-//!
-//! Every address maps to an account record that holds the nonce that orders the
-//! transactions of the sender, the native balance in base units, and the sender
-//! signature scheme and public key. The public key is kept in state so a
-//! signature can be verified without a side channel. The trie is keyed by the
-//! thirty two byte address hash, which is the canonical address payload, so no
-//! separate hashing step is introduced. The state root is the trie root over the
-//! whole account set and is fixed by that set, independent of insertion order.
 
 use qtv_codec::{from_bytes, to_bytes, Decode, Decoder, Encode, Encoder, Error};
 use qtv_crypto::sha3;
@@ -18,9 +8,6 @@ use qtv_governance::{
 use qtv_staking::{Bond, Session, SessionMeter};
 use qtv_state::{Key, Trie, HASH_LEN, KEY_LEN};
 
-/// An account record: the nonce, the native balance, the signature scheme, and
-/// the public key the sender signs under. An absent account reads as the default,
-/// a fresh account with a zero balance and no key.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Account {
     pub nonce: u64,
@@ -30,8 +17,6 @@ pub struct Account {
 }
 
 impl Account {
-    /// A funded account with a known signing key, the shape a genesis account and
-    /// a sender both take.
     pub fn funded(balance: u64, scheme: u8, public_key: Vec<u8>) -> Self {
         Account {
             nonce: 0,
@@ -41,8 +26,6 @@ impl Account {
         }
     }
 
-    /// Whether the account carries a public key, the precondition for verifying a
-    /// signature from it. A receive only account has none until it first signs.
     pub fn has_key(&self) -> bool {
         !self.public_key.is_empty()
     }
@@ -68,11 +51,6 @@ impl Decode for Account {
     }
 }
 
-/// The trie key for an address, the canonical address payload rendered back to
-/// its raw bytes. A canonical address carries the full thirty two byte hash, so
-/// the payload fills the key. A shorter payload is left padded space, and an
-/// address that does not parse maps to the zero key, which the caller rules out
-/// by validating the address before it reaches state.
 pub(crate) fn state_key(address: &str) -> Key {
     let mut key = [0u8; KEY_LEN];
     if let Ok(payload) = qtv_idfmt::parse_address(address) {
@@ -82,9 +60,6 @@ pub(crate) fn state_key(address: &str) -> Key {
     key
 }
 
-/// The trie key an address maps to, the handle a disk store persists an account
-/// under. It is the same key the ledger writes under, so a persisted account
-/// reloads into the identical trie position.
 pub fn account_key(address: &str) -> Key {
     state_key(address)
 }
@@ -96,9 +71,6 @@ const STAKE_TREASURY_TAG: &[u8] = b"qtv/stake/treasury";
 const GRANTS_POOL_TAG: &[u8] = b"qtv/grants/pool";
 const SUPPLY_TAG: &[u8] = b"qtv/supply";
 
-/// The transaction fee split, in basis points of ten thousand. A portion is burned, credited to no
-/// one so the total supply falls, and the rest funds the validators reward pool and the grants pool.
-/// These are the genesis defaults; governance can change them (SPEC-economics).
 const FEE_BURN_BPS: u64 = 2_000;
 const FEE_VALIDATORS_BPS: u64 = 6_000;
 const FEE_GRANTS_BPS: u64 = 2_000;
@@ -122,11 +94,6 @@ fn stake_rewards_key(id: &[u8; 32]) -> Key {
     sha3::sha3_256(&input)
 }
 
-/// A validator's persisted reward record: the tranches accrued to it, each dated
-/// by the session it was earned and carrying how much of it has been claimed. The
-/// list is length prefixed so it round trips through one trie leaf, and it stays
-/// short because a tranche is added at most once per session and a fully claimed,
-/// fully vested tranche is pruned on claim.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RewardBook {
     pub tranches: Vec<qtv_staking::RewardTranche>,
@@ -180,9 +147,6 @@ pub fn stake_system_address() -> String {
         .expect("a full hash reaches the address floor")
 }
 
-/// The reserved address a validator sends an empty transfer to in order to claim
-/// its vested rewards into its balance. The amount is ignored; the transfer is the
-/// claim intent.
 pub fn stake_claim_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/stake/claim"))
         .expect("a full hash reaches the address floor")
@@ -245,12 +209,6 @@ pub fn gov_system_address() -> String {
         .expect("a full hash reaches the address floor")
 }
 
-/// The reserved address an account sends its public key to in order to register it. A call whose
-/// target is this address carries the account's own public key in its arguments, and the node installs
-/// that key on the account so it can sign from then on. This is how an account funded by a transfer,
-/// which arrives with a balance but no key, becomes able to send. The key is proven to be the
-/// account's own by hashing to the account address under the scheme, and by signing the very
-/// transaction that registers it, so no one can register a key for an address that is not theirs.
 pub fn key_register_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/key/register"))
         .expect("a full hash reaches the address floor")
@@ -259,17 +217,11 @@ pub fn key_register_address() -> String {
 const VM_CODE_TAG: &[u8] = b"qtv/vm/code/";
 const VM_STORE_TAG: &[u8] = b"qtv/vm/store/";
 
-/// The reserved address a deploy transaction targets. A transfer style call whose target is this
-/// address, carrying a container in its arguments, deploys that container to a fresh contract address.
 pub fn vm_deploy_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/vm/deploy"))
         .expect("a full hash reaches the address floor")
 }
 
-/// The address a deploy from a given account at a given nonce lands the contract at. It is a pure
-/// function of the deployer and the nonce, so the deployer computes the same address the chain does
-/// and can call the contract immediately, and two deploys from the same account never collide because
-/// the nonce differs.
 pub fn contract_address(deployer: &str, nonce: u64) -> Option<String> {
     let id = address_id(deployer)?;
     let mut input = Vec::with_capacity(16 + id.len() + 8);
@@ -293,31 +245,15 @@ fn contract_store_key(id: &[u8; 32]) -> Key {
     sha3::sha3_256(&input)
 }
 
-/// The length in bytes of the trusted execution context the node injects at the front of a contract's
-/// scratch memory before it runs: the thirty two byte caller address, then the thirty two byte address
-/// of the contract being called, then the eight byte consensus time. A contract reads its caller and
-/// its own identity as whole addresses, so an owner check binds all thirty two bytes and a signed
-/// message can commit to the exact contract it authorizes.
 pub const CONTRACT_CONTEXT_BYTES: usize = 72;
 
-/// The leading eight bytes of an address payload as a big endian word. This is a lossy reduction of a
-/// full address and is retained only as an opaque handle; it is no longer how a contract sees its
-/// caller, which now arrives as the whole thirty two byte address in the trusted context, so an
-/// address a contract compares or keys on is never narrowed to this word by the node.
 pub fn address_word(address: &str) -> Option<u64> {
     let id = address_id(address)?;
     Some(u64::from_be_bytes(id[..8].try_into().expect("eight bytes")))
 }
 
-/// A contract storage key, the thirty two byte slot a contract loads and stores under. A scalar field
-/// key is the machine's `scalar_key` of its slot number and a keyed map derives its key by hashing the
-/// map and the whole thirty two byte address, so the slot space is the digest space and two distinct
-/// addresses share a balance slot only on a hash collision, not on a sixty four bit match.
 type StorageKey = [u8; 32];
 
-/// Encode a contract's whole storage as one length prefixed run of key and value entries, so a
-/// contract's state is one trie leaf that loads and stores in one read and one write regardless of how
-/// its keyed maps scatter across the key space. The key is the full thirty two byte slot.
 fn encode_storage(storage: &std::collections::BTreeMap<StorageKey, u64>) -> Vec<u8> {
     let mut encoder = qtv_codec::Encoder::new();
     (storage.len() as u64).encode(&mut encoder);
@@ -359,8 +295,6 @@ pub enum EnactError {
     BadAddress,
     UnknownParameter,
     BadValue,
-    /// The action passed its vote but the chain has no implementation for it yet, so enacting it must
-    /// fail rather than record a false enactment. It stays approved and can enact once implemented.
     NotImplemented,
 }
 
@@ -406,11 +340,6 @@ impl Ledger {
         self.trie.insert(stake_bond_key(id), Vec::new());
     }
 
-    /// The committee weight of an address in whole native units, the unit the
-    /// sortition sampler weighs a validator by. A banned account or one with no
-    /// bond weighs zero. The base unit remainder below one whole unit is dropped,
-    /// which can never cross the eligibility floor because the minimum bond is
-    /// thousands of whole units, so the truncation only ever discards dust.
     pub fn staked_weight(&self, address: &str) -> u64 {
         let id = match address_id(address) {
             Some(id) => id,
@@ -424,12 +353,6 @@ impl Ledger {
             .unwrap_or(0)
     }
 
-    /// Seed a genesis validator's bond directly, returning the state key and value
-    /// so a persisting node can write it under the genesis root. The amount is in
-    /// base units and the bond dates from day zero. This puts the stake the
-    /// committee already assumed onto the ledger, so every later reweight reads the
-    /// live bond rather than a genesis constant, and a slash or a top up moves the
-    /// committee weight with it.
     pub fn seed_validator_bond(&mut self, address: &str, amount: u64) -> Option<(Key, Vec<u8>)> {
         let id = address_id(address)?;
         let bond = Bond {
@@ -470,11 +393,6 @@ impl Ledger {
             .insert(stake_singleton_key(STAKE_TREASURY_TAG), to_bytes(&amount));
     }
 
-    /// The total value in existence, in Quon. Genesis sets it to the sum of every funded balance, the
-    /// seeded reward pool, and the seeded validator bonds. Only two things change it after that, a fee
-    /// burn lowers it and a governance mint raises it, because every other movement, a transfer, a
-    /// bond, a claim, or a fee into the pools, only moves value between places that are all part of the
-    /// supply. It is the live figure the gateway reports rather than a fixed headline.
     pub fn total_supply(&self) -> u64 {
         self.trie
             .get(&stake_singleton_key(SUPPLY_TAG))
@@ -487,8 +405,6 @@ impl Ledger {
             .insert(stake_singleton_key(SUPPLY_TAG), to_bytes(&amount));
     }
 
-    /// Add to the total supply, on a genesis funding or a governance mint. A zero change writes
-    /// nothing, so an empty block or a fee whose whole amount funds the pools moves no state.
     pub fn credit_supply(&mut self, amount: u64) {
         if amount == 0 {
             return;
@@ -497,7 +413,6 @@ impl Ledger {
         self.set_total_supply(next);
     }
 
-    /// Remove from the total supply, on a fee burn. A zero change writes nothing.
     pub fn debit_supply(&mut self, amount: u64) {
         if amount == 0 {
             return;
@@ -506,9 +421,6 @@ impl Ledger {
         self.set_total_supply(next);
     }
 
-    /// Set the genesis total supply and return the state key and value, so genesis persists it to the
-    /// store the same way it persists the reward pool and the validator bonds. This is the sum of every
-    /// funded balance, the seeded reward pool, and the seeded validator bonds.
     pub fn seed_supply(&mut self, amount: u64) -> (Key, Vec<u8>) {
         self.set_total_supply(amount);
         (stake_singleton_key(SUPPLY_TAG), to_bytes(&amount))
@@ -526,20 +438,12 @@ impl Ledger {
             .insert(stake_singleton_key(GRANTS_POOL_TAG), to_bytes(&amount));
     }
 
-    /// Split a charged transaction fee: a portion is burned, credited to no one so the total supply
-    /// falls, and the rest funds the validators reward pool and the grants pool. The burned portion is
-    /// the remainder after the two credited shares, so any rounding dust is burned rather than
-    /// misallocated and no unit is ever created. The shares are the genesis defaults and governance
-    /// can change them (SPEC-economics).
     pub fn collect_fee(&mut self, fee: u64) {
         if fee == 0 {
             return;
         }
         let validators = ((fee as u128) * (FEE_VALIDATORS_BPS as u128) / 10_000) as u64;
         let grants = ((fee as u128) * (FEE_GRANTS_BPS as u128) / 10_000) as u64;
-        // The rest, the burn share plus any rounding dust, is credited nowhere, so it leaves the
-        // supply. The two credited shares stay part of the supply because the pools are part of it, so
-        // only the burn is removed from the total.
         let pool = self.stake_pool().saturating_add(validators);
         self.set_stake_pool(pool);
         let grants_pool = self.grants_pool().saturating_add(grants);
@@ -547,19 +451,12 @@ impl Ledger {
         self.debit_supply(fee - validators - grants);
     }
 
-    /// The portion of a fee that is burned under the current split, credited to no one. Used to check
-    /// the supply drops by exactly the burned share.
     pub fn fee_burned(fee: u64) -> u64 {
         let validators = ((fee as u128) * (FEE_VALIDATORS_BPS as u128) / 10_000) as u64;
         let grants = ((fee as u128) * (FEE_GRANTS_BPS as u128) / 10_000) as u64;
         fee - validators - grants
     }
 
-    /// The validators and grants shares of a single fee, split exactly as collect_fee splits it, but
-    /// without touching the pools. A block executor accumulates these across its transactions and
-    /// credits the pools once, which lands on the identical pool values as crediting per transaction,
-    /// since addition is associative, while doing two pool writes for the whole block instead of two
-    /// per transaction.
     pub fn fee_shares(fee: u64) -> (u64, u64) {
         if fee == 0 {
             return (0, 0);
@@ -569,9 +466,6 @@ impl Ledger {
         (validators, grants)
     }
 
-    /// Credit already split validators and grants shares to their pools in one pair of writes. Used by
-    /// the block executor after it has summed the per transaction shares, so the pools are read and
-    /// written once for the whole block rather than once per transaction.
     pub fn credit_pools(&mut self, validators: u64, grants: u64) {
         if validators == 0 && grants == 0 {
             return;
@@ -582,10 +476,6 @@ impl Ledger {
         self.set_grants_pool(grants_pool);
     }
 
-    /// The keys changed since the last call and their current values, so a persisting node writes back
-    /// exactly what a block changed, accounts and protocol singletons alike, the treasury, the pool,
-    /// bonds, and any other state. This replaces persisting a hand listed set of touched accounts,
-    /// which silently dropped every singleton a block modified and diverged a node on reload.
     pub fn take_dirty_entries(&mut self) -> Vec<(Key, Vec<u8>)> {
         self.trie
             .take_persist_dirty()
@@ -597,7 +487,6 @@ impl Ledger {
             .collect()
     }
 
-    /// Discard the pending persist set, for after genesis has written the whole state explicitly.
     pub fn clear_dirty(&mut self) {
         self.trie.clear_persist_dirty();
     }
@@ -618,11 +507,6 @@ impl Ledger {
         self.trie.insert(gov_blacklist_key(id), vec![1]);
     }
 
-    /// Whether an address has been retired by the blacklist and kill track. A
-    /// blacklisted address is refused as the sender or the recipient of a transfer,
-    /// as a governance caller, and as a staker, so a compromised or hostile address
-    /// stops moving value the block after the referendum enacts. It is a pure read
-    /// of committed state, so every node refuses the same address at the same height.
     pub fn is_blacklisted(&self, address: &str) -> bool {
         match address_id(address) {
             Some(id) => self.is_gov_blacklisted(&id),
@@ -630,10 +514,6 @@ impl Ledger {
         }
     }
 
-    /// The native to dollar rate governance publishes, in base dollar units per
-    /// whole native unit, the figure the session reward cap is measured against. It
-    /// is zero until governance sets it, and a zero rate holds every accrual to
-    /// nothing, so no reward is ever paid on an unpublished rate.
     pub fn stake_price(&self) -> u128 {
         self.trie
             .get(&stake_singleton_key(STAKE_PRICE_TAG))
@@ -648,10 +528,6 @@ impl Ledger {
         );
     }
 
-    /// The day mainnet began, the anchor the reward blackout is measured from. It
-    /// defaults to the maximum day, which holds the whole validator set in blackout
-    /// so no reward accrues until governance sets the real mainnet start. This is
-    /// what keeps a test network, which never sets it, from ever paying a reward.
     pub fn stake_mainnet_start(&self) -> u64 {
         self.trie
             .get(&stake_singleton_key(STAKE_MAINNET_TAG))
@@ -664,9 +540,6 @@ impl Ledger {
             .insert(stake_singleton_key(STAKE_MAINNET_TAG), to_bytes(&day));
     }
 
-    /// The session meter, the running count of transactions in the open session
-    /// window and the day the window opened. It defaults to a window that opened on
-    /// day zero, so the first session runs from genesis.
     pub fn session_meter(&self) -> SessionMeter {
         self.trie
             .get(&stake_singleton_key(STAKE_METER_TAG))
@@ -691,11 +564,6 @@ impl Ledger {
         self.trie.insert(stake_rewards_key(id), to_bytes(book));
     }
 
-    /// Accrue one session's reward to a validator from the pool. Nothing accrues
-    /// during the mainnet blackout, on an unpublished rate, to an account with no
-    /// bond, or beyond what the pool holds. The paid amount leaves the pool and
-    /// lands as a tranche dated to the accrual day, from which it vests on the
-    /// released schedule. Returns the amount paid, so a caller can total the round.
     pub fn accrue_reward(&mut self, address: &str, session: Session, now_day: u64) -> u64 {
         match address_id(address) {
             Some(id) => self.accrue_reward_by_id(&id, session, now_day),
@@ -730,8 +598,6 @@ impl Ledger {
         paid
     }
 
-    /// The reward a validator could claim on a given day, the vested but unclaimed
-    /// amount summed over its tranches. It is read only and moves no balance.
     pub fn claimable_reward(&self, address: &str, now_day: u64) -> u64 {
         let id = match address_id(address) {
             Some(id) => id,
@@ -747,10 +613,6 @@ impl Ledger {
             .sum()
     }
 
-    /// Claim a validator's vested rewards into its balance on a given day. Each
-    /// tranche releases the vested amount not yet claimed, the total credits the
-    /// account, and a tranche that is fully vested and fully claimed is pruned so
-    /// the book cannot grow without bound. Returns the amount credited.
     pub fn claim_reward(&mut self, address: &str, now_day: u64) -> u64 {
         let id = match address_id(address) {
             Some(id) => id,
@@ -775,10 +637,6 @@ impl Ledger {
         credited
     }
 
-    /// Charge a claim transaction's fee, bump the nonce, and credit the vested
-    /// rewards into the sender's balance. The fee applies whether or not anything
-    /// was vested, so a claim with nothing to release is a fee paying no op rather
-    /// than a free retry. Returns false only when the sender cannot cover the fee.
     pub fn claim_with_fee(&mut self, address: &str, fee: u64, now_day: u64) -> bool {
         let mut account = self.account(address);
         if account.balance < fee {
@@ -792,12 +650,6 @@ impl Ledger {
         true
     }
 
-    /// Feed a block's transaction count into the session meter and, when the session
-    /// window closes, classify it and reset the window. Returns the classification
-    /// of the session that just closed, or None while the window is still open. The
-    /// meter is persisted, so the count carries across blocks and reloads, and the
-    /// classification is a pure function of committed state, so every node closes the
-    /// same session on the same day with the same verdict.
     pub fn record_session(&mut self, transactions: u64, now_day: u64) -> Option<Session> {
         let mut meter = self.session_meter();
         meter.record(transactions);
@@ -806,8 +658,6 @@ impl Ledger {
         closed
     }
 
-    /// Whether an address holds a deployed contract, so a transaction to it is a call rather than a
-    /// transfer. It is a pure read of committed state.
     pub fn is_contract(&self, address: &str) -> bool {
         match address_id(address) {
             Some(id) => self.contract_code(&id).is_some(),
@@ -815,15 +665,10 @@ impl Ledger {
         }
     }
 
-    /// The container of the contract at an address, or None when the address holds no contract. This
-    /// is the address facing form of contract_code, so a reader holding a q1 address need not reduce
-    /// it to an id first. The gateway reads a container through this.
     pub fn contract_code_at(&self, address: &str) -> Option<Vec<u8>> {
         self.contract_code(&address_id(address)?)
     }
 
-    /// The whole storage of the contract at an address, empty when the address holds no contract. The
-    /// address facing form of contract_storage.
     pub fn contract_storage_at(&self, address: &str) -> std::collections::BTreeMap<StorageKey, u64> {
         match address_id(address) {
             Some(id) => self.contract_storage(&id),
@@ -831,7 +676,6 @@ impl Ledger {
         }
     }
 
-    /// The deployed container of a contract, its compiled bytes, or None when the id holds no contract.
     pub fn contract_code(&self, id: &[u8; 32]) -> Option<Vec<u8>> {
         self.trie
             .get(&contract_code_key(id))
@@ -839,14 +683,10 @@ impl Ledger {
             .map(|bytes| bytes.to_vec())
     }
 
-    /// Deploy a container at a contract id. The container is the compiled contract the virtual machine
-    /// runs; it is written once and read on every call.
     pub fn set_contract_code(&mut self, id: &[u8; 32], code: &[u8]) {
         self.trie.insert(contract_code_key(id), code.to_vec());
     }
 
-    /// Deploy a container from a deployer at a nonce, storing it at the derived contract address and
-    /// returning that address so the caller records where the contract lives.
     pub fn deploy_contract(&mut self, deployer: &str, nonce: u64, code: &[u8]) -> Option<String> {
         let contract = contract_address(deployer, nonce)?;
         let id = address_id(&contract)?;
@@ -854,8 +694,6 @@ impl Ledger {
         Some(contract)
     }
 
-    /// The whole storage of a contract, loaded as the slot to value map the virtual machine reads. An
-    /// absent contract reads as empty, so a first call sees a clean slate.
     pub fn contract_storage(&self, id: &[u8; 32]) -> std::collections::BTreeMap<StorageKey, u64> {
         match self.trie.get(&contract_store_key(id)) {
             Some(bytes) if !bytes.is_empty() => decode_storage(bytes),
@@ -863,7 +701,6 @@ impl Ledger {
         }
     }
 
-    /// Write back a contract's whole storage after a call, as one trie leaf.
     pub fn set_contract_storage(
         &mut self,
         id: &[u8; 32],
@@ -873,17 +710,6 @@ impl Ledger {
             .insert(contract_store_key(id), encode_storage(storage));
     }
 
-    /// Call an entry of a deployed contract. The contract's code and whole storage load from state, and
-    /// the argument memory is the caller supplied bytes with the trusted execution context overwritten
-    /// in place, so a caller can forge none of it. The context is the full thirty two byte caller
-    /// address at offset zero, the full thirty two byte address of the contract being called at offset
-    /// thirty two, and the eight byte consensus time at offset sixty four, spanning the first seventy
-    /// two bytes of scratch (see `CONTRACT_CONTEXT_BYTES`). The caller is injected in full, not reduced
-    /// to a leading word, so two addresses that share a prefix are distinct to the contract and an
-    /// owner check the contract runs binds the whole address. A clean halt commits the post execution
-    /// storage. A call that records a native transfer effect is refused and commits nothing, because
-    /// moving native value out of a contract needs the transfer bridged back to the ledger, which is a
-    /// later step; so only a pure state contract runs today. Returns true when the call committed.
     pub fn call_contract(
         &mut self,
         caller: &str,
@@ -904,18 +730,12 @@ impl Ledger {
         let storage = self.contract_storage(&contract_id);
         let mut memory = vec![0u8; user_memory.len().max(CONTRACT_CONTEXT_BYTES)];
         memory[..user_memory.len()].copy_from_slice(user_memory);
-        // The trusted context, injected in full and overwriting any caller supplied bytes: the whole
-        // caller address, the whole contract address, and the consensus time. A parse failure on the
-        // caller lands the zero address, which owns nothing, so a malformed caller can pass no check.
         let caller_id = address_id(caller).unwrap_or([0u8; 32]);
         memory[0..32].copy_from_slice(&caller_id);
         memory[32..64].copy_from_slice(&contract_id);
         memory[64..72].copy_from_slice(&now_seconds.to_be_bytes());
         match crate::execution::execute_contract_call(&code, selector, storage, &memory, meter) {
             Ok(outcome) => {
-                // A contract initiated native transfer is not applied by the node yet, so a call that
-                // records one is refused and no state moves. A call that only records events commits,
-                // and its events are collected in emission order for the block event root.
                 if outcome
                     .effects
                     .iter()
@@ -939,9 +759,6 @@ impl Ledger {
         }
     }
 
-    /// The reward earning validator set, the ids the session accrual pays. It is
-    /// written at genesis from the committee set and read at every session close, so
-    /// the accrual pays exactly the validators the chain committed to.
     pub fn validator_ids(&self) -> Vec<[u8; 32]> {
         let bytes = match self.trie.get(&stake_singleton_key(STAKE_VALIDATORS_TAG)) {
             Some(bytes) if !bytes.is_empty() => bytes,
@@ -956,8 +773,6 @@ impl Ledger {
         ids
     }
 
-    /// Record the validator id set, returning the state key and value so a
-    /// persisting node can write it under the genesis root.
     pub fn seed_validator_set(&mut self, ids: &[[u8; 32]]) -> (Key, Vec<u8>) {
         let mut bytes = Vec::with_capacity(ids.len() * KEY_LEN);
         for id in ids {
@@ -968,13 +783,6 @@ impl Ledger {
         (key, bytes)
     }
 
-    /// Tick the session meter for a block and, when the session window closes, pay
-    /// each validator its session reward from the pool. It is inert until governance
-    /// sets the mainnet start, so a test network never meters or pays, and once
-    /// mainnet is set it meters every block and pays at each window close, all a pure
-    /// function of committed state so every node settles the session alike. The
-    /// transaction count is the block's included count, identical on the builder and
-    /// on every validator that re-executes the same body.
     pub fn settle_session(&mut self, now_day: u64, transactions: u64) {
         if self.stake_mainnet_start() == u64::MAX {
             return;
@@ -998,10 +806,6 @@ impl Ledger {
             .insert(stake_singleton_key(GOV_NEXT_TAG), to_bytes(&id));
     }
 
-    /// The governance electorate, the total value locked for voting across every
-    /// live ballot. It is the denominator the support threshold is measured
-    /// against, and it moves only as locks open and release, never as a referendum
-    /// tallies, so support reads as the share of the locked electorate that voted.
     pub fn gov_total_locked(&self) -> u128 {
         self.trie
             .get(&stake_singleton_key(GOV_LOCKED_TAG))
@@ -1041,9 +845,6 @@ impl Ledger {
         self.trie.insert(gov_action_key(id), Vec::new());
     }
 
-    /// The permanent enactment record for a referendum, written when it enacts and
-    /// never cleared, so any enacted decision can be audited against the action hash,
-    /// the recovery scope it was bound to, and the tally that carried it.
     pub fn gov_receipt(&self, id: u64) -> Option<EnactmentReceipt> {
         self.trie
             .get(&gov_receipt_key(id))
@@ -1082,11 +883,6 @@ impl Ledger {
         self.trie.insert(gov_lock_key(voter), Vec::new());
     }
 
-    /// Whether recovery, freeze, or blacklist may never reach this account. The
-    /// second constitutional invariant shields validator stake and governance
-    /// locks, and the two protocol system accounts are shielded with them. An
-    /// account carrying a bond or a lock is therefore untouchable by the recovery
-    /// tracks, so a referendum can never seize consensus or voting collateral.
     fn is_protected_account(&self, addr: &[u8]) -> bool {
         let id = match id_from_slice(addr) {
             Some(id) => id,
@@ -1100,10 +896,6 @@ impl Ledger {
         id == stake_id || id == gov_id
     }
 
-    /// Open a referendum on a track, debiting the track deposit from the proposer.
-    /// The action must belong to the track, and the deposit is held until the
-    /// referendum concludes, when it returns on reaching support or is forfeit to
-    /// the treasury on spam or a kill. Returns the new referendum id.
     pub fn gov_propose(
         &mut self,
         proposer: &str,
@@ -1130,11 +922,6 @@ impl Ledger {
         Some(id)
     }
 
-    /// Cast a ballot on a live referendum. The stake is locked from the voter's
-    /// balance into a governance lock, separate from any validator bond, so voting
-    /// weight never draws on consensus collateral. Weight is the stake times the
-    /// conviction factor; a voter votes once per referendum. The lock releases on
-    /// the conviction schedule.
     pub fn gov_vote(
         &mut self,
         voter: &str,
@@ -1186,9 +973,6 @@ impl Ledger {
         true
     }
 
-    /// Resolve a referendum once its window closes, settling the deposit on the
-    /// first resolution: returned to the proposer on reaching support, or forfeit
-    /// to the treasury on spam or a kill. Idempotent once decided.
     pub fn gov_conclude(&mut self, referendum_id: u64, now: u64) -> Option<Status> {
         let mut referendum = self.gov_referendum(referendum_id)?;
         if referendum.status != Status::Deciding {
@@ -1212,10 +996,6 @@ impl Ledger {
         Some(status)
     }
 
-    /// Enact an approved referendum. It concludes first, then the constitution gate
-    /// checks the action against its track, the committed recovery scope, and the
-    /// protected accounts, and only a clean action executes. The action record is
-    /// tombstoned on success so a referendum enacts exactly once.
     pub fn gov_enact(&mut self, referendum_id: u64, now: u64) -> Result<(), EnactError> {
         let status = self.gov_conclude(referendum_id, now).ok_or(EnactError::Unknown)?;
         if status != Status::Approved {
@@ -1259,7 +1039,6 @@ impl Ledger {
                 let mut account = self.account(&addr);
                 account.balance = account.balance.saturating_add(*amount);
                 self.set_account(&addr, &account);
-                // A mint creates value that did not exist, so it raises the total supply.
                 self.credit_supply(*amount);
                 Ok(())
             }
@@ -1289,11 +1068,6 @@ impl Ledger {
                 self.set_account(&victim_addr, &account);
                 Ok(())
             }
-            // These actions are defined and can pass a vote, but the chain has no implementation for
-            // them yet, a chain upgrade, a bridge migration, adding an asset to a single asset ledger,
-            // and the standalone freeze. Enacting one must fail rather than tombstone the referendum
-            // with a receipt that falsely says it was carried out. It stays approved and enacts once
-            // the implementation lands.
             Action::Upgrade { .. }
             | Action::BridgeMigration { .. }
             | Action::AddAsset { .. }
@@ -1310,8 +1084,6 @@ impl Ledger {
             b"mainnet_start" => {
                 let day = u64_from_le(value).ok_or(EnactError::BadValue)?;
                 self.set_stake_mainnet_start(day);
-                // Open the first session window on the mainnet start so the six month
-                // sessions align to mainnet rather than to genesis.
                 self.set_session_meter(&SessionMeter::new(day));
                 Ok(())
             }
@@ -1319,8 +1091,6 @@ impl Ledger {
         }
     }
 
-    /// Return a released governance lock to the voter's balance and drop it from the
-    /// electorate. Nothing moves while the conviction lock still holds.
     pub fn gov_release(&mut self, voter: &str, now: u64) -> u64 {
         let voter_id = match address_id(voter) {
             Some(id) => id,
@@ -1483,8 +1253,6 @@ mod stake_state_tests {
 
     #[test]
     fn a_contract_call_injects_the_trusted_caller_and_persists_storage() {
-        // An entry that reads the caller word at offset zero and stores it under the key at offset
-        // zero, which is the whole caller address the node injected there.
         let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 0\nSSTORE r2, r0\nHALT")
             .expect("the program assembles");
         let selector = [1u8, 2, 3, 4];
@@ -1508,24 +1276,15 @@ mod stake_state_tests {
 
         let caller = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
         assert!(l.call_contract(&caller, &contract, selector, &[], 0, 100_000));
-        // The value stored is the leading caller word, keyed under the whole caller address the node
-        // injected, so the store lands under the thirty two byte caller key.
         let expected = u64::from_be_bytes([9u8; 8]);
         assert_eq!(l.contract_storage(&contract_id).get(&[9u8; 32]), Some(&expected));
 
-        // A call to an address that holds no contract is refused.
         let empty = qtv_idfmt::render_address(&[71u8; 32]).unwrap();
         assert!(!l.call_contract(&caller, &empty, selector, &[], 0, 100_000));
     }
 
     #[test]
     fn a_contract_sees_the_whole_caller_address_not_a_leading_word() {
-        // An entry that stores the caller word at scratch offset twenty four into slot zero and the
-        // contract self word at offset thirty two into slot one. Offset twenty four lies past the old
-        // eight byte caller reduction, so under the old node it would read zero; under the trusted
-        // context it reads real caller bytes, proving the whole address reaches the contract.
-        // Store the caller word at offset twenty four under the whole caller address key, and the
-        // contract word at offset thirty two under the whole contract address key.
         let code = qtv_vm::asm::assemble(
             "LDI r1, 24\nMLOAD r0, r1\nLDI r2, 0\nSSTORE r2, r0\n\
              LDI r3, 32\nMLOAD r4, r3\nLDI r5, 32\nSSTORE r5, r4\nHALT",
@@ -1549,8 +1308,6 @@ mod stake_state_tests {
         let contract = qtv_idfmt::render_address(&contract_id).unwrap();
         l.set_contract_code(&contract_id, &container.canonical_bytes());
 
-        // Two callers that share their leading eight bytes but differ past byte twenty three. The old
-        // sixty four bit reduction mapped both to the same word; the whole address does not.
         let mut p1 = [5u8; 32];
         p1[24..].copy_from_slice(&[0xA1u8; 8]);
         let mut p2 = [5u8; 32];
@@ -1560,7 +1317,6 @@ mod stake_state_tests {
 
         assert!(l.call_contract(&c1, &contract, selector, &[], 0, 100_000));
         let seen1 = *l.contract_storage(&contract_id).get(&p1).unwrap();
-        // The contract self word is the leading eight bytes of the contract address.
         assert_eq!(
             l.contract_storage(&contract_id).get(&contract_id),
             Some(&u64::from_be_bytes([70u8; 8]))
@@ -1585,9 +1341,7 @@ mod stake_state_tests {
         fund(&mut l, &addr, 10_000 * 1_000_000);
         l.set_gov_blacklisted(&id);
         assert!(l.is_blacklisted(&addr));
-        // It can no longer bond.
         assert!(!l.bond(&addr, 2_000 * 1_000_000, 0));
-        // Even a bond already on the books carries zero committee weight.
         l.seed_validator_bond(&addr, 2_000 * 1_000_000);
         assert_eq!(l.staked_weight(&addr), 0);
     }
@@ -1612,14 +1366,12 @@ mod stake_state_tests {
         assert!(l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0));
         assert_eq!(l.balance(&voter), 5_000 * 1_000_000);
         assert_eq!(l.gov_total_locked(), 5_000 * 1_000_000);
-        // A voter votes once per referendum.
         assert!(!l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 100, 0));
 
         let close = 7 * 86_400 + 1;
         assert_eq!(l.gov_conclude(id, close), Some(qtv_governance::Status::Approved));
         assert_eq!(l.balance(&proposer), 20_000 * 1_000_000);
 
-        // A second proposal that no one votes on forfeits its deposit to the treasury.
         let spam_action = qtv_governance::Action::Parameter {
             key: b"price".to_vec(),
             value: 1u128.to_le_bytes().to_vec(),
@@ -1655,9 +1407,7 @@ mod stake_state_tests {
         };
         l.gov_enact(id, 7 * 86_400 + 1).unwrap();
         assert_eq!(l.stake_price(), 70_000_000);
-        // A referendum enacts exactly once.
         assert!(l.gov_enact(id, 7 * 86_400 + 1).is_err());
-        // The enactment is recorded permanently against the action hash and the tally.
         let receipt = l.gov_receipt(id).unwrap();
         assert_eq!(receipt.referendum, id);
         assert_eq!(
@@ -1673,7 +1423,6 @@ mod stake_state_tests {
         let mut l = Ledger::new();
         let proposer = gov_addr(30);
         fund(&mut l, &proposer, 2_000_000 * 1_000_000);
-        // A chain upgrade passes its vote but the chain has no implementation for it yet.
         let action = qtv_governance::Action::Upgrade { blob: vec![1, 2, 3] };
         let id = l
             .gov_propose(&proposer, qtv_governance::Track::ChainUpgrade, action, 0)
@@ -1688,8 +1437,6 @@ mod stake_state_tests {
             1_000_000 * 1_000_000,
             0,
         );
-        // Enacting after the fourteen day chain upgrade period fails rather than recording a receipt
-        // that falsely says the upgrade was carried out.
         let result = l.gov_enact(id, 14 * 86_400 + 1);
         assert_eq!(result, Err(EnactError::NotImplemented));
         assert!(l.gov_receipt(id).is_none(), "a failed enactment writes no receipt");
@@ -1764,13 +1511,10 @@ mod stake_state_tests {
             .unwrap();
         let voter = gov_addr(29);
         fund(&mut l, &voter, 10_000 * 1_000_000);
-        // A one year conviction locks the stake for a year.
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Year, 4_000 * 1_000_000, 0);
         assert_eq!(l.balance(&voter), 6_000 * 1_000_000);
-        // Before the lock expires nothing returns.
         assert_eq!(l.gov_release(&voter, 100), 0);
         assert_eq!(l.balance(&voter), 6_000 * 1_000_000);
-        // After a year the whole lock returns and leaves the electorate.
         let year = 365 * 86_400;
         assert_eq!(l.gov_release(&voter, year), 4_000 * 1_000_000);
         assert_eq!(l.balance(&voter), 10_000 * 1_000_000);
@@ -1812,30 +1556,22 @@ mod stake_state_tests {
         l.seed_stake_pool(700_000 * 1_000_000);
         l.seed_validator_bond(&addr, 2_000 * 1_000_000);
 
-        // In the default blackout nothing accrues, whatever the session classifies as.
         assert_eq!(l.accrue_reward(&addr, qtv_staking::Session::Low, 400), 0);
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000);
 
-        // Past the blackout but with no published rate, still nothing accrues.
         l.set_stake_mainnet_start(0);
         assert_eq!(l.accrue_reward(&addr, qtv_staking::Session::Low, 400), 0);
 
-        // With a rate published, a low session pays one percent of the bond, twenty
-        // whole units on a two thousand unit bond, and it leaves the pool.
         l.set_stake_price(70 * 1_000_000);
         let paid = l.accrue_reward(&addr, qtv_staking::Session::Low, 400);
         assert_eq!(paid, 20 * 1_000_000);
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000 - 20 * 1_000_000);
 
-        // It is locked through the year long cliff: nothing is claimable inside it.
         assert_eq!(l.claimable_reward(&addr, 400 + 364), 0);
-        // At the cliff a quarter releases, and a claim moves exactly that to balance.
         assert_eq!(l.claimable_reward(&addr, 400 + 365), 5 * 1_000_000);
         assert_eq!(l.claim_reward(&addr, 400 + 365), 5 * 1_000_000);
         assert_eq!(l.balance(&addr), 5 * 1_000_000);
-        // A second claim on the same day moves nothing more.
         assert_eq!(l.claim_reward(&addr, 400 + 365), 0);
-        // The whole amount releases after the last tranche day, and the book prunes.
         let full_day = 400 + 365 + 3 * 120;
         assert_eq!(l.claim_reward(&addr, full_day), 15 * 1_000_000);
         assert_eq!(l.balance(&addr), 20 * 1_000_000);
@@ -1849,8 +1585,6 @@ mod stake_state_tests {
         l.seed_stake_pool(700_000 * 1_000_000);
         l.seed_validator_bond(&addr, 2_000 * 1_000_000);
         l.set_stake_mainnet_start(0);
-        // At a high price the four thousand dollar per session cap bites, so the
-        // reward is the cap converted to native units, not one percent of the bond.
         l.set_stake_price(2_000 * 1_000_000);
         assert_eq!(
             l.accrue_reward(&addr, qtv_staking::Session::Low, 400),
@@ -1867,22 +1601,18 @@ mod stake_state_tests {
         l.seed_validator_bond(&v, 2_000 * 1_000_000);
         l.seed_validator_set(&[vid]);
 
-        // Inert while mainnet is unset: a session close pays nothing and the pool holds.
         l.settle_session(182, 5);
         l.settle_session(400, 5);
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000);
         assert_eq!(l.claimable_reward(&v, 1_000), 0);
 
-        // Governance turns mainnet on at day zero with a published price.
         l.set_stake_mainnet_start(0);
         l.set_stake_price(70 * 1_000_000);
 
-        // The first two closes fall in the twelve month blackout, so still nothing.
         l.settle_session(182, 5);
         l.settle_session(364, 5);
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000);
 
-        // The close past the blackout pays one percent of the bond into a tranche.
         l.settle_session(546, 5);
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000 - 20 * 1_000_000);
         assert_eq!(l.claimable_reward(&v, 546 + 365), 5 * 1_000_000);
@@ -1891,12 +1621,9 @@ mod stake_state_tests {
     #[test]
     fn the_session_meter_counts_across_blocks_and_closes_on_the_window() {
         let mut l = Ledger::new();
-        // The window opens on day zero and transactions accumulate while it is open.
         assert_eq!(l.record_session(10, 100), None);
         assert_eq!(l.record_session(20, 150), None);
         assert_eq!(l.session_meter().count(), 30);
-        // At the window length the session closes, classifies by the total count, and
-        // the meter resets for the next window.
         assert_eq!(l.record_session(5, 182), Some(qtv_staking::Session::Low));
         assert_eq!(l.session_meter().count(), 0);
     }
@@ -1907,15 +1634,10 @@ mod stake_state_tests {
         let addr = qtv_idfmt::render_address(&[8u8; 32]).unwrap();
         let id = [8u8; 32];
         assert_eq!(l.staked_weight(&addr), 0);
-        // A genesis style seed of 2,000 whole units reads back as a weight of 2,000,
-        // the unit the sortition sampler weighs a validator by.
         l.seed_validator_bond(&addr, 2_000 * 1_000_000).unwrap();
         assert_eq!(l.staked_weight(&addr), 2_000);
-        // Base unit dust below one whole unit is dropped and never lifts the weight.
         l.set_stake_bond(&id, &Bond::new(2_000 * 1_000_000 + 999_999, 0).unwrap());
         assert_eq!(l.staked_weight(&addr), 2_000);
-        // An attributable slash clears the bond and bans the account, so its weight
-        // falls to zero and it can never be drawn into a committee again.
         l.slash_stake(&addr, qtv_staking::Fault::Attributable);
         assert_eq!(l.staked_weight(&addr), 0);
         assert!(l.is_stake_banned(&id));
@@ -2005,9 +1727,6 @@ mod stake_state_tests {
     }
 }
 
-/// A typed event a contract emitted in the block: the contract that emitted it, the four byte event
-/// selector, and the operand payload. The block commits to these through the event root in the header,
-/// so a light client proves an event without the full state (SPEC-blocks, SPEC-container).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockEvent {
     pub contract: String,
@@ -2016,8 +1735,6 @@ pub struct BlockEvent {
 }
 
 impl BlockEvent {
-    /// The canonical encoding of the event, the leaf the event root hashes. Each field is length
-    /// prefixed so no two distinct events share an encoding.
     pub fn encode(&self) -> Vec<u8> {
         let mut encoder = Encoder::new();
         encoder.put_bytes(self.contract.as_bytes());
@@ -2027,18 +1744,13 @@ impl BlockEvent {
     }
 }
 
-/// The account state of the chain over the sparse Merkle trie.
 #[derive(Debug, Clone, Default)]
 pub struct Ledger {
     trie: Trie,
-    /// The events emitted so far in the block being executed, in emission order. Transient and never
-    /// part of the trie or the state root, it is committed to the block through the header event root
-    /// and cleared at the start of each block.
     block_events: Vec<BlockEvent>,
 }
 
 impl Ledger {
-    /// An empty ledger with no accounts.
     pub fn new() -> Self {
         Ledger {
             trie: Trie::new(),
@@ -2046,11 +1758,7 @@ impl Ledger {
         }
     }
 
-    /// A ledger over a trie loaded from disk. The trie holds the account leaves a
-    /// store reopened, so a node restarted from its store rebuilds the exact state
-    /// it committed, with the same state root.
     pub fn from_trie(mut trie: Trie) -> Self {
-        // The reloaded state is already on disk, so nothing is pending persistence yet.
         trie.clear_persist_dirty();
         Ledger {
             trie,
@@ -2058,19 +1766,14 @@ impl Ledger {
         }
     }
 
-    /// Clear the block event buffer at the start of a block, so each block's event root covers only the
-    /// events that block emitted.
     pub fn clear_block_events(&mut self) {
         self.block_events.clear();
     }
 
-    /// The events emitted so far in the block being executed, in emission order.
     pub fn block_events(&self) -> &[BlockEvent] {
         &self.block_events
     }
 
-    /// The account an address holds, or the default fresh account when the
-    /// address is absent.
     pub fn account(&self, address: &str) -> Account {
         match self.trie.get(&state_key(address)) {
             Some(bytes) => from_bytes(bytes).expect("state holds a canonical account record"),
@@ -2078,42 +1781,30 @@ impl Ledger {
         }
     }
 
-    /// Bind an address to an account record, replacing any prior record.
     pub fn set_account(&mut self, address: &str, account: &Account) {
         self.trie.insert(state_key(address), to_bytes(account));
     }
 
-    /// The whole leaf map, for a reader that snapshots many account keys across threads. Used by the
-    /// block executor to read a layer's accounts in parallel. It is a pure read and never touches the
-    /// root cache.
     pub(crate) fn leaves(&self) -> &std::collections::BTreeMap<Key, Vec<u8>> {
         self.trie.leaves()
     }
 
-    /// Store an already encoded account record under an already derived key, the write half of the
-    /// parallel path once the encode and the key derivation have been done off the critical section.
-    /// It lands on the identical trie state as set_account, which derives the key and encodes inline.
     pub(crate) fn insert_raw(&mut self, key: Key, bytes: Vec<u8>) {
         self.trie.insert(key, bytes);
     }
 
-    /// The balance an address holds.
     pub fn balance(&self, address: &str) -> u64 {
         self.account(address).balance
     }
 
-    /// The next expected nonce of an address.
     pub fn nonce(&self, address: &str) -> u64 {
         self.account(address).nonce
     }
 
-    /// The state root over the whole account set, fixed by the set and not by the
-    /// order the accounts were written in.
     pub fn state_root(&self) -> [u8; HASH_LEN] {
         self.trie.root()
     }
 
-    /// The state root rendered under the state family for display.
     pub fn state_root_id(&self) -> String {
         qtv_idfmt::render_state(&self.state_root())
             .expect("a state root is the fixed digest length")
@@ -2142,13 +1833,11 @@ mod tests {
         ledger.seed_supply(1_000_000);
         assert_eq!(ledger.total_supply(), 1_000_000, "genesis fixes the supply");
 
-        // A fee removes only its burned share from the supply, since the pool shares stay part of it.
         let fee = 1_000u64;
         let burned = Ledger::fee_burned(fee);
         ledger.collect_fee(fee);
         assert_eq!(ledger.total_supply(), 1_000_000 - burned, "the burn lowers the supply");
 
-        // A mint raises it by exactly what it creates.
         ledger.credit_supply(500);
         assert_eq!(ledger.total_supply(), 1_000_000 - burned + 500, "a mint raises the supply");
     }

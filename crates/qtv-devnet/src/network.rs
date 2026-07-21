@@ -1,32 +1,12 @@
-//! The delivery schedule the round loop stamps sealed records with, and the view
-//! timeout a node waits before it rotates the leader.
-//!
-//! The schedule is a pure function of a per record counter, so a run replays to
-//! the identical chain and any reordering is deterministic rather than a race. A
-//! synchronous schedule delivers every record after one fixed latency. A
-//! reordering schedule spreads the delays across a window, so records from
-//! different peers arrive at a receiver in a scrambled order while the records on
-//! one directed edge still arrive in send order, the way one ordered stream
-//! behaves under a network that interleaves several of them.
 
 use crate::clock::{Time, SLOT_MS};
 
-/// The base latency of one hop, in logical milliseconds.
 const DELIVER_MS: Time = 5;
 
-/// The default view timeout, three slots. A round of propose, attest, and collect
-/// completes in a few hops, well inside this bound, so the happy path never times
-/// out; a silent leader offers no proposal, so the bound elapses and the view
-/// rotates.
 const VIEW_TIMEOUT_MS: Time = 3 * SLOT_MS;
 
-/// The reordering window, two slots. A record is delayed by up to this much on top
-/// of the base latency, kept below the view timeout so a reordered proposal still
-/// lands before the view would rotate.
 const REORDER_SPREAD_MS: Time = 2 * SLOT_MS;
 
-/// A delivery schedule: the base latency of a hop, the reordering window, and the
-/// view timeout.
 #[derive(Clone, Copy, Debug)]
 pub struct Network {
     latency: Time,
@@ -35,8 +15,6 @@ pub struct Network {
 }
 
 impl Network {
-    /// A synchronous schedule: every record after one fixed latency, no spread,
-    /// so records arrive in a single global order.
     pub fn synchronous() -> Self {
         Network {
             latency: DELIVER_MS,
@@ -45,9 +23,6 @@ impl Network {
         }
     }
 
-    /// A schedule that spreads record delays across a window, so records from
-    /// different peers arrive at a receiver in a scrambled order. Each directed
-    /// edge still delivers in send order.
     pub fn reordering() -> Self {
         Network {
             latency: DELIVER_MS,
@@ -56,14 +31,11 @@ impl Network {
         }
     }
 
-    /// Override the view timeout, used to force or forbid a view change in a test.
     pub fn with_view_timeout(mut self, view_timeout: Time) -> Self {
         self.view_timeout = view_timeout;
         self
     }
 
-    /// The delay to deliver the record with the given send counter. Deterministic
-    /// in the counter, so the whole schedule replays identically.
     pub fn delay(&self, seq: u64) -> Time {
         if self.spread == 0 {
             return self.latency;
@@ -71,7 +43,6 @@ impl Network {
         self.latency + scramble(seq) % (self.spread + 1)
     }
 
-    /// The time a node waits at a height and view before it times out.
     pub fn view_timeout(&self) -> Time {
         self.view_timeout
     }
@@ -83,8 +54,6 @@ impl Default for Network {
     }
 }
 
-/// A deterministic scramble of a counter, spreading consecutive counters across
-/// the window so consecutive records do not keep their send order across edges.
 fn scramble(seq: u64) -> Time {
     seq.wrapping_mul(11400714819323198485).rotate_left(29)
 }
@@ -110,9 +79,7 @@ mod tests {
             assert!((DELIVER_MS..=DELIVER_MS + REORDER_SPREAD_MS).contains(&d));
             distinct.insert(d);
         }
-        // The delays actually spread, so records reorder across edges.
         assert!(distinct.len() > 1);
-        // A reordered record still lands before the view would rotate.
         assert!(DELIVER_MS + REORDER_SPREAD_MS < net.view_timeout());
     }
 

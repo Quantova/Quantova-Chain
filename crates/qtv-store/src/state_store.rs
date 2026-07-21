@@ -1,15 +1,3 @@
-//! The file backed state store.
-//!
-//! The account state is the set of leaves of the qtv-state sparse Merkle trie.
-//! Each leaf is a value keyed by its thirty two byte hash, the trie key. This
-//! store appends two kinds of record to its log. An entry record binds a key to a
-//! value, and the latest entry for a key wins. A commit record fixes the state
-//! root a set of entries was committed under, and the last commit is the head.
-//!
-//! On open the log is scanned once. The entries rebuild the in memory map, latest
-//! wins, and the last commit becomes the head. A trie rebuilt from the entries
-//! reproduces the head root, so a state committed under a root is fully readable
-//! after reopening from disk.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -20,19 +8,15 @@ use qtv_state::{Hash, Key, Trie};
 
 use crate::log::Log;
 
-/// The record tag that binds a key to a value.
 const TAG_ENTRY: u8 = 1;
-/// The record tag that fixes the committed state root.
 const TAG_COMMIT: u8 = 2;
 
-/// Append a fixed width thirty two byte value as its raw bytes in order.
 fn put_fixed(encoder: &mut Encoder, value: &[u8; 32]) {
     for &byte in value.iter() {
         encoder.put_u8(byte);
     }
 }
 
-/// Read a fixed width thirty two byte value as its raw bytes in order.
 fn get_fixed(decoder: &mut Decoder<'_>) -> Result<[u8; 32], Error> {
     let mut value = [0u8; 32];
     for slot in value.iter_mut() {
@@ -41,8 +25,6 @@ fn get_fixed(decoder: &mut Decoder<'_>) -> Result<[u8; 32], Error> {
     Ok(value)
 }
 
-/// One state record: an entry that binds a key to a value, or a commit that fixes
-/// the state root the entries so far were committed under.
 enum StateRecord {
     Entry { key: Key, value: Vec<u8> },
     Commit { root: Hash },
@@ -81,9 +63,6 @@ impl Decode for StateRecord {
     }
 }
 
-/// A file backed store of the account state, the leaves of the sparse Merkle
-/// trie keyed by their hash, together with the head root they were committed
-/// under.
 #[derive(Debug)]
 pub struct StateStore {
     log: Log,
@@ -92,9 +71,6 @@ pub struct StateStore {
 }
 
 impl StateStore {
-    /// Open the state store at a path, creating the file when absent, and rebuild
-    /// the entries and the head from the records. An absent or truncated file
-    /// opens as an empty store.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let (log, frames) = Log::open(path)?;
         let mut store = StateStore {
@@ -116,9 +92,6 @@ impl StateStore {
         Ok(store)
     }
 
-    /// Bind a key to a value, replacing any value the key already held. The value
-    /// enters the log through the canonical encoding, so a read returns the exact
-    /// bytes that were written.
     pub fn put_account(&mut self, key: Key, value: Vec<u8>) -> io::Result<()> {
         let record = StateRecord::Entry {
             key,
@@ -129,8 +102,6 @@ impl StateStore {
         Ok(())
     }
 
-    /// Fix the state root the entries so far were committed under. The last commit
-    /// is the head the store reopens to.
     pub fn commit(&mut self, root: Hash) -> io::Result<()> {
         let record = StateRecord::Commit { root };
         self.log.append(&to_bytes(&record))?;
@@ -138,26 +109,20 @@ impl StateStore {
         Ok(())
     }
 
-    /// The value a key holds, or nothing when the key is absent.
     pub fn account(&self, key: &Key) -> Option<&[u8]> {
         self.entries.get(key).map(|value| value.as_slice())
     }
 
-    /// The head root, the last root a state was committed under, or nothing when
-    /// no commit was made.
     pub fn head(&self) -> Option<Hash> {
         self.head
     }
 
-    /// The key and value pairs the store holds, in key order.
     pub fn accounts(&self) -> impl Iterator<Item = (&Key, &[u8])> {
         self.entries
             .iter()
             .map(|(key, value)| (key, value.as_slice()))
     }
 
-    /// A trie rebuilt from the entries. After a full commit its root equals the
-    /// head, so the store reproduces the committed state root from disk.
     pub fn load_trie(&self) -> Trie {
         let mut trie = Trie::new();
         for (key, value) in &self.entries {
@@ -166,12 +131,10 @@ impl StateStore {
         trie
     }
 
-    /// The number of entries the store holds.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Whether the store holds no entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -198,7 +161,6 @@ mod tests {
         path
     }
 
-    /// A trie key from an index, standing in for a canonical address payload.
     fn key(index: u8) -> Key {
         let mut key = [0u8; KEY_LEN];
         key[0] = index;
@@ -206,7 +168,6 @@ mod tests {
         key
     }
 
-    /// An account value, a nonce and a balance in canonical encoding.
     fn account(nonce: u64, balance: u64) -> Vec<u8> {
         let mut encoder = Encoder::new();
         encoder.put_u64(nonce);
@@ -255,7 +216,6 @@ mod tests {
         }
         assert_eq!(store.load_trie().root(), root);
 
-        // Every account the trie holds is reachable under the reopened root.
         for (k, value) in &accounts {
             assert_eq!(store.load_trie().get(k), Some(value.as_slice()));
         }

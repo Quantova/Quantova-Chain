@@ -1,10 +1,3 @@
-//! An in memory duplex stream for tests.
-//!
-//! A connected pair of duplex streams models a bidirectional link without a
-//! socket. Each end reads from one shared buffer and writes to the other, a
-//! blocking read waits until bytes arrive or the far end closes, and dropping an
-//! end closes its write buffer so the far end reads end of stream. This is enough
-//! for two peers on two threads to run the handshake and exchange records.
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -27,13 +20,11 @@ fn shared() -> Shared {
     ))
 }
 
-/// One end of an in memory duplex stream.
 pub struct DuplexStream {
     inbound: Shared,
     outbound: Shared,
 }
 
-/// Build a connected pair of duplex streams.
 pub fn duplex() -> (DuplexStream, DuplexStream) {
     let one = shared();
     let two = shared();

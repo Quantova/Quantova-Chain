@@ -1,26 +1,9 @@
-//! The wide area local coordinator.
-//!
-//! This stands up the wide area validators on this one host over localhost sockets and
-//! reports that they rendezvous, finalise, and agree on a byte identical chain. It is
-//! the validation that the harness stands up before any host is provisioned, not the
-//! network run. The network run starts one validator on each real host over the single
-//! fixed transport port and is driven by the deploy script; this coordinator drives the
-//! same validator binary with localhost addresses so the whole path is exercised here
-//! first.
-//!
-//! EVERY FIGURE THIS PRINTS IS LOOPBACK MULTI PROCESS, REAL SOCKETS, NEAR ZERO
-//! PROPAGATION, exactly as the loopback run was labelled. The sockets are localhost, so
-//! there is no inter host bandwidth and no geographic propagation, and this is not a
-//! network throughput and not a real global finality. The propagation number the wide
-//! area run exists to produce comes only from a real run across regions and is not
-//! produced here.
 
 use qtv_widearea::local::{run_scenario, Scenario};
 use qtv_widearea::{env_usize, prefix_matches, RunReport, TRANSPORT_PORT};
 
 use qtv_loopback::stats::Distribution;
 
-/// The validator binary beside this driver in the same target directory.
 fn validator_bin() -> String {
     std::env::var("QTV_WA_VALIDATOR_BIN").unwrap_or_else(|_| {
         std::env::current_exe()
@@ -35,8 +18,6 @@ fn rule() {
     println!("{}", "-".repeat(80));
 }
 
-/// A comma separated list of host indices from an environment variable, empty when the
-/// variable is unset.
 fn index_list(name: &str) -> Vec<usize> {
     std::env::var(name)
         .unwrap_or_default()
@@ -46,10 +27,6 @@ fn index_list(name: &str) -> Vec<usize> {
 }
 
 fn main() {
-    // Collect mode: the deploy script has already run the validators across the real
-    // hosts and gathered one RESULT line per host into a directory. Read them, check the
-    // hosts agree, and report the finality distribution the run produced, rather than
-    // standing anything up locally.
     if let Ok(dir) = std::env::var("QTV_WA_COLLECT") {
         collect_and_report(&dir);
         return;
@@ -63,9 +40,6 @@ fn main() {
     let stall_secs = env_usize("QTV_WA_STALLSECS", 30).max(1);
     let height_cap = env_usize("QTV_WA_HEIGHTCAP", (qtv_loopback::HARNESS_SLOTS as usize) - 64);
 
-    // Optional local fault knobs, so the same faults the injection test asserts can be
-    // reproduced by hand. QTV_WA_DOWN is a comma separated list of host indices that are
-    // down this run; QTV_WA_SLOW is index:milliseconds pairs for slow hosts.
     let mut up = vec![true; validators];
     for i in index_list("QTV_WA_DOWN") {
         if i < validators {
@@ -159,11 +133,6 @@ fn main() {
     println!("================================================================================");
 }
 
-/// Print the outcome of a run: whether every up host agreed on a byte identical chain,
-/// then the finality distribution and throughput of the ingress host. The label names
-/// what the figure carries, the loopback near zero propagation for a local stand up and
-/// the real propagation of wherever the hosts ran for a collected network run, so the
-/// figure is never mislabelled.
 fn report_run(reports: &[RunReport], label: &str) {
     let up = reports.len();
     let ingress = match reports.iter().find(|r| r.idx == 0) {
@@ -225,8 +194,6 @@ fn report_run(reports: &[RunReport], label: &str) {
         println!("   finality p99 (ms)            : {:.1}", d.p99);
         println!("   finality max (ms)            : {:.1}", d.max);
     }
-    // The per phase split of the consensus wall clock, where the block's wall clock
-    // actually goes. The five phases plus the unattributed remainder sum to it.
     println!("   phase wait (ms)              : {:.1}", ingress.phase_wait_ms);
     println!("   phase build (ms)             : {:.1}", ingress.phase_build_ms);
     println!("   phase verify (ms)            : {:.1}", ingress.phase_verify_ms);
@@ -237,13 +204,6 @@ fn report_run(reports: &[RunReport], label: &str) {
     rule();
 }
 
-/// Read the RESULT line the deploy script gathered from each host and report the run.
-/// Each file holds one host's RESULT line. The report is the finality distribution and
-/// throughput of the ingress host and a check that every host agreed on the byte
-/// identical chain. Whether the figure carries real propagation depends on where the
-/// hosts ran, so the report states plainly that a network figure must be committed to a
-/// results file in the q-prover form with the host regions and the measured inter host
-/// round trips before it is reported as a network number.
 fn collect_and_report(dir: &str) {
     let mut reports: Vec<RunReport> = Vec::new();
     let entries = match std::fs::read_dir(dir) {

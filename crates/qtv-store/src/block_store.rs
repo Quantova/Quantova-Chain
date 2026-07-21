@@ -1,11 +1,3 @@
-//! The file backed block store.
-//!
-//! Each finalized block is appended to the log as one record: the height, the
-//! header hash, and the canonical block encoding. The block encoding is stored
-//! whole, so a read returns the exact bytes that were written. Two in memory
-//! indexes, one by height and one by hash, point at the stored encoding, so a
-//! block is fetched by either. On open the log is scanned once and both indexes
-//! and the head height are rebuilt from the records.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -16,17 +8,14 @@ use qtv_codec::{to_bytes, Decode, Decoder, Encode, Encoder, Error};
 
 use crate::log::Log;
 
-/// A header hash or a height keyed digest, a thirty two byte value.
 type Hash = [u8; ROOT_LEN];
 
-/// Append a thirty two byte value as its raw bytes in order.
 fn put_hash(encoder: &mut Encoder, hash: &Hash) {
     for &byte in hash.iter() {
         encoder.put_u8(byte);
     }
 }
 
-/// Read a thirty two byte value as its raw bytes in order.
 fn get_hash(decoder: &mut Decoder<'_>) -> Result<Hash, Error> {
     let mut hash = [0u8; ROOT_LEN];
     for slot in hash.iter_mut() {
@@ -35,8 +24,6 @@ fn get_hash(decoder: &mut Decoder<'_>) -> Result<Hash, Error> {
     Ok(hash)
 }
 
-/// One stored block: the height and header hash it is indexed by, and the
-/// canonical block encoding kept whole.
 struct BlockRecord {
     height: u64,
     hash: Hash,
@@ -64,7 +51,6 @@ impl Decode for BlockRecord {
     }
 }
 
-/// A file backed store of finalized blocks, indexed by height and by hash.
 #[derive(Debug)]
 pub struct BlockStore {
     log: Log,
@@ -75,9 +61,6 @@ pub struct BlockStore {
 }
 
 impl BlockStore {
-    /// Open the block store at a path, creating the file when absent, and rebuild
-    /// the indexes and the head height from the records. An absent or truncated
-    /// file opens as an empty store.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let (log, frames) = Log::open(path)?;
         let mut store = BlockStore {
@@ -97,9 +80,6 @@ impl BlockStore {
         Ok(store)
     }
 
-    /// Append a finalized block, then index it by height and by hash. The block
-    /// enters the log through the canonical encoding, so a read returns the exact
-    /// bytes that were written.
     pub fn put_block(&mut self, block: &Block) -> io::Result<()> {
         let record = BlockRecord {
             height: block.header().height(),
@@ -111,39 +91,30 @@ impl BlockStore {
         Ok(())
     }
 
-    /// The canonical encoding of the block at a height, or nothing when no block
-    /// sits at that height.
     pub fn block_by_height(&self, height: u64) -> Option<&[u8]> {
         self.by_height
             .get(&height)
             .map(|&index| self.blocks[index].as_slice())
     }
 
-    /// The canonical encoding of the block with a header hash, or nothing when no
-    /// block carries that hash.
     pub fn block_by_hash(&self, hash: &Hash) -> Option<&[u8]> {
         self.by_hash
             .get(hash)
             .map(|&index| self.blocks[index].as_slice())
     }
 
-    /// The head height, the greatest height the store holds, or nothing when the
-    /// store is empty.
     pub fn head_height(&self) -> Option<u64> {
         self.head_height
     }
 
-    /// The number of blocks the store holds.
     pub fn len(&self) -> usize {
         self.blocks.len()
     }
 
-    /// Whether the store holds no blocks.
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
     }
 
-    /// Record a decoded block in the indexes and advance the head height.
     fn index(&mut self, record: BlockRecord) {
         let index = self.blocks.len();
         self.by_height.insert(record.height, index);

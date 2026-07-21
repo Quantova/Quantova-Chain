@@ -1,21 +1,3 @@
-//! quantovad, the standalone Quantova validator daemon.
-//!
-//! One process, one validator. It reads a node config file and the shared genesis
-//! file both nodes of a network open from, opens the node against its on disk stores,
-//! stands up the real qtv-net post quantum mesh to its peers, and drives a continuous
-//! production round that finalises blocks and persists each one before advancing. A
-//! restart reopens the stores and resumes from the last finalised block. A committee
-//! of one is its own supermajority, so a single quantovad is a live chain on its own,
-//! which is the front door the rest of the stack, the RPC and everything a person
-//! touches, is then built on.
-//!
-//! KEY MODEL AND THE GUARD. This build derives every validator's identity from its
-//! numeric id, so whoever holds the genesis controls every validator. That is a chain
-//! one party owns entirely, fine on one operator's own boxes and unacceptable once a
-//! second party runs a node. The daemon refuses to start under this model unless the
-//! local development flag is set, so the shortcut cannot leave by accident. See the
-//! note in the genesis loader for why, and replace it with operator held keys before
-//! the network leaves one pair of hands.
 
 mod config;
 mod driver;
@@ -44,9 +26,6 @@ fn main() {
     }
 }
 
-/// Parse the command line, refuse a non development start under the derived key
-/// model, load the config and genesis, open the node, stand up the mesh, and drive
-/// the round until a clean stop or a boundary the daemon cannot cross.
 fn run() -> Result<(), String> {
     let args = Args::parse()?;
     guard_derived_keys(args.dev);
@@ -54,10 +33,6 @@ fn run() -> Result<(), String> {
     let settings = config::NodeSettings::load(&args.config)?;
     let genesis_file = genesis::GenesisFile::load(&settings.genesis_path)?;
 
-    // The validator set from genesis is the committee. This build derives identity
-    // from the id and the mesh indexes a peer by id minus one, so the ids must be the
-    // contiguous set one to n. A gap or a duplicate is a build simplification not yet
-    // lifted, refused with a clear message rather than mis indexed.
     let mut ids: Vec<u64> = genesis_file
         .genesis
         .validators
@@ -98,10 +73,6 @@ fn run() -> Result<(), String> {
     let mut node =
         DevNode::open(&my_node, &devnet).map_err(|e| format!("opening the node: {e:?}"))?;
 
-    // Load any local header notes and hand them to the node, so the blocks this node
-    // proposes carry them by height. The file is a local operator file, never part of
-    // the genesis or a repository, so its contents reach the chain only through the
-    // blocks produced here.
     if let Some(msg_path) = &settings.block_messages_path {
         let messages = load_block_messages(msg_path)?;
         util::log(&format!(
@@ -112,8 +83,6 @@ fn run() -> Result<(), String> {
         node.set_block_messages(messages);
     }
 
-    // Place each configured peer's dial address at its validator index. A peer that is
-    // this node, or not a genesis validator, is a config error caught here.
     let mut peer_addrs: Vec<Option<String>> = vec![None; n];
     for (pid, addr) in &settings.peers {
         if *pid == my_id {
@@ -147,9 +116,6 @@ fn run() -> Result<(), String> {
     let mut driver = driver::Driver::new(node, idx, mesh);
     driver.set_budget(genesis_file.slots);
 
-    // Stand up the RPC gateway when the config asks for it. It binds its own port and
-    // feeds client requests to the round loop over a channel, so the node stays the
-    // single owner of its state and the gateway only asks it.
     if let Some(rpc_addr) = settings.rpc_listen.clone() {
         let rpc_listener = TcpListener::bind(&rpc_addr)
             .map_err(|e| format!("binding the RPC address {rpc_addr}: {e}"))?;
@@ -178,10 +144,6 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-/// Build the devnet configuration from the parsed genesis. Its genesis reconstructs
-/// the parsed one field for field, so every node that opens from the same file funds
-/// the same accounts and draws the same committee. The per node store and address
-/// fields here are unused, since the running node's own config carries them.
 fn build_devnet(genesis_file: &genesis::GenesisFile) -> DevnetConfig {
     let mut validators = genesis_file.genesis.validators.clone();
     validators.sort_by_key(|v| v.id);
@@ -206,8 +168,6 @@ fn build_devnet(genesis_file: &genesis::GenesisFile) -> DevnetConfig {
     }
 }
 
-/// Write the startup summary an operator reads to confirm the node came up on the
-/// network it meant, at the height it meant, under the key model it meant.
 fn log_startup(
     settings: &config::NodeSettings,
     genesis_file: &genesis::GenesisFile,
@@ -258,12 +218,6 @@ fn log_startup(
     }
 }
 
-/// Load header notes from a local file, one per line as `QTV|<height>|<note>`. The
-/// whole line, prefix and index included, is the note stamped into that height's
-/// block, exactly as written. Blank lines and lines starting with a hash are skipped.
-/// A line longer than the header allows is refused with its number rather than
-/// silently trimmed, so a note that would not fit is a clear error, not a surprise.
-/// The file stays local and its contents reach the chain only through produced blocks.
 fn load_block_messages(path: &PathBuf) -> Result<HashMap<u64, Vec<u8>>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("reading block messages {}: {e}", path.display()))?;
@@ -299,17 +253,12 @@ fn load_block_messages(path: &PathBuf) -> Result<HashMap<u64, Vec<u8>>, String> 
     Ok(messages)
 }
 
-/// The port of a `host:port` address, the one this process binds on every interface.
 fn port_of(addr: &str) -> Result<u16, String> {
     addr.rsplit_once(':')
         .and_then(|(_, port)| port.parse().ok())
         .ok_or_else(|| format!("listen address '{addr}' is not host:port with a numeric port"))
 }
 
-/// Poll for the stop file and set the stop flag when it appears, so an operator stops
-/// the daemon cleanly between blocks by creating that file. An abrupt kill is also
-/// safe, since the store commits after every finalised block and recovers a torn
-/// tail, so the graceful path is a convenience and not a correctness requirement.
 fn spawn_stop_watcher(path: PathBuf, stopped: Arc<AtomicBool>) {
     thread::spawn(move || loop {
         if path.exists() {
@@ -323,10 +272,6 @@ fn spawn_stop_watcher(path: PathBuf, stopped: Arc<AtomicBool>) {
     });
 }
 
-/// The hard guard on the derived key model. This build derives every validator's
-/// identity from its id, so the daemon refuses to start unless the local development
-/// flag is set, and it stops rather than let the shortcut slide into a posture where a
-/// second party trusts an identity the first party can forge.
 fn guard_derived_keys(dev: bool) {
     if dev {
         return;
@@ -346,14 +291,12 @@ fn guard_derived_keys(dev: bool) {
     std::process::exit(1);
 }
 
-/// The parsed command line.
 struct Args {
     config: PathBuf,
     dev: bool,
 }
 
 impl Args {
-    /// Parse `quantovad --config <path> [--dev]`, accepting `--config=<path>` too.
     fn parse() -> Result<Args, String> {
         let mut config: Option<PathBuf> = None;
         let mut dev = false;
