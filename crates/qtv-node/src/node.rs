@@ -476,7 +476,14 @@ fn dispatch_vm(
     ledger.set_account(&sender, &charged_account);
     ledger.collect_fee(charged);
     if target == crate::ledger::vm_deploy_address() {
-        ledger.deploy_contract(&sender, nonce, &args);
+        if let Some(contract) = ledger.deploy_contract(&sender, nonce, &args) {
+            // Run the genesis constructor with the deploying account as the caller, so a genesis
+            // `owner = deployer` stores the whole deployer address into the owner field. A container
+            // with no genesis entry carries no such selector, so the call is a metered no op.
+            let genesis =
+                qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
+            ledger.call_contract(&sender, &contract, genesis, &[], now_seconds, meter);
+        }
     } else if args.len() >= 4 {
         let selector = [args[0], args[1], args[2], args[3]];
         ledger.call_contract(&sender, &target, selector, &args[4..], now_seconds, meter);
@@ -1053,7 +1060,8 @@ mod tests {
         let deployer = keypair(130);
         fund(&mut ledger, &deployer, 10_000 * 1_000_000);
 
-        // A container whose entry stores the caller word it is called with into slot zero.
+        // A container whose entry stores the caller word it is called with under the caller address
+        // key at offset zero, the whole thirty two byte caller the node injected.
         let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 0\nSSTORE r2, r0\nHALT")
             .expect("the program assembles");
         let selector = [1u8, 2, 3, 4];
@@ -1087,8 +1095,13 @@ mod tests {
         let call = system_tx(&deployer, &contract, selector.to_vec(), 1, 100_000, &fee);
         assert_eq!(execute_ordered(&mut ledger, &[call], &fee, 0).len(), 1);
         let stored = ledger.contract_storage(&address_bytes(&contract));
+        let deployer_key = address_bytes(&deployer.address());
         let expected = crate::ledger::address_word(&deployer.address()).unwrap();
-        assert_eq!(stored.get(&0), Some(&expected), "the injected caller was stored");
+        assert_eq!(
+            stored.get(&deployer_key),
+            Some(&expected),
+            "the injected caller was stored"
+        );
 
         // The parallel path reaches the identical state through the fallback.
         let mut parallel = {
@@ -1106,6 +1119,116 @@ mod tests {
         );
         crate::parallel::execute_parallel(&mut parallel, &[deploy2], &fee, 8, 0);
         assert!(parallel.is_contract(&contract));
+    }
+
+    #[test]
+    fn a_deploy_runs_the_genesis_constructor_with_the_deployer_as_caller() {
+        // A container whose genesis entry stores the caller word at offset zero under the slot zero
+        // key, which is the whole thirty two byte deployer address the node injects as the caller. The
+        // chain runs the genesis at deploy, so a fresh contract holds the real deployer, not zero.
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let deployer = keypair(140);
+        fund(&mut ledger, &deployer, 10_000 * 1_000_000);
+
+        let code = qtv_vm::asm::assemble(
+            // Read the caller word at offset zero, then store it under the slot zero key at offset
+            // 1024, a thirty two byte zero region equal to scalar_key(0).
+            "LDI r1, 0\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT",
+        )
+        .expect("the program assembles");
+        let genesis_selector = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector: genesis_selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess::default(),
+            }],
+        );
+
+        let deploy = system_tx(
+            &deployer,
+            &crate::ledger::vm_deploy_address(),
+            container.canonical_bytes(),
+            0,
+            100_000,
+            &fee,
+        );
+        assert_eq!(execute_ordered(&mut ledger, &[deploy], &fee, 0).len(), 1);
+        let contract = crate::ledger::contract_address(&deployer.address(), 0).unwrap();
+        let contract_id = address_bytes(&contract);
+
+        // Genesis ran at deploy: the owner slot holds the leading word of the deployer address.
+        let deployer_word =
+            u64::from_be_bytes(address_bytes(&deployer.address())[0..8].try_into().unwrap());
+        assert_eq!(
+            ledger
+                .contract_storage(&contract_id)
+                .get(&qtv_vm::abi::scalar_key(0)),
+            Some(&deployer_word),
+            "the genesis constructor stored the deployer at deploy"
+        );
+    }
+
+    #[test]
+    fn two_contract_calls_in_one_block_do_not_race_the_stored_counter() {
+        // A signed or quorum entry increments a per signer nonce it reads then writes. Two such calls
+        // in one block must not both read the same nonce and write the same next value, which would let
+        // a signature replay. The classifier the executor reads, is_vm_op, routes any block that holds a
+        // contract deploy or call to the sequential path, so contract state is never read from a stale
+        // parallel snapshot. This is shown with a contract that increments a counter under the caller
+        // key: two calls run in order and the counter reaches two, not one, even through the parallel
+        // entry point, so a read modify write on contract state cannot be raced.
+        let fee = FeeParams::devnet();
+        let deployer = keypair(131);
+
+        let code = qtv_vm::asm::assemble(
+            "LDI r0, 0\nSLOAD r1, r0\nLDI r2, 1\nADD r1, r1, r2\nSSTORE r0, r1\nHALT",
+        )
+        .expect("the program assembles");
+        let selector = [5u8, 6, 7, 8];
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![0],
+                    writes: vec![0],
+                },
+            }],
+        );
+
+        let contract = crate::ledger::contract_address(&deployer.address(), 0).unwrap();
+        let contract_id = address_bytes(&contract);
+        let caller_key = address_bytes(&deployer.address());
+
+        let deploy = system_tx(
+            &deployer,
+            &crate::ledger::vm_deploy_address(),
+            container.canonical_bytes(),
+            0,
+            100_000,
+            &fee,
+        );
+        let call_one = system_tx(&deployer, &contract, selector.to_vec(), 1, 100_000, &fee);
+        let call_two = system_tx(&deployer, &contract, selector.to_vec(), 2, 100_000, &fee);
+        let block = vec![deploy, call_one, call_two];
+
+        // Through the parallel entry point, which falls back to the ordered path because the block
+        // holds contract operations.
+        let mut ledger = Ledger::new();
+        fund(&mut ledger, &deployer, 10_000 * 1_000_000);
+        let included = crate::parallel::execute_parallel(&mut ledger, &block, &fee, 8, 0);
+        assert_eq!(included.len(), 3, "the deploy and both calls are included");
+        assert_eq!(
+            ledger.contract_storage(&contract_id).get(&caller_key),
+            Some(&2),
+            "the two calls increment in order, so the counter is two not one"
+        );
     }
 
     #[test]

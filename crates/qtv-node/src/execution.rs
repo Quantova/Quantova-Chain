@@ -20,10 +20,21 @@ const SENDER_SLOT: u64 = 0;
 /// The storage slot the recipient balance occupies during a run.
 const RECIPIENT_SLOT: u64 = 1;
 
+/// The thirty two byte storage key of the sender balance slot, seeded at the front of scratch memory
+/// so the transfer program names it by its pointer. The recipient key follows it.
+fn sender_key() -> [u8; 32] {
+    qtv_vm::abi::scalar_key(SENDER_SLOT)
+}
+fn recipient_key() -> [u8; 32] {
+    qtv_vm::abi::scalar_key(RECIPIENT_SLOT)
+}
+
 /// The fixed transfer program. It loads the amount and the fee from the constant
 /// pool, debits the sender by their sum with a checked subtraction, and credits
 /// the recipient by the amount, then halts. A checked subtraction faults on an
-/// insufficient balance and a clean halt commits the two updated balances.
+/// insufficient balance and a clean halt commits the two updated balances. The two
+/// balance keys are the thirty two byte slot keys seeded at scratch offset zero and
+/// thirty two, and the storage opcodes name each by its pointer.
 const TRANSFER_PROGRAM: &str = "\
 LDC r0, 0
 LDC r1, 1
@@ -32,7 +43,7 @@ LDI r3, 0
 SLOAD r4, r3
 SUB r4, r4, r2
 SSTORE r3, r4
-LDI r5, 1
+LDI r5, 32
 SLOAD r6, r5
 ADD r6, r6, r0
 SSTORE r5, r6
@@ -95,12 +106,18 @@ pub fn execute_transfer(
 ) -> Result<Transferred, ExecError> {
     let code = assemble(TRANSFER_PROGRAM).expect("the transfer program assembles");
     let consts = [amount, fee];
+    let (sender_key, recipient_key) = (sender_key(), recipient_key());
     let mut storage = std::collections::BTreeMap::new();
-    storage.insert(SENDER_SLOT, sender_balance);
-    storage.insert(RECIPIENT_SLOT, recipient_balance);
+    storage.insert(sender_key, sender_balance);
+    storage.insert(recipient_key, recipient_balance);
+    // Seed the two slot keys at scratch offset zero and thirty two, where the program reads them.
+    let mut memory = [0u8; 64];
+    memory[..32].copy_from_slice(&sender_key);
+    memory[32..].copy_from_slice(&recipient_key);
 
     let outcome = Interpreter::new(&code, &consts, meter_limit)
         .with_storage(storage)
+        .with_memory(&memory)
         .run()
         .map_err(|fault| match fault {
             Fault::Overflow => ExecError::InsufficientFunds,
@@ -109,8 +126,8 @@ pub fn execute_transfer(
         })?;
 
     Ok(Transferred {
-        sender_balance: outcome.storage.get(&SENDER_SLOT).copied().unwrap_or(0),
-        recipient_balance: outcome.storage.get(&RECIPIENT_SLOT).copied().unwrap_or(0),
+        sender_balance: outcome.storage.get(&sender_key).copied().unwrap_or(0),
+        recipient_balance: outcome.storage.get(&recipient_key).copied().unwrap_or(0),
         meter_used: outcome.gas_used,
     })
 }
@@ -119,7 +136,7 @@ pub fn execute_transfer(
 /// effects the call recorded through `send`, and the meter it spent.
 #[derive(Debug)]
 pub struct ContractOutcome {
-    pub storage: std::collections::BTreeMap<u64, u64>,
+    pub storage: std::collections::BTreeMap<[u8; 32], u64>,
     pub effects: Vec<qtv_vm::interp::Effect>,
     pub meter_used: u64,
 }
@@ -201,7 +218,7 @@ pub fn decode_container(bytes: &[u8]) -> Option<qtv_vm::container::Container> {
 pub fn execute_contract_call(
     container_bytes: &[u8],
     selector: [u8; qtv_vm::container::SELECTOR_BYTES],
-    storage: std::collections::BTreeMap<u64, u64>,
+    storage: std::collections::BTreeMap<[u8; 32], u64>,
     memory: &[u8],
     meter_limit: u64,
 ) -> Result<ContractOutcome, ExecError> {
@@ -249,8 +266,10 @@ mod tests {
     #[test]
     fn a_contract_call_runs_a_decoded_container_and_persists_storage() {
         use qtv_vm::container::{Container, Entry, StateAccess};
-        // Load constant zero, the value forty two, and store it into slot seven, then halt.
-        let code = qtv_vm::asm::assemble("LDC r0, 0\nLDI r1, 7\nSSTORE r1, r0\nHALT")
+        // Load constant zero, the value forty two, and store it under the slot seven key at the front
+        // of scratch, then halt. The store names the key by its pointer in r1.
+        let key = qtv_vm::abi::scalar_key(7);
+        let code = qtv_vm::asm::assemble("LDC r0, 0\nLDI r1, 0\nSSTORE r1, r0\nHALT")
             .expect("the program assembles");
         let selector = [1u8, 2, 3, 4];
         let container = Container::new(
@@ -272,11 +291,11 @@ mod tests {
             &bytes,
             selector,
             std::collections::BTreeMap::new(),
-            &[],
+            &key,
             100_000,
         )
         .expect("the call halts");
-        assert_eq!(out.storage.get(&7), Some(&42));
+        assert_eq!(out.storage.get(&key), Some(&42));
 
         // An unknown selector and an undecodable container are both refused.
         assert_eq!(

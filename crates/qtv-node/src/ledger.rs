@@ -309,27 +309,41 @@ pub fn address_word(address: &str) -> Option<u64> {
     Some(u64::from_be_bytes(id[..8].try_into().expect("eight bytes")))
 }
 
-/// Encode a contract's whole storage as one length prefixed run of slot and value words, so a
+/// A contract storage key, the thirty two byte slot a contract loads and stores under. A scalar field
+/// key is the machine's `scalar_key` of its slot number and a keyed map derives its key by hashing the
+/// map and the whole thirty two byte address, so the slot space is the digest space and two distinct
+/// addresses share a balance slot only on a hash collision, not on a sixty four bit match.
+type StorageKey = [u8; 32];
+
+/// Encode a contract's whole storage as one length prefixed run of key and value entries, so a
 /// contract's state is one trie leaf that loads and stores in one read and one write regardless of how
-/// its keyed maps scatter across the word space.
-fn encode_storage(storage: &std::collections::BTreeMap<u64, u64>) -> Vec<u8> {
+/// its keyed maps scatter across the key space. The key is the full thirty two byte slot.
+fn encode_storage(storage: &std::collections::BTreeMap<StorageKey, u64>) -> Vec<u8> {
     let mut encoder = qtv_codec::Encoder::new();
     (storage.len() as u64).encode(&mut encoder);
-    for (slot, value) in storage {
-        slot.encode(&mut encoder);
+    for (key, value) in storage {
+        encoder.put_bytes(key);
         value.encode(&mut encoder);
     }
     encoder.into_bytes()
 }
 
-fn decode_storage(bytes: &[u8]) -> std::collections::BTreeMap<u64, u64> {
+fn decode_storage(bytes: &[u8]) -> std::collections::BTreeMap<StorageKey, u64> {
     let mut decoder = qtv_codec::Decoder::new(bytes);
     let mut storage = std::collections::BTreeMap::new();
     let count = u64::decode(&mut decoder).unwrap_or(0);
     for _ in 0..count {
-        match (u64::decode(&mut decoder), u64::decode(&mut decoder)) {
-            (Ok(slot), Ok(value)) => {
-                storage.insert(slot, value);
+        let key = match decoder.get_bytes() {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(bytes);
+                key
+            }
+            _ => break,
+        };
+        match u64::decode(&mut decoder) {
+            Ok(value) => {
+                storage.insert(key, value);
             }
             _ => break,
         }
@@ -810,7 +824,7 @@ impl Ledger {
 
     /// The whole storage of the contract at an address, empty when the address holds no contract. The
     /// address facing form of contract_storage.
-    pub fn contract_storage_at(&self, address: &str) -> std::collections::BTreeMap<u64, u64> {
+    pub fn contract_storage_at(&self, address: &str) -> std::collections::BTreeMap<StorageKey, u64> {
         match address_id(address) {
             Some(id) => self.contract_storage(&id),
             None => std::collections::BTreeMap::new(),
@@ -842,7 +856,7 @@ impl Ledger {
 
     /// The whole storage of a contract, loaded as the slot to value map the virtual machine reads. An
     /// absent contract reads as empty, so a first call sees a clean slate.
-    pub fn contract_storage(&self, id: &[u8; 32]) -> std::collections::BTreeMap<u64, u64> {
+    pub fn contract_storage(&self, id: &[u8; 32]) -> std::collections::BTreeMap<StorageKey, u64> {
         match self.trie.get(&contract_store_key(id)) {
             Some(bytes) if !bytes.is_empty() => decode_storage(bytes),
             _ => std::collections::BTreeMap::new(),
@@ -853,7 +867,7 @@ impl Ledger {
     pub fn set_contract_storage(
         &mut self,
         id: &[u8; 32],
-        storage: &std::collections::BTreeMap<u64, u64>,
+        storage: &std::collections::BTreeMap<StorageKey, u64>,
     ) {
         self.trie
             .insert(contract_store_key(id), encode_storage(storage));
@@ -1469,7 +1483,8 @@ mod stake_state_tests {
 
     #[test]
     fn a_contract_call_injects_the_trusted_caller_and_persists_storage() {
-        // An entry that reads the caller word at memory offset zero and stores it into slot zero.
+        // An entry that reads the caller word at offset zero and stores it under the key at offset
+        // zero, which is the whole caller address the node injected there.
         let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 0\nSSTORE r2, r0\nHALT")
             .expect("the program assembles");
         let selector = [1u8, 2, 3, 4];
@@ -1493,9 +1508,10 @@ mod stake_state_tests {
 
         let caller = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
         assert!(l.call_contract(&caller, &contract, selector, &[], 0, 100_000));
-        // The leading caller word the node injected at offset zero, part of the whole caller address.
+        // The value stored is the leading caller word, keyed under the whole caller address the node
+        // injected, so the store lands under the thirty two byte caller key.
         let expected = u64::from_be_bytes([9u8; 8]);
-        assert_eq!(l.contract_storage(&contract_id).get(&0), Some(&expected));
+        assert_eq!(l.contract_storage(&contract_id).get(&[9u8; 32]), Some(&expected));
 
         // A call to an address that holds no contract is refused.
         let empty = qtv_idfmt::render_address(&[71u8; 32]).unwrap();
@@ -1508,9 +1524,11 @@ mod stake_state_tests {
         // contract self word at offset thirty two into slot one. Offset twenty four lies past the old
         // eight byte caller reduction, so under the old node it would read zero; under the trusted
         // context it reads real caller bytes, proving the whole address reaches the contract.
+        // Store the caller word at offset twenty four under the whole caller address key, and the
+        // contract word at offset thirty two under the whole contract address key.
         let code = qtv_vm::asm::assemble(
             "LDI r1, 24\nMLOAD r0, r1\nLDI r2, 0\nSSTORE r2, r0\n\
-             LDI r3, 32\nMLOAD r4, r3\nLDI r5, 1\nSSTORE r5, r4\nHALT",
+             LDI r3, 32\nMLOAD r4, r3\nLDI r5, 32\nSSTORE r5, r4\nHALT",
         )
         .expect("the program assembles");
         let selector = [1u8, 2, 3, 4];
@@ -1541,15 +1559,15 @@ mod stake_state_tests {
         let c2 = qtv_idfmt::render_address(&p2).unwrap();
 
         assert!(l.call_contract(&c1, &contract, selector, &[], 0, 100_000));
-        let seen1 = *l.contract_storage(&contract_id).get(&0).unwrap();
+        let seen1 = *l.contract_storage(&contract_id).get(&p1).unwrap();
         // The contract self word is the leading eight bytes of the contract address.
         assert_eq!(
-            l.contract_storage(&contract_id).get(&1),
+            l.contract_storage(&contract_id).get(&contract_id),
             Some(&u64::from_be_bytes([70u8; 8]))
         );
 
         assert!(l.call_contract(&c2, &contract, selector, &[], 0, 100_000));
-        let seen2 = *l.contract_storage(&contract_id).get(&0).unwrap();
+        let seen2 = *l.contract_storage(&contract_id).get(&p2).unwrap();
 
         assert_eq!(seen1, u64::from_be_bytes([0xA1u8; 8]));
         assert_eq!(seen2, u64::from_be_bytes([0xB2u8; 8]));
