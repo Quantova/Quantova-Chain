@@ -293,12 +293,17 @@ fn contract_store_key(id: &[u8; 32]) -> Key {
     sha3::sha3_256(&input)
 }
 
-/// The reduction of a full account address to the one machine word a contract sees it as. The virtual
-/// machine works in sixty four bit words, so an address a contract stores as an owner or reads as its
-/// caller is this word, not the whole thirty two byte payload. The word is the leading eight bytes of
-/// the address payload read big endian, a pure function of the address, so the same address always
-/// reduces to the same word for a storage key, a caller check, and an argument alike. It is lossy, so
-/// it is an internal handle for a pure state contract and never a route back to a full address.
+/// The length in bytes of the trusted execution context the node injects at the front of a contract's
+/// scratch memory before it runs: the thirty two byte caller address, then the thirty two byte address
+/// of the contract being called, then the eight byte consensus time. A contract reads its caller and
+/// its own identity as whole addresses, so an owner check binds all thirty two bytes and a signed
+/// message can commit to the exact contract it authorizes.
+pub const CONTRACT_CONTEXT_BYTES: usize = 72;
+
+/// The leading eight bytes of an address payload as a big endian word. This is a lossy reduction of a
+/// full address and is retained only as an opaque handle; it is no longer how a contract sees its
+/// caller, which now arrives as the whole thirty two byte address in the trusted context, so an
+/// address a contract compares or keys on is never narrowed to this word by the node.
 pub fn address_word(address: &str) -> Option<u64> {
     let id = address_id(address)?;
     Some(u64::from_be_bytes(id[..8].try_into().expect("eight bytes")))
@@ -855,12 +860,16 @@ impl Ledger {
     }
 
     /// Call an entry of a deployed contract. The contract's code and whole storage load from state, and
-    /// the argument memory is the caller supplied words with the two trusted context words overwritten
-    /// in place: the caller's reduced address at offset zero and the consensus time at offset eight, so
-    /// a caller can never forge either. A clean halt commits the post execution storage. A call that
-    /// records a native transfer effect is refused and commits nothing, because moving native value out
-    /// of a contract needs the reduced word bridged back to a full address, which is a later step; so
-    /// only a pure state contract runs today. Returns true when the call committed.
+    /// the argument memory is the caller supplied bytes with the trusted execution context overwritten
+    /// in place, so a caller can forge none of it. The context is the full thirty two byte caller
+    /// address at offset zero, the full thirty two byte address of the contract being called at offset
+    /// thirty two, and the eight byte consensus time at offset sixty four, spanning the first seventy
+    /// two bytes of scratch (see `CONTRACT_CONTEXT_BYTES`). The caller is injected in full, not reduced
+    /// to a leading word, so two addresses that share a prefix are distinct to the contract and an
+    /// owner check the contract runs binds the whole address. A clean halt commits the post execution
+    /// storage. A call that records a native transfer effect is refused and commits nothing, because
+    /// moving native value out of a contract needs the transfer bridged back to the ledger, which is a
+    /// later step; so only a pure state contract runs today. Returns true when the call committed.
     pub fn call_contract(
         &mut self,
         caller: &str,
@@ -879,11 +888,15 @@ impl Ledger {
             None => return false,
         };
         let storage = self.contract_storage(&contract_id);
-        let mut memory = vec![0u8; user_memory.len().max(16)];
+        let mut memory = vec![0u8; user_memory.len().max(CONTRACT_CONTEXT_BYTES)];
         memory[..user_memory.len()].copy_from_slice(user_memory);
-        let caller_word = address_word(caller).unwrap_or(0);
-        memory[0..8].copy_from_slice(&caller_word.to_be_bytes());
-        memory[8..16].copy_from_slice(&now_seconds.to_be_bytes());
+        // The trusted context, injected in full and overwriting any caller supplied bytes: the whole
+        // caller address, the whole contract address, and the consensus time. A parse failure on the
+        // caller lands the zero address, which owns nothing, so a malformed caller can pass no check.
+        let caller_id = address_id(caller).unwrap_or([0u8; 32]);
+        memory[0..32].copy_from_slice(&caller_id);
+        memory[32..64].copy_from_slice(&contract_id);
+        memory[64..72].copy_from_slice(&now_seconds.to_be_bytes());
         match crate::execution::execute_contract_call(&code, selector, storage, &memory, meter) {
             Ok(outcome) => {
                 // A contract initiated native transfer is not applied by the node yet, so a call that
@@ -1480,13 +1493,70 @@ mod stake_state_tests {
 
         let caller = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
         assert!(l.call_contract(&caller, &contract, selector, &[], 0, 100_000));
-        // The stored word is the caller's reduced address, the node injected it, not the caller.
+        // The leading caller word the node injected at offset zero, part of the whole caller address.
         let expected = u64::from_be_bytes([9u8; 8]);
         assert_eq!(l.contract_storage(&contract_id).get(&0), Some(&expected));
 
         // A call to an address that holds no contract is refused.
         let empty = qtv_idfmt::render_address(&[71u8; 32]).unwrap();
         assert!(!l.call_contract(&caller, &empty, selector, &[], 0, 100_000));
+    }
+
+    #[test]
+    fn a_contract_sees_the_whole_caller_address_not_a_leading_word() {
+        // An entry that stores the caller word at scratch offset twenty four into slot zero and the
+        // contract self word at offset thirty two into slot one. Offset twenty four lies past the old
+        // eight byte caller reduction, so under the old node it would read zero; under the trusted
+        // context it reads real caller bytes, proving the whole address reaches the contract.
+        let code = qtv_vm::asm::assemble(
+            "LDI r1, 24\nMLOAD r0, r1\nLDI r2, 0\nSSTORE r2, r0\n\
+             LDI r3, 32\nMLOAD r4, r3\nLDI r5, 1\nSSTORE r5, r4\nHALT",
+        )
+        .expect("the program assembles");
+        let selector = [1u8, 2, 3, 4];
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![0, 1],
+                },
+            }],
+        );
+        let mut l = Ledger::new();
+        let contract_id = [70u8; 32];
+        let contract = qtv_idfmt::render_address(&contract_id).unwrap();
+        l.set_contract_code(&contract_id, &container.canonical_bytes());
+
+        // Two callers that share their leading eight bytes but differ past byte twenty three. The old
+        // sixty four bit reduction mapped both to the same word; the whole address does not.
+        let mut p1 = [5u8; 32];
+        p1[24..].copy_from_slice(&[0xA1u8; 8]);
+        let mut p2 = [5u8; 32];
+        p2[24..].copy_from_slice(&[0xB2u8; 8]);
+        let c1 = qtv_idfmt::render_address(&p1).unwrap();
+        let c2 = qtv_idfmt::render_address(&p2).unwrap();
+
+        assert!(l.call_contract(&c1, &contract, selector, &[], 0, 100_000));
+        let seen1 = *l.contract_storage(&contract_id).get(&0).unwrap();
+        // The contract self word is the leading eight bytes of the contract address.
+        assert_eq!(
+            l.contract_storage(&contract_id).get(&1),
+            Some(&u64::from_be_bytes([70u8; 8]))
+        );
+
+        assert!(l.call_contract(&c2, &contract, selector, &[], 0, 100_000));
+        let seen2 = *l.contract_storage(&contract_id).get(&0).unwrap();
+
+        assert_eq!(seen1, u64::from_be_bytes([0xA1u8; 8]));
+        assert_eq!(seen2, u64::from_be_bytes([0xB2u8; 8]));
+        assert_ne!(
+            seen1, seen2,
+            "two callers sharing a leading word are distinct to the contract"
+        );
     }
 
     #[test]
