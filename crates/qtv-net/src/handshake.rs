@@ -1,14 +1,3 @@
-//! The post-quantum authenticated handshake.
-//!
-//! The initiator sends its identity public key and a random nonce. The responder
-//! generates an ephemeral ML-KEM key pair, sends its identity public key, the
-//! ephemeral encapsulation key, and a nonce, and signs the transcript so far with
-//! its identity key. The initiator verifies that signature, encapsulates to the
-//! ephemeral key to fix the shared secret, and signs the transcript including the
-//! ciphertext with its identity key. The responder verifies that signature and
-//! decapsulates to the same shared secret. Both sides derive the session keys
-//! from the shared secret and the transcript hash. A signature that does not
-//! verify, over a transcript either peer tampered with, aborts the handshake.
 
 use std::io::{Read, Write};
 
@@ -20,31 +9,23 @@ use crate::keyschedule;
 use crate::transcript::Transcript;
 use crate::{fill_random, Error, Result};
 
-/// The signature context that binds a signature to the initiator role.
 const INITIATOR_CONTEXT: &[u8] = b"qtv-net initiator";
 
-/// The signature context that binds a signature to the responder role.
 const RESPONDER_CONTEXT: &[u8] = b"qtv-net responder";
 
 impl<S: Read + Write> Channel<S> {
-    /// Run the handshake as the initiator over `stream`.
     pub fn connect(stream: S, identity: &Identity) -> Result<Self> {
         initiate(stream, identity, None)
     }
 
-    /// Run the handshake as the initiator and require the authenticated peer to
-    /// be `peer`, so a man in the middle without that identity key is rejected.
     pub fn connect_pinned(stream: S, identity: &Identity, peer: &PeerId) -> Result<Self> {
         initiate(stream, identity, Some(peer))
     }
 
-    /// Run the handshake as the responder over `stream`.
     pub fn accept(stream: S, identity: &Identity) -> Result<Self> {
         respond(stream, identity, None)
     }
 
-    /// Run the handshake as the responder and require the authenticated peer to
-    /// be `peer`.
     pub fn accept_pinned(stream: S, identity: &Identity, peer: &PeerId) -> Result<Self> {
         respond(stream, identity, Some(peer))
     }

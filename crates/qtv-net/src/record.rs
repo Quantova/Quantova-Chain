@@ -1,11 +1,3 @@
-//! The ChaCha20-Poly1305 record layer.
-//!
-//! Each direction of the channel is a sender and a receiver that share a
-//! directional key and a starting nonce. The sender seals every message under a
-//! nonce offset by a monotonic sequence number, binds the same sequence number as
-//! associated data, and writes a length framed record. The receiver opens the
-//! next record under the sequence number it expects, so a reordered, replayed, or
-//! tampered record does not open and the channel tears down.
 
 use std::io::{Read, Write};
 
@@ -13,14 +5,10 @@ use qtv_crypto::chacha20poly1305::{self, KEY_BYTES, NONCE_BYTES, TAG_BYTES};
 
 use crate::{Error, Result};
 
-/// The largest plaintext one record carries, one mebibyte.
 const MAX_RECORD_PLAINTEXT: usize = 1 << 20;
 
-/// The width of the big endian record length prefix.
 const LENGTH_PREFIX: usize = 4;
 
-/// Offset the starting nonce by the record sequence number. The counter occupies
-/// the low eight bytes so a nonce never repeats within a direction.
 fn record_nonce(iv: &[u8; NONCE_BYTES], sequence: u64) -> [u8; NONCE_BYTES] {
     let mut nonce = *iv;
     for (slot, byte) in nonce[NONCE_BYTES - 8..]
@@ -32,7 +20,6 @@ fn record_nonce(iv: &[u8; NONCE_BYTES], sequence: u64) -> [u8; NONCE_BYTES] {
     nonce
 }
 
-/// The sending half of one direction.
 pub struct Sealer {
     key: [u8; KEY_BYTES],
     iv: [u8; NONCE_BYTES],
@@ -40,7 +27,6 @@ pub struct Sealer {
 }
 
 impl Sealer {
-    /// Start a sender from a directional key and its starting nonce.
     pub fn new(key: [u8; KEY_BYTES], iv: [u8; NONCE_BYTES]) -> Self {
         Self {
             key,
@@ -49,7 +35,6 @@ impl Sealer {
         }
     }
 
-    /// Seal `plaintext` and write the framed record to `writer`.
     pub fn seal<W: Write>(&mut self, writer: &mut W, plaintext: &[u8]) -> Result<()> {
         if plaintext.len() > MAX_RECORD_PLAINTEXT {
             return Err(Error::Handshake("record plaintext exceeds the size bound"));
@@ -71,7 +56,6 @@ impl Sealer {
     }
 }
 
-/// The receiving half of one direction.
 pub struct Opener {
     key: [u8; KEY_BYTES],
     iv: [u8; NONCE_BYTES],
@@ -79,7 +63,6 @@ pub struct Opener {
 }
 
 impl Opener {
-    /// Start a receiver from a directional key and its starting nonce.
     pub fn new(key: [u8; KEY_BYTES], iv: [u8; NONCE_BYTES]) -> Self {
         Self {
             key,
@@ -88,8 +71,6 @@ impl Opener {
         }
     }
 
-    /// Read one framed record from `reader` and return its plaintext. A record
-    /// that fails to open leaves the sequence untouched and returns an error.
     pub fn open<R: Read>(&mut self, reader: &mut R) -> Result<Vec<u8>> {
         let mut length_bytes = [0u8; LENGTH_PREFIX];
         reader.read_exact(&mut length_bytes)?;

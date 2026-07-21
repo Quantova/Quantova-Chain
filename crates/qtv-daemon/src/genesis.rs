@@ -1,30 +1,3 @@
-//! The genesis file, the shared and byte identical starting point every validator
-//! opens from.
-//!
-//! One file fixes the whole network: its chain id, its genesis time, its committee
-//! slot budget, its fee schedule, its funded accounts, and its validator set. Every
-//! node parses the same file into the same genesis, so every node computes the
-//! identical genesis state root and draws the identical committee. The format is a
-//! plain `key = value` text we parse ourselves, comments after `#`, so the chain
-//! graph keeps its property of carrying no outside serialization crate.
-//!
-//! A NOTE ON KEYS, READ IT. This build derives every validator's network and
-//! attestation identity deterministically from its numeric id, through
-//! `qtv_devnet::node::net_identity`. That means whoever holds this genesis and can
-//! name a validator id controls that validator's identity. It is acceptable only on
-//! a single operator's own machines and is unacceptable the moment a second party
-//! runs a node, because the second party's identity would be one the first party can
-//! forge. The daemon refuses to start under this key model unless a local
-//! development flag is set, so the shortcut cannot leave by accident. Operator held
-//! keys, one secret per validator that no one else can derive, are the required next
-//! step before the network leaves one pair of hands.
-//!
-//! The chain id is bound through the genesis hash below. Two nodes that parsed
-//! different genesis files, a different chain id, a different validator set, a
-//! different fund, produce different genesis hashes, and the mesh refuses a peer
-//! whose genesis hash is not this node's. So a node built on the wrong genesis
-//! cannot feed this one consensus records, which is the cheap network identity that
-//! is far more expensive to retrofit once two live networks exist.
 
 use std::path::Path;
 
@@ -37,43 +10,16 @@ use qtv_node::node::{Genesis, GenesisAccount, ValidatorSpec};
 use crate::config::{parse_kv, Field};
 use crate::util::from_hex;
 
-/// A parsed genesis file: the chain id it names, the genesis the node opens from,
-/// the committee slot budget, and the hash that fixes this network's identity.
 pub struct GenesisFile {
-    /// The human chain id, reported in logs and carried for the operator's eye. The
-    /// binding check is the hash, which commits to this and to every other field.
     pub chain_id: String,
-    /// The genesis message, a free line folded into the genesis hash so it is a
-    /// permanent and unforgeable part of this network's identity, the way a headline
-    /// sits in the first block. Empty when the genesis sets none. The founder writes
-    /// the words; this carries them, and the same field carries them on testnet and
-    /// mainnet so the two test the same structure and differ only in what it says.
     pub message: String,
-    /// The genesis every node funds and draws its committee from.
     pub genesis: Genesis,
-    /// The one time sortition slot budget every validator tree is sized to. One slot
-    /// is spent per finalised height, so this bounds the chain to that many heights
-    /// before the sortition keys are exhausted and the daemon can no longer select a
-    /// committee. Running past it needs an epoch or key rotation mechanism in the
-    /// consensus, which is a named open item and not something the daemon papers
-    /// over. The daemon logs the budget and the heights remaining so the boundary is
-    /// never a surprise.
     pub slots: u64,
-    /// The native asset symbol the network presents, `TQTOV` on a test network and
-    /// `QTOV` on mainnet. It is a display label for clients and the explorer; the
-    /// ledger keeps balances in base units regardless. It defaults to `QTOV` when the
-    /// genesis names none.
     pub asset: String,
-    /// The SHA3 hash over the whole genesis, chain id included. This is the network
-    /// identity the mesh pins a peer against.
     pub hash: [u8; 32],
 }
 
 impl GenesisFile {
-    /// Load and parse a genesis file, deriving each funded account's address from its
-    /// scheme and public key and computing the genesis hash. Every failure names the
-    /// file and the line so a malformed genesis is caught at load rather than at the
-    /// first block.
     pub fn load(path: &Path) -> Result<GenesisFile, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("reading genesis file {}: {e}", path.display()))?;
@@ -171,9 +117,6 @@ impl GenesisFile {
     }
 }
 
-/// Parse a validator line, `validator = <id> <stake> <online|offline>`. The stake is
-/// the native weight the sortition draws the committee against, so it is part of
-/// genesis and the same on every node.
 fn parse_validator(field: &Field) -> Result<ValidatorSpec, String> {
     let parts: Vec<&str> = field.value.split_whitespace().collect();
     if parts.len() != 3 {
@@ -193,10 +136,6 @@ fn parse_validator(field: &Field) -> Result<ValidatorSpec, String> {
     Ok(ValidatorSpec { id, stake, online })
 }
 
-/// Parse a funded account line, `account = <scheme> <public_key_hex> <balance>`. The
-/// address is derived from the scheme and the public key at the canonical tier, the
-/// same derivation a wallet computes, so the funded account is the one the holder of
-/// that key signs from.
 fn parse_account(field: &Field) -> Result<GenesisAccount, String> {
     let parts: Vec<&str> = field.value.split_whitespace().collect();
     if parts.len() != 3 {
@@ -218,17 +157,8 @@ fn parse_account(field: &Field) -> Result<GenesisAccount, String> {
     })
 }
 
-/// The SHA3 hash over the whole genesis, the network identity a peer is pinned
-/// against. The validators and accounts are folded in sorted order, validators by
-/// id and accounts by address, so two genesis files that list the same set in a
-/// different line order still hash equal and name the same network. Every field is
-/// length prefixed or fixed width, so no two distinct genesis inputs collide onto
-/// one hash.
 fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) -> [u8; 32] {
     let mut buf: Vec<u8> = Vec::new();
-    // Version two folds in the genesis message and the native fee ceiling. Both are
-    // part of the network identity a peer is pinned against, so a node that carries a
-    // different message or a different ceiling names a different network.
     buf.extend_from_slice(b"QTV-GENESIS-V2");
     put_bytes(&mut buf, chain_id.as_bytes());
     put_bytes(&mut buf, message.as_bytes());
@@ -261,8 +191,6 @@ fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) ->
     sha3::sha3_256(&buf)
 }
 
-/// Append a length prefixed byte string, so a field boundary is unambiguous and two
-/// distinct field splits cannot fold to the same bytes.
 fn put_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
     buf.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
     buf.extend_from_slice(bytes);

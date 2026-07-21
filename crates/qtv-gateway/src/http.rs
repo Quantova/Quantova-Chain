@@ -1,11 +1,3 @@
-//! A small HTTP/1.1 server, written over the standard library so the gateway carries
-//! no outside dependency, the same discipline the rest of the stack holds.
-//!
-//! It accepts a POST to a path under `/v1`, reads a JSON body, turns the path into a
-//! typed request, hands that request to the node over the channel, waits for the one
-//! reply, and writes it back. Cross origin headers are permissive so a browser served
-//! explorer can read the chain, and a preflight is answered directly. Everything a
-//! client sends is bounded, so a hostile body cannot exhaust memory.
 
 use std::io::{BufRead, BufReader, Read, Result as IoResult, Write};
 use std::net::{TcpListener, TcpStream};
@@ -19,30 +11,14 @@ use crate::json::{self, object, Json};
 use crate::service::build_request;
 use crate::GatewayCall;
 
-/// The largest request body the gateway reads. A signed transaction is a few kilobytes,
-/// so a couple of megabytes is ample and a larger claim is refused rather than allocated.
 const MAX_BODY: usize = 2 * 1024 * 1024;
 
-/// The largest request head the gateway reads, the request line and all the headers together. A
-/// real request head is a few hundred bytes, so sixteen kilobytes is ample. This is bounded on its
-/// own because the head is read before the body limit is ever consulted, so without it a hostile
-/// peer could stream an endless request line or header and exhaust memory.
 const MAX_HEAD: usize = 16 * 1024;
 
-/// The deadline on reading a request and writing its reply, so a peer that opens a connection and
-/// then stalls, the classic slow client, cannot hold a connection thread forever.
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The most connections the gateway serves at once. Each connection is handled on its own thread, so
-/// this bounds the threads a connection flood can spawn. A request is small and the node answers it
-/// quickly, so a real load stays well under this, and a peer beyond it is turned away rather than
-/// letting the process spawn threads without limit.
 const MAX_CONNECTIONS: usize = 512;
 
-/// Serve the RPC on a bound listener, sending each request to the node over the channel.
-/// Each connection is handled on its own thread, and the node serialises the requests, so
-/// concurrency here never reaches the node's state out of order. The number of connections in flight
-/// is capped, and a peer past the cap is turned away at once so the flood cannot exhaust threads.
 pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>) {
     thread::spawn(move || {
         let active = Arc::new(AtomicUsize::new(0));
@@ -65,14 +41,10 @@ pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>) {
 }
 
 fn handle_connection(mut stream: TcpStream, requests: Sender<GatewayCall>) -> IoResult<()> {
-    // Bound how long a read or a write may block, so a stalled peer drops off rather than pinning a
-    // connection thread. A None deadline would let a slow client hold the thread forever.
     stream.set_read_timeout(Some(IO_TIMEOUT)).ok();
     stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
     let mut reader = BufReader::new(stream.try_clone()?);
 
-    // Read the request line and the headers under one shared byte budget, so the whole head is
-    // bounded and neither an endless line nor a flood of headers can exhaust memory.
     let mut head_budget = MAX_HEAD;
     let request_line = match read_capped_line(&mut reader, &mut head_budget) {
         Ok(Some(line)) => line,
@@ -153,10 +125,6 @@ fn handle_connection(mut stream: TcpStream, requests: Sender<GatewayCall>) -> Io
     }
 }
 
-/// Read one line ending in a newline, drawing down a shared byte budget so the request line and the
-/// headers together can never exceed it. Returns the line without its trailing newline, None if the
-/// connection ends before any byte arrives, and an error once the budget is exhausted, which is how
-/// an endless line or an endless run of headers is refused before it can exhaust memory.
 fn read_capped_line<R: BufRead>(reader: &mut R, budget: &mut usize) -> IoResult<Option<String>> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
@@ -182,7 +150,6 @@ fn read_capped_line<R: BufRead>(reader: &mut R, budget: &mut usize) -> IoResult<
     }
 }
 
-/// The trimmed value of a header by its lowercase name, if the line names it.
 fn header_value<'a>(line: &'a str, name: &str) -> Option<&'a str> {
     let (key, value) = line.split_once(':')?;
     if key.trim().eq_ignore_ascii_case(name) {
@@ -192,7 +159,6 @@ fn header_value<'a>(line: &'a str, name: &str) -> Option<&'a str> {
     }
 }
 
-/// Write a JSON error body under a status code.
 fn write_error(stream: &mut TcpStream, code: u16, error: &str, message: &str) -> IoResult<()> {
     let body = object(vec![
         ("error", Json::str(error)),
@@ -202,8 +168,6 @@ fn write_error(stream: &mut TcpStream, code: u16, error: &str, message: &str) ->
     write_response(stream, code, &body)
 }
 
-/// Write a full HTTP response with the permissive cross origin headers a browser client
-/// needs and a length so the client knows where the body ends.
 fn write_response(stream: &mut TcpStream, code: u16, body: &str) -> IoResult<()> {
     let response = format!(
         "HTTP/1.1 {code} {reason}\r\n\
@@ -222,7 +186,6 @@ fn write_response(stream: &mut TcpStream, code: u16, body: &str) -> IoResult<()>
     stream.flush()
 }
 
-/// The reason phrase for a status code, the small set the gateway returns.
 fn reason(code: u16) -> &'static str {
     match code {
         200 => "OK",
@@ -272,16 +235,12 @@ mod tests {
 
     #[test]
     fn the_head_budget_is_shared_across_the_lines() {
-        // The two lines together exceed the budget, so the second read fails even though the first
-        // fit, which is how a flood of small headers is refused, not only one endless line.
         let mut reader = Cursor::new(b"aaaaa\nbbbbb\n".to_vec());
         let mut budget = 8usize;
         assert!(read_capped_line(&mut reader, &mut budget).unwrap().is_some());
         assert!(read_capped_line(&mut reader, &mut budget).is_err());
     }
 
-    // Stand up the real server on a loopback port with a responder that answers every call with a
-    // small canned object, so a request can be driven over a real socket. Returns the port.
     fn serve_stub() -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -295,7 +254,6 @@ mod tests {
         port
     }
 
-    // Send a raw request over a real connection and read the whole response back.
     fn round_trip(port: u16, request: &str) -> String {
         use std::io::{Read, Write};
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -328,8 +286,6 @@ mod tests {
     #[test]
     fn an_oversized_body_is_refused_over_the_socket() {
         let port = serve_stub();
-        // The declared length is above the body cap, so the request is refused before the body is
-        // ever read or allocated.
         let response = round_trip(
             port,
             &format!("POST /v1/node_info HTTP/1.1\r\nContent-Length: {}\r\n\r\n", MAX_BODY + 1),

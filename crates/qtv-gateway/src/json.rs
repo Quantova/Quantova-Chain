@@ -1,20 +1,8 @@
-//! A small JSON reader and writer, written here rather than pulled from a crate so
-//! the whole chain graph keeps its property of carrying no outside dependency.
-//!
-//! It covers exactly what the wire needs. The writer emits objects, arrays, strings,
-//! integers, booleans, and null. Every quantity that can exceed what a JavaScript
-//! number holds without loss, a balance, a fee, a meter limit, is emitted as a
-//! decimal string rather than a number, so a browser client never silently rounds a
-//! value past two to the fifty three. The reader parses the flat request objects a
-//! client sends, a value keyed by a name, and nothing more elaborate is needed.
 
-/// A JSON value the writer renders and the reader parses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Json {
     Null,
     Bool(bool),
-    /// An integer small enough to be a JSON number safely, a height, a nonce, a
-    /// scheme byte, a count. A quantity that can grow large is carried as a string.
     Int(u64),
     Str(String),
     Array(Vec<Json>),
@@ -22,12 +10,10 @@ pub enum Json {
 }
 
 impl Json {
-    /// A string value.
     pub fn str(s: impl Into<String>) -> Json {
         Json::Str(s.into())
     }
 
-    /// Render the value to a compact JSON string.
     pub fn render(&self) -> String {
         let mut out = String::new();
         self.write(&mut out);
@@ -66,7 +52,6 @@ impl Json {
         }
     }
 
-    /// The value under a key, if this is an object holding it.
     pub fn get(&self, key: &str) -> Option<&Json> {
         match self {
             Json::Object(fields) => fields.iter().find(|(k, _)| k == key).map(|(_, v)| v),
@@ -74,7 +59,6 @@ impl Json {
         }
     }
 
-    /// This value as a string, if it is one.
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Json::Str(s) => Some(s),
@@ -82,7 +66,6 @@ impl Json {
         }
     }
 
-    /// This value as an integer, if it is one.
     pub fn as_u64(&self) -> Option<u64> {
         match self {
             Json::Int(n) => Some(*n),
@@ -91,7 +74,6 @@ impl Json {
     }
 }
 
-/// Build an object from named fields in order.
 pub fn object(fields: Vec<(&str, Json)>) -> Json {
     Json::Object(
         fields
@@ -101,7 +83,6 @@ pub fn object(fields: Vec<(&str, Json)>) -> Json {
     )
 }
 
-/// Write a JSON string with the escapes the standard requires.
 fn write_string(s: &str, out: &mut String) {
     out.push('"');
     for c in s.chars() {
@@ -118,12 +99,6 @@ fn write_string(s: &str, out: &mut String) {
     out.push('"');
 }
 
-/// Parse a JSON value from a string, enough for the request bodies a client sends.
-/// The deepest an accepted JSON value may nest. A real gateway request is flat or a level or two
-/// deep, so this is far above any honest body. It exists because the parser recurses to descend into
-/// an array or an object, so without a bound a hostile body of deeply nested brackets would recurse
-/// until the thread's stack overflows, which aborts the whole process and, because the gateway runs
-/// in the node's process, halts the node. Bounding the nesting turns that attack into a clean error.
 const MAX_DEPTH: usize = 64;
 
 pub fn parse(input: &str) -> Result<Json, String> {
@@ -144,8 +119,6 @@ pub fn parse(input: &str) -> Result<Json, String> {
 struct Parser {
     chars: Vec<char>,
     pos: usize,
-    /// How many arrays or objects are open around the value being parsed, so the recursion that
-    /// descends into them can be bounded before it overflows the stack.
     depth: usize,
 }
 
@@ -181,9 +154,6 @@ impl Parser {
         }
     }
 
-    /// Descend into an array or an object one level deeper, refusing to go past the depth bound. The
-    /// depth counts the currently open containers, so it rises on the way in and falls on the way out,
-    /// which bounds the recursion depth without rejecting a wide but shallow value.
     fn nested(&mut self, parse_container: fn(&mut Self) -> Result<Json, String>) -> Result<Json, String> {
         if self.depth >= MAX_DEPTH {
             return Err("the JSON nests deeper than the gateway allows".to_string());
@@ -324,9 +294,6 @@ impl Parser {
     }
 }
 
-/// Decode a lowercase or uppercase hex string into bytes, for the transaction bytes a
-/// client submits as hex. An odd length or a non hex character is refused with a
-/// message rather than a silent truncation.
 pub fn from_hex(s: &str) -> Result<Vec<u8>, String> {
     let s = s.trim();
     if !s.len().is_multiple_of(2) {
@@ -344,7 +311,6 @@ pub fn from_hex(s: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Lowercase hex of a byte slice.
 pub fn to_hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -367,7 +333,6 @@ fn hex_nibble(c: u8) -> Result<u8, String> {
 mod tests {
     use super::*;
 
-    /// Count an object's fields, a small helper the tests use.
     fn field_count(value: &Json) -> usize {
         match value {
             Json::Object(fields) => fields.len(),
@@ -377,8 +342,6 @@ mod tests {
 
     #[test]
     fn deeply_nested_json_is_refused_rather_than_overflowing_the_stack() {
-        // A body of many thousand open brackets would recurse the parser to a stack overflow and abort
-        // the node without the depth bound. It must come back as a clean error instead.
         let deep = "[".repeat(200_000);
         let result = parse(&deep);
         assert!(result.is_err(), "deeply nested JSON must be refused");
@@ -390,7 +353,6 @@ mod tests {
 
     #[test]
     fn a_wide_but_shallow_array_still_parses() {
-        // The bound is on nesting depth, not size, so a large flat array is fine.
         let wide = format!("[{}]", vec!["1"; 10_000].join(","));
         let value = parse(&wide).expect("a wide flat array parses");
         assert!(matches!(value, Json::Array(items) if items.len() == 10_000));

@@ -1,4 +1,3 @@
-//! Peer identity backed by an ML-DSA key pair.
 
 use std::fmt;
 
@@ -6,8 +5,6 @@ use qtv_crypto::{ml_dsa, sha3};
 
 use crate::{fill_random, Error, Result};
 
-/// A peer long term identity. The ML-DSA public key is the peer identity and the
-/// secret key signs the handshake transcript so the far side can authenticate it.
 #[derive(Clone)]
 pub struct Identity {
     public: ml_dsa::PublicKey,
@@ -15,26 +12,19 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// Derive an identity from a thirty two byte seed. The same seed always
-    /// yields the same key pair, so a peer identity is stable across restarts.
     pub fn from_seed(seed: &[u8; ml_dsa::SEED_BYTES]) -> Self {
         let (public, secret) = ml_dsa::keygen(seed);
         Self { public, secret }
     }
 
-    /// The ML-DSA public key that names this peer.
     pub fn public(&self) -> &ml_dsa::PublicKey {
         &self.public
     }
 
-    /// The peer identity that other peers see.
     pub fn peer_id(&self) -> PeerId {
         PeerId::from_public(&self.public)
     }
 
-    /// Sign `message` under `context` with this identity key. The handshake signs
-    /// the transcript hash under a role context so the far side authenticates
-    /// this peer. The signing randomness is drawn from the operating system.
     pub fn sign(&self, message: &[u8], context: &[u8]) -> Result<ml_dsa::Signature> {
         let mut randomizer = [0u8; 32];
         fill_random(&mut randomizer)?;
@@ -44,7 +34,6 @@ impl Identity {
     }
 }
 
-/// A peer identity, the ML-DSA public key addressed by its SHA3-256 fingerprint.
 #[derive(Clone)]
 pub struct PeerId {
     public: ml_dsa::PublicKey,
@@ -52,7 +41,6 @@ pub struct PeerId {
 }
 
 impl PeerId {
-    /// Build a peer identity from an ML-DSA public key.
     pub fn from_public(public: &ml_dsa::PublicKey) -> Self {
         Self {
             public: *public,
@@ -60,12 +48,10 @@ impl PeerId {
         }
     }
 
-    /// The ML-DSA public key of this peer.
     pub fn public(&self) -> &ml_dsa::PublicKey {
         &self.public
     }
 
-    /// The SHA3-256 fingerprint of the public key, a compact peer handle.
     pub fn fingerprint(&self) -> &[u8; 32] {
         &self.fingerprint
     }

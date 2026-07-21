@@ -1,46 +1,21 @@
-//! The single formatting path for every identifier in the Quantova stack.
-//!
-//! Raw bytes become a Bech32m string carrying a role prefix. Nothing here ever
-//! emits Ethereum style hex. Encoding and decoding follow the modern Bech32m
-//! standard, meaning the Bech32 base 32 alphabet paired with the Bech32m
-//! checksum constant.
-//!
-//! Each family exposes a render function and a parse function. Render takes the
-//! raw bytes and returns the checked string. Parse takes the string and returns
-//! the raw bytes, verifying both the checksum and the prefix.
 
 #![forbid(unsafe_code)]
 
 use std::fmt;
 
-/// Human readable part for an account or contract address. The separator that
-/// follows a human readable part is the digit one, so an address reads as Q1.
 pub const HRP_ADDRESS: &str = "Q";
-/// Human readable part for a secret seed.
 pub const HRP_SECRET: &str = "Q2";
-/// Human readable part for a transaction id.
 pub const HRP_TX: &str = "QTX";
-/// Human readable part for a block hash.
 pub const HRP_BLOCK: &str = "QBK";
-/// Human readable part for a state root.
 pub const HRP_STATE: &str = "QST";
-/// Human readable part for a contract interface digest.
 pub const HRP_CID: &str = "QCID";
-/// Human readable part for a proof digest.
 pub const HRP_PROOF: &str = "QPF";
 
-/// The security floor in bytes for the address and secret families. Every
-/// payload is the full 256-bit width, and a shorter one is refused.
 pub const KEY_FLOOR: usize = 32;
-/// The fixed digest length in bytes for the transaction, block, state,
-/// interface, and proof families.
 pub const DIGEST_LEN: usize = 32;
 
-/// The Bech32 base 32 alphabet.
 const CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-/// The Bech32m checksum constant from the modern standard.
 const BECH32M_CONST: u32 = 734539939;
-/// The five generator coefficients of the Bech32 checksum polynomial.
 const GENERATOR: [u32; 5] = [
     996825010,
     642813549,
@@ -49,34 +24,21 @@ const GENERATOR: [u32; 5] = [
     705979059,
 ];
 
-/// A reason a render or parse step refused its input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// The payload is shorter than the security floor.
     TooShort {
-        /// The floor in bytes.
         min: usize,
-        /// The length that was offered.
         got: usize,
     },
-    /// The payload is not the required fixed length.
     BadLength {
-        /// The required length in bytes.
         expected: usize,
-        /// The length that was offered.
         got: usize,
     },
-    /// The string carries a prefix other than the one expected.
     WrongPrefix,
-    /// The checksum does not verify.
     BadChecksum,
-    /// The string holds a character outside the Bech32 alphabet.
     BadChar,
-    /// The string mixes upper and lower case.
     MixedCase,
-    /// The string lacks a separator.
     NoSeparator,
-    /// The data section does not decode to whole bytes.
     BadData,
 }
 
@@ -107,7 +69,6 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// The Bech32 checksum polynomial over a run of five bit groups.
 fn polymod(values: &[u8]) -> u32 {
     let mut chk: u32 = 1;
     for &value in values {
@@ -122,7 +83,6 @@ fn polymod(values: &[u8]) -> u32 {
     chk
 }
 
-/// Expand a human readable part into the five bit groups the checksum folds in.
 fn hrp_expand(hrp: &str) -> Vec<u8> {
     let lowered = hrp.to_ascii_lowercase();
     let bytes = lowered.as_bytes();
@@ -137,8 +97,6 @@ fn hrp_expand(hrp: &str) -> Vec<u8> {
     out
 }
 
-/// Regroup a byte stream from one bit width to another. When padding is on the
-/// tail is zero filled. When padding is off a nonzero tail returns nothing.
 fn convert_bits(data: &[u8], from: u32, to: u32, pad: bool) -> Option<Vec<u8>> {
     let mut acc: u32 = 0;
     let mut bits: u32 = 0;
@@ -167,7 +125,6 @@ fn convert_bits(data: &[u8], from: u32, to: u32, pad: bool) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Assemble a Bech32m string from a human readable part and five bit groups.
 fn encode(hrp: &str, data: &[u8]) -> String {
     let mut values = hrp_expand(hrp);
     values.extend_from_slice(data);
@@ -187,16 +144,12 @@ fn encode(hrp: &str, data: &[u8]) -> String {
     out
 }
 
-/// Render a payload under a human readable part. The regrouping from eight to
-/// five bits with padding is total, so this never fails.
 fn render(hrp: &str, payload: &[u8]) -> String {
     let groups =
         convert_bits(payload, 8, 5, true).expect("eight to five padded regrouping is total");
     encode(hrp, &groups).to_ascii_uppercase()
 }
 
-/// Split a Bech32m string, verify its checksum, and return the raw bytes with
-/// the human readable part.
 fn decode(text: &str) -> Result<(String, Vec<u8>), Error> {
     let has_lower = text.bytes().any(|b| b.is_ascii_lowercase());
     let has_upper = text.bytes().any(|b| b.is_ascii_uppercase());
@@ -238,7 +191,6 @@ fn decode(text: &str) -> Result<(String, Vec<u8>), Error> {
     Ok((hrp.to_string(), payload))
 }
 
-/// Parse a Bech32m string and confirm it carries the expected prefix.
 fn parse(expected: &str, text: &str) -> Result<Vec<u8>, Error> {
     let (hrp, payload) = decode(text)?;
     if !hrp.eq_ignore_ascii_case(expected) {
@@ -247,7 +199,6 @@ fn parse(expected: &str, text: &str) -> Result<Vec<u8>, Error> {
     Ok(payload)
 }
 
-/// Confirm a payload length reaches the key floor.
 fn check_floor(len: usize) -> Result<(), Error> {
     if len < KEY_FLOOR {
         Err(Error::TooShort {
@@ -259,7 +210,6 @@ fn check_floor(len: usize) -> Result<(), Error> {
     }
 }
 
-/// Confirm a payload length is exactly the fixed digest length.
 fn check_digest(len: usize) -> Result<(), Error> {
     if len != DIGEST_LEN {
         Err(Error::BadLength {

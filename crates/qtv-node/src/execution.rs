@@ -1,27 +1,12 @@
-//! Transaction execution through the virtual machine.
-//!
-//! A transaction in this slice is a native transfer. Its call names the recipient
-//! address and carries the transfer amount. The node runs a fixed program on the
-//! qtv-vm interpreter that debits the sender by the amount and the protocol fee
-//! and credits the recipient by the amount, so the balance change is a real
-//! metered execution, not a bookkeeping step. The sender and recipient balances
-//! enter the interpreter as its declared storage and the amount and fee enter as
-//! its constant pool. On a clean halt the node reads the post execution balances
-//! back; a checked subtraction that would underflow faults the run and no balance
-//! moves, which is how an insufficient balance is rejected at execution.
 
 use qtv_codec::{Decoder, Encoder};
 use qtv_tx::Call;
 use qtv_vm::asm::assemble;
 use qtv_vm::interp::{Fault, Interpreter};
 
-/// The storage slot the sender balance occupies during a run.
 const SENDER_SLOT: u64 = 0;
-/// The storage slot the recipient balance occupies during a run.
 const RECIPIENT_SLOT: u64 = 1;
 
-/// The thirty two byte storage key of the sender balance slot, seeded at the front of scratch memory
-/// so the transfer program names it by its pointer. The recipient key follows it.
 fn sender_key() -> [u8; 32] {
     qtv_vm::abi::scalar_key(SENDER_SLOT)
 }
@@ -29,12 +14,6 @@ fn recipient_key() -> [u8; 32] {
     qtv_vm::abi::scalar_key(RECIPIENT_SLOT)
 }
 
-/// The fixed transfer program. It loads the amount and the fee from the constant
-/// pool, debits the sender by their sum with a checked subtraction, and credits
-/// the recipient by the amount, then halts. A checked subtraction faults on an
-/// insufficient balance and a clean halt commits the two updated balances. The two
-/// balance keys are the thirty two byte slot keys seeded at scratch offset zero and
-/// thirty two, and the storage opcodes name each by its pointer.
 const TRANSFER_PROGRAM: &str = "\
 LDC r0, 0
 LDC r1, 1
@@ -49,20 +28,14 @@ ADD r6, r6, r0
 SSTORE r5, r6
 HALT";
 
-/// The meter a transfer program spends over the machine's weighted schedule, and so
-/// the minimum meter limit a transfer needs to reach a clean halt.
 pub const TRANSFER_METER: u64 = 1_210;
 
-/// A native transfer call: the recipient address as the target and the amount as
-/// eight little endian bytes of arguments.
 pub fn transfer_call(recipient: &str, amount: u64) -> Call {
     let mut encoder = Encoder::new();
     encoder.put_u64(amount);
     Call::new(recipient.to_string(), encoder.into_bytes())
 }
 
-/// The amount a transfer call carries, or None when the arguments are not a
-/// single eight byte amount.
 pub fn transfer_amount(call: &Call) -> Option<u64> {
     let mut decoder = Decoder::new(call.args());
     let amount = decoder.get_u64().ok()?;
@@ -70,20 +43,14 @@ pub fn transfer_amount(call: &Call) -> Option<u64> {
     Some(amount)
 }
 
-/// The reason a transfer failed to execute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecError {
-    /// The sender could not cover the amount and the fee, so the debit faulted.
     InsufficientFunds,
-    /// The meter limit did not cover the program's execution.
     MeterExhausted,
-    /// Any other virtual machine fault, which a native transfer never reaches.
     Vm(Fault),
-    /// The deployed container did not decode, or it names no entry for the call selector.
     BadContainer,
 }
 
-/// The outcome of a transfer: the post execution balances and the meter spent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Transferred {
     pub sender_balance: u64,
@@ -91,12 +58,6 @@ pub struct Transferred {
     pub meter_used: u64,
 }
 
-/// Execute a transfer through the virtual machine. The sender and recipient
-/// balances seed the interpreter storage and the amount and fee seed the constant
-/// pool. A clean halt yields the two post execution balances and the meter spent.
-/// The meter limit is passed to the machine, which meters execution per operation
-/// and faults when it would exceed the limit, and the machine's own metering is
-/// mapped back onto our meter here at the one boundary where the two meet.
 pub fn execute_transfer(
     sender_balance: u64,
     recipient_balance: u64,
@@ -110,7 +71,6 @@ pub fn execute_transfer(
     let mut storage = std::collections::BTreeMap::new();
     storage.insert(sender_key, sender_balance);
     storage.insert(recipient_key, recipient_balance);
-    // Seed the two slot keys at scratch offset zero and thirty two, where the program reads them.
     let mut memory = [0u8; 64];
     memory[..32].copy_from_slice(&sender_key);
     memory[32..].copy_from_slice(&recipient_key);
@@ -132,8 +92,6 @@ pub fn execute_transfer(
     })
 }
 
-/// The outcome of a contract call: the contract's whole post execution storage, the native transfer
-/// effects the call recorded through `send`, and the meter it spent.
 #[derive(Debug)]
 pub struct ContractOutcome {
     pub storage: std::collections::BTreeMap<[u8; 32], u64>,
@@ -157,10 +115,6 @@ fn read_be_u64(bytes: &[u8], pos: &mut usize) -> Option<u64> {
 
 fn read_slots(bytes: &[u8], pos: &mut usize) -> Option<Vec<u64>> {
     let count = read_be_u32(bytes, pos)?;
-    // Start empty rather than reserving `count` up front. The count is attacker controlled in a
-    // deployed container, so a huge value would reserve gigabytes and abort the node before a single
-    // element is read. Growing as each bounded read succeeds caps the allocation at the bytes that
-    // actually follow, so a count larger than the remaining bytes fails fast instead.
     let mut slots = Vec::new();
     for _ in 0..count {
         slots.push(read_be_u64(bytes, pos)?);
@@ -168,11 +122,6 @@ fn read_slots(bytes: &[u8], pos: &mut usize) -> Option<Vec<u64>> {
     Some(slots)
 }
 
-/// Rebuild a container from its canonical bytes, the inverse of the machine's `canonical_bytes`. The
-/// tagged qtv-vm serializes a container but does not read one back, and the chain must, so a deployed
-/// container can run. The format is the `QVM1` tag, then the length prefixed code, the constant pool,
-/// and the entries, each an entry selector, its code offset, and its declared reads and writes. It is
-/// a pure function of the bytes, so every node rebuilds the identical container from the same deploy.
 pub fn decode_container(bytes: &[u8]) -> Option<qtv_vm::container::Container> {
     use qtv_vm::container::{Container, Entry, StateAccess, SELECTOR_BYTES};
     if bytes.len() < 4 || &bytes[0..4] != b"QVM1" {
@@ -184,8 +133,6 @@ pub fn decode_container(bytes: &[u8]) -> Option<qtv_vm::container::Container> {
     let code = bytes.get(pos..code_end)?.to_vec();
     pos = code_end;
     let consts_len = read_be_u32(bytes, &mut pos)?;
-    // Start empty and grow as each bounded read succeeds, so an attacker supplied count cannot
-    // reserve a huge allocation before any bytes are read. See read_slots for why.
     let mut consts = Vec::new();
     for _ in 0..consts_len {
         consts.push(read_be_u64(bytes, &mut pos)?);
@@ -209,12 +156,6 @@ pub fn decode_container(bytes: &[u8]) -> Option<qtv_vm::container::Container> {
     Some(Container::new(code, consts, entries))
 }
 
-/// Run one entry of a deployed contract through the virtual machine. The container's canonical bytes
-/// rebuild the container, the entry is selected by its selector, the contract's whole storage seeds
-/// the machine, and the argument memory carries the call arguments and the host context words the
-/// caller placed. A clean halt yields the post execution storage, the recorded native transfer
-/// effects, and the meter spent; a fault, an undecodable container, or an unknown selector is refused
-/// and no state moves.
 pub fn execute_contract_call(
     container_bytes: &[u8],
     selector: [u8; qtv_vm::container::SELECTOR_BYTES],
@@ -246,16 +187,11 @@ mod tests {
 
     #[test]
     fn a_container_with_a_huge_count_is_refused_without_a_giant_allocation() {
-        // The QVM1 tag, a zero length code section, then a constant count of four billion with no
-        // constant bytes following. Before the fix this reserved billions of elements and aborted the
-        // node. Now the decoder grows as it reads and fails the moment the bytes run out, returning
-        // None without a large allocation.
         let mut bytes = b"QVM1".to_vec();
         bytes.extend_from_slice(&0u32.to_be_bytes()); // code length zero
         bytes.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // a hostile constant count
         assert!(decode_container(&bytes).is_none());
 
-        // The same for a hostile entry count.
         let mut bytes = b"QVM1".to_vec();
         bytes.extend_from_slice(&0u32.to_be_bytes()); // code length zero
         bytes.extend_from_slice(&0u32.to_be_bytes()); // no constants
@@ -266,8 +202,6 @@ mod tests {
     #[test]
     fn a_contract_call_runs_a_decoded_container_and_persists_storage() {
         use qtv_vm::container::{Container, Entry, StateAccess};
-        // Load constant zero, the value forty two, and store it under the slot seven key at the front
-        // of scratch, then halt. The store names the key by its pointer in r1.
         let key = qtv_vm::abi::scalar_key(7);
         let code = qtv_vm::asm::assemble("LDC r0, 0\nLDI r1, 0\nSSTORE r1, r0\nHALT")
             .expect("the program assembles");
@@ -286,7 +220,6 @@ mod tests {
         );
         let bytes = container.canonical_bytes();
 
-        // The chain rebuilds the container from its canonical bytes and runs the entry.
         let out = execute_contract_call(
             &bytes,
             selector,
@@ -297,7 +230,6 @@ mod tests {
         .expect("the call halts");
         assert_eq!(out.storage.get(&key), Some(&42));
 
-        // An unknown selector and an undecodable container are both refused.
         assert_eq!(
             execute_contract_call(&bytes, [9, 9, 9, 9], std::collections::BTreeMap::new(), &[], 100_000)
                 .unwrap_err(),
@@ -345,13 +277,6 @@ mod tests {
 
     #[test]
     fn the_transfer_meter_is_constant_so_it_cannot_be_exceeded() {
-        // The transfer program is straight line with no data dependent branch, so
-        // the meter it spends does not depend on the amount, the fee, or the
-        // balances. Across a spread of inputs that each reach a clean halt, the
-        // meter spent is always exactly TRANSFER_METER, so a limit of TRANSFER_METER
-        // is enough for every transfer and no transfer, whatever its values, spends
-        // past it. The extreme case sits at the edge of the checked debit, amount
-        // plus fee one below the sender balance.
         let cases = [
             (u64::MAX, 0u64, 0u64),
             (1_000, 1, 1),
@@ -367,10 +292,6 @@ mod tests {
 
     #[test]
     fn no_transfer_commits_below_its_meter_limit() {
-        // The dual of the constant cost: at every limit below that cost the run
-        // faults rather than completing, so there is no path that runs past the
-        // limit and still moves a balance. We sweep every limit from zero up to one
-        // below the cost, and each one faults.
         for limit in 0..TRANSFER_METER {
             let err = execute_transfer(1_000, 0, 1, 1, limit).unwrap_err();
             assert_eq!(err, ExecError::MeterExhausted);

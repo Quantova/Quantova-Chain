@@ -1,12 +1,4 @@
-//! A distribution summary over a set of samples, reported as the median, the
-//! ninetieth and ninety ninth percentiles, and the maximum, so a figure carries its
-//! tail rather than a single central point. This is the same method the in process
-//! baseline uses, linear interpolation between the two nearest ranks, so the two
-//! runs' finality distributions are computed identically and compare directly.
 
-/// A summary of a set of samples: the count, the minimum, the median, the ninetieth
-/// and ninety ninth percentiles, the maximum, and the mean. All the value fields are
-/// in the same unit as the samples.
 #[derive(Clone, Copy, Debug)]
 pub struct Distribution {
     pub count: usize,
@@ -19,8 +11,6 @@ pub struct Distribution {
 }
 
 impl Distribution {
-    /// Summarise a set of samples. Returns None for an empty set, since a
-    /// distribution over no samples has no honest central point or tail.
     pub fn of(samples: &[f64]) -> Option<Distribution> {
         if samples.is_empty() {
             return None;
@@ -40,9 +30,6 @@ impl Distribution {
     }
 }
 
-/// The percentile of a sorted, ascending sample set by linear interpolation between
-/// the two nearest ranks. A percentile of zero is the minimum and a hundred is the
-/// maximum.
 fn percentile(sorted: &[f64], pct: f64) -> f64 {
     let n = sorted.len();
     if n == 1 {

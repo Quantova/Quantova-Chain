@@ -1,58 +1,3 @@
-//! The Quantova live in process multi node harness.
-//!
-//! It stands up several real validator instances over the real qtv-net post
-//! quantum transport, runs the real committee sortition, real block production,
-//! real module lattice attestation, and a real aggregated finality certificate,
-//! and drives a real signed transaction workload through them for a real run of
-//! at least a minute. It then reports two measured numbers: the sustained
-//! finalised throughput and the finality latency as a distribution with its tail.
-//!
-//! WHAT IS REAL HERE. The validator instances are real DevNode instances, each
-//! with its own module lattice key. The committee is drawn by the real qtv-sampler
-//! one time key sortition, the grinding resistant construction of consensus v0.5.0,
-//! the pin the buildable devnet now carries. Each validator commits a one time
-//! preimage tree bonded to its stake, and membership is a committed preimage with
-//! its Merkle path against the registered root, drawn with the stake floor on.
-//! Blocks are produced by the real leader, executed through the real virtual machine
-//! to a real state root, attested with real module lattice signatures over the real
-//! one time membership credential, and finalised by a real aggregated certificate
-//! that every node verifies. Every transaction carries a real 3309 byte module
-//! lattice signature and is verified on the ingress path. Every gossip byte is
-//! sealed and opened through the real qtv-net channel, an ML-KEM and ML-DSA
-//! handshake with a ChaCha20-Poly1305 record layer.
-//!
-//! THE SORTITION THIS RUNS, STATED PLAINLY. This harness measures the one time key
-//! sortition, the grinding resistant successor to the v0.3.0 module lattice
-//! verifiable random draw. The devnet pins consensus v0.5.0, which carries the one
-//! time construction with the minimum self stake floor on by default, so committee
-//! membership and proposer eligibility are drawn and rechecked as a committed one
-//! time preimage with its Merkle path against the registered root, and an account
-//! below the floor is not eligible. The predecessor draw is no longer on the path.
-//!
-//! WHAT IS IN PROCESS, NOT MULTI MACHINE, AND SO NOT MEASURED. The validators run
-//! as several instances inside one operating system process on one host, and the
-//! transport is an in memory duplex rather than a socket to another machine. So the
-//! seal and open cryptography is paid for real, but the network transfer is a
-//! memory copy: inter node bandwidth and propagation latency are NOT measured. The
-//! consensus round is scheduled on a logical clock inside the devnet, so the
-//! modelled slot and view timeouts are logical, not wall clock. Every committee
-//! member's compute runs serially on this one host rather than in parallel across
-//! machines. The two consequences are stated at each number below and must be read
-//! with it: this is an in process multi node measurement of the consensus software
-//! on one host, not a live global network figure. The modelled global topology
-//! finality and the bandwidth bound throughput live in the separate Quantova-Bench
-//! and are labelled modelled there; they are not restated here as measured.
-//!
-//! WHAT ERASURE CODED DISSEMINATION CHANGES HERE. The devnet no longer carries a
-//! block proposal as one whole qtv-net record. It codes the block the proposal
-//! commits to into k data shards and n minus k parity shards under a SHA3 commitment
-//! and disseminates the shards over the overlay, each shard within the record bound,
-//! and every node rebuilds the block from any k shards and verifies it against the
-//! header. This changes how the proposal is carried; it does not turn the in memory
-//! transport into a real network, so it does not by itself produce a network
-//! throughput number. What it does is remove the width cap the single record proposal
-//! imposed, so a block wider than one record can be driven and measured at all. This
-//! harness now runs a width that the single record path would have refused.
 
 mod stats;
 
@@ -70,21 +15,10 @@ use qtv_tx::{sign, Body, Wrapper};
 
 use crate::stats::Distribution;
 
-/// The genesis time the run starts from.
 const GENESIS_TIME: u64 = 1_700_000_000_000;
-/// The seed the funded sender accounts derive from.
 const ACCOUNT_SEED: [u8; 32] = [37u8; 32];
-/// The native balance each sender account is funded with at genesis, ample for a
-/// long run at the protocol fee so no transaction ever fails on funds.
 const FUND: u64 = 1_000_000_000_000;
-/// The value each transfer moves. Nonzero so no transaction is a no op.
 const TRANSFER_AMOUNT: u64 = 1;
-/// The one time slot count the harness sizes each validator tree to. The founder
-/// authorised this count for the harness so a sustained run can finalise more heights
-/// than the consensus default of sixty four serves, one slot per height. It is a
-/// harness parameter, not a consensus parameter. The consensus default is unchanged;
-/// the harness opts into the larger count through the DevnetConfig slots field, which
-/// flows into the committee sampler and the attester over the with_slots path.
 const HARNESS_SLOTS: u64 = 4096;
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -94,9 +28,6 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// The short output of a shell command, or a fallback when it cannot be run, so
-/// the harness reports the host and the commit without a hard dependency on the
-/// tools being present.
 fn shell(program: &str, args: &[&str], fallback: &str) -> String {
     Command::new(program)
         .args(args)
@@ -108,15 +39,10 @@ fn shell(program: &str, args: &[&str], fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
-/// A distinct funded sender account, one per block slot. Each sends one transfer
-/// per height, so the block width is the account count and every signature is over
-/// a distinct key on a distinct state leaf.
 fn accounts(count: usize) -> Vec<Account> {
     (0..count as u64).map(|i| derive(&ACCOUNT_SEED, i)).collect()
 }
 
-/// The devnet configuration: a set of real validators all at the stake floor, an
-/// online full mesh over the in memory duplex, and the funded sender accounts.
 fn devnet_config(base: &PathBuf, validators: usize, senders: &[Account]) -> DevnetConfig {
     let funded: Vec<GenesisAccount> = senders
         .iter()
@@ -125,8 +51,6 @@ fn devnet_config(base: &PathBuf, validators: usize, senders: &[Account]) -> Devn
     let nodes: Vec<NodeConfig> = (0..validators)
         .map(|i| {
             let id = i as u64 + 1;
-            // A star bootstrap centred on the first node, so the discovery graph is
-            // connected and every node learns the whole validator set.
             let bootstrap = if i == 0 {
                 if validators > 1 {
                     vec![2]
@@ -156,10 +80,6 @@ fn devnet_config(base: &PathBuf, validators: usize, senders: &[Account]) -> Devn
     }
 }
 
-/// Build and sign the transactions for one height: every account sends one
-/// transfer to the next account at its current nonce. The signing is real ML-DSA
-/// work but it is client side, so it is timed separately and kept out of the
-/// consensus throughput. Returns the batch and the wall clock spent signing it.
 fn build_batch(
     senders: &[Account],
     recipients: &[String],
@@ -177,21 +97,8 @@ fn build_batch(
     (batch, start.elapsed())
 }
 
-/// The qtv-net record plaintext bound, one mebibyte. The devnet no longer carries a
-/// proposal as one whole record: it disseminates the proposal as its erasure coded
-/// shards, each shard within this bound, and every node rebuilds the block from any k
-/// shards and verifies it against the header. So this bound no longer caps the block
-/// width; it is kept only to report the width the old single record path could carry,
-/// so a run above it is one the old path would have refused.
 const MAX_RECORD_PLAINTEXT: usize = 1 << 20;
 
-/// One driven height: submit the pre built batch to the ingress node and finalise
-/// the block across the committee. The submit runs the real ingress signature
-/// verification and the step runs the real gossip, build, attestation, aggregation
-/// and finalisation, so the timed region is exactly the consensus work on a batch
-/// of already signed transactions. Returns the wall clock the height took and how
-/// many transactions the finalised block actually carried, or the transport or
-/// consensus error that stopped it.
 fn drive_height<S: std::io::Read + std::io::Write>(
     devnet: &mut Devnet<S>,
     batch: Vec<Wrapper>,
@@ -199,8 +106,6 @@ fn drive_height<S: std::io::Read + std::io::Write>(
     let before = devnet.node(0).chain().len();
     let start = Instant::now();
     for tx in batch {
-        // A rejected transaction never reaches a block; the nonces and funding are
-        // set so none is rejected, but a reject is dropped rather than counted.
         let _ = devnet.submit(0, tx);
     }
     devnet
@@ -208,8 +113,6 @@ fn drive_height<S: std::io::Read + std::io::Write>(
         .map_err(|e| format!("the height did not finalise: {e:?}"))?;
     let elapsed = start.elapsed();
     let chain = devnet.node(0).chain();
-    // Only a genuinely finalised block is counted, and only the transactions it
-    // actually included, so a skipped transaction is never counted as finalised.
     let finalized = if chain.len() > before {
         chain.last().expect("a finalised block").block.body().len()
     } else {
@@ -290,7 +193,6 @@ fn main() {
     println!("      target sustained duration {run_secs:.0} s, {warmup} warmup heights (not counted)");
     rule();
 
-    // ---- stand up the real devnet ----
     let base = std::env::temp_dir().join(format!(
         "qtv-live-{}-{}",
         std::process::id(),
@@ -303,15 +205,6 @@ fn main() {
     let fee = u128::from(FeeParams::devnet().transfer_fee());
     let mut nonces = vec![0u64; senders_n];
 
-    // The proposal is no longer one whole record. The devnet erasure codes the block
-    // the proposal commits to into k data shards and n minus k parity shards under a
-    // SHA3 commitment and disseminates the shards over the overlay, each shard within
-    // the record bound, and every node rebuilds the block from any k shards and
-    // verifies it against the header before use. So the block width is no longer
-    // capped by the record size. The single record path could carry only the width
-    // below, computed from one real signed transaction so it tracks the true wire
-    // size, and a run above it is one that path would have refused mid run inside the
-    // transport.
     let sample_tx_bytes = {
         let call = transfer_call(&recipients[0], TRANSFER_AMOUNT);
         let body = Body::new(senders[0].address(), 0, TRANSFER_METER, fee, call);
@@ -340,14 +233,11 @@ fn main() {
     let mut devnet =
         Devnet::over_duplex(devnet_config(&base, validators, &senders)).expect("devnet stands up");
 
-    // ---- warmup ----
     for _ in 0..warmup {
         let (batch, _) = build_batch(&senders, &recipients, &mut nonces, fee);
         drive_height(&mut devnet, batch).expect("a warmup height finalises");
     }
 
-    // The committee is read from a real finalised block: the attesters that signed
-    // it are the online committee, the ground truth of the committee size.
     let committee = devnet
         .node(0)
         .chain()
@@ -355,7 +245,6 @@ fn main() {
         .map(|b| b.attesters.len())
         .unwrap_or(0);
 
-    // The real wire sizes, measured off a real finalised block, not modelled.
     let (tx_bytes, cert_bytes, block_bytes) = {
         let last = devnet.node(0).chain().last().expect("a warmup block");
         let body = last.block.body();
@@ -378,7 +267,6 @@ fn main() {
     println!("   finalised block: {:.2} MB", block_bytes as f64 / 1e6);
     rule();
 
-    // ---- the measured sustained run ----
     println!(" Sustained finalised run (real wall clock, only finalised transactions counted):");
     println!("   driving back to back heights until the consensus wall clock reaches {run_secs:.0} s.");
     println!();
@@ -414,14 +302,7 @@ fn main() {
 
     let dist = Distribution::of(&per_block_ms).expect("at least one finalised block");
     let consensus_s = consensus_wall.as_secs_f64();
-    // The primary sustained throughput: finalised transactions divided by the
-    // consensus wall clock. This EXCLUDES client side signing (timed separately)
-    // and, because every member's compute runs serially on one host and the
-    // transport is in memory, it is a compute bound, network free, single host
-    // figure, not a multi machine network throughput.
     let tps_consensus = finalized_tx as f64 / consensus_s;
-    // The end to end figure includes the client signing time, the rate a single
-    // driver that signs then submits sustains with no pipelining.
     let tps_end_to_end = finalized_tx as f64 / (consensus_s + sign_wall.as_secs_f64());
 
     if let Some(reason) = &stalled {
@@ -443,7 +324,6 @@ fn main() {
     println!("   end to end incl. client signing: {tps_end_to_end:.0} finalised transactions per second");
     rule();
 
-    // ---- the finality distribution with its tail ----
     println!(" FINALITY LATENCY DISTRIBUTION (measured, in process), per finalised block:");
     println!("   each sample is the real wall clock to build, attest, aggregate and verify one");
     println!("   block across the committee. caveat: this is compute time with all {committee} members");
@@ -467,6 +347,5 @@ fn main() {
     println!(" is the number reported: the harness drives a fixed workload and does not tune to a path.");
     println!("================================================================================");
 
-    // Best effort cleanup of the per node stores this run wrote.
     let _ = std::fs::remove_dir_all(&base);
 }

@@ -1,35 +1,3 @@
-//! The loopback multi process driver.
-//!
-//! This binary answers exactly one question and labels every number as answering
-//! only it: does moving the committee's compute from serial on one host to parallel
-//! across one process per validator, over real localhost sockets, sharply change the
-//! finality and the throughput, or not. It runs BOTH sides at the identical
-//! configuration on this one host, so the comparison isolates the single variable of
-//! parallelism:
-//!
-//!  1. THE IN PROCESS SERIAL BASELINE. Several real validator instances inside ONE
-//!     process over an in memory duplex, every member's compute run serially on one
-//!     host, driven exactly as the qtv-live harness drives it. This is the serial
-//!     single host compute number.
-//!
-//!  2. THE LOOPBACK MULTI PROCESS RUN. One operating system process per validator,
-//!     talking over REAL localhost TCP sockets through the REAL qtv-net post quantum
-//!     channel, so the committee computes in parallel with near zero propagation.
-//!
-//! Both drive the byte identical deterministic workload over the byte identical
-//! committee, so the finalised chains are byte identical, which the driver checks
-//! before it reports a number: every process agrees with every other, and the
-//! multi process chain matches the in process chain. Only then are the two numbers
-//! reported side by side.
-//!
-//! WHAT EVERY LOOPBACK NUMBER MEANS, STATED PLAINLY AT THE POINT OF USE. The loopback
-//! numbers are LOOPBACK MULTI PROCESS, REAL SOCKETS, NEAR ZERO PROPAGATION. They are
-//! parallel per process compute plus the loopback socket cost of moving the sealed
-//! records between processes on one host. They are NOT a geographic or global network
-//! throughput and NOT a real global finality: the sockets are localhost, so inter
-//! host bandwidth and propagation latency are absent and unmeasured. A geographically
-//! distributed run would bundle parallelism and propagation and could not separate
-//! them; this run isolates parallelism alone.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -50,8 +18,6 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// The short output of a shell command, or a fallback, so the harness reports the
-/// host and the commit without a hard dependency on the tools being present.
 fn shell(program: &str, args: &[&str], fallback: &str) -> String {
     Command::new(program)
         .args(args)
@@ -63,16 +29,10 @@ fn shell(program: &str, args: &[&str], fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
-/// The per block hex digest of every finalised block on a chain, the list two runs
-/// compare over their common prefix to prove they finalised the byte identical
-/// blocks.
 fn block_hashes(encoded: &[Vec<u8>]) -> Vec<String> {
     encoded.iter().map(|b| hex(&gossip_id(b))).collect()
 }
 
-/// The measured result of one run: the per block finality samples, the finalised
-/// transaction count, the consensus and client signing wall clocks, the committee
-/// size, and the per block chain digests.
 struct RunResult {
     per_block_ms: Vec<f64>,
     finalized_tx: u64,
@@ -84,11 +44,6 @@ struct RunResult {
     stalled: bool,
 }
 
-/// Run the in process serial baseline: several real validators inside one process
-/// over the in memory duplex, driven exactly as qtv-live drives them. The timed
-/// region per height is the submit of the pre signed batch to the ingress node plus
-/// the step that gossips, builds, attests, aggregates, and finalises across the
-/// committee, all serial on this one host.
 fn run_serial(
     validators: usize,
     senders_n: usize,
@@ -169,7 +124,6 @@ fn run_serial(
     }
 }
 
-/// Parse one child's `RESULT` line into a `RunResult`.
 fn parse_result(line: &str) -> RunResult {
     let mut per_block_ms = Vec::new();
     let mut finalized_tx = 0u64;
@@ -219,10 +173,6 @@ fn parse_result(line: &str) -> RunResult {
     }
 }
 
-/// Spawn one validator process per validator, hand each the peer port set, and
-/// collect each process's measured result over its piped stdout. The real qtv-net
-/// mesh is established between the processes; this driver only rendezvous the ports
-/// and collects the results, it never carries a consensus record.
 fn run_loopback(
     validators: usize,
     senders_n: usize,
@@ -252,7 +202,6 @@ fn run_loopback(
         children.push(child);
     }
 
-    // Read each child's announced listener port.
     let mut readers: Vec<BufReader<std::process::ChildStdout>> = children
         .iter_mut()
         .map(|c| BufReader::new(c.stdout.take().expect("child stdout")))
@@ -269,7 +218,6 @@ fn run_loopback(
         }
     }
 
-    // Hand every child the full peer port set, so each dials its peers.
     let csv = ports
         .iter()
         .map(|p| p.to_string())
@@ -281,7 +229,6 @@ fn run_loopback(
         stdin.flush().expect("flush the peer set");
     }
 
-    // Collect each child's measured result.
     let mut results: Vec<RunResult> = Vec::with_capacity(validators);
     for reader in readers.iter_mut() {
         loop {
@@ -304,8 +251,6 @@ fn run_loopback(
     results
 }
 
-/// Whether two per block digest lists agree over their common prefix, the byte
-/// identity two chains must hold to prove they finalised the same blocks.
 fn prefix_matches(a: &[String], b: &[String]) -> bool {
     let common = a.len().min(b.len());
     common > 0 && a[..common] == b[..common]
@@ -320,11 +265,6 @@ fn main() {
     let senders_n = env_usize("QTV_MP_ACCOUNTS", 250).max(2);
     let run_secs = env_usize("QTV_MP_SECS", 60).max(1);
     let warmup = env_usize("QTV_MP_WARMUP", 2);
-    // The height cap keeps warmup plus measured heights under the one time sortition
-    // tree's committed slot count. The harness sizes that tree to HARNESS_SLOTS, well
-    // above the consensus default, so the cap no longer pins the run below the default
-    // and a sustained run can finalise past it. The default here leaves headroom below
-    // the harness slot count for the warmup heights.
     let height_cap = env_usize("QTV_MP_HEIGHTCAP", (qtv_loopback::HARNESS_SLOTS as usize) - 64);
 
     let manifest = env!("CARGO_MANIFEST_DIR");
@@ -374,7 +314,6 @@ fn main() {
     println!(" Process count (loopback): {validators} validator processes + 1 driver");
     rule();
 
-    // ---- the in process serial baseline ----
     println!(" [1/2] In process serial baseline (all committee compute serial, one host, in memory) ...");
     let serial = run_serial(validators, senders_n, run_secs as f64, warmup, height_cap);
     println!(
@@ -385,7 +324,6 @@ fn main() {
         if serial.stalled { " (stopped early)" } else { "" },
     );
 
-    // ---- the loopback multi process run ----
     println!(" [2/2] Loopback multi process run (one process per validator, real qtv-net TCP mesh) ...");
     let loopback = run_loopback(validators, senders_n, run_secs, warmup, height_cap, &validator_bin);
     let ingress = loopback
@@ -400,7 +338,6 @@ fn main() {
     );
     rule();
 
-    // ---- correctness oracle: byte identical chains ----
     let all_agree = loopback
         .iter()
         .all(|r| prefix_matches(&r.block_hashes, &ingress.block_hashes));
@@ -425,7 +362,6 @@ fn main() {
     println!("   loopback numbers are a like for like comparison against the serial baseline.");
     rule();
 
-    // ---- the side by side numbers ----
     let serial_dist = Distribution::of(&serial.per_block_ms);
     let loop_dist = Distribution::of(&ingress.per_block_ms);
     let serial_tps = if serial.consensus_ms > 0.0 {
@@ -508,7 +444,6 @@ fn main() {
     }
     rule();
 
-    // ---- what moved, and what did not ----
     let speedup = if loop_tps > 0.0 { loop_tps / serial_tps.max(1e-9) } else { 0.0 };
     let finality_ratio = match (serial_dist, loop_dist) {
         (Some(s), Some(l)) if l.p50 > 0.0 => s.p50 / l.p50,

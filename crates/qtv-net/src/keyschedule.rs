@@ -1,39 +1,21 @@
-//! The SHAKE key schedule.
-//!
-//! Both peers finish the handshake holding the same ML-KEM shared secret and the
-//! same handshake transcript hash. They feed both into SHAKE-256 under a fixed
-//! label and split the output stream the same way, so they agree on a key and a
-//! starting nonce for each direction and on an exporter value without any
-//! further exchange. Because the schedule binds the transcript, a peer that saw a
-//! different transcript derives different keys and cannot open the other side
-//! records.
 
 use qtv_crypto::chacha20poly1305::{KEY_BYTES, NONCE_BYTES};
 use qtv_crypto::sha3;
 
 const KEY_SCHEDULE_LABEL: &[u8] = b"qtv-net/key-schedule/v1";
 
-/// The channel cipher key and the starting nonce for one direction.
 #[derive(Clone)]
 pub struct DirKey {
-    /// The ChaCha20-Poly1305 key that seals or opens this direction.
     pub key: [u8; KEY_BYTES],
-    /// The starting nonce the record counter is offset from.
     pub iv: [u8; NONCE_BYTES],
 }
 
-/// The directional session keys and the exporter both peers derive alike.
 pub struct SessionKeys {
-    /// The key and nonce the initiator seals with and the responder opens with.
     pub initiator_to_responder: DirKey,
-    /// The key and nonce the responder seals with and the initiator opens with.
     pub responder_to_initiator: DirKey,
-    /// A value both peers derive alike, a channel binding over the handshake.
     pub exporter: [u8; 32],
 }
 
-/// Derive the session keys from the ML-KEM shared secret and the handshake
-/// transcript hash with SHAKE-256.
 pub fn derive(shared_secret: &[u8; 32], transcript_hash: &[u8; 32]) -> SessionKeys {
     let mut input = Vec::with_capacity(KEY_SCHEDULE_LABEL.len() + 64);
     input.extend_from_slice(KEY_SCHEDULE_LABEL);

@@ -1,38 +1,18 @@
-//! The logical clock and the event queue the asynchronous round loop turns over.
-//!
-//! A node acts when a message arrives or a timer fires, not when a central driver
-//! steps every node together. Both are events on one logical clock. The clock
-//! advances only when the loop pops an event, never against a wall clock, so a
-//! given schedule of events replays to the identical chain. Ties at one logical
-//! time break by the order the events were scheduled, so the pop order is a fixed
-//! total order and there are no threads and no real time in the loop.
 
 use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-/// Logical time in milliseconds. One slot is `SLOT_MS` of this time.
 pub type Time = u64;
 
-/// The logical duration of a slot, the consensus slot reused as logical time. A
-/// leader proposes within its slot and a view times out after a bound measured in
-/// slots.
 pub const SLOT_MS: Time = qtv_bft::params::SLOT_MS;
 
-/// An event the round loop acts on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    /// A view timeout fired for a node at a height and view. If the node is still
-    /// at that height and view without a valid proposal, it advances the view.
     Timeout { node: usize, height: u64, view: u64 },
-    /// One sealed record is ready to open at `to` from `from`. The loop opens
-    /// exactly one record on that directed edge, in send order.
     Deliver { from: usize, to: usize },
 }
 
-/// An event stamped with the logical time it fires and the sequence number it was
-/// scheduled under. The sequence number breaks ties at equal times, so the pop
-/// order of the queue is a fixed total order for a given schedule.
 struct Scheduled {
     time: Time,
     seq: u64,
@@ -59,9 +39,6 @@ impl PartialOrd for Scheduled {
     }
 }
 
-/// A logical clock over a queue of scheduled events. The clock owns the present
-/// time, a monotonic sequence counter, and a min ordered queue keyed by time then
-/// sequence.
 #[derive(Default)]
 pub struct Clock {
     now: Time,
@@ -70,18 +47,14 @@ pub struct Clock {
 }
 
 impl Clock {
-    /// A clock at time zero with no events scheduled.
     pub fn new() -> Self {
         Clock::default()
     }
 
-    /// The present logical time, the time of the last event popped.
     pub fn now(&self) -> Time {
         self.now
     }
 
-    /// Schedule an event to fire at `at`, never before the present. Ties break by
-    /// the order events are scheduled, keeping the pop order deterministic.
     pub fn schedule(&mut self, at: Time, event: Event) {
         let time = at.max(self.now);
         let seq = self.seq;
@@ -89,21 +62,16 @@ impl Clock {
         self.queue.push(Reverse(Scheduled { time, seq, event }));
     }
 
-    /// The time the next event fires, without popping it. None when the queue is
-    /// empty. A driver uses this to run the clock only up to a deadline.
     pub fn peek_time(&self) -> Option<Time> {
         self.queue.peek().map(|Reverse(scheduled)| scheduled.time)
     }
 
-    /// Pop the next event, advancing the present to its time. None when the queue
-    /// is empty, which is quiescence: no timer and no record is left to act on.
     pub fn next_event(&mut self) -> Option<Event> {
         let Reverse(scheduled) = self.queue.pop()?;
         self.now = scheduled.time;
         Some(scheduled.event)
     }
 
-    /// Whether no event is left to fire.
     pub fn is_idle(&self) -> bool {
         self.queue.is_empty()
     }
@@ -142,7 +110,6 @@ mod tests {
         );
         clock.next_event();
         assert_eq!(clock.now(), 50);
-        // Scheduled in the past, so it fires at the present, not before it.
         clock.schedule(
             20,
             Event::Timeout {

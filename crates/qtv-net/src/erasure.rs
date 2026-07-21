@@ -1,49 +1,15 @@
-//! Erasure coding of a payload into k data shards and n minus k parity shards, so
-//! any k of the n shards reconstruct the payload byte for byte, together with a
-//! SHA3 Merkle commitment over the shard hashes that authenticates a shard before
-//! it is used and rejects a wrong one.
-//!
-//! The code is a systematic Reed Solomon code over the field of 256 elements. The
-//! first k shards are the payload split into k equal pieces, so a node that already
-//! holds the data shards reads the payload straight off them, and the remaining n
-//! minus k shards are parity drawn from a Vandermonde generator, so any k of the n
-//! shards, data or parity in any mix, invert back to the payload. The field
-//! arithmetic and the linear algebra are the standard library alone. The only
-//! cryptographic dependency is qtv-crypto, whose SHA3 fixes each shard hash and
-//! their Merkle root.
-//!
-//! This is coding theory, not cryptography. It adds redundancy so a block survives
-//! the loss of some shards, and it lowers the bytes a node downloads to take part
-//! in propagation, since a node fetches its share of the shards rather than the
-//! whole block. Shard integrity rests on the SHA3 commitment over the shard hashes,
-//! not on any new primitive. The commitment travels bound to the block header, so a
-//! shard is checked against the root before it is used and a reconstructed payload
-//! is checked against the header the code committed to.
 
 use qtv_crypto::sha3::sha3_256;
 
-/// The length in bytes of a shard hash and of the Merkle root, the SHA3-256 digest
-/// length.
 pub const DIGEST_LEN: usize = 32;
 
-/// The largest number of shards a payload codes into. The generator draws a
-/// distinct field element for each shard, and the field holds 256 elements, so the
-/// shard count cannot exceed the field size.
 pub const MAX_SHARDS: usize = 256;
 
-/// A reason erasure coding refused its input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// The parameters were out of range: k was zero, n was below k, or n exceeded
-    /// the field size.
     Parameters,
-    /// Reconstruction was given fewer than k shards, a shard index at or above n, or
-    /// two shards at one index, so the decode matrix was not a full set of k rows.
     ShardSet,
-    /// A shard did not carry the committed shard length.
     ShardLength,
-    /// The decode matrix over the chosen shards was singular, which a distinct
-    /// Vandermonde never produces and so only a malformed index set can reach.
     Singular,
 }
 
@@ -60,22 +26,13 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-// The field of 256 elements, built over the primitive polynomial
-// x^8 + x^4 + x^3 + x^2 + 1 with generator two. Addition is exclusive or;
-// multiplication runs through the log and exponent tables so a byte product is two
-// lookups and an add.
 
-/// The exponent and logarithm tables of the field, built once on first use.
 struct Field {
-    /// The generator raised to each power, doubled in length so a sum of two
-    /// logarithms indexes it without a modular reduction.
     exp: [u8; 512],
-    /// The logarithm of each nonzero element to the generator base.
     log: [u8; 256],
 }
 
 impl Field {
-    /// Build the tables by walking the powers of the generator through the field.
     fn build() -> Field {
         let mut exp = [0u8; 512];
         let mut log = [0u8; 256];
@@ -90,13 +47,10 @@ impl Field {
             }
             power += 1;
         }
-        // The upper half repeats the lower so a sum of two logarithms, each below
-        // 255, indexes the exponent table without a modular reduction.
         exp.copy_within(0..257, 255);
         Field { exp, log }
     }
 
-    /// The product of two field elements.
     fn mul(&self, a: u8, b: u8) -> u8 {
         if a == 0 || b == 0 {
             0
@@ -105,63 +59,39 @@ impl Field {
         }
     }
 
-    /// The multiplicative inverse of a nonzero field element.
     fn inv(&self, a: u8) -> u8 {
         debug_assert!(a != 0, "zero has no inverse in the field");
         self.exp[255 - self.log[a as usize] as usize]
     }
 }
 
-/// The field tables, initialized once and shared for the process.
 fn field() -> &'static Field {
     use std::sync::OnceLock;
     static FIELD: OnceLock<Field> = OnceLock::new();
     FIELD.get_or_init(Field::build)
 }
 
-/// A single coded shard, its position among the n shards and its bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shard {
-    /// The shard position, from zero below n. Positions under k are data shards, the
-    /// rest are parity.
     pub index: usize,
-    /// The shard bytes, all of the committed shard length.
     pub bytes: Vec<u8>,
 }
 
-/// A Merkle inclusion proof of one shard hash under the commitment root, the sibling
-/// hashes from the leaf up to the root. The direction at each level follows from the
-/// shard index and the shard count, so the proof carries only the siblings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShardProof {
-    /// The sibling hashes from the leaf level up to the level below the root.
     pub siblings: Vec<[u8; DIGEST_LEN]>,
 }
 
-/// The commitment a block header carries over its shards: the Merkle root over the
-/// n shard hashes and the parameters that fix the coding. A shard is verified
-/// against the root before it is used, and the parameters let any k verified shards
-/// reconstruct the payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commitment {
-    /// The Merkle root over the n shard hashes under SHA3-256.
     pub root: [u8; DIGEST_LEN],
-    /// The number of data shards, the count that reconstructs the payload.
     pub k: usize,
-    /// The total number of shards, data plus parity.
     pub n: usize,
-    /// The length in bytes of every shard.
     pub shard_len: usize,
-    /// The length in bytes of the original payload, so reconstruction trims the
-    /// padding the split added.
     pub data_len: usize,
 }
 
 impl Commitment {
-    /// Verify a shard against the commitment: its index names one of the n shards,
-    /// it carries the committed length, and its hash sits at that index under the
-    /// root by the Merkle proof. A corrupted or misplaced shard fails here and is
-    /// rejected before it is used.
     pub fn verify_shard(&self, shard: &Shard, proof: &ShardProof) -> bool {
         if shard.index >= self.n || shard.bytes.len() != self.shard_len {
             return false;
@@ -188,9 +118,6 @@ impl Commitment {
     }
 }
 
-/// A coded payload: its commitment, the n shards, and the Merkle tree that proves a
-/// shard against the root. The producer disperses the shards over the overlay and
-/// binds the commitment to the block header.
 pub struct Coded {
     commitment: Commitment,
     shards: Vec<Shard>,
@@ -198,22 +125,18 @@ pub struct Coded {
 }
 
 impl Coded {
-    /// The commitment over the shards, the value the block header carries.
     pub fn commitment(&self) -> &Commitment {
         &self.commitment
     }
 
-    /// The n shards in index order.
     pub fn shards(&self) -> &[Shard] {
         &self.shards
     }
 
-    /// One shard by index.
     pub fn shard(&self, index: usize) -> &Shard {
         &self.shards[index]
     }
 
-    /// The Merkle proof that authenticates the shard at an index against the root.
     pub fn proof(&self, index: usize) -> ShardProof {
         let mut siblings = Vec::new();
         let mut pos = index;
@@ -222,8 +145,6 @@ impl Coded {
                 break;
             }
             let sibling = if pos.is_multiple_of(2) {
-                // The successor, or the node itself when it is the last of an odd
-                // level and pairs with a copy of itself.
                 level.get(pos + 1).copied().unwrap_or(level[pos])
             } else {
                 level[pos - 1]
@@ -235,7 +156,6 @@ impl Coded {
     }
 }
 
-/// The SHA3-256 hash of a left node followed by a right node, the Merkle pairing.
 fn pair_hash(left: &[u8; DIGEST_LEN], right: &[u8; DIGEST_LEN]) -> [u8; DIGEST_LEN] {
     let mut input = [0u8; DIGEST_LEN * 2];
     input[..DIGEST_LEN].copy_from_slice(left);
@@ -243,9 +163,6 @@ fn pair_hash(left: &[u8; DIGEST_LEN], right: &[u8; DIGEST_LEN]) -> [u8; DIGEST_L
     sha3_256(&input)
 }
 
-/// Build the Merkle tree over the leaf hashes, a vector of levels from the leaves up
-/// to the single root. A level with an odd count pairs its last node with a copy of
-/// itself, the same rule the block transaction root uses.
 fn merkle_tree(leaves: Vec<[u8; DIGEST_LEN]>) -> Vec<Vec<[u8; DIGEST_LEN]>> {
     let mut levels = vec![leaves];
     while levels.last().expect("a level is present").len() > 1 {
@@ -267,20 +184,12 @@ fn merkle_tree(leaves: Vec<[u8; DIGEST_LEN]>) -> Vec<Vec<[u8; DIGEST_LEN]>> {
     levels
 }
 
-/// Split a payload into k data shards, extend it to n shards with n minus k parity,
-/// and commit to the n shards under a SHA3 Merkle root. The first k shards are the
-/// payload cut into k equal pieces, zero padded to a whole shard, so they carry the
-/// data directly, and the parity shards come from a Vandermonde generator so any k
-/// of the n reconstruct the payload. The coding is deterministic, so one payload
-/// always yields the same shards and the same root.
 pub fn encode(data: &[u8], k: usize, n: usize) -> Result<Coded, Error> {
     if k == 0 || n < k || n > MAX_SHARDS {
         return Err(Error::Parameters);
     }
     let shard_len = data.len().div_ceil(k).max(1);
 
-    // The k data shards: the payload cut into k pieces of the shard length, the last
-    // piece zero padded. Reconstruction trims back to the payload length.
     let mut shard_bytes: Vec<Vec<u8>> = Vec::with_capacity(n);
     for piece in 0..k {
         let mut buf = vec![0u8; shard_len];
@@ -292,9 +201,6 @@ pub fn encode(data: &[u8], k: usize, n: usize) -> Result<Coded, Error> {
         shard_bytes.push(buf);
     }
 
-    // The parity shards: each is a Vandermonde combination of the k data shards
-    // under the systematic generator, so the data shards stay untouched and any k
-    // shards invert back to them.
     let parity = parity_coefficients(k, n)?;
     for coeffs in &parity {
         shard_bytes.push(combine(coeffs, &shard_bytes[..k], shard_len));
@@ -323,14 +229,8 @@ pub fn encode(data: &[u8], k: usize, n: usize) -> Result<Coded, Error> {
     })
 }
 
-/// Reconstruct the payload from any k shards under a commitment. The caller has
-/// verified each shard against the commitment root, so this trusts the bytes and
-/// solves the k by k decode system the shard indices name, then trims the padding to
-/// the committed payload length. The result is byte for byte the original payload.
 pub fn reconstruct(commitment: &Commitment, shards: &[Shard]) -> Result<Vec<u8>, Error> {
     let k = commitment.k;
-    // Take the first k distinct shards, refusing an index at or above n, a repeat, or
-    // a shard of the wrong length.
     let mut indices: Vec<usize> = Vec::with_capacity(k);
     let mut rows: Vec<&[u8]> = Vec::with_capacity(k);
     for shard in shards {
@@ -350,9 +250,6 @@ pub fn reconstruct(commitment: &Commitment, shards: &[Shard]) -> Result<Vec<u8>,
         return Err(Error::ShardSet);
     }
 
-    // The decode matrix: row r is the generator row for shard indices[r], an identity
-    // row for a data shard and a Vandermonde parity row for a parity shard. Inverting
-    // it maps the received shards back to the k data shards.
     let matrix = decode_matrix(&indices, commitment.n, k)?;
     let inverse = invert(matrix, k)?;
 
@@ -365,9 +262,6 @@ pub fn reconstruct(commitment: &Commitment, shards: &[Shard]) -> Result<Vec<u8>,
     Ok(data)
 }
 
-/// Combine a coefficient row over a set of equal length shards into one shard, the
-/// field sum of each shard scaled by its coefficient. This is one row of a matrix by
-/// shard product, the operation both encoding and decoding run.
 fn combine<T: AsRef<[u8]>>(coeffs: &[u8], shards: &[T], shard_len: usize) -> Vec<u8> {
     let f = field();
     let mut out = vec![0u8; shard_len];
@@ -384,9 +278,6 @@ fn combine<T: AsRef<[u8]>>(coeffs: &[u8], shards: &[T], shard_len: usize) -> Vec
     out
 }
 
-/// The parity rows of the systematic generator, the bottom n minus k rows of the
-/// Vandermonde generator once its top k by k block is reduced to the identity. Each
-/// row combines the k data shards into one parity shard.
 fn parity_coefficients(k: usize, n: usize) -> Result<Vec<Vec<u8>>, Error> {
     let top_inverse = invert(vandermonde(&(0..k).collect::<Vec<_>>(), k), k)?;
     let mut parity = Vec::with_capacity(n - k);
@@ -397,9 +288,6 @@ fn parity_coefficients(k: usize, n: usize) -> Result<Vec<Vec<u8>>, Error> {
     Ok(parity)
 }
 
-/// The decode matrix over a set of received shard indices: the generator rows the
-/// indices name. A data index gives an identity row, a parity index gives its
-/// systematic parity row.
 fn decode_matrix(indices: &[usize], _n: usize, k: usize) -> Result<Vec<Vec<u8>>, Error> {
     let top_inverse = invert(vandermonde(&(0..k).collect::<Vec<_>>(), k), k)?;
     let mut matrix = Vec::with_capacity(k);
@@ -416,8 +304,6 @@ fn decode_matrix(indices: &[usize], _n: usize, k: usize) -> Result<Vec<Vec<u8>>,
     Ok(matrix)
 }
 
-/// One row of the Vandermonde generator for an evaluation point, the point raised to
-/// the powers zero through k minus one over the field.
 fn vandermonde_row(point: usize, k: usize) -> Vec<u8> {
     let f = field();
     let alpha = point as u8;
@@ -430,7 +316,6 @@ fn vandermonde_row(point: usize, k: usize) -> Vec<u8> {
     row
 }
 
-/// The Vandermonde matrix over a set of evaluation points, one row per point.
 fn vandermonde(points: &[usize], k: usize) -> Vec<Vec<u8>> {
     points
         .iter()
@@ -438,7 +323,6 @@ fn vandermonde(points: &[usize], k: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// A row vector times a matrix over the field, the product with each column.
 fn row_times_matrix(row: &[u8], matrix: &[Vec<u8>], k: usize) -> Vec<u8> {
     let f = field();
     let mut out = vec![0u8; k];
@@ -453,9 +337,6 @@ fn row_times_matrix(row: &[u8], matrix: &[Vec<u8>], k: usize) -> Vec<u8> {
     out
 }
 
-/// Invert a k by k matrix over the field by Gauss Jordan elimination, or report that
-/// it is singular. The generator is a distinct Vandermonde, so every k row selection
-/// is invertible and a singular result only follows from a malformed index set.
 fn invert(mut matrix: Vec<Vec<u8>>, k: usize) -> Result<Vec<Vec<u8>>, Error> {
     let f = field();
     let mut inverse: Vec<Vec<u8>> = (0..k)
@@ -467,14 +348,12 @@ fn invert(mut matrix: Vec<Vec<u8>>, k: usize) -> Result<Vec<Vec<u8>>, Error> {
         .collect();
 
     for col in 0..k {
-        // Find a pivot row at or below the column with a nonzero entry in the column.
         let pivot = (col..k)
             .find(|&r| matrix[r][col] != 0)
             .ok_or(Error::Singular)?;
         matrix.swap(col, pivot);
         inverse.swap(col, pivot);
 
-        // Scale the pivot row so its pivot entry is one.
         let scale = f.inv(matrix[col][col]);
         for value in matrix[col].iter_mut() {
             *value = f.mul(*value, scale);
@@ -483,7 +362,6 @@ fn invert(mut matrix: Vec<Vec<u8>>, k: usize) -> Result<Vec<Vec<u8>>, Error> {
             *value = f.mul(*value, scale);
         }
 
-        // Eliminate the column from every other row.
         for row in 0..k {
             if row == col {
                 continue;
@@ -507,8 +385,6 @@ fn invert(mut matrix: Vec<Vec<u8>>, k: usize) -> Result<Vec<Vec<u8>>, Error> {
 mod tests {
     use super::*;
 
-    /// A deterministic pseudo random payload of a length, so a test drives real bytes
-    /// rather than a constant pattern the code could special case.
     fn payload(len: usize, seed: u64) -> Vec<u8> {
         let mut out = Vec::with_capacity(len);
         let mut state = seed.wrapping_add(11400714819323198485);
@@ -526,12 +402,10 @@ mod tests {
         let f = field();
         assert_eq!(f.mul(0, 5), 0);
         assert_eq!(f.mul(1, 5), 5);
-        // Every nonzero element times its inverse is one.
         for a in 1u16..256 {
             let a = a as u8;
             assert_eq!(f.mul(a, f.inv(a)), 1, "element {a} did not invert");
         }
-        // Multiplication is commutative and associative over a sample.
         for a in [1u8, 2, 17, 200, 255] {
             for b in [1u8, 3, 44, 199, 254] {
                 assert_eq!(f.mul(a, b), f.mul(b, a));
@@ -546,7 +420,6 @@ mod tests {
     fn data_shards_carry_the_payload_untouched() {
         let data = payload(400, 1);
         let coded = encode(&data, 4, 8).expect("encode");
-        // The systematic data shards are the payload cut into k pieces.
         let mut rebuilt = Vec::new();
         for shard in coded.shards().iter().take(4) {
             rebuilt.extend_from_slice(&shard.bytes);
@@ -562,7 +435,6 @@ mod tests {
         let n = 8;
         let coded = encode(&data, k, n).expect("encode");
         let commitment = coded.commitment().clone();
-        // Every choice of k of the n shards reconstructs the exact payload.
         let mut count = 0;
         for a in 0..n {
             for b in (a + 1)..n {
@@ -579,7 +451,6 @@ mod tests {
                 }
             }
         }
-        // All seventy choices of four of eight were exercised.
         assert_eq!(count, 70);
     }
 
@@ -587,7 +458,6 @@ mod tests {
     fn parity_only_reconstruction_holds() {
         let data = payload(777, 3);
         let coded = encode(&data, 4, 8).expect("encode");
-        // The four parity shards alone reconstruct the payload, the hardest subset.
         let parity: Vec<Shard> = coded.shards().iter().skip(4).cloned().collect();
         let out = reconstruct(coded.commitment(), &parity).expect("reconstruct");
         assert_eq!(out, data);
@@ -599,7 +469,6 @@ mod tests {
         let k = 16;
         let n = 32;
         let coded = encode(&data, k, n).expect("encode");
-        // A scattered choice of sixteen of thirty two, a mix of data and parity.
         let picks = [1, 3, 4, 7, 8, 11, 12, 15, 17, 19, 20, 23, 24, 27, 28, 31];
         let chosen: Vec<Shard> = picks.iter().map(|&i| coded.shard(i).clone()).collect();
         let out = reconstruct(coded.commitment(), &chosen).expect("reconstruct");
@@ -625,19 +494,15 @@ mod tests {
         let coded = encode(&data, 8, 12).expect("encode");
         let commitment = coded.commitment();
 
-        // A flipped byte fails its Merkle proof.
         let mut corrupt = coded.shard(3).clone();
         corrupt.bytes[0] ^= 1;
         assert!(!commitment.verify_shard(&corrupt, &coded.proof(3)));
 
-        // A shard offered under the wrong index fails against the sibling path of the
-        // claimed position.
         let mut misplaced = coded.shard(3).clone();
         misplaced.index = 5;
         assert!(!commitment.verify_shard(&misplaced, &coded.proof(3)));
         assert!(!commitment.verify_shard(&misplaced, &coded.proof(5)));
 
-        // A shard of the wrong length fails on the length check.
         let mut short = coded.shard(3).clone();
         short.bytes.pop();
         assert!(!commitment.verify_shard(&short, &coded.proof(3)));
@@ -654,8 +519,6 @@ mod tests {
 
     #[test]
     fn odd_and_short_payloads_round_trip() {
-        // A payload that does not divide by k, and a payload shorter than k, both
-        // reconstruct exactly after the zero padding is trimmed.
         for (len, k, n) in [(1usize, 4usize, 8usize), (5, 4, 7), (101, 8, 11), (0, 3, 6)] {
             let data = payload(len, len as u64);
             let coded = encode(&data, k, n).expect("encode");
@@ -670,10 +533,8 @@ mod tests {
         let data = payload(500, 8);
         let coded = encode(&data, 4, 8).expect("encode");
         let commitment = coded.commitment();
-        // Fewer than k shards cannot reconstruct.
         let few: Vec<Shard> = coded.shards().iter().take(3).cloned().collect();
         assert_eq!(reconstruct(commitment, &few), Err(Error::ShardSet));
-        // A repeated index is not k distinct rows.
         let repeated = vec![
             coded.shard(0).clone(),
             coded.shard(0).clone(),

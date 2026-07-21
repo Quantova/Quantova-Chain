@@ -1,13 +1,3 @@
-//! The gossip messages nodes exchange over the channels, and their canonical
-//! codec.
-//!
-//! Three things travel the wire: a submitted transaction, a block proposal that
-//! carries the real header and the ordered body, and a committee attestation that
-//! carries the one time membership credential and the module lattice signature. Every
-//! message enters and leaves the wire through the qtv-codec canonical encoding, so
-//! a message has exactly one encoded form and a message that does not parse is
-//! dropped at the edge, which is where a classical or malformed artifact is
-//! refused.
 
 use qtv_attest::{Attestation, Block, Certificate, Envelope, Parent};
 use qtv_block::{Block as ChainBlock, Header};
@@ -21,44 +11,21 @@ use qtv_tx::{Body, Call, Wrapper};
 
 use crate::discovery::{PeerEntry, KEY_BYTES};
 
-/// The tag that selects a transaction message.
 const TAG_TX: u8 = 1;
-/// The tag that selects a block proposal message.
 const TAG_PROPOSAL: u8 = 2;
-/// The tag that selects an attestation message.
 const TAG_ATTEST: u8 = 3;
-/// The tag that selects a peer list message, the discovery exchange.
 const TAG_PEERS: u8 = 4;
-/// The tag that selects a status message, a node's finalized height.
 const TAG_STATUS: u8 = 5;
-/// The tag that selects a block range request during catch up sync.
 const TAG_GET_BLOCKS: u8 = 6;
-/// The tag that selects a served block range, the sync response.
 const TAG_BLOCKS: u8 = 7;
-/// The tag that selects a view change record, a member's move to a later view
-/// carrying the block it is locked on.
 const TAG_VIEW_CHANGE: u8 = 8;
-/// The tag that selects one erasure coded shard of a block proposal, the unit that
-/// disseminates a proposal over the overlay in place of a single whole record.
 const TAG_CODED_PROPOSAL: u8 = 9;
 
-/// The tag that marks a genesis parent link.
 const PARENT_GENESIS: u8 = 0;
-/// The tag that marks a value parent link.
 const PARENT_VALUE: u8 = 1;
 
-/// The version tag of a certificate body, the aggregated attestations.
 const STAGE_ONE: u8 = 1;
 
-/// A block proposal: the view it is offered in, the real chain header the
-/// committee attests over, and the ordered body the header commits to. The view
-/// names which leader in the rotation proposed it, so a receiver checks the
-/// proposal against the leader of that view and never against a stale one.
-///
-/// A proposal offered in a later view after a split may carry a justification: a
-/// quorum of view change records for that view. The justification is what lets a
-/// locked member unlock and attest a conflicting block, so it never does so on a
-/// bare later proposal, only on one that proves the network moved on.
 #[derive(Clone)]
 pub struct Proposal {
     pub view: u64,
@@ -67,17 +34,6 @@ pub struct Proposal {
     pub justification: Vec<ViewChange>,
 }
 
-/// One erasure coded shard of a block proposal, the unit that disseminates a
-/// proposal over the overlay in place of one whole record. The block the proposal's
-/// header commits to is coded into k data shards and n minus k parity shards under a
-/// SHA3 commitment, and each shard travels as its own message within the transport
-/// record bound. A shard carries the routing metadata every shard repeats, the view,
-/// the header, the shared commitment, and the justification, alongside its own shard
-/// bytes and the Merkle proof that authenticates them, so a receiver that gathers any
-/// k of the shards rebuilds the whole proposal and checks the block against the
-/// header without a separate metadata message. A shard is verified against the
-/// commitment before it is used, and a wider block draws more shards rather than a
-/// larger one, so the block width is no longer bounded by the record size.
 #[derive(Clone)]
 pub struct CodedProposal {
     pub view: u64,
@@ -88,22 +44,12 @@ pub struct CodedProposal {
     pub proof: ShardProof,
 }
 
-/// The block a member is locked on, carried in its view change record so the
-/// leader that collects the quorum holds the full block it must re-propose, not
-/// only its value.
 #[derive(Clone)]
 pub struct LockedBlock {
     pub header: Header,
     pub body: Vec<Wrapper>,
 }
 
-/// A view change record: one committee member's signed move to a later view,
-/// carrying the block it is currently locked on if any. The signature is a
-/// module lattice attestation over a canonical view change subject that commits
-/// to the height, the target view, the lock view, and the locked value, so a
-/// forged record does not verify and a quorum of records is an unforgeable proof
-/// that the network reached the target view. A leader aggregates a quorum of
-/// these into the justification it attaches to its proposal.
 #[derive(Clone)]
 pub struct ViewChange {
     pub height: u64,
@@ -113,57 +59,27 @@ pub struct ViewChange {
     pub att: Attestation,
 }
 
-/// A gossip message. A node forwards a transaction it admitted, a leader forwards
-/// its proposal, a committee member forwards its attestation, and a node reports
-/// the peers it knows to a bootstrap neighbor during discovery.
 #[derive(Clone)]
 pub enum Message {
-    /// A submitted transaction spreading toward the leader mempools.
     Tx(Wrapper),
-    /// A leader block proposal for the current height, carried whole in one record.
-    /// The overlay disseminates a proposal as coded shards instead, so this variant
-    /// is the codec form a whole proposal round trips through, not the wire unit.
     Proposal(Proposal),
-    /// One erasure coded shard of a leader block proposal. The overlay disseminates a
-    /// proposal as its shards, so a block wider than one record is carried as shards
-    /// and rebuilt on receipt from any k of them.
     CodedProposal(Box<CodedProposal>),
-    /// One committee member attestation over a proposed block.
     Attest(Box<Attestation>),
-    /// The peers a node knows, exchanged with a bootstrap neighbor so the network
-    /// discovers itself from a small set of bootstrap edges.
     Peers(Vec<PeerEntry>),
-    /// A node's finalized status, the next height it will produce. A node learns a
-    /// peer is ahead when the peer status names a greater height than its own.
     Status(u64),
-    /// A request for the finalized blocks in the inclusive height range, sent by a
-    /// node behind the tip to a peer ahead of it.
     GetBlocks { from: u64, to: u64 },
-    /// The finalized blocks a peer serves for a range, each carrying its finality
-    /// certificate in its certificate slot, verified block by block by the receiver.
     Blocks(Vec<ChainBlock>),
-    /// One committee member view change record, its signed move to a later view
-    /// carrying the block it is locked on, gossiped after a split so a leader can
-    /// gather a quorum of them into a justification.
     ViewChange(Box<ViewChange>),
 }
 
-/// A reason a wire message failed to parse. Any of these drops the message.
 #[derive(Debug)]
 pub enum DecodeError {
-    /// A codec step refused the bytes.
     Codec(CodecError),
-    /// The header inside a proposal did not decode.
     Header(qtv_block::Error),
-    /// A message tag named no message.
     UnknownTag(u8),
-    /// A parent link tag named neither genesis nor a value.
     BadParent(u8),
-    /// A certificate stage tag named neither stage one nor stage two.
     BadStage(u8),
-    /// A fixed width crypto field was not its expected length.
     BadLength,
-    /// A text field did not hold valid text.
     Utf8,
 }
 
@@ -180,7 +96,6 @@ impl From<qtv_block::Error> for DecodeError {
 }
 
 impl Message {
-    /// The canonical encoding of the message, a tag byte then the variant.
     pub fn encode(&self) -> Vec<u8> {
         let mut encoder = Encoder::new();
         match self {
@@ -241,15 +156,10 @@ impl Message {
         encoder.into_bytes()
     }
 
-    /// The content id of the message, its SHA3-256 over the canonical encoding.
-    /// The overlay keys its seen record by this, so a message that arrives by two
-    /// paths carries one id and is relayed and counted once.
     pub fn id(&self) -> [u8; 32] {
         gossip_id(&self.encode())
     }
 
-    /// Read a message from a whole payload in canonical form, refusing trailing
-    /// bytes.
     pub fn decode(bytes: &[u8]) -> Result<Message, DecodeError> {
         let mut decoder = Decoder::new(bytes);
         let message = match decoder.get_tag()? {
@@ -310,25 +220,20 @@ impl Message {
     }
 }
 
-/// The content id of a canonical message encoding, its SHA3-256 digest.
 pub fn gossip_id(bytes: &[u8]) -> [u8; 32] {
     sha3_256(bytes)
 }
 
-/// Read a length delimited byte string as text.
 fn read_text(decoder: &mut Decoder<'_>) -> Result<String, DecodeError> {
     let bytes = decoder.get_bytes()?;
     String::from_utf8(bytes.to_vec()).map_err(|_| DecodeError::Utf8)
 }
 
-/// Read a length delimited byte string into a fixed width array.
 fn read_fixed<const N: usize>(decoder: &mut Decoder<'_>) -> Result<[u8; N], DecodeError> {
     let bytes = decoder.get_bytes()?;
     bytes.try_into().map_err(|_| DecodeError::BadLength)
 }
 
-/// Read a transaction wrapper field by field, the mirror of its canonical
-/// encoding.
 fn decode_wrapper(decoder: &mut Decoder<'_>) -> Result<Wrapper, DecodeError> {
     let sender = read_text(decoder)?;
     let nonce = decoder.get_u64()?;
@@ -342,8 +247,6 @@ fn decode_wrapper(decoder: &mut Decoder<'_>) -> Result<Wrapper, DecodeError> {
     Ok(Wrapper::new(body, scheme, signature))
 }
 
-/// Append the canonical encoding of an attestation: its subject, the consensus
-/// block, the one time membership credential, and the module lattice signature.
 fn encode_attestation(encoder: &mut Encoder, attestation: &Attestation) {
     encoder.put_u64(attestation.from);
     encoder.put_u64(attestation.height);
@@ -353,8 +256,6 @@ fn encode_attestation(encoder: &mut Encoder, attestation: &Attestation) {
     encoder.put_bytes(&attestation.sig);
 }
 
-/// Read an attestation, reconstructing the one time credential and the signature
-/// from their fields.
 fn decode_attestation(decoder: &mut Decoder<'_>) -> Result<Attestation, DecodeError> {
     let from = decoder.get_u64()?;
     let height = decoder.get_u64()?;
@@ -372,10 +273,6 @@ fn decode_attestation(decoder: &mut Decoder<'_>) -> Result<Attestation, DecodeEr
     })
 }
 
-/// Append the canonical encoding of a one time membership credential: the slot
-/// position, the committed preimage, and the Merkle path to the registered root.
-/// This is the sortition draw a verifier rechecks against the account root, and it
-/// travels the wire so a receiver rechecks entitlement without a secret.
 fn encode_credential(encoder: &mut Encoder, credential: &Credential) {
     encoder.put_u64(credential.position);
     encoder.put_bytes(&credential.preimage);
@@ -385,8 +282,6 @@ fn encode_credential(encoder: &mut Encoder, credential: &Credential) {
     }
 }
 
-/// Read a one time membership credential, reconstructing the preimage and the
-/// Merkle path from their length delimited fields.
 fn decode_credential(decoder: &mut Decoder<'_>) -> Result<Credential, DecodeError> {
     let position = decoder.get_u64()?;
     let preimage: [u8; PREIMAGE_BYTES] = read_fixed(decoder)?;
@@ -403,9 +298,6 @@ fn decode_credential(decoder: &mut Decoder<'_>) -> Result<Credential, DecodeErro
     })
 }
 
-/// Append the canonical encoding of a view change record: the height, the target
-/// view, the lock view, the locked block if any, and the module lattice
-/// attestation that signs the whole claim.
 fn encode_view_change(encoder: &mut Encoder, record: &ViewChange) {
     encoder.put_u64(record.height);
     encoder.put_u64(record.target_view);
@@ -424,7 +316,6 @@ fn encode_view_change(encoder: &mut Encoder, record: &ViewChange) {
     encode_attestation(encoder, &record.att);
 }
 
-/// Read a view change record, refusing a lock flag that is neither zero nor one.
 fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeError> {
     let height = decoder.get_u64()?;
     let target_view = decoder.get_u64()?;
@@ -452,10 +343,6 @@ fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeErr
     })
 }
 
-/// Append the canonical encoding of one erasure coded proposal shard: the view, the
-/// header, the commitment the shards code under, the justification, and the shard
-/// with its Merkle proof. The commitment and the proof travel with the shard so a
-/// receiver verifies the shard against the root before it uses it.
 fn encode_coded_proposal(encoder: &mut Encoder, coded: &CodedProposal) {
     encoder.put_u64(coded.view);
     coded.header.encode(encoder);
@@ -472,8 +359,6 @@ fn encode_coded_proposal(encoder: &mut Encoder, coded: &CodedProposal) {
     }
 }
 
-/// Read one erasure coded proposal shard, reconstructing the commitment, the shard,
-/// and the Merkle proof from their length delimited fields.
 fn decode_coded_proposal(decoder: &mut Decoder<'_>) -> Result<CodedProposal, DecodeError> {
     let view = decoder.get_u64()?;
     let header = Header::decode(decoder)?;
@@ -501,8 +386,6 @@ fn decode_coded_proposal(decoder: &mut Decoder<'_>) -> Result<CodedProposal, Dec
     })
 }
 
-/// Append the canonical encoding of a shard commitment: the Merkle root over the
-/// shard hashes and the coding parameters that fix the shards.
 fn encode_commitment(encoder: &mut Encoder, commitment: &Commitment) {
     encoder.put_bytes(&commitment.root);
     encoder.put_u64(commitment.k as u64);
@@ -511,8 +394,6 @@ fn encode_commitment(encoder: &mut Encoder, commitment: &Commitment) {
     encoder.put_u64(commitment.data_len as u64);
 }
 
-/// Read a shard commitment, reconstructing the root from its fixed width field and
-/// the parameters from their eight byte integers.
 fn decode_commitment(decoder: &mut Decoder<'_>) -> Result<Commitment, DecodeError> {
     let root: [u8; DIGEST_LEN] = read_fixed(decoder)?;
     let k = decoder.get_u64()? as usize;
@@ -528,15 +409,12 @@ fn decode_commitment(decoder: &mut Decoder<'_>) -> Result<Commitment, DecodeErro
     })
 }
 
-/// Append a 32-byte consensus value as raw fixed-width bytes, so the encoding
-/// stays canonical and the value carries its full 256-bit width on the wire.
 fn put_value(encoder: &mut Encoder, value: &[u8; 32]) {
     for &byte in value {
         encoder.put_u8(byte);
     }
 }
 
-/// Read a 32-byte consensus value.
 fn get_value(decoder: &mut Decoder<'_>) -> Result<[u8; 32], DecodeError> {
     let mut value = [0u8; 32];
     for slot in value.iter_mut() {
@@ -545,7 +423,6 @@ fn get_value(decoder: &mut Decoder<'_>) -> Result<[u8; 32], DecodeError> {
     Ok(value)
 }
 
-/// Append the canonical encoding of a consensus block.
 fn encode_block(encoder: &mut Encoder, block: &Block) {
     encoder.put_u64(block.height);
     put_value(encoder, &block.val);
@@ -562,8 +439,6 @@ fn encode_block(encoder: &mut Encoder, block: &Block) {
     encoder.put_u64(block.cost);
 }
 
-/// Read a consensus block, refusing a parent tag that names neither genesis nor a
-/// value.
 fn decode_block(decoder: &mut Decoder<'_>) -> Result<Block, DecodeError> {
     let height = decoder.get_u64()?;
     let val = get_value(decoder)?;
@@ -583,10 +458,6 @@ fn decode_block(decoder: &mut Decoder<'_>) -> Result<Block, DecodeError> {
     })
 }
 
-/// The canonical encoding of a finality certificate, the bytes that fill the
-/// certificate slot of a finalized block. A syncing node reads this back and
-/// verifies it against the committee commitment and the beacon before it accepts
-/// the block, so the certificate travels with the block it finalizes.
 pub fn certificate_to_bytes(certificate: &Certificate) -> Vec<u8> {
     let mut encoder = Encoder::new();
     encode_envelope(&mut encoder, &certificate.envelope);
@@ -598,7 +469,6 @@ pub fn certificate_to_bytes(certificate: &Certificate) -> Vec<u8> {
     encoder.into_bytes()
 }
 
-/// Read a finality certificate from a certificate slot, refusing trailing bytes.
 pub fn certificate_from_bytes(bytes: &[u8]) -> Result<Certificate, DecodeError> {
     let mut decoder = Decoder::new(bytes);
     let envelope = decode_envelope(&mut decoder)?;
@@ -617,8 +487,6 @@ pub fn certificate_from_bytes(bytes: &[u8]) -> Result<Certificate, DecodeError> 
     Ok(certificate)
 }
 
-/// Append the canonical encoding of a certificate envelope: the height, the slot,
-/// the consensus block, and the committee commitment digest.
 fn encode_envelope(encoder: &mut Encoder, envelope: &Envelope) {
     encoder.put_u64(envelope.height);
     encoder.put_u64(envelope.slot);
@@ -626,8 +494,6 @@ fn encode_envelope(encoder: &mut Encoder, envelope: &Envelope) {
     encoder.put_bytes(&envelope.committee);
 }
 
-/// Read a certificate envelope, reconstructing the committee digest from its fixed
-/// width field.
 fn decode_envelope(decoder: &mut Decoder<'_>) -> Result<Envelope, DecodeError> {
     let height = decoder.get_u64()?;
     let slot = decoder.get_u64()?;
@@ -641,8 +507,6 @@ fn decode_envelope(decoder: &mut Decoder<'_>) -> Result<Envelope, DecodeError> {
     })
 }
 
-/// Append the canonical encoding of a finalized chain block: the header, the
-/// certificate slot, and the ordered body, the mirror of the block encoding.
 fn encode_chain_block(encoder: &mut Encoder, block: &ChainBlock) {
     block.header().encode(encoder);
     encoder.put_bytes(block.certificate());
@@ -652,9 +516,6 @@ fn encode_chain_block(encoder: &mut Encoder, block: &ChainBlock) {
     }
 }
 
-/// Read a finalized chain block from its whole canonical encoding, the form the
-/// block store keeps, refusing trailing bytes. A peer decodes a stored block this
-/// way to serve it for sync.
 pub fn chain_block_from_bytes(bytes: &[u8]) -> Result<ChainBlock, DecodeError> {
     let mut decoder = Decoder::new(bytes);
     let block = decode_chain_block(&mut decoder)?;
@@ -662,9 +523,6 @@ pub fn chain_block_from_bytes(bytes: &[u8]) -> Result<ChainBlock, DecodeError> {
     Ok(block)
 }
 
-/// Read a transaction from its whole canonical encoding, the form a client submits it
-/// in over the RPC, refusing trailing bytes. This is the exact decode the mesh uses
-/// for a gossiped transaction, exposed so the gateway parses a submission the same way.
 pub fn wrapper_from_bytes(bytes: &[u8]) -> Result<Wrapper, DecodeError> {
     let mut decoder = Decoder::new(bytes);
     let wrapper = decode_wrapper(&mut decoder)?;
@@ -672,8 +530,6 @@ pub fn wrapper_from_bytes(bytes: &[u8]) -> Result<Wrapper, DecodeError> {
     Ok(wrapper)
 }
 
-/// Read a finalized chain block field by field, the mirror of its canonical
-/// encoding.
 fn decode_chain_block(decoder: &mut Decoder<'_>) -> Result<ChainBlock, DecodeError> {
     let header = Header::decode(decoder)?;
     let certificate = decoder.get_bytes()?.to_vec();
