@@ -396,6 +396,17 @@ fn dispatch_key_register(ledger: &mut Ledger, wrapper: &Wrapper, fee_params: &Fe
     true
 }
 
+/// The most compute a block may run across all of its contract calls, counted in meter, the machine's
+/// per instruction work unit. It bounds how much execution one block asks of every validator, so a
+/// call carrying a loop and a large meter cannot make the network do unbounded work for a flat fee.
+/// It is also the ceiling on a single call, since a call whose meter could never fit a block is
+/// refused at admission rather than sitting in the pool forever. Transfers, staking, and governance
+/// are not counted against it, they run a fixed tiny program, only contract deploys and calls draw on
+/// it. The executor includes calls in order until the budget is spent and skips the rest, which the
+/// leader applies when it builds a block and every validator applies when it re executes one, so the
+/// two agree and a block that spends past the budget is refused.
+const VM_BLOCK_METER_BUDGET: u64 = 50_000_000;
+
 /// Whether a transaction is a virtual machine operation: a deploy to the reserved deploy address, or a
 /// call to an address that already holds a deployed contract. A pure read of committed state, so the
 /// mempool, the sequential executor, and the parallel fallback all classify a transaction the same.
@@ -418,7 +429,10 @@ pub(crate) fn vm_admissible(
     if !account.has_key() || !qtv_tx::scheme_supported(wrapper.scheme()) || !signature_ok {
         return false;
     }
-    if body.nonce() != account.nonce || body.meter_limit() < crate::execution::TRANSFER_METER {
+    if body.nonce() != account.nonce
+        || body.meter_limit() < crate::execution::TRANSFER_METER
+        || body.meter_limit() > VM_BLOCK_METER_BUDGET
+    {
         return false;
     }
     if body.fee() < u128::from(fee_params.transfer_fee()) {
@@ -483,6 +497,12 @@ fn execute_ordered_across(
     let gov_address = crate::ledger::gov_system_address();
     let now_seconds = day.saturating_mul(86_400);
     let mut included = Vec::new();
+    // The compute spent by the block's contract calls so far, in meter. A call is only included while
+    // it fits under the block budget, so the whole block asks a bounded amount of execution of every
+    // validator. The leader applies this when it builds a block and every validator applies it when it
+    // re executes one, so the included set is a pure function of the block and a block that spends past
+    // the budget is refused by the count check the caller makes.
+    let mut vm_meter: u64 = 0;
     for (index, wrapper) in candidates.iter().enumerate() {
         // A blacklisted sender has been retired by the blacklist and kill track and may take no
         // action of any kind. Refuse it here, above the operation branches, so a contract call, a
@@ -494,7 +514,14 @@ fn execute_ordered_across(
             continue;
         }
         if is_vm_op(ledger, wrapper) {
+            let meter = wrapper.body().meter_limit();
+            if vm_meter.saturating_add(meter) > VM_BLOCK_METER_BUDGET {
+                // This call would push the block past its compute budget, so it is left for a later
+                // block rather than run here.
+                continue;
+            }
             if dispatch_vm(ledger, wrapper, verified[index], fee_params, now_seconds) {
+                vm_meter = vm_meter.saturating_add(meter);
                 included.push(wrapper.clone());
             }
             continue;
