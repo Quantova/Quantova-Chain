@@ -261,6 +261,9 @@ pub fn execute_parallel(
     // part of the serial writeback cost.
     let mut fee_validators: u64 = 0;
     let mut fee_grants: u64 = 0;
+    // The burned share of every fee is summed too, so the total supply falls by the same amount the
+    // sequential path removes when it burns each fee in turn.
+    let mut fee_burned: u64 = 0;
 
     for layer in &layers {
         // Name the two addresses each transaction touches. The accounts themselves are read inside the
@@ -297,10 +300,12 @@ pub fn execute_parallel(
             let (validators, grants) = Ledger::fee_shares(write.fee);
             fee_validators = fee_validators.saturating_add(validators);
             fee_grants = fee_grants.saturating_add(grants);
+            fee_burned = fee_burned.saturating_add(write.fee - validators - grants);
             included.push(write.index);
         }
     }
     ledger.credit_pools(fee_validators, fee_grants);
+    ledger.debit_supply(fee_burned);
 
     included.sort_unstable();
     included
