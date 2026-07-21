@@ -14,20 +14,20 @@
 use std::fmt;
 
 /// Human readable part for an account or contract address. The separator that
-/// follows a human readable part is the digit one, so an address reads as q1.
-pub const HRP_ADDRESS: &str = "q";
+/// follows a human readable part is the digit one, so an address reads as Q1.
+pub const HRP_ADDRESS: &str = "Q";
 /// Human readable part for a secret seed.
-pub const HRP_SECRET: &str = "q2";
+pub const HRP_SECRET: &str = "Q2";
 /// Human readable part for a transaction id.
-pub const HRP_TX: &str = "qtx";
+pub const HRP_TX: &str = "QTX";
 /// Human readable part for a block hash.
-pub const HRP_BLOCK: &str = "qbk";
+pub const HRP_BLOCK: &str = "QBK";
 /// Human readable part for a state root.
-pub const HRP_STATE: &str = "qst";
+pub const HRP_STATE: &str = "QST";
 /// Human readable part for a contract interface digest.
-pub const HRP_CID: &str = "qcid";
+pub const HRP_CID: &str = "QCID";
 /// Human readable part for a proof digest.
-pub const HRP_PROOF: &str = "qpf";
+pub const HRP_PROOF: &str = "QPF";
 
 /// The security floor in bytes for the address and secret families. Every
 /// payload is the full 256-bit width, and a shorter one is refused.
@@ -124,7 +124,8 @@ fn polymod(values: &[u8]) -> u32 {
 
 /// Expand a human readable part into the five bit groups the checksum folds in.
 fn hrp_expand(hrp: &str) -> Vec<u8> {
-    let bytes = hrp.as_bytes();
+    let lowered = hrp.to_ascii_lowercase();
+    let bytes = lowered.as_bytes();
     let mut out = Vec::with_capacity(bytes.len() * 2 + 1);
     for &byte in bytes {
         out.push(byte >> 5);
@@ -240,7 +241,7 @@ fn decode(text: &str) -> Result<(String, Vec<u8>), Error> {
 /// Parse a Bech32m string and confirm it carries the expected prefix.
 fn parse(expected: &str, text: &str) -> Result<Vec<u8>, Error> {
     let (hrp, payload) = decode(text)?;
-    if hrp != expected {
+    if !hrp.eq_ignore_ascii_case(expected) {
         return Err(Error::WrongPrefix);
     }
     Ok(payload)
