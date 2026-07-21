@@ -293,23 +293,27 @@ impl DevNode {
 
     /// Fund the genesis accounts and persist them under the genesis state root.
     fn init_genesis(&mut self, genesis: &Genesis) -> Result<(), RoundError> {
+        // Sum the total supply as genesis funds it, every funded balance, the seeded reward pool, and
+        // the seeded validator bonds, so the chain reports a live supply from the first block.
+        let mut supply: u64 = 0;
         for account in &genesis.accounts {
             let funded =
                 Account::funded(account.balance, account.scheme, account.public_key.clone());
             self.ledger.set_account(&account.address, &funded);
             self.state_store
                 .put_account(account_key(&account.address), to_bytes(&funded))?;
+            supply = supply.saturating_add(account.balance);
         }
         let (pool_key, pool_value) = self.ledger.seed_stake_pool(qtv_staking::STAKING_POOL);
         self.state_store.put_account(pool_key, pool_value)?;
+        supply = supply.saturating_add(qtv_staking::STAKING_POOL);
         let mut validator_ids: Vec<[u8; 32]> = Vec::new();
         for v in &self.base_validators {
             let address = validator_address(v.id);
-            if let Some((bond_key, bond_value)) = self.ledger.seed_validator_bond(
-                &address,
-                v.stake.saturating_mul(qtv_staking::NATIVE_UNIT as u64),
-            ) {
+            let bond = v.stake.saturating_mul(qtv_staking::NATIVE_UNIT as u64);
+            if let Some((bond_key, bond_value)) = self.ledger.seed_validator_bond(&address, bond) {
                 self.state_store.put_account(bond_key, bond_value)?;
+                supply = supply.saturating_add(bond);
             }
             if let Ok(payload) = qtv_idfmt::parse_address(&address) {
                 if let Ok(id) = <[u8; 32]>::try_from(payload) {
@@ -319,6 +323,8 @@ impl DevNode {
         }
         let (validators_key, validators_value) = self.ledger.seed_validator_set(&validator_ids);
         self.state_store.put_account(validators_key, validators_value)?;
+        let (supply_key, supply_value) = self.ledger.seed_supply(supply);
+        self.state_store.put_account(supply_key, supply_value)?;
         self.state_store.commit(self.ledger.state_root())?;
         // Genesis wrote the whole state explicitly, so nothing is pending persistence.
         self.ledger.clear_dirty();

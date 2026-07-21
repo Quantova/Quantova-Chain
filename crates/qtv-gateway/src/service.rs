@@ -49,6 +49,8 @@ pub enum Request {
     Container(String),
     /// The whole storage of the contract at an address.
     Storage(String),
+    /// The total value in existence, in Quon.
+    Supply,
 }
 
 /// A request the gateway could not carry out because the client sent it wrong, a
@@ -118,6 +120,7 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
             }
         }
         "pending" => Ok(Request::Pending),
+        "supply" => Ok(Request::Supply),
         "get_container" => Ok(Request::Container(string_field(body, "address")?)),
         "get_storage" => Ok(Request::Storage(string_field(body, "address")?)),
         other => Err(ClientError {
@@ -151,6 +154,7 @@ pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result
         Request::ChainParams => Ok(chain_params()),
         Request::StakingState => Ok(staking_state(node)),
         Request::Pending => Ok(pending(node)),
+        Request::Supply => Ok(supply(node)),
         Request::Container(address) => container(node, &address),
         Request::Storage(address) => storage(node, &address),
     }
@@ -393,6 +397,16 @@ fn pending(node: &DevNode) -> Json {
         ("count", Json::Int(items.len() as u64)),
         ("transactions", Json::Array(items)),
     ])
+}
+
+/// The total value in existence, in Quon, as a decimal string so a large value never rounds. Genesis
+/// fixes the starting supply, the fee burn lowers it, and a governance mint raises it, so this is the
+/// live figure an explorer shows rather than a fixed headline.
+fn supply(node: &DevNode) -> Json {
+    object(vec![(
+        "supply_quon",
+        Json::str(node.ledger().total_supply().to_string()),
+    )])
 }
 
 /// The container of the contract at an address, its compiled bytes as hex, or an error when the

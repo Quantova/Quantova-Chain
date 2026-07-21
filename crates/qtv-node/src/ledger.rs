@@ -94,6 +94,7 @@ const STAKE_REWARDS_TAG: &[u8] = b"qtv/stake/rewards/";
 const STAKE_POOL_TAG: &[u8] = b"qtv/stake/pool";
 const STAKE_TREASURY_TAG: &[u8] = b"qtv/stake/treasury";
 const GRANTS_POOL_TAG: &[u8] = b"qtv/grants/pool";
+const SUPPLY_TAG: &[u8] = b"qtv/supply";
 
 /// The transaction fee split, in basis points of ten thousand. A portion is burned, credited to no
 /// one so the total supply falls, and the rest funds the validators reward pool and the grants pool.
@@ -447,6 +448,50 @@ impl Ledger {
             .insert(stake_singleton_key(STAKE_TREASURY_TAG), to_bytes(&amount));
     }
 
+    /// The total value in existence, in Quon. Genesis sets it to the sum of every funded balance, the
+    /// seeded reward pool, and the seeded validator bonds. Only two things change it after that, a fee
+    /// burn lowers it and a governance mint raises it, because every other movement, a transfer, a
+    /// bond, a claim, or a fee into the pools, only moves value between places that are all part of the
+    /// supply. It is the live figure the gateway reports rather than a fixed headline.
+    pub fn total_supply(&self) -> u64 {
+        self.trie
+            .get(&stake_singleton_key(SUPPLY_TAG))
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical supply"))
+            .unwrap_or(0)
+    }
+
+    fn set_total_supply(&mut self, amount: u64) {
+        self.trie
+            .insert(stake_singleton_key(SUPPLY_TAG), to_bytes(&amount));
+    }
+
+    /// Add to the total supply, on a genesis funding or a governance mint. A zero change writes
+    /// nothing, so an empty block or a fee whose whole amount funds the pools moves no state.
+    pub fn credit_supply(&mut self, amount: u64) {
+        if amount == 0 {
+            return;
+        }
+        let next = self.total_supply().saturating_add(amount);
+        self.set_total_supply(next);
+    }
+
+    /// Remove from the total supply, on a fee burn. A zero change writes nothing.
+    pub fn debit_supply(&mut self, amount: u64) {
+        if amount == 0 {
+            return;
+        }
+        let next = self.total_supply().saturating_sub(amount);
+        self.set_total_supply(next);
+    }
+
+    /// Set the genesis total supply and return the state key and value, so genesis persists it to the
+    /// store the same way it persists the reward pool and the validator bonds. This is the sum of every
+    /// funded balance, the seeded reward pool, and the seeded validator bonds.
+    pub fn seed_supply(&mut self, amount: u64) -> (Key, Vec<u8>) {
+        self.set_total_supply(amount);
+        (stake_singleton_key(SUPPLY_TAG), to_bytes(&amount))
+    }
+
     pub fn grants_pool(&self) -> u64 {
         self.trie
             .get(&stake_singleton_key(GRANTS_POOL_TAG))
@@ -470,11 +515,14 @@ impl Ledger {
         }
         let validators = ((fee as u128) * (FEE_VALIDATORS_BPS as u128) / 10_000) as u64;
         let grants = ((fee as u128) * (FEE_GRANTS_BPS as u128) / 10_000) as u64;
-        // The rest, the burn share plus any rounding dust, is credited nowhere, so it leaves the supply.
+        // The rest, the burn share plus any rounding dust, is credited nowhere, so it leaves the
+        // supply. The two credited shares stay part of the supply because the pools are part of it, so
+        // only the burn is removed from the total.
         let pool = self.stake_pool().saturating_add(validators);
         self.set_stake_pool(pool);
         let grants_pool = self.grants_pool().saturating_add(grants);
         self.set_grants_pool(grants_pool);
+        self.debit_supply(fee - validators - grants);
     }
 
     /// The portion of a fee that is burned under the current split, credited to no one. Used to check
@@ -1181,6 +1229,8 @@ impl Ledger {
                 let mut account = self.account(&addr);
                 account.balance = account.balance.saturating_add(*amount);
                 self.set_account(&addr, &account);
+                // A mint creates value that did not exist, so it raises the total supply.
+                self.credit_supply(*amount);
                 Ok(())
             }
             Action::Parameter { key, value } => self.apply_parameter(key, value),
@@ -1961,6 +2011,23 @@ mod tests {
         let ledger = Ledger::new();
         assert_eq!(ledger.account(&address(0)), Account::default());
         assert_eq!(ledger.balance(&address(0)), 0);
+    }
+
+    #[test]
+    fn supply_starts_at_genesis_falls_by_the_burn_and_rises_by_a_mint() {
+        let mut ledger = Ledger::new();
+        ledger.seed_supply(1_000_000);
+        assert_eq!(ledger.total_supply(), 1_000_000, "genesis fixes the supply");
+
+        // A fee removes only its burned share from the supply, since the pool shares stay part of it.
+        let fee = 1_000u64;
+        let burned = Ledger::fee_burned(fee);
+        ledger.collect_fee(fee);
+        assert_eq!(ledger.total_supply(), 1_000_000 - burned, "the burn lowers the supply");
+
+        // A mint raises it by exactly what it creates.
+        ledger.credit_supply(500);
+        assert_eq!(ledger.total_supply(), 1_000_000 - burned + 500, "a mint raises the supply");
     }
 
     #[test]
