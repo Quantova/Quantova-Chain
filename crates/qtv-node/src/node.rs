@@ -457,6 +457,9 @@ fn execute_ordered_across(
         if ledger.is_blacklisted(wrapper.body().sender()) {
             continue;
         }
+        if ledger.is_frozen(wrapper.body().sender()) {
+            continue;
+        }
         if is_vm_op(ledger, wrapper) {
             let meter = wrapper.body().meter_limit();
             if vm_meter.saturating_add(meter) > VM_BLOCK_METER_BUDGET {
@@ -1847,6 +1850,57 @@ mod tests {
         let mut parallel = ledger.clone();
         assert!(crate::parallel::execute_parallel(&mut parallel, &[out], &fee, 8, 3).is_empty());
         assert_eq!(parallel.state_root(), ledger.state_root());
+    }
+
+    #[test]
+    fn a_governance_freeze_stops_a_sender_but_still_lets_it_receive() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        ledger.seed_validator_bond(&qtv_idfmt::render_address(&[201u8; 32]).unwrap(), 10_000 * 1_000_000);
+        let proposer = keypair(140);
+        let voter = keypair(141);
+        let hostile = keypair(142);
+        let peer = keypair(143);
+        fund(&mut ledger, &proposer, 300_000 * 1_000_000);
+        fund(&mut ledger, &voter, 10_000 * 1_000_000);
+        fund(&mut ledger, &hostile, 10_000 * 1_000_000);
+        fund(&mut ledger, &peer, 10_000 * 1_000_000);
+
+        let target = qtv_idfmt::parse_address(&hostile.address()).unwrap();
+        let action = Action::Freeze { targets: vec![target] };
+        let mut propose_args = vec![1u8];
+        propose_args.extend_from_slice(&qtv_codec::to_bytes(&action));
+        execute_ordered(
+            &mut ledger,
+            &[
+                gov_call_tx(&proposer, propose_args, 0, &fee),
+                gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee),
+            ],
+            &fee,
+            0,
+        );
+        let mut enact = qtv_codec::Encoder::new();
+        enact.put_u8(3);
+        enact.put_u64(1);
+        execute_ordered(
+            &mut ledger,
+            &[gov_call_tx(&proposer, enact.into_bytes(), 1, &fee)],
+            &fee,
+            2,
+        );
+        assert!(ledger.is_frozen(&hostile.address()));
+
+        let out = transfer(&hostile, &peer.address(), 100 * 1_000_000, 0, &fee);
+        assert!(
+            execute_ordered(&mut ledger, &[out], &fee, 2).is_empty(),
+            "a frozen account cannot send"
+        );
+        let into = transfer(&peer, &hostile.address(), 100 * 1_000_000, 0, &fee);
+        assert_eq!(
+            execute_ordered(&mut ledger, &[into], &fee, 2).len(),
+            1,
+            "a frozen account still receives"
+        );
     }
 
     #[test]
