@@ -171,6 +171,49 @@ pub fn header_value(header_hash: &[u8; 32]) -> [u8; 32] {
     *header_hash
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalityStatus {
+    Extends,
+    Confirms,
+    Violation {
+        height: u64,
+        finalized: [u8; 32],
+        conflicting: [u8; 32],
+    },
+}
+
+#[derive(Debug, Default)]
+pub struct FinalityLedger {
+    finalized: std::collections::BTreeMap<u64, [u8; 32]>,
+}
+
+impl FinalityLedger {
+    pub fn new() -> Self {
+        FinalityLedger {
+            finalized: std::collections::BTreeMap::new(),
+        }
+    }
+
+    pub fn finalized_value(&self, height: u64) -> Option<[u8; 32]> {
+        self.finalized.get(&height).copied()
+    }
+
+    pub fn observe(&mut self, height: u64, value: [u8; 32]) -> FinalityStatus {
+        match self.finalized.get(&height) {
+            Some(seen) if *seen == value => FinalityStatus::Confirms,
+            Some(seen) => FinalityStatus::Violation {
+                height,
+                finalized: *seen,
+                conflicting: value,
+            },
+            None => {
+                self.finalized.insert(height, value);
+                FinalityStatus::Extends
+            }
+        }
+    }
+}
+
 /// A node's consensus state, its own attester and the roster of public commitments. It
 /// computes its own reveal and assembles the committee from published reveals verified
 /// against the roster.
@@ -555,6 +598,27 @@ mod tests {
     fn the_header_value_is_a_deterministic_fold() {
         assert_eq!(header_value(&[3u8; 32]), header_value(&[3u8; 32]));
         assert_ne!(header_value(&[3u8; 32]), header_value(&[4u8; 32]));
+    }
+
+    #[test]
+    fn a_second_certificate_that_conflicts_at_one_height_is_a_finality_violation() {
+        let mut ledger = FinalityLedger::new();
+        assert_eq!(ledger.observe(1, [1u8; 32]), FinalityStatus::Extends);
+        assert_eq!(ledger.observe(2, [2u8; 32]), FinalityStatus::Extends);
+        assert_eq!(ledger.observe(1, [1u8; 32]), FinalityStatus::Confirms);
+        assert_eq!(
+            ledger.observe(1, [9u8; 32]),
+            FinalityStatus::Violation {
+                height: 1,
+                finalized: [1u8; 32],
+                conflicting: [9u8; 32],
+            }
+        );
+        assert_eq!(
+            ledger.finalized_value(1),
+            Some([1u8; 32]),
+            "the first finalized value is never overwritten by a conflicting one"
+        );
     }
 
     #[test]
