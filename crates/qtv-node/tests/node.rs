@@ -23,12 +23,13 @@ fn validators(online: &[bool]) -> Vec<ValidatorSpec> {
         .enumerate()
         .map(|(i, &on)| {
             let id = i as u64 + 1;
-            ValidatorSpec {
+            ValidatorSpec::from_secret(
                 id,
-                stake: VALIDATOR_STAKE,
-                online: on,
-                bond_address: qtv_node::keys::validator_address(&qtv_node::keys::fixture_secret(id)),
-            }
+                VALIDATOR_STAKE,
+                on,
+                &qtv_node::keys::fixture_secret(id),
+                qtv_node::consensus::DEFAULT_SLOTS,
+            )
         })
         .collect()
 }
