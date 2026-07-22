@@ -335,6 +335,7 @@ pub enum Action {
     AddAsset { asset: Vec<u8> },
     Parameter { key: Vec<u8>, value: Vec<u8> },
     Spend { from: Vec<u8>, to: Vec<u8>, amount: u64 },
+    Unfreeze { targets: Vec<Vec<u8>> },
 }
 
 impl Action {
@@ -349,6 +350,7 @@ impl Action {
             Action::AddAsset { .. } => Track::AddAsset,
             Action::Parameter { .. } => Track::Parameter,
             Action::Spend { .. } => Track::Mint,
+            Action::Unfreeze { .. } => Track::BlacklistKill,
         }
     }
 
@@ -418,6 +420,13 @@ impl Encode for Action {
                 to.encode(encoder);
                 encoder.put_u64(*amount);
             }
+            Action::Unfreeze { targets } => {
+                encoder.put_u8(10);
+                (targets.len() as u64).encode(encoder);
+                for target in targets {
+                    target.encode(encoder);
+                }
+            }
         }
     }
 }
@@ -476,6 +485,15 @@ impl Decode for Action {
                 to: Vec::<u8>::decode(decoder)?,
                 amount: decoder.get_u64()?,
             }),
+            10 => {
+                let count = u64::decode(decoder)?;
+                let mut targets =
+                    Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_BYTES_VEC)?);
+                for _ in 0..count {
+                    targets.push(Vec::<u8>::decode(decoder)?);
+                }
+                Ok(Action::Unfreeze { targets })
+            }
             other => Err(Error::UnknownTag { tag: other }),
         }
     }
@@ -520,6 +538,64 @@ where
             Ok(())
         }
         _ => Ok(()),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GuardianSet {
+    pub members: Vec<[u8; 32]>,
+    pub threshold: u32,
+}
+
+impl GuardianSet {
+    pub fn new(members: Vec<[u8; 32]>, threshold: u32) -> GuardianSet {
+        GuardianSet { members, threshold }
+    }
+
+    pub fn well_formed(&self) -> bool {
+        self.threshold >= 2 && (self.threshold as usize) <= self.members.len()
+    }
+
+    pub fn is_member(&self, id: &[u8; 32]) -> bool {
+        self.members.contains(id)
+    }
+
+    pub fn authorizes(&self, approvers: &[[u8; 32]]) -> bool {
+        if !self.well_formed() {
+            return false;
+        }
+        let mut seen: Vec<[u8; 32]> = Vec::new();
+        for approver in approvers {
+            if self.is_member(approver) && !seen.contains(approver) {
+                seen.push(*approver);
+            }
+        }
+        seen.len() as u32 >= self.threshold
+    }
+}
+
+impl Encode for GuardianSet {
+    fn encode(&self, encoder: &mut Encoder) {
+        (self.members.len() as u64).encode(encoder);
+        for member in &self.members {
+            encoder.put_bytes(member);
+        }
+        encoder.put_u32(self.threshold);
+    }
+}
+
+impl Decode for GuardianSet {
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
+        let count = u64::decode(decoder)?;
+        let mut members =
+            Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_SEIZURE)?);
+        for _ in 0..count {
+            let bytes = decoder.get_bytes()?;
+            let member: [u8; 32] = bytes.try_into().map_err(|_| Error::UnknownTag { tag: 0 })?;
+            members.push(member);
+        }
+        let threshold = decoder.get_u32()?;
+        Ok(GuardianSet { members, threshold })
     }
 }
 
@@ -953,11 +1029,43 @@ mod tests {
                 to: vec![8; 32],
                 amount: 42_000_000,
             },
+            Action::Unfreeze {
+                targets: vec![vec![1; 32], vec![2; 32]],
+            },
         ];
         for action in actions {
             let back: Action = from_bytes(&to_bytes(&action)).unwrap();
             assert_eq!(action, back);
         }
+    }
+
+    #[test]
+    fn a_guardian_caucus_never_acts_on_a_single_key() {
+        let members = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        let caucus = GuardianSet::new(members.clone(), 2);
+        assert!(caucus.well_formed());
+        assert!(!caucus.authorizes(&[[1u8; 32]]), "one guardian is not a caucus");
+        assert!(
+            !caucus.authorizes(&[[1u8; 32], [1u8; 32]]),
+            "one guardian named twice is still one key"
+        );
+        assert!(caucus.authorizes(&[[1u8; 32], [2u8; 32]]));
+        assert!(!caucus.authorizes(&[[1u8; 32], [9u8; 32]]), "an outsider carries no weight");
+        assert!(caucus.authorizes(&[[3u8; 32], [1u8; 32], [2u8; 32]]));
+
+        let single = GuardianSet::new(members, 1);
+        assert!(!single.well_formed(), "a threshold of one is never a well formed caucus");
+        assert!(!single.authorizes(&[[1u8; 32]]));
+
+        let short = GuardianSet::new(vec![[1u8; 32]], 2);
+        assert!(!short.well_formed(), "a threshold above the membership is not well formed");
+    }
+
+    #[test]
+    fn a_guardian_set_round_trips_through_the_codec() {
+        let caucus = GuardianSet::new(vec![[4u8; 32], [5u8; 32], [6u8; 32]], 2);
+        let back: GuardianSet = from_bytes(&to_bytes(&caucus)).unwrap();
+        assert_eq!(caucus, back);
     }
 
     #[test]
