@@ -928,6 +928,30 @@ mod tests {
     }
 
     #[test]
+    fn a_transfer_to_a_system_record_address_does_not_halt_the_executor() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let alice = keypair(300);
+        fund(&mut ledger, &alice, 10_000 * 1_000_000);
+        ledger.set_stake_pool(9_000);
+        let pool_key = qtv_crypto::sha3::sha3_256(b"qtv/stake/pool");
+        let hostile = qtv_idfmt::render_address(&pool_key).expect("a full hash reaches the floor");
+        let pool_before = ledger.stake_pool();
+        let tx = transfer(&alice, &hostile, 1, 0, &fee);
+        let included = execute_ordered(&mut ledger, &[tx], &fee, 0);
+        assert_eq!(included.len(), 1, "the crafted transfer is handled as an ordinary send");
+        assert_eq!(
+            ledger.account(&hostile).balance,
+            1,
+            "the unit lands in a domain-separated account leaf, not the system record"
+        );
+        assert!(
+            ledger.stake_pool() >= pool_before,
+            "the stake pool record stays a coherent balance and is never clobbered"
+        );
+    }
+
+    #[test]
     fn a_transfer_fee_burns_a_portion_and_funds_the_pools() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
