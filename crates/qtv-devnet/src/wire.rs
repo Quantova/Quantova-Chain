@@ -26,6 +26,22 @@ const PARENT_VALUE: u8 = 1;
 
 const STAGE_ONE: u8 = 1;
 
+const PREALLOC_LIMIT: usize = 4096;
+const MIN_WRAPPER: usize = 65;
+const MIN_VIEW_CHANGE: usize = 32;
+const MIN_CHAIN_BLOCK: usize = 16;
+const MIN_PEER: usize = 16;
+const MIN_ATTESTATION: usize = 32;
+const MIN_SIBLING: usize = 8;
+
+fn bounded_capacity(remaining: usize, count: u64, min_element: usize) -> Result<usize, DecodeError> {
+    let ceiling = (remaining / min_element.max(1)) as u64;
+    if count > ceiling {
+        return Err(DecodeError::BadLength);
+    }
+    Ok((count as usize).min(PREALLOC_LIMIT))
+}
+
 #[derive(Clone)]
 pub struct Proposal {
     pub view: u64,
@@ -168,12 +184,17 @@ impl Message {
                 let view = decoder.get_u64()?;
                 let header = Header::decode(&mut decoder)?;
                 let count = decoder.get_u64()?;
-                let mut body = Vec::with_capacity(count as usize);
+                let mut body =
+                    Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_WRAPPER)?);
                 for _ in 0..count {
                     body.push(decode_wrapper(&mut decoder)?);
                 }
                 let just_count = decoder.get_u64()?;
-                let mut justification = Vec::with_capacity(just_count as usize);
+                let mut justification = Vec::with_capacity(bounded_capacity(
+                    decoder.remaining(),
+                    just_count,
+                    MIN_VIEW_CHANGE,
+                )?);
                 for _ in 0..just_count {
                     justification.push(decode_view_change(&mut decoder)?);
                 }
@@ -190,7 +211,8 @@ impl Message {
             TAG_ATTEST => Message::Attest(Box::new(decode_attestation(&mut decoder)?)),
             TAG_PEERS => {
                 let count = decoder.get_u64()?;
-                let mut peers = Vec::with_capacity(count as usize);
+                let mut peers =
+                    Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_PEER)?);
                 for _ in 0..count {
                     let key: [u8; KEY_BYTES] = read_fixed(&mut decoder)?;
                     let address = read_text(&mut decoder)?;
@@ -206,7 +228,11 @@ impl Message {
             }
             TAG_BLOCKS => {
                 let count = decoder.get_u64()?;
-                let mut blocks = Vec::with_capacity(count as usize);
+                let mut blocks = Vec::with_capacity(bounded_capacity(
+                    decoder.remaining(),
+                    count,
+                    MIN_CHAIN_BLOCK,
+                )?);
                 for _ in 0..count {
                     blocks.push(decode_chain_block(&mut decoder)?);
                 }
@@ -286,7 +312,7 @@ fn decode_credential(decoder: &mut Decoder<'_>) -> Result<Credential, DecodeErro
     let position = decoder.get_u64()?;
     let preimage: [u8; PREIMAGE_BYTES] = read_fixed(decoder)?;
     let count = decoder.get_u64()?;
-    let mut siblings = Vec::with_capacity(count as usize);
+    let mut siblings = Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_SIBLING)?);
     for _ in 0..count {
         let sibling: [u8; NODE_BYTES] = read_fixed(decoder)?;
         siblings.push(sibling);
@@ -325,7 +351,8 @@ fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeErr
         1 => {
             let header = Header::decode(decoder)?;
             let count = decoder.get_u64()?;
-            let mut body = Vec::with_capacity(count as usize);
+            let mut body =
+                Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_WRAPPER)?);
             for _ in 0..count {
                 body.push(decode_wrapper(decoder)?);
             }
@@ -364,14 +391,22 @@ fn decode_coded_proposal(decoder: &mut Decoder<'_>) -> Result<CodedProposal, Dec
     let header = Header::decode(decoder)?;
     let commitment = decode_commitment(decoder)?;
     let just_count = decoder.get_u64()?;
-    let mut justification = Vec::with_capacity(just_count as usize);
+    let mut justification = Vec::with_capacity(bounded_capacity(
+        decoder.remaining(),
+        just_count,
+        MIN_VIEW_CHANGE,
+    )?);
     for _ in 0..just_count {
         justification.push(decode_view_change(decoder)?);
     }
     let index = decoder.get_u64()? as usize;
     let bytes = decoder.get_bytes()?.to_vec();
     let sibling_count = decoder.get_u64()?;
-    let mut siblings = Vec::with_capacity(sibling_count as usize);
+    let mut siblings = Vec::with_capacity(bounded_capacity(
+        decoder.remaining(),
+        sibling_count,
+        MIN_SIBLING,
+    )?);
     for _ in 0..sibling_count {
         let sibling: [u8; DIGEST_LEN] = read_fixed(decoder)?;
         siblings.push(sibling);
@@ -475,7 +510,11 @@ pub fn certificate_from_bytes(bytes: &[u8]) -> Result<Certificate, DecodeError> 
     let certificate = match decoder.get_u8()? {
         STAGE_ONE => {
             let count = decoder.get_u64()?;
-            let mut attestations = Vec::with_capacity(count as usize);
+            let mut attestations = Vec::with_capacity(bounded_capacity(
+                decoder.remaining(),
+                count,
+                MIN_ATTESTATION,
+            )?);
             for _ in 0..count {
                 attestations.push(decode_attestation(&mut decoder)?);
             }
@@ -534,9 +573,50 @@ fn decode_chain_block(decoder: &mut Decoder<'_>) -> Result<ChainBlock, DecodeErr
     let header = Header::decode(decoder)?;
     let certificate = decoder.get_bytes()?.to_vec();
     let count = decoder.get_u64()?;
-    let mut body = Vec::with_capacity(count as usize);
+    let mut body =
+        Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_WRAPPER)?);
     for _ in 0..count {
         body.push(decode_wrapper(decoder)?);
     }
     Ok(ChainBlock::new(header, certificate, body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_peer_frame_with_a_huge_count_and_a_tiny_body_is_rejected() {
+        let mut bytes = vec![TAG_PEERS];
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+        assert!(matches!(Message::decode(&bytes), Err(DecodeError::BadLength)));
+    }
+
+    #[test]
+    fn a_blocks_frame_with_a_huge_count_and_a_tiny_body_is_rejected() {
+        let mut bytes = vec![TAG_BLOCKS];
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+        assert!(matches!(Message::decode(&bytes), Err(DecodeError::BadLength)));
+    }
+
+    #[test]
+    fn bounded_capacity_rejects_a_count_that_overruns_the_remaining_bytes() {
+        assert!(matches!(
+            bounded_capacity(0, u64::MAX, MIN_WRAPPER),
+            Err(DecodeError::BadLength)
+        ));
+        assert!(matches!(
+            bounded_capacity(16, 100, MIN_PEER),
+            Err(DecodeError::BadLength)
+        ));
+    }
+
+    #[test]
+    fn bounded_capacity_admits_a_plausible_count_and_caps_the_reservation() {
+        assert_eq!(bounded_capacity(1_000_000, 3, MIN_WRAPPER).unwrap(), 3);
+        assert_eq!(
+            bounded_capacity(1_000_000_000, 100_000, MIN_SIBLING).unwrap(),
+            PREALLOC_LIMIT
+        );
+    }
 }
