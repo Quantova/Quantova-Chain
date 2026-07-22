@@ -92,6 +92,7 @@ pub struct Finalized {
     pub certificate: Certificate,
     pub leader: u64,
     pub committee_size: usize,
+    pub members: Vec<u64>,
     pub attesters: Vec<u64>,
 }
 
@@ -584,6 +585,7 @@ pub struct Node {
     chain: Vec<Finalized>,
     slashed: Vec<u64>,
     exec_threads: usize,
+    equivocator: Option<u64>,
 }
 
 /// Reweigh the public roster from the live ledger bonds, moving only stake weight and
@@ -708,7 +710,12 @@ impl Node {
             chain: Vec::new(),
             slashed: Vec::new(),
             exec_threads: min_validator_cores(),
+            equivocator: None,
         }
+    }
+
+    pub fn force_equivocation(&mut self, id: u64) {
+        self.equivocator = Some(id);
     }
 
     /// The reveals every simulated validator publishes for the slot.
@@ -756,8 +763,8 @@ impl Node {
         let slot = height;
 
         let reweighed = committee_weights(&self.ledger, &self.base_validators);
-        self.consensus
-            .reweight(crate::consensus::roster_of(&reweighed, self.slots));
+        let roster = crate::consensus::roster_of(&reweighed, self.slots);
+        self.consensus.reweight(roster.clone());
         let published = self.published_reveals(slot);
         let selection = self
             .consensus
@@ -806,6 +813,22 @@ impl Node {
             .filter_map(|id| self.sim_attesters.get(id))
             .map(|attester| attester.attest(height, slot, block, &self.beacon))
             .collect();
+
+        let mut evidence = attestations.clone();
+        if let Some(bad) = self.equivocator {
+            if selection.members.contains(&bad) {
+                if let Some(attester) = self.sim_attesters.get(&bad) {
+                    let conflicting = crate::consensus::Block::new(
+                        height,
+                        header_value(&[0xEE; 32]),
+                        self.parent_val,
+                    );
+                    evidence.push(attester.attest(height, slot, conflicting, &self.beacon));
+                }
+            }
+        }
+        let offenders = crate::consensus::equivocation_offenders(&evidence, &roster);
+
         let certificate = self
             .consensus
             .finalize(&selection, height, slot, block, &self.beacon, &attestations)
@@ -823,15 +846,24 @@ impl Node {
             certificate,
             leader: selection.leader,
             committee_size: selection.commitment.len(),
+            members: selection.members.clone(),
             attesters,
         };
 
-        self.beacon = self.beacon.advance(&cert_digest, height);
+        self.beacon = self.beacon.advance_from_reveals(slot, &selection.reveals);
         self.parent_header_hash = header_hash;
         self.parent_val = Parent::Value(value);
         self.height += 1;
         self.mempool.remove_included(&included_ids);
         self.chain.push(finalized);
+
+        for id in &offenders {
+            if let Some(address) = self.validator_addresses.get(id).cloned() {
+                if self.ledger.slash_validator(&address) && !self.slashed.contains(id) {
+                    self.slashed.push(*id);
+                }
+            }
+        }
 
         Ok(self.chain.last().expect("a block was just finalized"))
     }
