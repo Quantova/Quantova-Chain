@@ -464,3 +464,32 @@ fn a_restarted_node_will_not_sign_a_height_it_already_signed() {
     std::fs::remove_file(&path).ok();
     std::fs::remove_file(path.with_extension("tmp")).ok();
 }
+
+#[test]
+fn a_conflicting_certificate_at_a_finalized_height_halts_loudly() {
+    let mut node = boot(genesis(vec![], &[true, true, true, true]));
+    node.produce().expect("height one finalizes");
+    let finalized = node
+        .finalized_value(1)
+        .expect("the node recorded its finalized value");
+
+    assert_eq!(
+        node.observe_certificate(1, finalized),
+        Ok(qtv_node::consensus::FinalityStatus::Confirms),
+        "the same certificate re confirms without alarm"
+    );
+
+    let mut conflicting = finalized;
+    conflicting[0] ^= 0xFF;
+    let halt = node
+        .observe_certificate(1, conflicting)
+        .expect_err("a conflicting certificate at a finalized height must halt the node");
+    assert_eq!(halt.height, 1);
+    assert_eq!(halt.finalized, finalized);
+    assert_eq!(halt.conflicting, conflicting);
+    assert_eq!(
+        node.finalized_value(1),
+        Some(finalized),
+        "the node never silently adopts the conflicting certificate"
+    );
+}
