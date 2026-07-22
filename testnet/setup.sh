@@ -14,9 +14,11 @@
 set -euo pipefail
 
 QCORE="${QCORE:-qcore}"
+QUANTOVAD="${QUANTOVAD:-quantovad}"
 OUT="${OUT:-./testnet-live}"
 CHAIN_ID="${CHAIN_ID:-Q-test-net-1}"
 FAUCET_TQTOV="${FAUCET_TQTOV:-1000000}"
+STAKE="${STAKE:-2000}"
 RPC="${RPC:-127.0.0.1:8645}"
 LISTEN="${LISTEN:-127.0.0.1:40404}"
 # The height horizon. The sortition keys are one time, so the chain halts honestly at this height. A
@@ -37,6 +39,14 @@ FAUCET_PUBKEY=$("$QCORE" pubkey "$FAUCET_SEED" 0 | awk '/^pubkey/{print $2}')
 FAUCET_QUON=$(( FAUCET_TQTOV * 1000000 ))
 GENESIS_TIME=$(date +%s)
 
+# The node generates its own secret into its own keystore and prints only its public
+# registration line. The secret stays in the keystore and is never written into the
+# genesis. Each operator runs this on their own machine and contributes the printed line,
+# so no party can reproduce another's key material.
+KEYSTORE="$OUT/store/keystore"
+echo "Generating the node keystore and its published registration"
+VALIDATOR_LINE=$("$QUANTOVAD" register --keystore "$KEYSTORE" --id 1 --stake "$STAKE" --online --slots "$SLOTS")
+
 cat > "$OUT/genesis.q" <<EOF
 chain_id = $CHAIN_ID
 genesis_time = $GENESIS_TIME
@@ -46,13 +56,14 @@ fee_transfer_micro_usd = 500
 fee_rate_micro_usd_per_qtov = 1000000
 fee_native_unit = 1000000
 fee_max_native = 1000
-validator = 1 2000 online
+$VALIDATOR_LINE
 account = 1 $FAUCET_PUBKEY $FAUCET_QUON
 EOF
 
 cat > "$OUT/node.conf" <<EOF
 id = 1
 store_dir = $OUT/store
+keystore = $KEYSTORE
 listen = $LISTEN
 genesis = $OUT/genesis.q
 rpc = $RPC
@@ -72,11 +83,12 @@ echo "  FAUCET_OPERATOR_SEED=$FAUCET_SEED"
 echo
 echo "Next steps"
 echo "  1. Start the node"
-echo "       quantovad --config $OUT/node.conf --dev"
+echo "       quantovad --config $OUT/node.conf"
 echo "  2. Start the faucet with the seed above"
 echo "       cd faucet-service && FAUCET_OPERATOR_SEED=<seed> FAUCET_RPC=http://$RPC npm start"
 echo "  3. Point the explorer indexer at http://$RPC"
 echo
-echo "The --dev flag runs the operator held validator under the id derived key model, which is correct"
-echo "while one operator runs every validator. A second party running a validator needs operator held"
-echo "keys, which is a separate step before the network leaves one pair of hands."
+echo "The node holds only its own secret in $KEYSTORE and reads every peer's public registration from"
+echo "the genesis. To add a second validator, that operator runs 'quantovad register' on their own"
+echo "machine over their own keystore and hands you the printed 'validator = ...' line for the genesis;"
+echo "no party can reproduce another's key material."
