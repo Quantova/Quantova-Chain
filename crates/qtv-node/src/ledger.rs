@@ -80,6 +80,7 @@ const STAKE_PRICE_TAG: &[u8] = b"qtv/stake/price";
 const STAKE_MAINNET_TAG: &[u8] = b"qtv/stake/mainnet";
 const STAKE_METER_TAG: &[u8] = b"qtv/stake/meter";
 const STAKE_VALIDATORS_TAG: &[u8] = b"qtv/stake/validators";
+const STAKE_TOTAL_TAG: &[u8] = b"qtv/stake/total";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FeeSplit {
@@ -197,11 +198,19 @@ const GOV_ACTION_TAG: &[u8] = b"qtv/gov/action/";
 const GOV_BALLOT_TAG: &[u8] = b"qtv/gov/ballot/";
 const GOV_LOCK_TAG: &[u8] = b"qtv/gov/lock/";
 const GOV_BLACKLIST_TAG: &[u8] = b"qtv/gov/blacklist/";
+const GOV_FREEZE_TAG: &[u8] = b"qtv/gov/freeze/";
 const GOV_RECEIPT_TAG: &[u8] = b"qtv/gov/receipt/";
 
 fn gov_blacklist_key(id: &[u8; 32]) -> Key {
     let mut input = Vec::with_capacity(GOV_BLACKLIST_TAG.len() + id.len());
     input.extend_from_slice(GOV_BLACKLIST_TAG);
+    input.extend_from_slice(id);
+    sha3::sha3_256(&input)
+}
+
+fn gov_freeze_key(id: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(GOV_FREEZE_TAG.len() + id.len());
+    input.extend_from_slice(GOV_FREEZE_TAG);
     input.extend_from_slice(id);
     sha3::sha3_256(&input)
 }
@@ -356,6 +365,13 @@ fn u64_from_le(bytes: &[u8]) -> Option<u64> {
     bytes.try_into().ok().map(u64::from_le_bytes)
 }
 
+fn action_is_enactable(action: &Action) -> bool {
+    !matches!(
+        action,
+        Action::Upgrade { .. } | Action::BridgeMigration { .. } | Action::AddAsset { .. }
+    )
+}
+
 fn u128_from_le(bytes: &[u8]) -> Option<u128> {
     bytes.try_into().ok().map(u128::from_le_bytes)
 }
@@ -398,7 +414,13 @@ impl Ledger {
             bonded_at_day: 0,
             exit_requested_at: None,
         };
+        let existing = self.stake_bond(&id).map(|b| b.amount).unwrap_or(0);
         self.set_stake_bond(&id, &bond);
+        if amount >= existing {
+            self.credit_staked(amount - existing);
+        } else {
+            self.debit_staked(existing - amount);
+        }
         Some((stake_bond_key(&id), to_bytes(&bond)))
     }
 
@@ -429,6 +451,34 @@ impl Ledger {
     pub fn set_stake_treasury(&mut self, amount: u64) {
         self.trie
             .insert(stake_singleton_key(STAKE_TREASURY_TAG), to_bytes(&amount));
+    }
+
+    pub fn total_staked(&self) -> u64 {
+        self.trie
+            .get(&stake_singleton_key(STAKE_TOTAL_TAG))
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical staked total"))
+            .unwrap_or(0)
+    }
+
+    fn set_total_staked(&mut self, amount: u64) {
+        self.trie
+            .insert(stake_singleton_key(STAKE_TOTAL_TAG), to_bytes(&amount));
+    }
+
+    fn credit_staked(&mut self, amount: u64) {
+        if amount == 0 {
+            return;
+        }
+        let next = self.total_staked().saturating_add(amount);
+        self.set_total_staked(next);
+    }
+
+    fn debit_staked(&mut self, amount: u64) {
+        if amount == 0 {
+            return;
+        }
+        let next = self.total_staked().saturating_sub(amount);
+        self.set_total_staked(next);
     }
 
     pub fn total_supply(&self) -> u64 {
@@ -564,8 +614,10 @@ impl Ledger {
         self.set_stake_banned(&id);
         if let Some(bond) = self.stake_bond(&id) {
             self.debit_supply(bond.amount);
+            self.debit_staked(bond.amount);
             self.clear_stake_bond(&id);
         }
+        self.clear_stake_rewards(&id);
         true
     }
 
@@ -580,6 +632,21 @@ impl Ledger {
     pub fn is_blacklisted(&self, address: &str) -> bool {
         match address_id(address) {
             Some(id) => self.is_gov_blacklisted(&id),
+            None => false,
+        }
+    }
+
+    fn is_frozen_id(&self, id: &[u8; 32]) -> bool {
+        matches!(self.trie.get(&gov_freeze_key(id)), Some(bytes) if !bytes.is_empty())
+    }
+
+    fn set_frozen(&mut self, id: &[u8; 32]) {
+        self.trie.insert(gov_freeze_key(id), vec![1]);
+    }
+
+    pub fn is_frozen(&self, address: &str) -> bool {
+        match address_id(address) {
+            Some(id) => self.is_frozen_id(&id),
             None => false,
         }
     }
@@ -634,6 +701,10 @@ impl Ledger {
         self.trie.insert(stake_rewards_key(id), to_bytes(book));
     }
 
+    fn clear_stake_rewards(&mut self, id: &[u8; 32]) {
+        self.trie.insert(stake_rewards_key(id), Vec::new());
+    }
+
     pub fn accrue_reward(&mut self, address: &str, session: Session, now_day: u64) -> u64 {
         match address_id(address) {
             Some(id) => self.accrue_reward_by_id(&id, session, now_day),
@@ -673,6 +744,9 @@ impl Ledger {
             Some(id) => id,
             None => return 0,
         };
+        if self.is_stake_banned(&id) || self.is_gov_blacklisted(&id) {
+            return 0;
+        }
         self.stake_rewards(&id)
             .tranches
             .iter()
@@ -688,6 +762,9 @@ impl Ledger {
             Some(id) => id,
             None => return 0,
         };
+        if self.is_stake_banned(&id) || self.is_gov_blacklisted(&id) {
+            return 0;
+        }
         let mut book = self.stake_rewards(&id);
         let mut credited = 0u64;
         for tranche in book.tranches.iter_mut() {
@@ -1005,6 +1082,9 @@ impl Ledger {
         if action.track() != track {
             return None;
         }
+        if !action_is_enactable(&action) {
+            return None;
+        }
         let proposer_id = address_id(proposer)?;
         let deposit = track.deposit();
         let mut account = self.account(proposer);
@@ -1077,7 +1157,7 @@ impl Ledger {
         if referendum.status != Status::Deciding {
             return Some(referendum.status);
         }
-        let electorate = self.gov_total_locked();
+        let electorate = self.total_staked() as u128;
         let status = referendum.resolve(now, electorate);
         if status == Status::Deciding {
             return Some(status);
@@ -1167,10 +1247,17 @@ impl Ledger {
                 self.set_account(&victim_addr, &account);
                 Ok(())
             }
+            Action::Freeze { targets } => {
+                for target in targets {
+                    if let Some(id) = id_from_slice(target) {
+                        self.set_frozen(&id);
+                    }
+                }
+                Ok(())
+            }
             Action::Upgrade { .. }
             | Action::BridgeMigration { .. }
-            | Action::AddAsset { .. }
-            | Action::Freeze { .. } => Err(EnactError::NotImplemented),
+            | Action::AddAsset { .. } => Err(EnactError::NotImplemented),
         }
     }
 
@@ -1221,7 +1308,10 @@ impl Ledger {
             return false;
         }
         let existing = self.stake_bond(&id).map(|b| b.amount).unwrap_or(0);
-        let total = existing + amount;
+        let total = match existing.checked_add(amount) {
+            Some(total) => total,
+            None => return false,
+        };
         if !qtv_staking::eligible(total) {
             return false;
         }
@@ -1235,6 +1325,7 @@ impl Ledger {
                 exit_requested_at: None,
             },
         );
+        self.credit_staked(amount);
         true
     }
 
@@ -1274,6 +1365,7 @@ impl Ledger {
                 exit_requested_at: None,
             },
         );
+        self.credit_staked(amount);
         true
     }
 
@@ -1289,9 +1381,11 @@ impl Ledger {
         let taken = qtv_staking::slash(bond.amount, fault);
         let treasury = self.stake_treasury() + taken;
         self.set_stake_treasury(treasury);
+        self.debit_staked(taken);
         if let qtv_staking::Fault::Attributable = fault {
             self.clear_stake_bond(&id);
             self.set_stake_banned(&id);
+            self.clear_stake_rewards(&id);
         } else {
             self.set_stake_bond(
                 &id,
@@ -1331,6 +1425,7 @@ impl Ledger {
             _ => return false,
         };
         self.clear_stake_bond(&id);
+        self.debit_staked(bond.amount);
         let mut account = self.account(address);
         account.balance += bond.amount;
         self.set_account(address, &account);
@@ -1448,6 +1543,7 @@ mod stake_state_tests {
     #[test]
     fn a_qip_deposit_returns_on_support_and_a_spam_deposit_is_forfeit() {
         let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
         let proposer = gov_addr(20);
         fund(&mut l, &proposer, 20_000 * 1_000_000);
         let action = qtv_governance::Action::Parameter {
@@ -1486,6 +1582,7 @@ mod stake_state_tests {
     #[test]
     fn governance_enacts_a_parameter_change_that_sets_the_reward_price() {
         let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
         let proposer = gov_addr(22);
         fund(&mut l, &proposer, 20_000 * 1_000_000);
         let action = qtv_governance::Action::Parameter {
@@ -1518,32 +1615,80 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn an_unimplemented_action_fails_to_enact_rather_than_claiming_success() {
+    fn a_track_with_no_enactment_cannot_be_proposed_and_keeps_the_deposit() {
         let mut l = Ledger::new();
         let proposer = gov_addr(30);
         fund(&mut l, &proposer, 2_000_000 * 1_000_000);
-        let action = qtv_governance::Action::Upgrade { blob: vec![1, 2, 3] };
+        assert!(l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::ChainUpgrade,
+                qtv_governance::Action::Upgrade { blob: vec![1, 2, 3] },
+                0,
+            )
+            .is_none());
+        assert!(l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::BridgeMigration { vault: vec![4; 32] },
+                0,
+            )
+            .is_none());
+        assert!(l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::AddAsset,
+                qtv_governance::Action::AddAsset { asset: vec![6; 32] },
+                0,
+            )
+            .is_none());
+        assert_eq!(l.balance(&proposer), 2_000_000 * 1_000_000);
+    }
+
+    #[test]
+    fn governance_freezes_a_named_account_and_shields_protected_stake_from_a_freeze() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        let proposer = gov_addr(40);
+        fund(&mut l, &proposer, 300_000 * 1_000_000);
+        let target = gov_addr(41);
         let id = l
-            .gov_propose(&proposer, qtv_governance::Track::ChainUpgrade, action, 0)
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BlacklistKill,
+                qtv_governance::Action::Freeze { targets: vec![[41u8; 32].to_vec()] },
+                0,
+            )
             .unwrap();
-        let voter = gov_addr(31);
-        fund(&mut l, &voter, 2_000_000 * 1_000_000);
-        l.gov_vote(
-            &voter,
-            id,
-            true,
-            qtv_governance::Conviction::Liquid,
-            1_000_000 * 1_000_000,
-            0,
+        let voter = gov_addr(42);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+        l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        assert!(!l.is_frozen(&target));
+        l.gov_enact(id, 2 * 86_400 + 1).unwrap();
+        assert!(l.is_frozen(&target));
+
+        let bonded = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BlacklistKill,
+                qtv_governance::Action::Freeze { targets: vec![[99u8; 32].to_vec()] },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, bonded, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        assert_eq!(
+            l.gov_enact(bonded, 2 * 86_400 + 1),
+            Err(EnactError::Constitution(
+                qtv_governance::Violation::FreezeTouchesProtected
+            ))
         );
-        let result = l.gov_enact(id, 14 * 86_400 + 1);
-        assert_eq!(result, Err(EnactError::NotImplemented));
-        assert!(l.gov_receipt(id).is_none(), "a failed enactment writes no receipt");
     }
 
     #[test]
     fn governance_mints_uncapped_to_the_target_on_the_mint_track() {
         let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
         let proposer = gov_addr(24);
         fund(&mut l, &proposer, 300_000 * 1_000_000);
         let target = gov_addr(30);
@@ -1559,6 +1704,38 @@ mod stake_state_tests {
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         l.gov_enact(id, 3 * 86_400 + 1).unwrap();
         assert_eq!(l.balance(&target), 1_000_000 * 1_000_000);
+    }
+
+    #[test]
+    fn a_lone_voter_no_longer_passes_a_proposal_a_real_supermajority_would_reject() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 1_000_000 * 1_000_000);
+        assert_eq!(l.total_staked(), 1_000_000 * 1_000_000);
+
+        let action = || qtv_governance::Action::Parameter {
+            key: b"price".to_vec(),
+            value: 70_000_000u128.to_le_bytes().to_vec(),
+        };
+        let proposer = gov_addr(80);
+        fund(&mut l, &proposer, 100_000 * 1_000_000);
+        let close = 7 * 86_400 + 1;
+
+        let lone = l
+            .gov_propose(&proposer, qtv_governance::Track::Parameter, action(), 0)
+            .unwrap();
+        let solo = gov_addr(81);
+        fund(&mut l, &solo, 10_000 * 1_000_000);
+        assert!(l.gov_vote(&solo, lone, true, qtv_governance::Conviction::Liquid, 2_000 * 1_000_000, 0));
+        assert!(l.gov_referendum(lone).unwrap().tally.reached_approval(qtv_governance::Track::Parameter));
+        assert_eq!(l.gov_conclude(lone, close), Some(qtv_governance::Status::Rejected));
+
+        let real = l
+            .gov_propose(&proposer, qtv_governance::Track::Parameter, action(), 0)
+            .unwrap();
+        let backer = gov_addr(82);
+        fund(&mut l, &backer, 600_000 * 1_000_000);
+        assert!(l.gov_vote(&backer, real, true, qtv_governance::Conviction::Liquid, 500_000 * 1_000_000, 0));
+        assert_eq!(l.gov_conclude(real, close), Some(qtv_governance::Status::Approved));
     }
 
     #[test]
@@ -1678,6 +1855,41 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn an_attributable_slash_wipes_accrued_rewards_and_a_banned_validator_cannot_claim() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[16u8; 32]).unwrap();
+        let id = [16u8; 32];
+        l.seed_stake_pool(700_000 * 1_000_000);
+        l.seed_validator_bond(&addr, 2_000 * 1_000_000);
+        l.set_stake_mainnet_start(0);
+        l.set_stake_price(70 * 1_000_000);
+        assert_eq!(l.accrue_reward(&addr, qtv_staking::Session::Low, 400), 20 * 1_000_000);
+        assert_eq!(l.claimable_reward(&addr, 400 + 365), 5 * 1_000_000);
+        l.slash_stake(&addr, qtv_staking::Fault::Attributable);
+        assert!(l.is_stake_banned(&id));
+        assert_eq!(l.claimable_reward(&addr, 400 + 365), 0);
+        assert_eq!(l.claim_reward(&addr, 400 + 365), 0);
+        assert_eq!(l.balance(&addr), 0);
+    }
+
+    #[test]
+    fn a_gov_blacklisted_validator_cannot_claim_accrued_rewards() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[17u8; 32]).unwrap();
+        let id = [17u8; 32];
+        l.seed_stake_pool(700_000 * 1_000_000);
+        l.seed_validator_bond(&addr, 2_000 * 1_000_000);
+        l.set_stake_mainnet_start(0);
+        l.set_stake_price(70 * 1_000_000);
+        l.accrue_reward(&addr, qtv_staking::Session::Low, 400);
+        assert_eq!(l.claimable_reward(&addr, 400 + 365), 5 * 1_000_000);
+        l.set_gov_blacklisted(&id);
+        assert_eq!(l.claimable_reward(&addr, 400 + 365), 0);
+        assert_eq!(l.claim_reward(&addr, 400 + 365), 0);
+        assert_eq!(l.balance(&addr), 0);
+    }
+
+    #[test]
     fn the_reward_cap_binds_when_the_price_climbs() {
         let mut l = Ledger::new();
         let addr = qtv_idfmt::render_address(&[13u8; 32]).unwrap();
@@ -1761,6 +1973,23 @@ mod stake_state_tests {
         assert_eq!(l.balance(&addr), 2_000 * 1_000_000);
         l.set_stake_banned(&id);
         assert!(!l.bond(&addr, 100 * 1_000_000, 0));
+    }
+
+    #[test]
+    fn bond_rejects_an_addition_that_would_overflow_the_stake_word() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[15u8; 32]).unwrap();
+        let id = [15u8; 32];
+        l.set_account(&addr, &Account::funded(3_000 * 1_000_000, 1, vec![]));
+        let ceiling = Bond {
+            amount: u64::MAX - 1_000,
+            bonded_at_day: 0,
+            exit_requested_at: None,
+        };
+        l.set_stake_bond(&id, &ceiling);
+        assert!(!l.bond(&addr, 2_000 * 1_000_000, 0));
+        assert_eq!(l.balance(&addr), 3_000 * 1_000_000);
+        assert_eq!(l.stake_bond(&id).unwrap().amount, u64::MAX - 1_000);
     }
 
     #[test]
