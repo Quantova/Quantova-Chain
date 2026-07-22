@@ -238,6 +238,9 @@ impl DevNode {
                 .put_account(account_key(&account.address), to_bytes(&funded))?;
             supply = supply.saturating_add(account.balance);
         }
+        for (key, value) in self.ledger.seed_ecosystem_accounts() {
+            self.state_store.put_account(key, value)?;
+        }
         let (pool_key, pool_value) = self.ledger.seed_stake_pool(qtv_staking::STAKING_POOL);
         self.state_store.put_account(pool_key, pool_value)?;
         supply = supply.saturating_add(qtv_staking::STAKING_POOL);
@@ -415,6 +418,7 @@ impl DevNode {
         let candidates = self.mempool.candidates();
         let mut ledger = self.ledger.clone();
         ledger.clear_block_events();
+        ledger.set_round_proposer(&proposer);
         let included = execute_ordered(&mut ledger, &candidates, &self.fee_params, day_of_height(height));
         let event_leaves: Vec<Vec<u8>> = ledger.block_events().iter().map(BlockEvent::encode).collect();
         let mut header = Header::new(
@@ -477,6 +481,7 @@ impl DevNode {
         }
         let mut ledger = self.ledger.clone();
         ledger.clear_block_events();
+        ledger.set_round_proposer(header.proposer());
         let included = execute_ordered(&mut ledger, body, &self.fee_params, day_of_height(header.height()));
         let event_leaves: Vec<Vec<u8>> = ledger.block_events().iter().map(BlockEvent::encode).collect();
         if included.len() != body.len()
@@ -1085,6 +1090,7 @@ impl DevNode {
         }
         let mut ledger = self.ledger.clone();
         ledger.clear_block_events();
+        ledger.set_round_proposer(header.proposer());
         let included = execute_ordered(&mut ledger, block.body(), &self.fee_params, day_of_height(header.height()));
         let event_leaves: Vec<Vec<u8>> = ledger.block_events().iter().map(BlockEvent::encode).collect();
         if included.len() != block.body().len()
