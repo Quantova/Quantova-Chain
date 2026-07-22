@@ -757,7 +757,7 @@ impl DevNode {
             seen.push(record.att.from);
             valid.push(record.clone());
         }
-        if qtv_bft::params::is_quorum(seen.len(), selection.commitment.len()) {
+        if seen.len() as u64 >= selection.tau {
             Some(valid)
         } else {
             None
@@ -805,7 +805,7 @@ impl DevNode {
             seen.push(record.att.from);
             records.push(record.clone());
         }
-        if qtv_bft::params::is_quorum(seen.len(), selection.commitment.len()) {
+        if seen.len() as u64 >= selection.tau {
             Some(records)
         } else {
             None
@@ -819,8 +819,7 @@ impl DevNode {
     }
 
     pub fn view_sync_target(&self, selection: &Selection) -> Option<View> {
-        let n = selection.commitment.len();
-        let blocking = n - qtv_bft::params::supermajority(n) + 1;
+        let blocking = (selection.expected - selection.tau + 1) as usize;
         let mut views: Vec<View> = self.view_changes.iter().map(|r| r.target_view).collect();
         views.sort_unstable();
         views.dedup();
@@ -1090,7 +1089,7 @@ impl DevNode {
             .committee_for_certificate(self.height, &certificate)
             .ok_or(SyncError::NoCommittee)?;
         if !certificate
-            .verify(&selection.commitment, &self.beacon)
+            .verify(&selection.commitment, &self.beacon, selection.tau)
             .is_verified()
         {
             return Err(SyncError::UnverifiedCertificate);
