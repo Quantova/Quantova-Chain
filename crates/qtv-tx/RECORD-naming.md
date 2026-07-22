@@ -25,7 +25,7 @@ pay, which is the whole distinction we found.
 The candidates that were rejected, and why, because the next person will reach for one of
 them. Q_Cost re-imports the exact conflation we are removing, a cost is a charge. Q_Steps
 implies one unit per instruction, and our meter is weighted, 1210 over eleven
-instructions rather than eleven. Q_Fuel is a borrowed word too, it is wasm's. Qgas on the
+instructions rather than eleven. Q_Fuel is a borrowed word too. Qgas on the
 mechanism is Ethereum's model with our prefix on it, which hides the inheritance rather
 than announcing it and is worse than the borrowed word itself.
 
