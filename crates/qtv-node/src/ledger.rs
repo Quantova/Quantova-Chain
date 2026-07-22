@@ -546,6 +546,29 @@ impl Ledger {
         self.trie.insert(stake_banned_key(id), vec![1]);
     }
 
+    pub fn is_validator_banned(&self, address: &str) -> bool {
+        match address_id(address) {
+            Some(id) => self.is_stake_banned(&id),
+            None => false,
+        }
+    }
+
+    pub fn slash_validator(&mut self, address: &str) -> bool {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return false,
+        };
+        if self.is_stake_banned(&id) {
+            return false;
+        }
+        self.set_stake_banned(&id);
+        if let Some(bond) = self.stake_bond(&id) {
+            self.debit_supply(bond.amount);
+            self.clear_stake_bond(&id);
+        }
+        true
+    }
+
     fn is_gov_blacklisted(&self, id: &[u8; 32]) -> bool {
         matches!(self.trie.get(&gov_blacklist_key(id)), Some(bytes) if !bytes.is_empty())
     }
