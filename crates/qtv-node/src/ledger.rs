@@ -186,8 +186,23 @@ pub fn stake_claim_address() -> String {
         .expect("a full hash reaches the address floor")
 }
 
+pub fn stake_exit_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/stake/exit"))
+        .expect("a full hash reaches the address floor")
+}
+
+pub fn stake_withdraw_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/stake/withdraw"))
+        .expect("a full hash reaches the address floor")
+}
+
 pub fn grants_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/gov/grants"))
+        .expect("a full hash reaches the address floor")
+}
+
+pub fn stake_treasury_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(STAKE_TREASURY_TAG))
         .expect("a full hash reaches the address floor")
 }
 
@@ -199,7 +214,22 @@ const GOV_BALLOT_TAG: &[u8] = b"qtv/gov/ballot/";
 const GOV_LOCK_TAG: &[u8] = b"qtv/gov/lock/";
 const GOV_BLACKLIST_TAG: &[u8] = b"qtv/gov/blacklist/";
 const GOV_FREEZE_TAG: &[u8] = b"qtv/gov/freeze/";
+const GOV_GUARDIAN_TAG: &[u8] = b"qtv/gov/guardians";
 const GOV_RECEIPT_TAG: &[u8] = b"qtv/gov/receipt/";
+
+fn is_reserved_pot(id: &[u8; 32]) -> bool {
+    const POTS: &[&[u8]] = &[
+        b"qtv/gov/grants",
+        b"qtv/stake/treasury",
+        b"qtv/stake/pool",
+        b"qtv/stake/system",
+        b"qtv/gov/system",
+        b"qtv/ecosystem/marketing",
+        b"qtv/ecosystem/market-maker",
+        b"qtv/ecosystem/foundation",
+    ];
+    POTS.iter().any(|tag| sha3::sha3_256(tag) == *id)
+}
 
 fn gov_blacklist_key(id: &[u8; 32]) -> Key {
     let mut input = Vec::with_capacity(GOV_BLACKLIST_TAG.len() + id.len());
@@ -644,11 +674,46 @@ impl Ledger {
         self.trie.insert(gov_freeze_key(id), vec![1]);
     }
 
+    fn clear_frozen(&mut self, id: &[u8; 32]) {
+        self.trie.insert(gov_freeze_key(id), Vec::new());
+    }
+
     pub fn is_frozen(&self, address: &str) -> bool {
         match address_id(address) {
             Some(id) => self.is_frozen_id(&id),
             None => false,
         }
+    }
+
+    pub fn guardian_set(&self) -> qtv_governance::GuardianSet {
+        self.trie
+            .get(&stake_singleton_key(GOV_GUARDIAN_TAG))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical guardian set"))
+            .unwrap_or_default()
+    }
+
+    pub fn set_guardian_set(&mut self, caucus: &qtv_governance::GuardianSet) {
+        self.trie
+            .insert(stake_singleton_key(GOV_GUARDIAN_TAG), to_bytes(caucus));
+    }
+
+    pub fn seed_guardian_set(&mut self, caucus: &qtv_governance::GuardianSet) -> (Key, Vec<u8>) {
+        self.set_guardian_set(caucus);
+        (stake_singleton_key(GOV_GUARDIAN_TAG), to_bytes(caucus))
+    }
+
+    pub fn guardian_freeze(&mut self, targets: &[[u8; 32]], approvers: &[[u8; 32]]) -> bool {
+        if targets.is_empty() || !self.guardian_set().authorizes(approvers) {
+            return false;
+        }
+        if targets.iter().any(|target| self.is_protected_account(target)) {
+            return false;
+        }
+        for target in targets {
+            self.set_frozen(target);
+        }
+        true
     }
 
     pub fn stake_price(&self) -> u128 {
@@ -795,6 +860,49 @@ impl Ledger {
         self.collect_fee(fee);
         self.claim_reward(address, now_day);
         true
+    }
+
+    pub fn request_exit_with_fee(&mut self, address: &str, fee: u64, now_day: u64) -> bool {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return false,
+        };
+        let ready = matches!(
+            self.stake_bond(&id),
+            Some(bond) if bond.exit_requested_at.is_none() && bond.can_request_exit(now_day)
+        );
+        if !ready {
+            return false;
+        }
+        let mut account = self.account(address);
+        if account.balance < fee {
+            return false;
+        }
+        account.balance -= fee;
+        account.nonce += 1;
+        self.set_account(address, &account);
+        self.collect_fee(fee);
+        self.request_stake_exit(address, now_day)
+    }
+
+    pub fn withdraw_with_fee(&mut self, address: &str, fee: u64, now_day: u64) -> bool {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return false,
+        };
+        let ready = matches!(self.stake_bond(&id), Some(bond) if bond.can_withdraw(now_day));
+        if !ready {
+            return false;
+        }
+        let mut account = self.account(address);
+        if account.balance < fee {
+            return false;
+        }
+        account.balance -= fee;
+        account.nonce += 1;
+        self.set_account(address, &account);
+        self.collect_fee(fee);
+        self.withdraw_stake(address, now_day)
     }
 
     pub fn record_session(&mut self, transactions: u64, now_day: u64) -> Option<Session> {
@@ -1067,9 +1175,7 @@ impl Ledger {
         if self.stake_bond(&id).is_some() || self.gov_lock(&id).is_some() {
             return true;
         }
-        let stake_id = sha3::sha3_256(b"qtv/stake/system");
-        let gov_id = sha3::sha3_256(b"qtv/gov/system");
-        id == stake_id || id == gov_id
+        is_reserved_pot(&id)
     }
 
     pub fn gov_propose(
@@ -1222,6 +1328,31 @@ impl Ledger {
                 Ok(())
             }
             Action::Parameter { key, value } => self.apply_parameter(key, value),
+            Action::Spend { from, to, amount } => {
+                let to_addr = id_bytes_to_address(to).ok_or(EnactError::BadAddress)?;
+                let from_id = id_from_slice(from).ok_or(EnactError::BadAddress)?;
+                if from_id == sha3::sha3_256(b"qtv/gov/grants") {
+                    let grants = grants_address();
+                    let mut pot = self.account(&grants);
+                    if pot.balance < *amount {
+                        return Err(EnactError::BadValue);
+                    }
+                    pot.balance -= *amount;
+                    self.set_account(&grants, &pot);
+                } else if from_id == stake_singleton_key(STAKE_TREASURY_TAG) {
+                    let treasury = self.stake_treasury();
+                    if treasury < *amount {
+                        return Err(EnactError::BadValue);
+                    }
+                    self.set_stake_treasury(treasury - *amount);
+                } else {
+                    return Err(EnactError::BadAddress);
+                }
+                let mut account = self.account(&to_addr);
+                account.balance = account.balance.saturating_add(*amount);
+                self.set_account(&to_addr, &account);
+                Ok(())
+            }
             Action::Blacklist { target } => {
                 if let Some(id) = id_from_slice(target) {
                     self.set_gov_blacklisted(&id);
@@ -1251,6 +1382,14 @@ impl Ledger {
                 for target in targets {
                     if let Some(id) = id_from_slice(target) {
                         self.set_frozen(&id);
+                    }
+                }
+                Ok(())
+            }
+            Action::Unfreeze { targets } => {
+                for target in targets {
+                    if let Some(id) = id_from_slice(target) {
+                        self.clear_frozen(&id);
                     }
                 }
                 Ok(())
@@ -1739,6 +1878,110 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn a_guardian_caucus_freezes_ahead_of_a_vote_and_a_vote_reverses_it() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![[201u8; 32], [202u8; 32], [203u8; 32]],
+            2,
+        ));
+
+        let target_id = [60u8; 32];
+        let target = qtv_idfmt::render_address(&target_id).unwrap();
+
+        assert!(!l.guardian_freeze(&[target_id], &[[201u8; 32]]));
+        assert!(!l.is_frozen(&target));
+
+        assert!(l.guardian_freeze(&[target_id], &[[201u8; 32], [202u8; 32]]));
+        assert!(l.is_frozen(&target));
+
+        let treasury_id = sha3::sha3_256(STAKE_TREASURY_TAG);
+        assert!(!l.guardian_freeze(&[treasury_id], &[[201u8; 32], [202u8; 32]]));
+        assert!(!l.is_frozen(&stake_treasury_address()));
+
+        let proposer = gov_addr(61);
+        fund(&mut l, &proposer, 300_000 * 1_000_000);
+        let voter = gov_addr(62);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+        let id = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BlacklistKill,
+                qtv_governance::Action::Unfreeze { targets: vec![target_id.to_vec()] },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        l.gov_enact(id, 2 * 86_400 + 1).unwrap();
+        assert!(!l.is_frozen(&target), "the full vote reversed the emergency freeze");
+    }
+
+    #[test]
+    fn a_passed_vote_pays_out_of_the_keyless_pots_and_nothing_else_can() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        let proposer = gov_addr(50);
+        fund(&mut l, &proposer, 600_000 * 1_000_000);
+        let voter = gov_addr(51);
+        fund(&mut l, &voter, 30_000 * 1_000_000);
+
+        let grants = grants_address();
+        fund(&mut l, &grants, 40_000 * 1_000_000);
+        l.set_stake_treasury(5_000 * 1_000_000);
+        assert!(!l.account(&grants).has_key(), "the grants pot carries no key to sign a spend");
+        assert!(
+            !l.account(&stake_treasury_address()).has_key(),
+            "the treasury pot carries no key to sign a spend"
+        );
+
+        let recipient = gov_addr(52);
+        let pass = |l: &mut Ledger, action: qtv_governance::Action| {
+            let id = l
+                .gov_propose(&proposer, qtv_governance::Track::Mint, action, 0)
+                .unwrap();
+            l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+            id
+        };
+
+        let from_grants = pass(
+            &mut l,
+            qtv_governance::Action::Spend {
+                from: sha3::sha3_256(b"qtv/gov/grants").to_vec(),
+                to: [52u8; 32].to_vec(),
+                amount: 12_000 * 1_000_000,
+            },
+        );
+        l.gov_enact(from_grants, 3 * 86_400 + 1).unwrap();
+        assert_eq!(l.balance(&recipient), 12_000 * 1_000_000);
+        assert_eq!(l.balance(&grants), 28_000 * 1_000_000);
+
+        let from_treasury = pass(
+            &mut l,
+            qtv_governance::Action::Spend {
+                from: stake_singleton_key(STAKE_TREASURY_TAG).to_vec(),
+                to: [52u8; 32].to_vec(),
+                amount: 5_000 * 1_000_000,
+            },
+        );
+        l.gov_enact(from_treasury, 3 * 86_400 + 1).unwrap();
+        assert_eq!(l.balance(&recipient), 17_000 * 1_000_000);
+        assert_eq!(l.stake_treasury(), 0);
+
+        let user = gov_addr(53);
+        fund(&mut l, &user, 9_000 * 1_000_000);
+        let steal = pass(
+            &mut l,
+            qtv_governance::Action::Spend {
+                from: [53u8; 32].to_vec(),
+                to: [52u8; 32].to_vec(),
+                amount: 9_000 * 1_000_000,
+            },
+        );
+        assert_eq!(l.gov_enact(steal, 3 * 86_400 + 1), Err(EnactError::BadAddress));
+        assert_eq!(l.balance(&user), 9_000 * 1_000_000);
+    }
+
+    #[test]
     fn the_constitution_refuses_a_recovery_that_reaches_bonded_stake() {
         let mut l = Ledger::new();
         let proposer = gov_addr(26);
@@ -2044,6 +2287,34 @@ mod stake_state_tests {
         assert_eq!(l.stake_bond(&id).unwrap().amount, 2_000 * 1_000_000);
         assert_eq!(l.stake_bond(&id).unwrap().bonded_at_day, 7);
         assert_eq!(l.account(&addr).nonce, 1);
+    }
+
+    #[test]
+    fn exit_and_withdraw_run_through_the_fee_charging_wrappers() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[18u8; 32]).unwrap();
+        let id = [18u8; 32];
+        l.set_account(&addr, &Account::funded(5_000 * 1_000_000, 1, vec![]));
+        assert!(l.bond(&addr, 2_000 * 1_000_000, 0));
+        assert_eq!(l.total_staked(), 2_000 * 1_000_000);
+
+        assert!(!l.request_exit_with_fee(&addr, 1_000_000, 89));
+        assert_eq!(l.balance(&addr), 3_000 * 1_000_000, "a refused exit charges no fee");
+        assert_eq!(l.account(&addr).nonce, 0);
+
+        assert!(l.request_exit_with_fee(&addr, 1_000_000, 90));
+        assert_eq!(l.balance(&addr), 3_000 * 1_000_000 - 1_000_000);
+        assert_eq!(l.account(&addr).nonce, 1);
+
+        assert!(!l.withdraw_with_fee(&addr, 1_000_000, 90 + 20));
+        assert!(l.withdraw_with_fee(&addr, 1_000_000, 90 + 21));
+        assert_eq!(
+            l.balance(&addr),
+            3_000 * 1_000_000 - 2_000_000 + 2_000 * 1_000_000
+        );
+        assert_eq!(l.account(&addr).nonce, 2);
+        assert!(l.stake_bond(&id).is_none());
+        assert_eq!(l.total_staked(), 0);
     }
 
     #[test]
