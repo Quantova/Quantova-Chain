@@ -191,6 +191,11 @@ pub fn grants_address() -> String {
         .expect("a full hash reaches the address floor")
 }
 
+pub fn stake_treasury_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(STAKE_TREASURY_TAG))
+        .expect("a full hash reaches the address floor")
+}
+
 const GOV_NEXT_TAG: &[u8] = b"qtv/gov/next";
 const GOV_LOCKED_TAG: &[u8] = b"qtv/gov/locked";
 const GOV_REF_TAG: &[u8] = b"qtv/gov/ref/";
@@ -1222,6 +1227,31 @@ impl Ledger {
                 Ok(())
             }
             Action::Parameter { key, value } => self.apply_parameter(key, value),
+            Action::Spend { from, to, amount } => {
+                let to_addr = id_bytes_to_address(to).ok_or(EnactError::BadAddress)?;
+                let from_id = id_from_slice(from).ok_or(EnactError::BadAddress)?;
+                if from_id == sha3::sha3_256(b"qtv/gov/grants") {
+                    let grants = grants_address();
+                    let mut pot = self.account(&grants);
+                    if pot.balance < *amount {
+                        return Err(EnactError::BadValue);
+                    }
+                    pot.balance -= *amount;
+                    self.set_account(&grants, &pot);
+                } else if from_id == stake_singleton_key(STAKE_TREASURY_TAG) {
+                    let treasury = self.stake_treasury();
+                    if treasury < *amount {
+                        return Err(EnactError::BadValue);
+                    }
+                    self.set_stake_treasury(treasury - *amount);
+                } else {
+                    return Err(EnactError::BadAddress);
+                }
+                let mut account = self.account(&to_addr);
+                account.balance = account.balance.saturating_add(*amount);
+                self.set_account(&to_addr, &account);
+                Ok(())
+            }
             Action::Blacklist { target } => {
                 if let Some(id) = id_from_slice(target) {
                     self.set_gov_blacklisted(&id);
@@ -1736,6 +1766,71 @@ mod stake_state_tests {
         fund(&mut l, &backer, 600_000 * 1_000_000);
         assert!(l.gov_vote(&backer, real, true, qtv_governance::Conviction::Liquid, 500_000 * 1_000_000, 0));
         assert_eq!(l.gov_conclude(real, close), Some(qtv_governance::Status::Approved));
+    }
+
+    #[test]
+    fn a_passed_vote_pays_out_of_the_keyless_pots_and_nothing_else_can() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        let proposer = gov_addr(50);
+        fund(&mut l, &proposer, 600_000 * 1_000_000);
+        let voter = gov_addr(51);
+        fund(&mut l, &voter, 30_000 * 1_000_000);
+
+        let grants = grants_address();
+        fund(&mut l, &grants, 40_000 * 1_000_000);
+        l.set_stake_treasury(5_000 * 1_000_000);
+        assert!(!l.account(&grants).has_key(), "the grants pot carries no key to sign a spend");
+        assert!(
+            !l.account(&stake_treasury_address()).has_key(),
+            "the treasury pot carries no key to sign a spend"
+        );
+
+        let recipient = gov_addr(52);
+        let pass = |l: &mut Ledger, action: qtv_governance::Action| {
+            let id = l
+                .gov_propose(&proposer, qtv_governance::Track::Mint, action, 0)
+                .unwrap();
+            l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+            id
+        };
+
+        let from_grants = pass(
+            &mut l,
+            qtv_governance::Action::Spend {
+                from: sha3::sha3_256(b"qtv/gov/grants").to_vec(),
+                to: [52u8; 32].to_vec(),
+                amount: 12_000 * 1_000_000,
+            },
+        );
+        l.gov_enact(from_grants, 3 * 86_400 + 1).unwrap();
+        assert_eq!(l.balance(&recipient), 12_000 * 1_000_000);
+        assert_eq!(l.balance(&grants), 28_000 * 1_000_000);
+
+        let from_treasury = pass(
+            &mut l,
+            qtv_governance::Action::Spend {
+                from: stake_singleton_key(STAKE_TREASURY_TAG).to_vec(),
+                to: [52u8; 32].to_vec(),
+                amount: 5_000 * 1_000_000,
+            },
+        );
+        l.gov_enact(from_treasury, 3 * 86_400 + 1).unwrap();
+        assert_eq!(l.balance(&recipient), 17_000 * 1_000_000);
+        assert_eq!(l.stake_treasury(), 0);
+
+        let user = gov_addr(53);
+        fund(&mut l, &user, 9_000 * 1_000_000);
+        let steal = pass(
+            &mut l,
+            qtv_governance::Action::Spend {
+                from: [53u8; 32].to_vec(),
+                to: [52u8; 32].to_vec(),
+                amount: 9_000 * 1_000_000,
+            },
+        );
+        assert_eq!(l.gov_enact(steal, 3 * 86_400 + 1), Err(EnactError::BadAddress));
+        assert_eq!(l.balance(&user), 9_000 * 1_000_000);
     }
 
     #[test]
