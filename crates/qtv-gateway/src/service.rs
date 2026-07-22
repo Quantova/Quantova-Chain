@@ -464,6 +464,9 @@ fn reason_code(reject: &Reject) -> &'static str {
         Reject::MeterLimitTooLow => "meter_limit_too_low",
         Reject::FeeTooLow => "fee_too_low",
         Reject::InsufficientFunds => "insufficient_funds",
+        Reject::WrongChain => "wrong_chain",
+        Reject::PoolFull => "pool_full",
+        Reject::SenderQueueFull => "sender_queue_full",
     }
 }
 
