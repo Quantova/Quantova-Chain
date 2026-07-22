@@ -616,6 +616,7 @@ impl Node {
                 &Account::funded(account.balance, account.scheme, account.public_key.clone()),
             );
         }
+        ledger.seed_ecosystem_accounts();
 
         let validators: Vec<ConsensusValidator> = genesis
             .validators
@@ -745,6 +746,7 @@ impl Node {
             .cloned()
             .unwrap_or_default();
 
+        self.ledger.set_round_proposer(&proposer);
         let included = self.execute_block();
         let included_ids: Vec<String> = included.iter().map(Wrapper::id).collect();
 
@@ -954,20 +956,29 @@ mod tests {
     }
 
     #[test]
-    fn a_transfer_fee_burns_a_portion_and_funds_the_pools() {
+    fn a_transfer_fee_splits_by_the_locked_shares_and_burns_nothing() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
         let alice = keypair(200);
         let bob = keypair(201);
         fund(&mut ledger, &alice, 10_000 * 1_000_000);
+        ledger.seed_supply(10_000 * 1_000_000);
+
+        let proposer = qtv_idfmt::render_address(&[0x5Au8; 32]).unwrap();
+        ledger.set_round_proposer(&proposer);
+        let marketing = crate::ledger::marketing_address();
+        let market_maker = crate::ledger::market_maker_address();
+        let community = crate::ledger::community_address();
 
         let charged = fee.transfer_fee();
-        let pool_before = ledger.stake_pool();
-        let grants_before = ledger.grants_pool();
-        let supply_before = ledger.account(&alice.address()).balance
-            + ledger.account(&bob.address()).balance
-            + pool_before
-            + grants_before;
+        assert_eq!(charged, 500, "the devnet transfer fee");
+        let supply_before = ledger.total_supply();
+        let value_before = ledger.balance(&alice.address())
+            + ledger.balance(&bob.address())
+            + ledger.balance(&proposer)
+            + ledger.balance(&marketing)
+            + ledger.balance(&market_maker)
+            + ledger.balance(&community);
 
         let tx = transfer(&alice, &bob.address(), 1_000, 0, &fee);
         assert_eq!(
@@ -976,25 +987,30 @@ mod tests {
             "the transfer is included"
         );
 
-        let pool_gain = ledger.stake_pool() - pool_before;
-        let grants_gain = ledger.grants_pool() - grants_before;
-        let burned = Ledger::fee_burned(charged);
-        assert!(pool_gain > 0 && grants_gain > 0, "both pools are funded");
-        assert!(burned > 0, "a portion is burned");
+        assert_eq!(ledger.balance(&proposer), 50, "the proposer takes a tenth");
+        assert_eq!(ledger.balance(&marketing), 100, "marketing takes a fifth");
+        assert_eq!(ledger.balance(&market_maker), 150, "the market maker takes three tenths");
+        assert_eq!(ledger.balance(&community), 200, "grants and community take two fifths");
         assert_eq!(
-            pool_gain + grants_gain + burned,
+            ledger.balance(&proposer)
+                + ledger.balance(&marketing)
+                + ledger.balance(&market_maker)
+                + ledger.balance(&community),
             charged,
-            "the whole fee splits into the pools and the burn, nothing created or lost"
+            "the four shares sum to the fee exactly"
         );
 
-        let supply_after = ledger.account(&alice.address()).balance
-            + ledger.account(&bob.address()).balance
-            + ledger.stake_pool()
-            + ledger.grants_pool();
+        let value_after = ledger.balance(&alice.address())
+            + ledger.balance(&bob.address())
+            + ledger.balance(&proposer)
+            + ledger.balance(&marketing)
+            + ledger.balance(&market_maker)
+            + ledger.balance(&community);
+        assert_eq!(value_before, value_after, "value is conserved, nothing created or lost");
         assert_eq!(
-            supply_before - supply_after,
-            burned,
-            "the total supply falls by exactly the burned share"
+            ledger.total_supply(),
+            supply_before,
+            "no fee burn, the supply is untouched by a fee"
         );
     }
 
