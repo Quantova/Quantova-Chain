@@ -130,10 +130,41 @@ pub struct Selection {
     pub leader: u64,
     pub tau: u64,
     pub expected: u64,
+    pub reveals: Vec<[u8; qtv_sampler::onetime::PREIMAGE_BYTES]>,
 }
 
 pub fn genesis_beacon() -> Beacon {
     Beacon::genesis()
+}
+
+/// The ids of validators that signed two conflicting attestations at one height, each
+/// proven by verifying both signatures against the offender's registered attestation key.
+/// A forged pair naming a validator that never double signed does not authenticate and is
+/// never flagged.
+pub fn equivocation_offenders(
+    attestations: &[Attestation],
+    roster: &[ValidatorRegistration],
+) -> Vec<u64> {
+    let mut flagged: Vec<u64> = Vec::new();
+    for (index, first) in attestations.iter().enumerate() {
+        for second in &attestations[index + 1..] {
+            if first.from == second.from
+                && first.height == second.height
+                && first.block != second.block
+                && !flagged.contains(&first.from)
+            {
+                if let Some(registration) = roster.iter().find(|r| r.id == first.from) {
+                    if first.signature_verifies(&registration.attest_pk)
+                        && second.signature_verifies(&registration.attest_pk)
+                    {
+                        flagged.push(first.from);
+                    }
+                }
+            }
+        }
+    }
+    flagged.sort_unstable();
+    flagged
 }
 
 pub fn header_value(header_hash: &[u8; 32]) -> [u8; 32] {
@@ -246,12 +277,14 @@ impl Consensus {
         let leader = view.elect_leader(&committee, beacon, slot)?.id;
         let expected = qtv_sampler::sortition::expected_committee(&view.weights(), self.budget);
         let tau = qtv_sampler::params::finality_threshold(expected);
+        let reveals = committee.reveals();
         Some(Selection {
             commitment,
             members,
             leader,
             tau,
             expected,
+            reveals,
         })
     }
 
@@ -522,6 +555,44 @@ mod tests {
     fn the_header_value_is_a_deterministic_fold() {
         assert_eq!(header_value(&[3u8; 32]), header_value(&[3u8; 32]));
         assert_ne!(header_value(&[3u8; 32]), header_value(&[4u8; 32]));
+    }
+
+    #[test]
+    fn equivocation_is_flagged_only_when_both_signatures_authenticate() {
+        let validators = secrets(&[true, true, true, true]);
+        let roster = roster_of(&validators, SLOTS);
+        let sim = Sim::new(&validators);
+        let beacon = genesis_beacon();
+
+        let honest: Vec<Attestation> = [1u64, 2, 3, 4]
+            .iter()
+            .map(|id| sim.attesters[id].attest(1, 1, block_for(1), &beacon))
+            .collect();
+        assert!(equivocation_offenders(&honest, &roster).is_empty());
+
+        let conflict = sim.attesters[&2].attest(
+            1,
+            1,
+            Block::new(1, header_value(&[9u8; 32]), Parent::Genesis),
+            &beacon,
+        );
+        let mut evidence = honest.clone();
+        evidence.push(conflict);
+        assert_eq!(equivocation_offenders(&evidence, &roster), vec![2]);
+
+        let mut forged_a = sim.attesters[&3].attest(1, 1, block_for(1), &beacon);
+        let mut forged_b = sim.attesters[&3].attest(
+            1,
+            1,
+            Block::new(1, header_value(&[7u8; 32]), Parent::Genesis),
+            &beacon,
+        );
+        forged_a.from = 1;
+        forged_b.from = 1;
+        assert!(
+            equivocation_offenders(&[forged_a, forged_b], &roster).is_empty(),
+            "a relabelled pair never slashes the named validator"
+        );
     }
 
     #[test]
