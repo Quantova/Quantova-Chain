@@ -125,6 +125,15 @@ pub enum ProduceError {
     NoCommittee,
     NotFinalized,
     DoubleSignRefused,
+    FinalityViolation,
+}
+
+#[cfg(any(test, feature = "test-fixtures"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinalityHalt {
+    pub height: u64,
+    pub finalized: [u8; 32],
+    pub conflicting: [u8; 32],
 }
 
 /// The bond and reward address of the validator behind a fixture secret index, for
@@ -605,6 +614,7 @@ pub struct Node {
     exec_threads: usize,
     equivocator: Option<u64>,
     sign_guard: Option<crate::watermark::SignGuard>,
+    finality: crate::consensus::FinalityLedger,
 }
 
 /// Reweigh the public roster from the live ledger bonds, moving only stake weight and
@@ -731,6 +741,7 @@ impl Node {
             exec_threads: min_validator_cores(),
             equivocator: None,
             sign_guard: None,
+            finality: crate::consensus::FinalityLedger::new(),
         }
     }
 
@@ -867,6 +878,12 @@ impl Node {
             .consensus
             .verify(&certificate, &selection, &self.beacon));
 
+        if let crate::consensus::FinalityStatus::Violation { .. } =
+            self.finality.observe(height, value)
+        {
+            return Err(ProduceError::FinalityViolation);
+        }
+
         let cert_digest = certificate.digest();
         let attesters = certificate.attesters();
         let chain_block = ChainBlock::new(header, cert_digest.to_vec(), included);
@@ -935,6 +952,29 @@ impl Node {
 
     pub fn slashed(&self) -> &[u64] {
         &self.slashed
+    }
+
+    pub fn finalized_value(&self, height: u64) -> Option<[u8; 32]> {
+        self.finality.finalized_value(height)
+    }
+
+    pub fn observe_certificate(
+        &mut self,
+        height: u64,
+        value: [u8; 32],
+    ) -> Result<crate::consensus::FinalityStatus, FinalityHalt> {
+        match self.finality.observe(height, value) {
+            crate::consensus::FinalityStatus::Violation {
+                height,
+                finalized,
+                conflicting,
+            } => Err(FinalityHalt {
+                height,
+                finalized,
+                conflicting,
+            }),
+            status => Ok(status),
+        }
     }
 }
 
