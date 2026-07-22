@@ -21,10 +21,14 @@ fn validators(online: &[bool]) -> Vec<ValidatorSpec> {
     online
         .iter()
         .enumerate()
-        .map(|(i, &on)| ValidatorSpec {
-            id: i as u64 + 1,
-            stake: VALIDATOR_STAKE,
-            online: on,
+        .map(|(i, &on)| {
+            let id = i as u64 + 1;
+            ValidatorSpec {
+                id,
+                stake: VALIDATOR_STAKE,
+                online: on,
+                bond_address: qtv_node::keys::validator_address(&qtv_node::keys::fixture_secret(id)),
+            }
         })
         .collect()
 }
@@ -36,6 +40,18 @@ fn genesis(accounts: Vec<GenesisAccount>, online: &[bool]) -> Genesis {
         validators: validators(online),
         genesis_time: GENESIS_TIME,
     }
+}
+
+/// Boot a node from genesis, supplying each validator's own fixture secret as the
+/// simulation roster. The genesis carries only commitments; the secrets are the test
+/// only fixtures the committed bond addresses were derived from.
+fn boot(genesis: Genesis) -> Node {
+    let secrets = genesis
+        .validators
+        .iter()
+        .map(|v| (v.id, qtv_node::keys::fixture_secret(v.id)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    Node::new(genesis, &secrets)
 }
 
 fn transfer(from: &Account, to: &str, amount: u64, nonce: u64, params: &FeeParams) -> Wrapper {
@@ -62,7 +78,7 @@ fn a_signed_transfer_executes_lands_in_a_block_and_moves_state() {
     let params = FeeParams::devnet();
     let alice = user(0);
     let bob = user(1);
-    let mut node = Node::new(genesis(
+    let mut node = boot(genesis(
         vec![GenesisAccount::from_account(&alice, 1_000_000)],
         &[true, true, true, true],
     ));
@@ -99,7 +115,7 @@ fn the_committee_finalizes_a_run_of_heights_in_order() {
     let params = FeeParams::devnet();
     let alice = user(0);
     let bob = user(1);
-    let mut node = Node::new(genesis(
+    let mut node = boot(genesis(
         vec![GenesisAccount::from_account(&alice, 1_000_000)],
         &[true, true, true, true],
     ));
@@ -140,7 +156,7 @@ fn a_bad_signature_or_insufficient_balance_is_rejected_and_never_finalized() {
     let alice = user(0);
     let poor = user(1);
     let bob = user(2);
-    let mut node = Node::new(genesis(
+    let mut node = boot(genesis(
         vec![
             GenesisAccount::from_account(&alice, 1_000_000),
             GenesisAccount::from_account(&poor, 10),
@@ -174,7 +190,7 @@ fn an_offline_validator_lowers_the_count_without_stalling_and_is_never_slashed()
     let alice = user(0);
     let bob = user(1);
     // Four validators, the fourth offline. A supermajority of four is three.
-    let mut node = Node::new(genesis(
+    let mut node = boot(genesis(
         vec![GenesisAccount::from_account(&alice, 1_000_000)],
         &[true, true, true, false],
     ));
@@ -226,7 +242,7 @@ fn run_scripted(params: &FeeParams) -> Result<Node, ProduceError> {
     let alice = user(0);
     let carol = user(1);
     let dave = user(2);
-    let mut node = Node::new(genesis(
+    let mut node = boot(genesis(
         vec![
             GenesisAccount::from_account(&alice, 1_000_000),
             GenesisAccount::from_account(&carol, 500_000),
@@ -271,7 +287,7 @@ fn run_batch(params: &FeeParams, threads: usize) -> Node {
         .map(|a| GenesisAccount::from_account(a, 10_000_000))
         .collect();
     let mut node =
-        Node::new(genesis(accounts, &[true, true, true, true])).with_parallelism(threads);
+        boot(genesis(accounts, &[true, true, true, true])).with_parallelism(threads);
 
     // Ten independent transfers, each from its own sender to a recipient nobody
     // else touches.
@@ -340,7 +356,7 @@ fn a_validator_is_hard_wired_to_use_at_least_half_its_cores() {
 
     let alice = user(1);
     let build = || {
-        Node::new(genesis(
+        boot(genesis(
             vec![GenesisAccount::from_account(&alice, 1_000_000)],
             &[true, true, true, true],
         ))

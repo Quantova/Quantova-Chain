@@ -133,7 +133,17 @@ fn parse_validator(field: &Field) -> Result<ValidatorSpec, String> {
         "offline" => false,
         other => return Err(field.error(&format!("'{other}' is not 'online' or 'offline'"))),
     };
-    Ok(ValidatorSpec { id, stake, online })
+    // The committed bond and reward address. Under this single owner development build
+    // it is the address the per index fixture secret derives to, so the genesis carries
+    // a real commitment and never a secret. A multi party genesis would instead carry
+    // each validator's own published address.
+    let bond_address = qtv_node::keys::validator_address(&qtv_node::keys::fixture_secret(id));
+    Ok(ValidatorSpec {
+        id,
+        stake,
+        online,
+        bond_address,
+    })
 }
 
 fn parse_account(field: &Field) -> Result<GenesisAccount, String> {
@@ -159,7 +169,7 @@ fn parse_account(field: &Field) -> Result<GenesisAccount, String> {
 
 fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) -> [u8; 32] {
     let mut buf: Vec<u8> = Vec::new();
-    buf.extend_from_slice(b"QTV-GENESIS-V2");
+    buf.extend_from_slice(b"QTV-GENESIS-V3");
     put_bytes(&mut buf, chain_id.as_bytes());
     put_bytes(&mut buf, message.as_bytes());
     buf.extend_from_slice(&genesis.genesis_time.to_le_bytes());
@@ -176,6 +186,7 @@ fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) ->
         buf.extend_from_slice(&v.id.to_le_bytes());
         buf.extend_from_slice(&v.stake.to_le_bytes());
         buf.push(v.online as u8);
+        put_bytes(&mut buf, v.bond_address.as_bytes());
     }
 
     let mut accounts = genesis.accounts.clone();

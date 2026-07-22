@@ -16,9 +16,7 @@ use qtv_node::consensus::{
 use qtv_node::fee::FeeParams;
 use qtv_node::ledger::{account_key, Account, BlockEvent, Ledger};
 use qtv_node::mempool::{Admitted, Mempool, Reject};
-use qtv_node::node::{
-    committee_weights, day_of_height, execute_ordered, validator_address, Genesis,
-};
+use qtv_node::node::{committee_weights, day_of_height, execute_ordered, Genesis};
 use qtv_store::{BlockStore, StateStore};
 use qtv_tx::Wrapper;
 
@@ -58,19 +56,22 @@ pub fn p2p_peer_id(secret: &[u8; 32]) -> PeerId {
     p2p_identity(secret).peer_id()
 }
 
-/// The peer to peer identity of validator `id`, sourced from its per node secret. A
-/// node calls this for its OWN id; the secret half is present only because the node
-/// holds the secret behind the id. In a keystore deployment this reads the node's own
-/// stored secret rather than deriving it.
+/// The peer to peer identity of validator `id` under the gated fixture secret, for the
+/// single process simulation and the local load test binaries only. A running node
+/// builds its own identity from the secret in its keystore through `p2p_identity`, and
+/// pins a peer by the peer id published in the roster, never by recomputing it from an
+/// id. This convenience is absent from a default node build.
+#[cfg(any(test, feature = "test-fixtures"))]
 pub fn node_identity(id: u64) -> Identity {
-    p2p_identity(&qtv_node::keys::node_secret(id))
+    p2p_identity(&qtv_node::keys::fixture_secret(id))
 }
 
-/// The published public peer id of validator `id`, for pinning a peer without any
-/// secret. In a keystore deployment this reads the peer's published commitment from
-/// the roster rather than recomputing it.
+/// The published peer id of validator `id` under the gated fixture secret, for the
+/// single process simulation and the local load test binaries only. Absent from a
+/// default node build.
+#[cfg(any(test, feature = "test-fixtures"))]
 pub fn node_peer_id(id: u64) -> PeerId {
-    p2p_peer_id(&qtv_node::keys::node_secret(id))
+    p2p_peer_id(&qtv_node::keys::fixture_secret(id))
 }
 
 pub fn leader_for(selection: &Selection, view: View) -> u64 {
@@ -196,17 +197,9 @@ impl DevNode {
         let block_store = BlockStore::open(node.store_dir.join("blocks.log"))?;
         let state_store = StateStore::open(node.store_dir.join("state.log"))?;
 
-        let validators: Vec<ConsensusValidator> = devnet
-            .validator_specs()
-            .iter()
-            .map(|v| ConsensusValidator {
-                id: v.id,
-                stake: v.stake,
-                online: v.online,
-            })
-            .collect();
+        let validators: Vec<ConsensusValidator> = devnet.consensus_validators();
 
-        let secret = qtv_node::keys::node_secret(node.id);
+        let secret = node.secret;
         let mut dev = DevNode {
             id: node.id,
             identity: p2p_identity(&secret),
@@ -261,13 +254,13 @@ impl DevNode {
         supply = supply.saturating_add(qtv_staking::STAKING_POOL);
         let mut validator_ids: Vec<[u8; 32]> = Vec::new();
         for v in &self.base_validators {
-            let address = validator_address(v.id);
+            let address = &v.bond_address;
             let bond = v.stake.saturating_mul(qtv_staking::NATIVE_UNIT as u64);
-            if let Some((bond_key, bond_value)) = self.ledger.seed_validator_bond(&address, bond) {
+            if let Some((bond_key, bond_value)) = self.ledger.seed_validator_bond(address, bond) {
                 self.state_store.put_account(bond_key, bond_value)?;
                 supply = supply.saturating_add(bond);
             }
-            if let Ok(payload) = qtv_idfmt::parse_address(&address) {
+            if let Ok(payload) = qtv_idfmt::parse_address(address) {
                 if let Ok(id) = <[u8; 32]>::try_from(payload) {
                     validator_ids.push(id);
                 }
@@ -380,7 +373,7 @@ impl DevNode {
 
     fn build_proposal_at(&mut self, selection: &Selection, view: View) -> Proposal {
         let height = self.height;
-        let proposer = validator_address(leader_for(selection, view));
+        let proposer = self.validator_address(leader_for(selection, view));
         let candidates = self.mempool.candidates();
         let mut ledger = self.ledger.clone();
         ledger.clear_block_events();
@@ -425,7 +418,7 @@ impl DevNode {
     ) -> Result<(), RoundError> {
         let header = &proposal.header;
         if proposal.view != self.view
-            || header.proposer() != validator_address(leader_for(selection, proposal.view))
+            || *header.proposer() != self.validator_address(leader_for(selection, proposal.view))
         {
             return Err(RoundError::ProposalRejected);
         }
@@ -599,7 +592,7 @@ impl DevNode {
                 }
             }
             None => {
-                if *proposal.header.proposer() != validator_address(leader_for(selection, view)) {
+                if *proposal.header.proposer() != self.validator_address(leader_for(selection, view)) {
                     return Vec::new();
                 }
             }
@@ -899,6 +892,17 @@ impl DevNode {
         self.id
     }
 
+    /// The committed bond and reward address of validator `id`, read from the roster
+    /// this node holds. The address is a commitment; it is never recomputed from the
+    /// id.
+    fn validator_address(&self, id: u64) -> String {
+        self.base_validators
+            .iter()
+            .find(|v| v.id == id)
+            .map(|v| v.bond_address.clone())
+            .unwrap_or_default()
+    }
+
     pub fn height(&self) -> Height {
         self.height
     }
@@ -1033,7 +1037,7 @@ impl DevNode {
             .members
             .iter()
             .copied()
-            .find(|&id| validator_address(id) == *header.proposer())
+            .find(|&id| self.validator_address(id) == *header.proposer())
             .unwrap_or(selection.leader);
         let attesters = certificate.attesters();
         let included_ids: Vec<String> = block.body().iter().map(Wrapper::id).collect();

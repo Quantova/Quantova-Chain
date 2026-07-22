@@ -1,88 +1,179 @@
 //! Per validator secret material for the node.
 //!
 //! Every private key a validator uses, its one time sortition tree, its ML-DSA-65
-//! attestation signing key, and its ML-DSA-65 peer to peer network identity, is
-//! derived from one 32 byte secret through the domain separated `from_secret`
-//! constructors in the consensus crates and `p2p` derivation in qtv-devnet. Nothing
-//! is derived from the public validator id alone.
+//! attestation signing key, its peer to peer network identity, and its ledger bond
+//! and reward account, is derived from one 32 byte secret through domain separated
+//! derivations. Nothing is derived from the public validator id, and there is no
+//! shared master.
 //!
-//! The secret itself is `node_secret(id)`, a derivation of a devnet master secret
-//! and the id. The master comes from the `QTV_DEVNET_MASTER` environment variable
-//! when set, so an operator running a devnet supplies one high entropy secret out of
-//! band and every node's material follows from it and cannot be recomputed by a
-//! party that does not hold it. When the variable is unset a fixed development master
-//! is used so a single machine devnet and the test suite are reproducible; that
-//! development master is not secret and must never carry a real network.
+//! The secret is high entropy material the operator generates on their own machine
+//! from the operating system CSPRNG and holds in a keystore file they own. It is read
+//! on startup and generated on first run when the file is absent. There is no path by
+//! which a second party can derive or hold a validator's secret; only the commitments
+//! (the sortition Merkle root, the ML-DSA public key, the peer id, and the bond
+//! account address) are ever published.
 //!
-//! FOUNDER DECISION, still open: where a real network's per validator secrets are
-//! generated and held. The intended end state is one secret per validator, generated
-//! by that validator from a real CSPRNG and held in its own keystore, with only the
-//! commitments published at registration. This module is the single seam that a
-//! keystore backend plugs into.
+//! FOUNDER DECISION, still open: the mainnet keystore backend, where and how the
+//! keystore file is protected at rest (an HSM, an encrypted store, an operator
+//! passphrase). This module is the single seam that backend plugs into; today it
+//! reads and writes a plain 0600 file, which is the developer default and not the
+//! mainnet answer.
 
-use std::env;
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
+use std::path::Path;
 
 use qtv_crypto::sha3::shake256;
 
-/// The environment variable carrying the devnet master secret as 64 hex characters.
-pub const DEVNET_MASTER_ENV: &str = "QTV_DEVNET_MASTER";
+/// The length of a validator's root secret in bytes.
+pub const SECRET_LEN: usize = 32;
 
-const NODE_SECRET_DOMAIN: &[u8] = b"QORUS/devnet/node-secret/v1";
+// Domain tag under which the one secret a validator holds is expanded into the seed
+// of its ledger bond and reward account. It is distinct from the sortition tree, the
+// signing key, and the peer identity domains, so the one secret yields four
+// independent derived keys and no derived key or public commitment reveals the
+// others or the secret.
+const VALIDATOR_ACCOUNT_DOMAIN: &[u8] = b"QORUS/validator-keying/v1/ledger-bond-account";
 
-// A fixed, NON SECRET development master. It exists only so a single machine devnet
-// and the tests are reproducible; a real network must set QTV_DEVNET_MASTER.
-const DEV_MASTER: [u8; 32] = [
-    0x11, 0x9a, 0x2c, 0x74, 0x3d, 0xe0, 0x5f, 0x88, 0x64, 0x1c, 0xb3, 0x27, 0x90, 0xda, 0x6f, 0xc1,
-    0x0e, 0x53, 0xa8, 0x42, 0xbb, 0x71, 0x2f, 0x9d, 0xc4, 0x86, 0x37, 0xef, 0x50, 0x19, 0x7a, 0x35,
-];
-
-/// Whether a real master secret was supplied out of band. When this is false every
-/// derived identity is recomputable from the public dev master and the id, which is
-/// acceptable only for a single machine devnet or the tests.
-pub fn master_is_operator_supplied() -> bool {
-    env::var(DEVNET_MASTER_ENV).is_ok()
+/// A freshly generated 32 byte secret from the operating system CSPRNG. This is how a
+/// validator's secret comes into being on first run: a real random draw the operator
+/// alone holds, never a function of any public value.
+pub fn generate() -> [u8; SECRET_LEN] {
+    let mut secret = [0u8; SECRET_LEN];
+    fill_random(&mut secret).expect("the operating system CSPRNG is available");
+    secret
 }
 
-/// The devnet master secret. The operator supplied value when `QTV_DEVNET_MASTER` is
-/// set to 64 hex characters, otherwise the fixed development master.
-pub fn devnet_master() -> [u8; 32] {
-    match env::var(DEVNET_MASTER_ENV) {
-        Ok(hex) => parse_hex32(&hex)
-            .unwrap_or_else(|| panic!("{DEVNET_MASTER_ENV} must be 64 hex characters")),
-        Err(_) => DEV_MASTER,
+/// Read the node's own secret from its keystore file, generating it on first run when
+/// the file is absent. The secret never leaves the machine that holds this file; a
+/// party without the file cannot derive it. This is the whole of a validator's key
+/// custody: one file the operator owns, read here and nowhere else.
+pub fn load_or_generate(path: &Path) -> io::Result<[u8; SECRET_LEN]> {
+    match fs::read_to_string(path) {
+        Ok(text) => parse_hex32(text.trim()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "keystore {} must hold exactly 64 hex characters",
+                    path.display()
+                ),
+            )
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let secret = generate();
+            write_keystore(path, &secret)?;
+            Ok(secret)
+        }
+        Err(error) => Err(error),
     }
 }
 
-/// The 32 byte secret a validator holds. All of the validator's private key material
-/// follows from this by domain separated derivation; the id alone never yields it
-/// unless the caller also holds the master.
-pub fn node_secret(id: u64) -> [u8; 32] {
-    node_secret_from_master(&devnet_master(), id)
+fn write_keystore(path: &Path, secret: &[u8; SECRET_LEN]) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        if !dir.as_os_str().is_empty() {
+            fs::create_dir_all(dir)?;
+        }
+    }
+    let mut file = open_private(path)?;
+    file.write_all(to_hex(secret).as_bytes())?;
+    file.write_all(b"\n")?;
+    Ok(())
 }
 
-/// The per node secret under an explicit master, for a caller that resolves the
-/// master once and derives the whole set.
-pub fn node_secret_from_master(master: &[u8; 32], id: u64) -> [u8; 32] {
-    const D: usize = NODE_SECRET_DOMAIN.len();
-    let mut buf = [0u8; D + 32 + 8];
-    buf[..D].copy_from_slice(NODE_SECRET_DOMAIN);
-    buf[D..D + 32].copy_from_slice(master);
-    buf[D + 32..].copy_from_slice(&id.to_le_bytes());
-    let mut out = [0u8; 32];
+#[cfg(unix)]
+fn open_private(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_private(path: &Path) -> io::Result<File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+fn fill_random(buf: &mut [u8]) -> io::Result<()> {
+    let mut file = File::open("/dev/urandom")?;
+    file.read_exact(buf)
+}
+
+/// Expand a validator's 32 byte secret into the seed of its ledger bond and reward
+/// account. The secret is material the validator alone holds; the account seed
+/// follows from it by a domain separated SHAKE and never leaves the validator. Only
+/// the account address is published, and it reveals neither this seed nor the secret.
+pub fn validator_account_seed(secret: &[u8; SECRET_LEN]) -> [u8; SECRET_LEN] {
+    const D: usize = VALIDATOR_ACCOUNT_DOMAIN.len();
+    let mut buf = [0u8; D + SECRET_LEN];
+    buf[..D].copy_from_slice(VALIDATOR_ACCOUNT_DOMAIN);
+    buf[D..].copy_from_slice(secret);
+    let mut out = [0u8; SECRET_LEN];
     shake256(&buf, &mut out);
     out
 }
 
-fn parse_hex32(hex: &str) -> Option<[u8; 32]> {
+/// The validator's ledger bond and reward account, derived from its one secret. The
+/// account holds the bond genesis seeds and the rewards the validator claims; its
+/// signing key follows from the secret alone, so a party knowing only the public id
+/// or the public address cannot spend from it.
+pub fn validator_account(secret: &[u8; SECRET_LEN]) -> qtv_account::Account {
+    qtv_account::derive(&validator_account_seed(secret), 0)
+}
+
+/// The published address of the validator's bond and reward account. This is a
+/// commitment: it goes into genesis, the roster, and the gateway view, and it carries
+/// no secret and cannot be turned back into the seed or the secret behind it.
+pub fn validator_address(secret: &[u8; SECRET_LEN]) -> String {
+    validator_account(secret).address()
+}
+
+fn parse_hex32(hex: &str) -> Option<[u8; SECRET_LEN]> {
     let hex = hex.trim();
-    if hex.len() != 64 {
+    if hex.len() != SECRET_LEN * 2 {
         return None;
     }
-    let mut out = [0u8; 32];
+    let mut out = [0u8; SECRET_LEN];
     for (i, byte) in out.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
     }
     Some(out)
+}
+
+fn to_hex(bytes: &[u8; SECRET_LEN]) -> String {
+    let mut out = String::with_capacity(SECRET_LEN * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+// Test and simulation fixtures. A single process that simulates the whole validator
+// set, the devnet, the single process node, and the local load test binaries, needs
+// every node's secret at once. These helpers hand it a deterministic per index secret
+// so a run is reproducible. They are compiled only under `cfg(test)` or the
+// `test-fixtures` feature and are absent from a default node build, so no key material
+// is ever derived from the public id on any default path. Each fixture secret is an
+// independent image of its index, never a shared master expanded by an id.
+#[cfg(any(test, feature = "test-fixtures"))]
+const FIXTURE_SECRET_DOMAIN: &[u8] = b"QORUS/TEST-ONLY/insecure-node-fixture-secret/v1";
+
+/// A deterministic, per index secret for tests and the single process simulation
+/// only. It is a clearly test only fixture, not a production derivation, and cannot be
+/// reached from a default node build.
+#[cfg(any(test, feature = "test-fixtures"))]
+pub fn fixture_secret(index: u64) -> [u8; SECRET_LEN] {
+    const D: usize = FIXTURE_SECRET_DOMAIN.len();
+    let mut buf = [0u8; D + 8];
+    buf[..D].copy_from_slice(FIXTURE_SECRET_DOMAIN);
+    buf[D..].copy_from_slice(&index.to_le_bytes());
+    let mut out = [0u8; SECRET_LEN];
+    shake256(&buf, &mut out);
+    out
 }
 
 #[cfg(test)]
@@ -90,23 +181,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_node_secret_depends_on_the_master_not_the_id_alone() {
-        let a = node_secret_from_master(&[1u8; 32], 5);
-        let b = node_secret_from_master(&[2u8; 32], 5);
-        assert_ne!(a, b, "a different master gives a different secret for one id");
-        let c = node_secret_from_master(&[1u8; 32], 6);
-        assert_ne!(a, c, "a different id gives a different secret under one master");
+    fn a_generated_secret_is_not_all_zero_and_two_draws_differ() {
+        let a = generate();
+        let b = generate();
+        assert_ne!(a, [0u8; SECRET_LEN], "the CSPRNG returned all zero");
+        assert_ne!(a, b, "two independent draws collided");
     }
 
     #[test]
-    fn the_secret_is_not_the_master() {
-        assert_ne!(node_secret_from_master(&[7u8; 32], 1), [7u8; 32]);
+    fn a_keystore_round_trips_and_is_generated_on_first_run() {
+        let dir = std::env::temp_dir().join(format!("qtv-keystore-{}", std::process::id()));
+        let path = dir.join("keystore");
+        let _ = fs::remove_file(&path);
+        let first = load_or_generate(&path).expect("first run generates");
+        let second = load_or_generate(&path).expect("second run loads");
+        assert_eq!(first, second, "the keystore did not persist the secret");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
     }
 
     #[test]
-    fn hex_masters_parse() {
-        assert_eq!(parse_hex32(&"ab".repeat(32)), Some([0xabu8; 32]));
+    fn the_account_seed_is_not_the_secret_and_is_bound_to_it() {
+        let secret = [9u8; SECRET_LEN];
+        assert_ne!(validator_account_seed(&secret), secret);
+        let other = [10u8; SECRET_LEN];
+        assert_ne!(
+            validator_account_seed(&secret),
+            validator_account_seed(&other)
+        );
+    }
+
+    #[test]
+    fn two_secrets_commit_two_bond_addresses() {
+        assert_ne!(
+            validator_address(&[1u8; SECRET_LEN]),
+            validator_address(&[2u8; SECRET_LEN])
+        );
+    }
+
+    #[test]
+    fn hex_round_trips() {
+        let secret = [0xabu8; SECRET_LEN];
+        assert_eq!(parse_hex32(&to_hex(&secret)), Some(secret));
         assert_eq!(parse_hex32("zz"), None);
-        assert_eq!(parse_hex32(&"a".repeat(63)), None);
     }
 }

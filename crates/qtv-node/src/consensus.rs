@@ -9,20 +9,42 @@ use qtv_sampler::validator::{SamplerValidator, DEFAULT_SLOTS};
 
 pub use qtv_attest::{Beacon, Block, Parent};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConsensusValidator {
     pub id: u64,
     pub stake: u64,
     pub online: bool,
+    /// The operator secret behind this validator. All of its consensus key material,
+    /// its sortition tree and its ML-DSA signing key, follows from this by domain
+    /// separated derivation. It is present because a single process simulates the
+    /// whole committee, and it never leaves this process nor any published structure.
+    pub secret: [u8; 32],
+    /// The published bond and reward account address, the commitment derived from the
+    /// secret. The ledger seeds and weighs the validator's stake under this address.
+    pub bond_address: String,
 }
 
 impl ConsensusValidator {
-    pub fn online(id: u64, stake: u64) -> Self {
+    /// A validator built from its operator secret. Its bond and reward address is the
+    /// commitment the secret derives to.
+    pub fn from_secret(id: u64, stake: u64, online: bool, secret: [u8; 32]) -> Self {
+        let bond_address = crate::keys::validator_address(&secret);
         ConsensusValidator {
             id,
             stake,
-            online: true,
+            online,
+            secret,
+            bond_address,
         }
+    }
+}
+
+// A per id convenience for tests and the single process simulation only, sourcing the
+// secret from the gated fixture. Absent from a default node build.
+#[cfg(any(test, feature = "test-fixtures"))]
+impl ConsensusValidator {
+    pub fn online(id: u64, stake: u64) -> Self {
+        Self::from_secret(id, stake, true, crate::keys::fixture_secret(id))
     }
 }
 
@@ -57,26 +79,14 @@ impl Consensus {
     pub fn with_slots(validators: &[ConsensusValidator], slots: u64) -> Self {
         let sampler = validators
             .iter()
-            .map(|v| {
-                SamplerValidator::from_secret_with_slots(
-                    v.id,
-                    &crate::keys::node_secret(v.id),
-                    v.stake,
-                    slots,
-                )
-            })
+            .map(|v| SamplerValidator::from_secret_with_slots(v.id, &v.secret, v.stake, slots))
             .collect();
         let attesters = validators
             .iter()
             .map(|v| {
                 (
                     v.id,
-                    Attester::from_secret_with_slots(
-                        v.id,
-                        &crate::keys::node_secret(v.id),
-                        v.stake,
-                        slots,
-                    ),
+                    Attester::from_secret_with_slots(v.id, &v.secret, v.stake, slots),
                 )
             })
             .collect();
@@ -93,14 +103,7 @@ impl Consensus {
     pub fn reweight(&mut self, validators: &[ConsensusValidator]) {
         let sampler = validators
             .iter()
-            .map(|v| {
-                SamplerValidator::from_secret_with_slots(
-                    v.id,
-                    &crate::keys::node_secret(v.id),
-                    v.stake,
-                    self.slots,
-                )
-            })
+            .map(|v| SamplerValidator::from_secret_with_slots(v.id, &v.secret, v.stake, self.slots))
             .collect();
         self.registry = Registry::new(sampler);
         self.attesters = validators
@@ -108,12 +111,7 @@ impl Consensus {
             .map(|v| {
                 (
                     v.id,
-                    Attester::from_secret_with_slots(
-                        v.id,
-                        &crate::keys::node_secret(v.id),
-                        v.stake,
-                        self.slots,
-                    ),
+                    Attester::from_secret_with_slots(v.id, &v.secret, v.stake, self.slots),
                 )
             })
             .collect();
@@ -186,10 +184,14 @@ mod tests {
         online
             .iter()
             .enumerate()
-            .map(|(i, &on)| ConsensusValidator {
-                id: i as u64 + 1,
-                stake: qtv_bft::params::VALIDATOR_STAKE_QTOV,
-                online: on,
+            .map(|(i, &on)| {
+                let id = i as u64 + 1;
+                ConsensusValidator::from_secret(
+                    id,
+                    qtv_bft::params::VALIDATOR_STAKE_QTOV,
+                    on,
+                    crate::keys::fixture_secret(id),
+                )
             })
             .collect()
     }

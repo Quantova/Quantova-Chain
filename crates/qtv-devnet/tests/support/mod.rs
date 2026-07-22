@@ -81,6 +81,7 @@ pub fn config_with_fanout(
                 store_dir: base.join(format!("node-{id}")),
                 bootstrap,
                 address: format!("mem://{id}"),
+                secret: qtv_node::keys::fixture_secret(id),
             }
         })
         .collect();

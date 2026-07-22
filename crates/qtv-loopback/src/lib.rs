@@ -48,6 +48,7 @@ pub fn devnet_config(base: &PathBuf, validators: usize, senders: &[Account]) -> 
                 store_dir: base.join(format!("node-{id}")),
                 bootstrap,
                 address: format!("mem://{id}"),
+                secret: qtv_node::keys::fixture_secret(id),
             }
         })
         .collect();
