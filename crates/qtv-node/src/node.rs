@@ -1176,6 +1176,67 @@ mod tests {
     }
 
     #[test]
+    fn a_malformed_container_is_rejected_at_deploy() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let deployer = keypair(170);
+        fund(&mut ledger, &deployer, 10_000 * 1_000_000);
+
+        let genesis = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
+        let bad_code = qtv_vm::asm::assemble("LDI r0, 1\nJMP 3\nHALT").expect("assembles");
+        let malformed = qtv_vm::container::Container::new(
+            bad_code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector: genesis,
+                offset: 0,
+                access: qtv_vm::container::StateAccess::default(),
+            }],
+        );
+        assert!(malformed.verify().is_err(), "the container is malformed");
+
+        let deploy = system_tx(
+            &deployer,
+            &crate::ledger::vm_deploy_address(),
+            malformed.canonical_bytes(),
+            0,
+            100_000,
+            &fee,
+        );
+        execute_ordered(&mut ledger, &[deploy], &fee, 0);
+        let rejected = crate::ledger::contract_address(&deployer.address(), 0).unwrap();
+        assert!(
+            !ledger.is_contract(&rejected),
+            "a malformed container deploys no contract"
+        );
+
+        let good_code = qtv_vm::asm::assemble("LDI r0, 1\nHALT").expect("assembles");
+        let good = qtv_vm::container::Container::new(
+            good_code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector: genesis,
+                offset: 0,
+                access: qtv_vm::container::StateAccess::default(),
+            }],
+        );
+        let deploy_good = system_tx(
+            &deployer,
+            &crate::ledger::vm_deploy_address(),
+            good.canonical_bytes(),
+            1,
+            100_000,
+            &fee,
+        );
+        execute_ordered(&mut ledger, &[deploy_good], &fee, 0);
+        let accepted = crate::ledger::contract_address(&deployer.address(), 1).unwrap();
+        assert!(
+            ledger.is_contract(&accepted),
+            "a well formed container deploys"
+        );
+    }
+
+    #[test]
     fn split_deploy_args_reads_the_frame_and_leaves_a_bare_container_whole() {
         let bare = b"QVM1 the whole container".to_vec();
         let (container, params) = super::split_deploy_args(&bare);

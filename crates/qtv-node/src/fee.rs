@@ -9,6 +9,7 @@ pub struct FeeParams {
     pub rate_micro_usd_per_qtov: u128,
     pub native_unit: u128,
     pub max_fee_native: u64,
+    pub chain_id: u64,
 }
 
 impl FeeParams {
@@ -18,6 +19,7 @@ impl FeeParams {
             rate_micro_usd_per_qtov: 1_000_000,
             native_unit: 1_000_000,
             max_fee_native: 1_000,
+            chain_id: qtv_tx::LOCAL_CHAIN_ID,
         }
     }
 
@@ -79,6 +81,7 @@ mod tests {
             rate_micro_usd_per_qtov: 1_000_000,
             native_unit: 1_000_000,
             max_fee_native: 1_000,
+            chain_id: qtv_tx::LOCAL_CHAIN_ID,
         };
         let dear = FeeParams {
             rate_micro_usd_per_qtov: 2_000_000,
@@ -94,6 +97,7 @@ mod tests {
             rate_micro_usd_per_qtov: 1_000_000,
             native_unit: 1_000_000,
             max_fee_native: 1_000,
+            chain_id: qtv_tx::LOCAL_CHAIN_ID,
         };
         assert_eq!(fresh.native_fee(MICRO_USD_CEILING), 1_000);
         let stale_low = FeeParams {
@@ -110,6 +114,7 @@ mod tests {
             rate_micro_usd_per_qtov: 1,
             native_unit: u128::from(u64::MAX),
             max_fee_native: u64::MAX,
+            chain_id: qtv_tx::LOCAL_CHAIN_ID,
         };
         assert_eq!(p.transfer_fee(), u64::MAX);
     }
@@ -121,6 +126,7 @@ mod tests {
             rate_micro_usd_per_qtov: 0,
             native_unit: 1_000_000,
             max_fee_native: 1_000,
+            chain_id: qtv_tx::LOCAL_CHAIN_ID,
         };
         assert_eq!(p.transfer_fee(), 0);
     }

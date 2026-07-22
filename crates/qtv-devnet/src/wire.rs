@@ -294,9 +294,19 @@ fn decode_wrapper(decoder: &mut Decoder<'_>) -> Result<Wrapper, DecodeError> {
     let fee = decoder.get_u128()?;
     let target = read_text(decoder)?;
     let args = decoder.get_bytes()?.to_vec();
+    let value = decoder.get_u64()?;
+    let chain_id = decoder.get_u64()?;
     let scheme = decoder.get_u8()?;
     let signature = decoder.get_bytes()?.to_vec();
-    let body = Body::new(sender, nonce, meter_limit, fee, Call::new(target, args));
+    let body = Body::with_context(
+        sender,
+        nonce,
+        meter_limit,
+        fee,
+        Call::new(target, args),
+        value,
+        chain_id,
+    );
     Ok(Wrapper::new(body, scheme, signature))
 }
 

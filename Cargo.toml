@@ -25,3 +25,10 @@ opt-level = 3
 qtv-bft = { path = "../QRC-CONSENSUS/crates/qtv-bft" }
 qtv-sampler = { path = "../QRC-CONSENSUS/crates/qtv-sampler" }
 qtv-attest = { path = "../QRC-CONSENSUS/crates/qtv-attest" }
+
+# Local override to build against the hardened QVM working tree that drops the
+# grindable verifiable random function opcode, enforces the storage manifest under
+# the dispatch path, and gains a deploy time container verifier. Before release this
+# override is dropped and the git tag pin is bumped to the tag that carries the change.
+[patch."https://github.com/Quantova/QVM.git"]
+qtv-vm = { path = "../QVM/crates/qtv-vm" }

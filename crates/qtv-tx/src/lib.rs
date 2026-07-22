@@ -13,6 +13,12 @@ pub const SCHEME_FALCON: u8 = qtv_account::SCHEME_FALCON;
 
 pub const DOMAIN_TX: &[u8] = b"quantova.transaction.v1";
 
+pub const LOCAL_CHAIN_ID: u64 = 0x5154_5644_4556_4E31;
+
+pub const MAINNET_CHAIN_ID: u64 = 0x5154_4F56_4D41_494E;
+
+pub const TESTNET_CHAIN_ID: u64 = 0x5154_4F56_5445_5354;
+
 const SIGN_RANDOMIZER: [u8; 32] = [0u8; 32];
 
 const SIGN_RANDOMIZER_HASH: [u8; slh_dsa::PUBLIC_KEY_BYTES / 2] =
@@ -51,16 +57,32 @@ pub struct Body {
     nonce: u64,
     meter_limit: u64,
     fee: u128,
+    value: u64,
+    chain_id: u64,
     call: Call,
 }
 
 impl Body {
     pub fn new(sender: String, nonce: u64, meter_limit: u64, fee: u128, call: Call) -> Self {
+        Body::with_context(sender, nonce, meter_limit, fee, call, 0, LOCAL_CHAIN_ID)
+    }
+
+    pub fn with_context(
+        sender: String,
+        nonce: u64,
+        meter_limit: u64,
+        fee: u128,
+        call: Call,
+        value: u64,
+        chain_id: u64,
+    ) -> Self {
         Body {
             sender,
             nonce,
             meter_limit,
             fee,
+            value,
+            chain_id,
             call,
         }
     }
@@ -81,6 +103,14 @@ impl Body {
         self.fee
     }
 
+    pub fn value(&self) -> u64 {
+        self.value
+    }
+
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
     pub fn call(&self) -> &Call {
         &self.call
     }
@@ -93,6 +123,8 @@ impl Encode for Body {
         self.meter_limit.encode(encoder);
         self.fee.encode(encoder);
         self.call.encode(encoder);
+        self.value.encode(encoder);
+        self.chain_id.encode(encoder);
     }
 }
 
