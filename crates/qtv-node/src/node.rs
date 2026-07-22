@@ -6,9 +6,9 @@ use std::thread;
 #[cfg(any(test, feature = "test-fixtures"))]
 use qtv_block::{Block as ChainBlock, Header};
 use qtv_codec::{Decode, Decoder};
-use qtv_crypto::ml_dsa::PublicKey;
+pub use qtv_crypto::ml_dsa::PublicKey;
 use qtv_governance::{Action, Conviction};
-use qtv_sampler::onetime::Root;
+pub use qtv_sampler::onetime::Root;
 use qtv_tx::Wrapper;
 
 #[cfg(any(test, feature = "test-fixtures"))]
