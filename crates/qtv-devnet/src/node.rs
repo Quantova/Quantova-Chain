@@ -262,6 +262,9 @@ impl DevNode {
         self.state_store.put_account(validators_key, validators_value)?;
         let (supply_key, supply_value) = self.ledger.seed_supply(supply);
         self.state_store.put_account(supply_key, supply_value)?;
+        for (key, value) in self.ledger.take_dirty_entries() {
+            self.state_store.put_account(key, value)?;
+        }
         self.state_store.commit(self.ledger.state_root())?;
         self.ledger.clear_dirty();
         self.refresh_committee();
