@@ -446,6 +446,8 @@ fn execute_ordered_across(
     let verified = verify_signatures(ledger, candidates, verify_cores);
     let stake_address = crate::ledger::stake_system_address();
     let claim_address = crate::ledger::stake_claim_address();
+    let exit_address = crate::ledger::stake_exit_address();
+    let withdraw_address = crate::ledger::stake_withdraw_address();
     let gov_address = crate::ledger::gov_system_address();
     let now_seconds = day.saturating_mul(86_400);
     let mut included = Vec::new();
@@ -495,6 +497,18 @@ fn execute_ordered_across(
         }
         if plan.recipient == claim_address {
             if ledger.claim_with_fee(&plan.sender, plan.fee, day) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
+        if plan.recipient == exit_address {
+            if ledger.request_exit_with_fee(&plan.sender, plan.fee, day) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
+        if plan.recipient == withdraw_address {
+            if ledger.withdraw_with_fee(&plan.sender, plan.fee, day) {
                 included.push(wrapper.clone());
             }
             continue;
@@ -1901,6 +1915,37 @@ mod tests {
             1,
             "a frozen account still receives"
         );
+    }
+
+    #[test]
+    fn a_transaction_bonds_then_exits_then_withdraws_the_stake() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let staker = keypair(150);
+        fund(&mut ledger, &staker, 5_000 * 1_000_000);
+        let sid = address_bytes(&staker.address());
+
+        let bond = transfer(&staker, &crate::ledger::stake_system_address(), 2_000 * 1_000_000, 0, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[bond], &fee, 0).len(), 1);
+        assert_eq!(ledger.stake_bond(&sid).unwrap().amount, 2_000 * 1_000_000);
+
+        let nonce = ledger.account(&staker.address()).nonce;
+        let exit = transfer(&staker, &crate::ledger::stake_exit_address(), 0, nonce, &fee);
+        assert!(
+            execute_ordered(&mut ledger, &[exit.clone()], &fee, 89).is_empty(),
+            "an exit before the lock clears is not included"
+        );
+        assert_eq!(execute_ordered(&mut ledger, &[exit], &fee, 90).len(), 1);
+        assert!(ledger.stake_bond(&sid).unwrap().exit_requested_at.is_some());
+
+        let nonce = ledger.account(&staker.address()).nonce;
+        let withdraw = transfer(&staker, &crate::ledger::stake_withdraw_address(), 0, nonce, &fee);
+        assert!(
+            execute_ordered(&mut ledger, &[withdraw.clone()], &fee, 90 + 20).is_empty(),
+            "a withdraw before the unbonding elapses is not included"
+        );
+        assert_eq!(execute_ordered(&mut ledger, &[withdraw], &fee, 90 + 21).len(), 1);
+        assert!(ledger.stake_bond(&sid).is_none());
     }
 
     #[test]
