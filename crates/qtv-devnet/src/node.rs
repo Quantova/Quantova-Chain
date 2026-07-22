@@ -238,7 +238,7 @@ impl DevNode {
                 .put_account(account_key(&account.address), to_bytes(&funded))?;
             supply = supply.saturating_add(account.balance);
         }
-        for (key, value) in self.ledger.seed_ecosystem_accounts() {
+        for (key, value) in self.ledger.seed_grants_account() {
             self.state_store.put_account(key, value)?;
         }
         let (pool_key, pool_value) = self.ledger.seed_stake_pool(qtv_staking::STAKING_POOL);

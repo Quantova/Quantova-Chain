@@ -616,7 +616,7 @@ impl Node {
                 &Account::funded(account.balance, account.scheme, account.public_key.clone()),
             );
         }
-        ledger.seed_ecosystem_accounts();
+        ledger.seed_grants_account();
 
         let validators: Vec<ConsensusValidator> = genesis
             .validators
@@ -956,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn a_transfer_fee_splits_by_the_locked_shares_and_burns_nothing() {
+    fn a_transfer_fee_splits_seventy_ten_twenty_and_burns_the_supply() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
         let alice = keypair(200);
@@ -966,19 +966,15 @@ mod tests {
 
         let proposer = qtv_idfmt::render_address(&[0x5Au8; 32]).unwrap();
         ledger.set_round_proposer(&proposer);
-        let marketing = crate::ledger::marketing_address();
-        let market_maker = crate::ledger::market_maker_address();
-        let community = crate::ledger::community_address();
+        let grants = crate::ledger::grants_address();
+        let marketing =
+            qtv_idfmt::render_address(&qtv_crypto::sha3::sha3_256(b"qtv/ecosystem/marketing")).unwrap();
+        let market_maker =
+            qtv_idfmt::render_address(&qtv_crypto::sha3::sha3_256(b"qtv/ecosystem/market-maker")).unwrap();
 
         let charged = fee.transfer_fee();
         assert_eq!(charged, 500, "the devnet transfer fee");
         let supply_before = ledger.total_supply();
-        let value_before = ledger.balance(&alice.address())
-            + ledger.balance(&bob.address())
-            + ledger.balance(&proposer)
-            + ledger.balance(&marketing)
-            + ledger.balance(&market_maker)
-            + ledger.balance(&community);
 
         let tx = transfer(&alice, &bob.address(), 1_000, 0, &fee);
         assert_eq!(
@@ -988,30 +984,33 @@ mod tests {
         );
 
         assert_eq!(ledger.balance(&proposer), 50, "the proposer takes a tenth");
-        assert_eq!(ledger.balance(&marketing), 100, "marketing takes a fifth");
-        assert_eq!(ledger.balance(&market_maker), 150, "the market maker takes three tenths");
-        assert_eq!(ledger.balance(&community), 200, "grants and community take two fifths");
+        assert_eq!(ledger.balance(&grants), 100, "grants takes a fifth");
+        assert_eq!(ledger.balance(&marketing), 0, "marketing takes no fee cut");
+        assert_eq!(ledger.balance(&market_maker), 0, "the market maker takes no fee cut");
+
         assert_eq!(
-            ledger.balance(&proposer)
-                + ledger.balance(&marketing)
-                + ledger.balance(&market_maker)
-                + ledger.balance(&community),
-            charged,
-            "the four shares sum to the fee exactly"
+            supply_before - ledger.total_supply(),
+            350,
+            "the supply falls by the seven tenths that burn"
         );
 
-        let value_after = ledger.balance(&alice.address())
+        let balances = ledger.balance(&alice.address())
             + ledger.balance(&bob.address())
             + ledger.balance(&proposer)
-            + ledger.balance(&marketing)
-            + ledger.balance(&market_maker)
-            + ledger.balance(&community);
-        assert_eq!(value_before, value_after, "value is conserved, nothing created or lost");
+            + ledger.balance(&grants);
         assert_eq!(
             ledger.total_supply(),
-            supply_before,
-            "no fee burn, the supply is untouched by a fee"
+            balances,
+            "the supply still equals the sum of every balance after the burn"
         );
+
+        let dust = crate::ledger::FeeSplit::of(7);
+        assert_eq!(
+            (dust.burn, dust.proposer, dust.grants),
+            (4, 0, 3),
+            "the rounding dust lands in the grants share"
+        );
+        assert_eq!(dust.total(), 7, "the split conserves the fee to the unit");
     }
 
     #[test]
