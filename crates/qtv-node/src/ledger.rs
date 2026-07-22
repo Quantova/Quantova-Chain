@@ -204,7 +204,22 @@ const GOV_BALLOT_TAG: &[u8] = b"qtv/gov/ballot/";
 const GOV_LOCK_TAG: &[u8] = b"qtv/gov/lock/";
 const GOV_BLACKLIST_TAG: &[u8] = b"qtv/gov/blacklist/";
 const GOV_FREEZE_TAG: &[u8] = b"qtv/gov/freeze/";
+const GOV_GUARDIAN_TAG: &[u8] = b"qtv/gov/guardians";
 const GOV_RECEIPT_TAG: &[u8] = b"qtv/gov/receipt/";
+
+fn is_reserved_pot(id: &[u8; 32]) -> bool {
+    const POTS: &[&[u8]] = &[
+        b"qtv/gov/grants",
+        b"qtv/stake/treasury",
+        b"qtv/stake/pool",
+        b"qtv/stake/system",
+        b"qtv/gov/system",
+        b"qtv/ecosystem/marketing",
+        b"qtv/ecosystem/market-maker",
+        b"qtv/ecosystem/foundation",
+    ];
+    POTS.iter().any(|tag| sha3::sha3_256(tag) == *id)
+}
 
 fn gov_blacklist_key(id: &[u8; 32]) -> Key {
     let mut input = Vec::with_capacity(GOV_BLACKLIST_TAG.len() + id.len());
@@ -649,11 +664,46 @@ impl Ledger {
         self.trie.insert(gov_freeze_key(id), vec![1]);
     }
 
+    fn clear_frozen(&mut self, id: &[u8; 32]) {
+        self.trie.insert(gov_freeze_key(id), Vec::new());
+    }
+
     pub fn is_frozen(&self, address: &str) -> bool {
         match address_id(address) {
             Some(id) => self.is_frozen_id(&id),
             None => false,
         }
+    }
+
+    pub fn guardian_set(&self) -> qtv_governance::GuardianSet {
+        self.trie
+            .get(&stake_singleton_key(GOV_GUARDIAN_TAG))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical guardian set"))
+            .unwrap_or_default()
+    }
+
+    pub fn set_guardian_set(&mut self, caucus: &qtv_governance::GuardianSet) {
+        self.trie
+            .insert(stake_singleton_key(GOV_GUARDIAN_TAG), to_bytes(caucus));
+    }
+
+    pub fn seed_guardian_set(&mut self, caucus: &qtv_governance::GuardianSet) -> (Key, Vec<u8>) {
+        self.set_guardian_set(caucus);
+        (stake_singleton_key(GOV_GUARDIAN_TAG), to_bytes(caucus))
+    }
+
+    pub fn guardian_freeze(&mut self, targets: &[[u8; 32]], approvers: &[[u8; 32]]) -> bool {
+        if targets.is_empty() || !self.guardian_set().authorizes(approvers) {
+            return false;
+        }
+        if targets.iter().any(|target| self.is_protected_account(target)) {
+            return false;
+        }
+        for target in targets {
+            self.set_frozen(target);
+        }
+        true
     }
 
     pub fn stake_price(&self) -> u128 {
@@ -1072,9 +1122,7 @@ impl Ledger {
         if self.stake_bond(&id).is_some() || self.gov_lock(&id).is_some() {
             return true;
         }
-        let stake_id = sha3::sha3_256(b"qtv/stake/system");
-        let gov_id = sha3::sha3_256(b"qtv/gov/system");
-        id == stake_id || id == gov_id
+        is_reserved_pot(&id)
     }
 
     pub fn gov_propose(
@@ -1281,6 +1329,14 @@ impl Ledger {
                 for target in targets {
                     if let Some(id) = id_from_slice(target) {
                         self.set_frozen(&id);
+                    }
+                }
+                Ok(())
+            }
+            Action::Unfreeze { targets } => {
+                for target in targets {
+                    if let Some(id) = id_from_slice(target) {
+                        self.clear_frozen(&id);
                     }
                 }
                 Ok(())
@@ -1766,6 +1822,45 @@ mod stake_state_tests {
         fund(&mut l, &backer, 600_000 * 1_000_000);
         assert!(l.gov_vote(&backer, real, true, qtv_governance::Conviction::Liquid, 500_000 * 1_000_000, 0));
         assert_eq!(l.gov_conclude(real, close), Some(qtv_governance::Status::Approved));
+    }
+
+    #[test]
+    fn a_guardian_caucus_freezes_ahead_of_a_vote_and_a_vote_reverses_it() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![[201u8; 32], [202u8; 32], [203u8; 32]],
+            2,
+        ));
+
+        let target_id = [60u8; 32];
+        let target = qtv_idfmt::render_address(&target_id).unwrap();
+
+        assert!(!l.guardian_freeze(&[target_id], &[[201u8; 32]]));
+        assert!(!l.is_frozen(&target));
+
+        assert!(l.guardian_freeze(&[target_id], &[[201u8; 32], [202u8; 32]]));
+        assert!(l.is_frozen(&target));
+
+        let treasury_id = sha3::sha3_256(STAKE_TREASURY_TAG);
+        assert!(!l.guardian_freeze(&[treasury_id], &[[201u8; 32], [202u8; 32]]));
+        assert!(!l.is_frozen(&stake_treasury_address()));
+
+        let proposer = gov_addr(61);
+        fund(&mut l, &proposer, 300_000 * 1_000_000);
+        let voter = gov_addr(62);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+        let id = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BlacklistKill,
+                qtv_governance::Action::Unfreeze { targets: vec![target_id.to_vec()] },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        l.gov_enact(id, 2 * 86_400 + 1).unwrap();
+        assert!(!l.is_frozen(&target), "the full vote reversed the emergency freeze");
     }
 
     #[test]
