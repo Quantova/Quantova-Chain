@@ -93,12 +93,21 @@ pub fn code_block(block: &ChainBlock, k: usize, n: usize) -> Result<CodedBlock, 
     })
 }
 
+pub fn commitment_in_bounds(commitment: &Commitment) -> bool {
+    commitment.k >= 1
+        && commitment.n >= commitment.k
+        && commitment.n <= erasure::MAX_SHARDS
+}
+
 pub fn reconstruct_block(
     header: &Header,
     header_hash: &[u8; DIGEST_LEN],
     commitment: &Commitment,
     received: &[(Shard, ShardProof)],
 ) -> Result<ChainBlock, CodedError> {
+    if !commitment_in_bounds(commitment) {
+        return Err(CodedError::BadCommitment);
+    }
     let mut verified: Vec<Shard> = Vec::with_capacity(commitment.k);
     for (shard, proof) in received {
         if verified.len() == commitment.k {
@@ -188,6 +197,9 @@ impl ProposalAssembler {
     pub fn admit(&mut self, coded: CodedProposal) -> Option<Result<Proposal, CodedError>> {
         let key: ProposalKey = (coded.view, coded.commitment.root);
         if self.done.contains_key(&key) {
+            return None;
+        }
+        if !commitment_in_bounds(&coded.commitment) {
             return None;
         }
         if !coded.commitment.verify_shard(&coded.shard, &coded.proof) {
@@ -555,6 +567,34 @@ mod tests {
             matches!(outcome, Some(Err(_))),
             "a header that did not match the coded block was not refused"
         );
+    }
+
+    #[test]
+    fn a_coded_proposal_with_out_of_range_parameters_is_refused() {
+        let proposal = sample_proposal(32, 0);
+        let shards = code_proposal(&proposal).expect("code the proposal");
+        let mut assembler = ProposalAssembler::new();
+
+        let mut oversized = shards[0].clone();
+        oversized.commitment.n = erasure::MAX_SHARDS + 1;
+        assert!(assembler.admit(oversized).is_none());
+
+        let mut zero_k = shards[1].clone();
+        zero_k.commitment.k = 0;
+        assert!(assembler.admit(zero_k).is_none());
+
+        let mut inverted = shards[2].clone();
+        inverted.commitment.k = inverted.commitment.n + 1;
+        assert!(assembler.admit(inverted).is_none());
+
+        let mut rebuilt = None;
+        let k = shards[0].commitment.k;
+        for coded in shards.iter().take(k).cloned() {
+            if let Some(result) = assembler.admit(coded) {
+                rebuilt = Some(result.expect("the clean k reconstruct"));
+            }
+        }
+        same_proposal(&rebuilt.expect("the clean k reconstruct the proposal"), &proposal);
     }
 
     #[test]
