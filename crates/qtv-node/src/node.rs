@@ -1778,6 +1778,7 @@ mod tests {
     fn a_governance_transaction_drives_a_referendum_through_the_executor() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
+        ledger.seed_validator_bond(&qtv_idfmt::render_address(&[201u8; 32]).unwrap(), 10_000 * 1_000_000);
         let proposer = keypair(100);
         let voter = keypair(101);
         fund(&mut ledger, &proposer, 30_000 * 1_000_000);
@@ -1807,6 +1808,7 @@ mod tests {
     fn a_governance_blacklist_stops_the_address_from_transacting() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
+        ledger.seed_validator_bond(&qtv_idfmt::render_address(&[201u8; 32]).unwrap(), 10_000 * 1_000_000);
         let proposer = keypair(112);
         let voter = keypair(113);
         let hostile = keypair(114);
@@ -1851,6 +1853,7 @@ mod tests {
     fn a_blacklisted_sender_is_refused_for_every_operation_not_only_a_transfer() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
+        ledger.seed_validator_bond(&qtv_idfmt::render_address(&[201u8; 32]).unwrap(), 10_000 * 1_000_000);
         let proposer = keypair(130);
         let voter = keypair(131);
         let hostile = keypair(132);
