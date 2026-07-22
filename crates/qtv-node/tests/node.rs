@@ -112,6 +112,52 @@ fn a_signed_transfer_executes_lands_in_a_block_and_moves_state() {
 }
 
 #[test]
+fn an_equivocator_is_banned_in_chain_state_and_excluded_from_the_next_committee() {
+    let alice = user(0);
+    let mut node = boot(genesis(
+        vec![GenesisAccount::from_account(&alice, 1_000_000)],
+        &[true, true, true, true],
+    ));
+
+    let culprit = 2u64;
+    let address = qtv_node::node::validator_address(culprit);
+    assert!(
+        node.ledger().staked_weight(&address) > 0,
+        "the validator is bonded at genesis"
+    );
+
+    node.force_equivocation(culprit);
+    node.produce().expect("the first block finalizes");
+
+    assert!(
+        node.slashed().contains(&culprit),
+        "the double signer is recorded in the slashed set"
+    );
+    assert!(
+        !node.slashed().contains(&1),
+        "an honest validator is never slashed"
+    );
+    assert!(
+        node.ledger().is_validator_banned(&address),
+        "the equivocator is banned in chain state"
+    );
+    assert_eq!(
+        node.ledger().staked_weight(&address),
+        0,
+        "the slashed bond carries no committee weight"
+    );
+
+    node.produce()
+        .expect("the next block finalizes without the banned validator");
+    let latest = node.chain().last().expect("a finalized block");
+    assert!(
+        !latest.members.contains(&culprit),
+        "the banned validator is excluded from the next committee"
+    );
+    assert_eq!(latest.header().height(), 2);
+}
+
+#[test]
 fn the_committee_finalizes_a_run_of_heights_in_order() {
     let params = FeeParams::devnet();
     let alice = user(0);
