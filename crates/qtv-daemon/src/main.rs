@@ -212,7 +212,11 @@ fn log_startup(
         "block interval {} ms, view timeout {} ms",
         settings.block_interval_ms, settings.view_timeout_ms
     ));
-    util::log("dev mode on, one process holds every validator's fixture secret");
+    util::log(
+        "dev mode on, the roster of commitments is derived from reproducible per index \
+         fixtures; the node holds only its own secret and forms the committee from published \
+         reveals",
+    );
     if settings.peers.is_empty() {
         util::log("no peers configured, this node is a committee of one and its own supermajority");
     } else {
@@ -280,18 +284,20 @@ fn guard_derived_keys(dev: bool) {
     }
     eprintln!(
         "\nquantovad refuses to start.\n\n\
-         This build stands the whole committee up in one process and derives every\n\
-         validator's key material from a per index development fixture. It is a single\n\
-         owner simulation: one party holds every validator's secret, fine on that party's\n\
-         own machines and unacceptable the moment a second party runs a node, because the\n\
-         second party's identity would be one this party can reproduce.\n\n\
-         Pass --dev to run this single owner simulation on your own boxes. The custody\n\
-         primitive for the real network is in place, one secret per validator generated\n\
-         from the operating system CSPRNG and held in the operator's own keystore file,\n\
-         with only the commitments published. What remains before the network leaves one\n\
-         pair of hands is that a node sample the committee from peers' published\n\
-         commitments rather than hold their secrets, a consensus change reserved for a\n\
-         founder decision.\n\n\
+         This build derives every validator's key material from a per index development\n\
+         fixture. It is a single owner simulation: one party can reproduce every\n\
+         validator's secret, fine on that party's own machines and unacceptable the moment\n\
+         a second party runs a node, because the second party's identity would be one this\n\
+         party can reproduce.\n\n\
+         Committee formation no longer holds a roster of secrets: a node holds only its\n\
+         own secret, computes only its own reveal, and forms the committee from the reveals\n\
+         each validator publishes for itself, verified against that validator's on chain\n\
+         commitment. What remains before the network leaves one pair of hands is that each\n\
+         party generate its own secret from the operating system CSPRNG in its own keystore\n\
+         and publish its commitments (its bond address, its sortition root, its attestation\n\
+         key, and its peer id) in a multi party genesis, so no party can reproduce another's\n\
+         key material.\n\n\
+         Pass --dev to run this single owner simulation on your own boxes.\n\n\
          Stopping rather than letting this slide because it happens to work.\n"
     );
     std::process::exit(1);

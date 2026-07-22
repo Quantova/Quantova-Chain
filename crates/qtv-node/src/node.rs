@@ -1,19 +1,26 @@
 
+#[cfg(any(test, feature = "test-fixtures"))]
 use std::collections::BTreeMap;
 use std::thread;
 
+#[cfg(any(test, feature = "test-fixtures"))]
 use qtv_block::{Block as ChainBlock, Header};
 use qtv_codec::{Decode, Decoder};
 use qtv_governance::{Action, Conviction};
 use qtv_tx::Wrapper;
 
+#[cfg(any(test, feature = "test-fixtures"))]
 use crate::consensus::{header_value, Beacon, Consensus, ConsensusValidator, Parent};
 use crate::execution::execute_transfer;
 use crate::fee::FeeParams;
 use crate::ledger::{Account, Ledger};
-use crate::mempool::{validate_verified, Admitted, Mempool, Reject};
+#[cfg(any(test, feature = "test-fixtures"))]
+use crate::mempool::{Admitted, Mempool, Reject};
+use crate::mempool::validate_verified;
+#[cfg(any(test, feature = "test-fixtures"))]
 use crate::parallel::execute_parallel;
 
+#[cfg(any(test, feature = "test-fixtures"))]
 use qtv_attest::Certificate;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +85,7 @@ pub struct Genesis {
     pub genesis_time: u64,
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
 pub struct Finalized {
     pub block: ChainBlock,
     pub certificate: Certificate,
@@ -86,6 +94,7 @@ pub struct Finalized {
     pub attesters: Vec<u64>,
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
 impl Finalized {
     pub fn header(&self) -> &Header {
         self.block.header()
@@ -108,6 +117,7 @@ impl Finalized {
     }
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProduceError {
     NoCommittee,
@@ -525,11 +535,19 @@ fn verify_signatures(ledger: &Ledger, candidates: &[Wrapper], verify_cores: usiz
     verdicts
 }
 
+/// A single process node that stands the whole committee up in one process, each
+/// validator's attester computing its own reveal and the committee assembled from those
+/// published reveals. A simulation, compiled only under cfg(test) or the test-fixtures
+/// feature and absent from a default build.
+#[cfg(any(test, feature = "test-fixtures"))]
 pub struct Node {
     ledger: Ledger,
     mempool: Mempool,
     consensus: Consensus,
     base_validators: Vec<ConsensusValidator>,
+    sim_attesters: BTreeMap<u64, qtv_attest::Attester>,
+    sim_online: BTreeMap<u64, bool>,
+    slots: u64,
     fee_params: FeeParams,
     validator_addresses: BTreeMap<u64, String>,
     beacon: Beacon,
@@ -542,6 +560,27 @@ pub struct Node {
     exec_threads: usize,
 }
 
+/// Reweigh the public roster from the live ledger bonds, moving only stake weight and
+/// keeping the fixed commitments. Falls back to the genesis weights when state is bare.
+pub fn reweigh_roster(
+    ledger: &Ledger,
+    base: &[crate::consensus::ValidatorRegistration],
+) -> Vec<crate::consensus::ValidatorRegistration> {
+    let derived: Vec<crate::consensus::ValidatorRegistration> = base
+        .iter()
+        .map(|r| {
+            let mut reweighed = r.clone();
+            reweighed.stake = ledger.staked_weight(&r.bond_address);
+            reweighed
+        })
+        .collect();
+    if derived.iter().all(|r| r.stake == 0) {
+        return base.to_vec();
+    }
+    derived
+}
+
+#[cfg(any(test, feature = "test-fixtures"))]
 pub fn committee_weights(
     ledger: &Ledger,
     base: &[ConsensusValidator],
@@ -562,12 +601,11 @@ pub fn committee_weights(
     derived
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
 impl Node {
     /// Build a single process node from genesis and the per validator secret roster.
-    /// The genesis carries only commitments; the secret behind each validator is
-    /// supplied here because one process simulates the whole committee. Nothing about
-    /// a validator is derived from its public id, and no secret is written to genesis.
     pub fn new(genesis: Genesis, secrets: &BTreeMap<u64, [u8; 32]>) -> Self {
+        let slots = qtv_sampler::validator::DEFAULT_SLOTS;
         let mut ledger = Ledger::new();
         for account in &genesis.accounts {
             ledger.set_account(
@@ -608,11 +646,31 @@ impl Node {
         }
         ledger.seed_validator_set(&validator_ids);
 
+        let sim_attesters: BTreeMap<u64, qtv_attest::Attester> = validators
+            .iter()
+            .map(|v| {
+                (
+                    v.id,
+                    qtv_attest::Attester::from_secret_with_slots(v.id, &v.secret, v.stake, slots),
+                )
+            })
+            .collect();
+        let sim_online = validators.iter().map(|v| (v.id, v.online)).collect();
+        let consensus = Consensus::with_slots(
+            validators[0].id,
+            &validators[0].secret,
+            crate::consensus::roster_of(&validators, slots),
+            slots,
+        );
+
         Node {
             ledger,
             mempool: Mempool::new(),
-            consensus: Consensus::new(&validators),
+            consensus,
             base_validators: validators,
+            sim_attesters,
+            sim_online,
+            slots,
             fee_params: genesis.fee_params,
             validator_addresses,
             beacon: crate::consensus::genesis_beacon(),
@@ -624,6 +682,28 @@ impl Node {
             slashed: Vec::new(),
             exec_threads: min_validator_cores(),
         }
+    }
+
+    /// The reveals every simulated validator publishes for the slot.
+    fn published_reveals(&self, slot: u64) -> Vec<qtv_sampler::committee::PublishedReveal> {
+        self.sim_attesters
+            .iter()
+            .filter_map(|(id, attester)| {
+                let credential = attester.reveal(slot);
+                if self
+                    .consensus
+                    .verify_published(
+                        &self.beacon,
+                        slot,
+                        &qtv_sampler::committee::PublishedReveal::new(*id, credential.clone()),
+                    )
+                {
+                    Some(qtv_sampler::committee::PublishedReveal::new(*id, credential))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     pub fn set_parallelism(&mut self, threads: usize) {
@@ -648,11 +728,13 @@ impl Node {
         let height = self.height;
         let slot = height;
 
+        let reweighed = committee_weights(&self.ledger, &self.base_validators);
         self.consensus
-            .reweight(&committee_weights(&self.ledger, &self.base_validators));
+            .reweight(crate::consensus::roster_of(&reweighed, self.slots));
+        let published = self.published_reveals(slot);
         let selection = self
             .consensus
-            .select(&self.beacon, slot)
+            .select(&self.beacon, slot, &published)
             .ok_or(ProduceError::NoCommittee)?;
         let proposer = self
             .validator_addresses
@@ -689,9 +771,16 @@ impl Node {
         let value = header_value(&header_hash);
         let block = crate::consensus::Block::new(height, value, self.parent_val);
 
+        let attestations: Vec<qtv_attest::Attestation> = selection
+            .members
+            .iter()
+            .filter(|id| self.sim_online.get(id).copied().unwrap_or(false))
+            .filter_map(|id| self.sim_attesters.get(id))
+            .map(|attester| attester.attest(height, slot, block, &self.beacon))
+            .collect();
         let certificate = self
             .consensus
-            .finalize(&selection, height, slot, block, &self.beacon)
+            .finalize(&selection, height, slot, block, &self.beacon, &attestations)
             .ok_or(ProduceError::NotFinalized)?;
         debug_assert!(self
             .consensus

@@ -16,7 +16,7 @@ use crate::network::Network;
 use crate::node::{leader_for, p2p_identity, DevNode, Height, RoundError, SyncError, View};
 use crate::overlay::{ring_lattice, Seen};
 use crate::transport::{connect_duplex_pair, Mesh};
-use crate::wire::{gossip_id, CodedProposal, Message, Proposal};
+use crate::wire::{gossip_id, CodedProposal, Message, Proposal, RevealNote};
 
 const MAX_VIEW: View = 16;
 
@@ -89,6 +89,7 @@ impl Devnet<DuplexStream> {
         };
         devnet.discover(&bootstrap)?;
         devnet.form_overlay(&identities)?;
+        devnet.exchange_reveals();
         Ok(devnet)
     }
 
@@ -161,7 +162,7 @@ impl<S> Devnet<S> {
         }
         let overlay = overlay_from_identities(&identities, config.fanout);
 
-        Ok(Devnet {
+        let mut devnet = Devnet {
             nodes,
             mesh,
             config,
@@ -174,7 +175,9 @@ impl<S> Devnet<S> {
             seen: vec![Seen::new(); n],
             partition: vec![0; n],
             assemblers: vec![ProposalAssembler::new(); n],
-        })
+        };
+        devnet.exchange_reveals();
+        Ok(devnet)
     }
 
     pub fn len(&self) -> usize {
@@ -260,6 +263,21 @@ impl<S> Devnet<S> {
 
     fn active_indices(&self) -> Vec<usize> {
         (0..self.nodes.len()).filter(|&i| self.active[i]).collect()
+    }
+
+    /// Disseminate the committee reveals for the current height. Each node computes its
+    /// own reveal and it is handed to every node, which admits it against the author's
+    /// committed root. Run over every node, since committee membership follows the
+    /// sortition and not a node's block attestation liveness.
+    fn exchange_reveals(&mut self) {
+        let notes: Vec<RevealNote> = (0..self.nodes.len())
+            .filter_map(|i| self.nodes[i].own_reveal_note())
+            .collect();
+        for node in &mut self.nodes {
+            for note in &notes {
+                node.collect_reveal(note.clone());
+            }
+        }
     }
 
     pub fn height(&self) -> Height {
@@ -534,6 +552,7 @@ impl<S: Read + Write> Devnet<S> {
                     Message::ViewChange(record) => {
                         self.deliver_view_change(to, *record, ceiling, active)?;
                     }
+                    Message::Reveal(note) => self.nodes[to].collect_reveal(*note),
                     Message::Peers(_)
                     | Message::Status(_)
                     | Message::GetBlocks { .. }
@@ -565,6 +584,7 @@ impl<S: Read + Write> Devnet<S> {
         if active.is_empty() {
             return Ok(());
         }
+        self.exchange_reveals();
         for &i in &active {
             if self.nodes[i].height() < ceiling {
                 self.enter_round(i, &active)?;
@@ -573,6 +593,7 @@ impl<S: Read + Write> Devnet<S> {
         while let Some(event) = self.clock.next_event() {
             self.handle_event(event, ceiling, &active)?;
         }
+        self.exchange_reveals();
         Ok(())
     }
 
@@ -628,6 +649,7 @@ impl<S: Read + Write> Devnet<S> {
                 break;
             }
         }
+        self.exchange_reveals();
         Ok(())
     }
 
@@ -636,6 +658,7 @@ impl<S: Read + Write> Devnet<S> {
         if active.is_empty() {
             return Ok(());
         }
+        self.exchange_reveals();
         for &i in &active {
             if self.nodes[i].height() < ceiling {
                 self.enter_round(i, &active)?;
@@ -648,6 +671,7 @@ impl<S: Read + Write> Devnet<S> {
             let event = self.clock.next_event().expect("a peeked event pops");
             self.handle_event(event, ceiling, &active)?;
         }
+        self.exchange_reveals();
         Ok(())
     }
 
@@ -683,6 +707,7 @@ impl<S: Read + Write> Devnet<S> {
 
     pub fn restart_node(&mut self, index: usize) -> Result<(), RoundError> {
         self.nodes[index] = DevNode::open(&self.config.nodes[index], &self.config)?;
+        self.exchange_reveals();
         Ok(())
     }
 }

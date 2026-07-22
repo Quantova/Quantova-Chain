@@ -90,6 +90,7 @@ pub fn message_height(message: &Message) -> Option<u64> {
         Message::CodedProposal(c) => Some(c.header.height()),
         Message::Attest(a) => Some(a.height),
         Message::ViewChange(v) => Some(v.height),
+        Message::Reveal(r) => Some(r.height),
         Message::Peers(_)
         | Message::Status(_)
         | Message::GetBlocks { .. }

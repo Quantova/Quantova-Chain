@@ -98,6 +98,7 @@ impl Runtime {
             }
             Message::Attest(attestation) => self.node.on_attestation(*attestation),
             Message::ViewChange(record) => self.node.collect_view_change(selection, *record),
+            Message::Reveal(note) => self.node.collect_reveal(*note),
             Message::Peers(_)
             | Message::Status(_)
             | Message::GetBlocks { .. }
@@ -120,8 +121,36 @@ impl Runtime {
             .map_err(|e| format!("finalize failed: {e:?}"))
     }
 
+    /// Publish this node's own reveal for the height and gather the peers' reveals.
+    fn disseminate_reveals(&mut self) {
+        if let Some(note) = self.node.own_reveal_note() {
+            let bytes = Message::Reveal(Box::new(note)).encode();
+            self.broadcast(&bytes, None);
+        }
+        let expected: Vec<u64> = (1..=self.n as u64).collect();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let have = self.node.collected_reveal_ids();
+            if expected.iter().all(|id| have.contains(id)) {
+                break;
+            }
+            match self.inbound.recv_timeout(Duration::from_millis(10)) {
+                Ok((from, bytes)) => {
+                    if let Ok(Message::Reveal(note)) = Message::decode(&bytes) {
+                        self.node.collect_reveal(*note);
+                    } else {
+                        self.buffered.push((from, bytes));
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
+
     fn drive_height(&mut self, batch: Option<Vec<qtv_tx::Wrapper>>) -> Result<HeightOutcome, String> {
         let start_height = self.node.height();
+        self.disseminate_reveals();
         let selection = self.node.select().map_err(|e| format!("select: {e:?}"))?;
         let online: Vec<u64> = selection.members.clone();
         let i_lead = leader_for(&selection, self.node.view()) == self.node.id();
