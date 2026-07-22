@@ -147,12 +147,16 @@ pub fn execute_parallel(
 ) -> Vec<Wrapper> {
     let stake_address = crate::ledger::stake_system_address();
     let claim_address = crate::ledger::stake_claim_address();
+    let exit_address = crate::ledger::stake_exit_address();
+    let withdraw_address = crate::ledger::stake_withdraw_address();
     let gov_address = crate::ledger::gov_system_address();
     let key_register_address = crate::ledger::key_register_address();
     if candidates.iter().any(|wrapper| {
         let (sender, target) = access(wrapper);
         target == stake_address.as_str()
             || target == claim_address.as_str()
+            || target == exit_address.as_str()
+            || target == withdraw_address.as_str()
             || target == gov_address.as_str()
             || target == key_register_address.as_str()
             || ledger.is_blacklisted(sender)
