@@ -34,6 +34,10 @@ Nothing here is borrowed. The addresses are Q1 Bech32m, never a twenty byte hex 
 
 The dependency wiring is explicit. The in repository crates are path dependencies, and qtv-crypto, qtv-vm, and the qtv-bft, qtv-sampler, and qtv-attest crates come from Q-Crypto, QVM, and QRC-CONSENSUS by git tag.
 
+## Fees, burn, and split
+
+A transaction pays a floating fee in the native asset, a band from five hundredths of a cent to one tenth of a cent that floats in QTOV through the governance rate and is paid at what the sender bids. The band is unchanged, and only the split of the collected fee is set here. Every fee divides three ways. Seventy percent is burned, ten percent goes to the validators of the round which is the block proposer, and twenty percent goes to the grants account. The burn is an Ethereum base fee style destruction, so the seventy percent is removed from the total supply and the supply falls with every fee and tracks the activity on the chain rather than a fixed schedule. The sender pays the whole fee, only the proposer and grants shares are credited, and the burned share is destroyed, so the sum of balances and the total supply both fall by the burn and stay equal. Rounding dust falls into the grants share. The grants account is the keyless governance account, spendable only through a vote. Marketing and the market maker are funded from the genesis reserves and take no cut of any fee. There is no yearly supply burn, the per fee burn is the only one.
+
 ## The network and the gateway
 
 - **qtv-net** is the post quantum authenticated channel. The handshake exchanges ML-DSA identities, encapsulates an ephemeral ML-KEM key, and signs the transcript with ML-DSA, then a SHAKE256 key schedule derives the directional ChaCha20-Poly1305 record keys. There is no classical cryptography and no X25519. It also carries a systematic Reed-Solomon erasure layer over GF(256) with a SHA3 Merkle commitment, so any k of n shards reconstruct a block proposal.

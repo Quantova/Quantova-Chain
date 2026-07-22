@@ -9,7 +9,7 @@ use qtv_tx::Wrapper;
 
 use crate::execution::execute_transfer;
 use crate::fee::FeeParams;
-use crate::ledger::{state_key, Account, Ledger};
+use crate::ledger::{state_key, Account, FeeSplit, Ledger};
 use crate::mempool::plan_from_account;
 
 fn access(wrapper: &Wrapper) -> (&str, &str) {
@@ -57,7 +57,7 @@ struct Write {
 
 fn account_at(leaves: &BTreeMap<Key, Vec<u8>>, key: &Key) -> Account {
     match leaves.get(key) {
-        Some(bytes) => from_bytes(bytes).expect("state holds a canonical account record"),
+        Some(bytes) => from_bytes(bytes).unwrap_or_default(),
         None => Account::default(),
     }
 }
@@ -163,9 +163,7 @@ pub fn execute_parallel(
     }
     let layers = plan_layers(candidates);
     let mut included: Vec<usize> = Vec::new();
-    let mut fee_validators: u64 = 0;
-    let mut fee_grants: u64 = 0;
-    let mut fee_burned: u64 = 0;
+    let mut fees = FeeSplit::default();
 
     for layer in &layers {
         let tasks: Vec<Task<'_>> = layer
@@ -190,15 +188,11 @@ pub fn execute_parallel(
         for write in writes {
             ledger.insert_raw(write.sender_key, write.sender_bytes);
             ledger.insert_raw(write.recipient_key, write.recipient_bytes);
-            let (validators, grants) = Ledger::fee_shares(write.fee);
-            fee_validators = fee_validators.saturating_add(validators);
-            fee_grants = fee_grants.saturating_add(grants);
-            fee_burned = fee_burned.saturating_add(write.fee - validators - grants);
+            fees.add(FeeSplit::of(write.fee));
             included.push(write.index);
         }
     }
-    ledger.credit_pools(fee_validators, fee_grants);
-    ledger.debit_supply(fee_burned);
+    ledger.apply_fee_split(fees);
 
     included.sort_unstable();
     included

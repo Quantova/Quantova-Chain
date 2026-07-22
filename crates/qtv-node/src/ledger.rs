@@ -69,17 +69,49 @@ const STAKE_BOND_TAG: &[u8] = b"qtv/stake/bond/";
 const STAKE_REWARDS_TAG: &[u8] = b"qtv/stake/rewards/";
 const STAKE_POOL_TAG: &[u8] = b"qtv/stake/pool";
 const STAKE_TREASURY_TAG: &[u8] = b"qtv/stake/treasury";
-const GRANTS_POOL_TAG: &[u8] = b"qtv/grants/pool";
 const SUPPLY_TAG: &[u8] = b"qtv/supply";
 
-const FEE_BURN_BPS: u64 = 2_000;
-const FEE_VALIDATORS_BPS: u64 = 6_000;
-const FEE_GRANTS_BPS: u64 = 2_000;
-const _: () = assert!(FEE_BURN_BPS + FEE_VALIDATORS_BPS + FEE_GRANTS_BPS == 10_000);
+pub const FEE_BURN_BPS: u64 = 7_000;
+pub const FEE_PROPOSER_BPS: u64 = 1_000;
+pub const FEE_GRANTS_BPS: u64 = 2_000;
+const _: () = assert!(FEE_BURN_BPS + FEE_PROPOSER_BPS + FEE_GRANTS_BPS == 10_000);
+
 const STAKE_PRICE_TAG: &[u8] = b"qtv/stake/price";
 const STAKE_MAINNET_TAG: &[u8] = b"qtv/stake/mainnet";
 const STAKE_METER_TAG: &[u8] = b"qtv/stake/meter";
 const STAKE_VALIDATORS_TAG: &[u8] = b"qtv/stake/validators";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FeeSplit {
+    pub burn: u64,
+    pub proposer: u64,
+    pub grants: u64,
+}
+
+impl FeeSplit {
+    pub fn of(fee: u64) -> Self {
+        let burn = ((fee as u128) * (FEE_BURN_BPS as u128) / 10_000) as u64;
+        let proposer = ((fee as u128) * (FEE_PROPOSER_BPS as u128) / 10_000) as u64;
+        let grants = fee - burn - proposer;
+        FeeSplit {
+            burn,
+            proposer,
+            grants,
+        }
+    }
+
+    pub fn total(&self) -> u64 {
+        self.burn
+            .saturating_add(self.proposer)
+            .saturating_add(self.grants)
+    }
+
+    pub fn add(&mut self, other: FeeSplit) {
+        self.burn = self.burn.saturating_add(other.burn);
+        self.proposer = self.proposer.saturating_add(other.proposer);
+        self.grants = self.grants.saturating_add(other.grants);
+    }
+}
 
 fn stake_bond_key(id: &[u8; 32]) -> Key {
     let mut input = Vec::with_capacity(STAKE_BOND_TAG.len() + id.len());
@@ -150,6 +182,11 @@ pub fn stake_system_address() -> String {
 
 pub fn stake_claim_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/stake/claim"))
+        .expect("a full hash reaches the address floor")
+}
+
+pub fn grants_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/gov/grants"))
         .expect("a full hash reaches the address floor")
 }
 
@@ -427,54 +464,49 @@ impl Ledger {
         (stake_singleton_key(SUPPLY_TAG), to_bytes(&amount))
     }
 
-    pub fn grants_pool(&self) -> u64 {
-        self.trie
-            .get(&stake_singleton_key(GRANTS_POOL_TAG))
-            .map(|bytes| from_bytes(bytes).expect("state holds a canonical grants balance"))
-            .unwrap_or(0)
+    pub fn set_round_proposer(&mut self, address: &str) {
+        self.round_proposer = if address.is_empty() {
+            None
+        } else {
+            Some(address.to_string())
+        };
     }
 
-    pub fn set_grants_pool(&mut self, amount: u64) {
-        self.trie
-            .insert(stake_singleton_key(GRANTS_POOL_TAG), to_bytes(&amount));
+    pub fn round_proposer(&self) -> Option<&str> {
+        self.round_proposer.as_deref()
+    }
+
+    fn credit_account(&mut self, address: &str, amount: u64) {
+        if amount == 0 {
+            return;
+        }
+        let mut account = self.account(address);
+        account.balance = account.balance.saturating_add(amount);
+        self.set_account(address, &account);
+    }
+
+    pub fn apply_fee_split(&mut self, split: FeeSplit) {
+        let grants = grants_address();
+        match self.round_proposer.clone() {
+            Some(proposer) => self.credit_account(&proposer, split.proposer),
+            None => self.credit_account(&grants, split.proposer),
+        }
+        self.credit_account(&grants, split.grants);
+        self.debit_supply(split.burn);
     }
 
     pub fn collect_fee(&mut self, fee: u64) {
         if fee == 0 {
             return;
         }
-        let validators = ((fee as u128) * (FEE_VALIDATORS_BPS as u128) / 10_000) as u64;
-        let grants = ((fee as u128) * (FEE_GRANTS_BPS as u128) / 10_000) as u64;
-        let pool = self.stake_pool().saturating_add(validators);
-        self.set_stake_pool(pool);
-        let grants_pool = self.grants_pool().saturating_add(grants);
-        self.set_grants_pool(grants_pool);
-        self.debit_supply(fee - validators - grants);
+        self.apply_fee_split(FeeSplit::of(fee));
     }
 
-    pub fn fee_burned(fee: u64) -> u64 {
-        let validators = ((fee as u128) * (FEE_VALIDATORS_BPS as u128) / 10_000) as u64;
-        let grants = ((fee as u128) * (FEE_GRANTS_BPS as u128) / 10_000) as u64;
-        fee - validators - grants
-    }
-
-    pub fn fee_shares(fee: u64) -> (u64, u64) {
-        if fee == 0 {
-            return (0, 0);
-        }
-        let validators = ((fee as u128) * (FEE_VALIDATORS_BPS as u128) / 10_000) as u64;
-        let grants = ((fee as u128) * (FEE_GRANTS_BPS as u128) / 10_000) as u64;
-        (validators, grants)
-    }
-
-    pub fn credit_pools(&mut self, validators: u64, grants: u64) {
-        if validators == 0 && grants == 0 {
-            return;
-        }
-        let pool = self.stake_pool().saturating_add(validators);
-        self.set_stake_pool(pool);
-        let grants_pool = self.grants_pool().saturating_add(grants);
-        self.set_grants_pool(grants_pool);
+    pub fn seed_grants_account(&mut self) -> Vec<(Key, Vec<u8>)> {
+        let address = grants_address();
+        let account = self.account(&address);
+        self.set_account(&address, &account);
+        vec![(state_key(&address), to_bytes(&account))]
     }
 
     pub fn take_dirty_entries(&mut self) -> Vec<(Key, Vec<u8>)> {
@@ -1749,6 +1781,7 @@ impl BlockEvent {
 pub struct Ledger {
     trie: Trie,
     block_events: Vec<BlockEvent>,
+    round_proposer: Option<String>,
 }
 
 impl Ledger {
@@ -1756,6 +1789,7 @@ impl Ledger {
         Ledger {
             trie: Trie::new(),
             block_events: Vec::new(),
+            round_proposer: None,
         }
     }
 
@@ -1764,6 +1798,7 @@ impl Ledger {
         Ledger {
             trie,
             block_events: Vec::new(),
+            round_proposer: None,
         }
     }
 
@@ -1829,18 +1864,42 @@ mod tests {
     }
 
     #[test]
-    fn supply_starts_at_genesis_falls_by_the_burn_and_rises_by_a_mint() {
+    fn a_fee_split_is_seventy_ten_twenty_with_dust_to_grants() {
+        let split = FeeSplit::of(1_000);
+        assert_eq!(split.burn, 700, "seven tenths of the fee burn");
+        assert_eq!(split.proposer, 100, "a tenth to the proposer");
+        assert_eq!(split.grants, 200, "a fifth to grants");
+        assert_eq!(split.total(), 1_000, "the shares sum to the fee");
+
+        let odd = FeeSplit::of(7);
+        assert_eq!(
+            (odd.burn, odd.proposer),
+            (4, 0),
+            "the burn and proposer shares floor"
+        );
+        assert_eq!(odd.grants, 3, "the rounding dust lands in the grants share");
+        assert_eq!(odd.total(), 7, "the split conserves the fee to the unit");
+    }
+
+    #[test]
+    fn a_fee_burns_seventy_percent_of_the_supply_and_a_mint_raises_it() {
         let mut ledger = Ledger::new();
         ledger.seed_supply(1_000_000);
         assert_eq!(ledger.total_supply(), 1_000_000, "genesis fixes the supply");
 
-        let fee = 1_000u64;
-        let burned = Ledger::fee_burned(fee);
-        ledger.collect_fee(fee);
-        assert_eq!(ledger.total_supply(), 1_000_000 - burned, "the burn lowers the supply");
+        ledger.collect_fee(1_000);
+        assert_eq!(
+            ledger.total_supply(),
+            1_000_000 - 700,
+            "a fee burns seven tenths and lowers the supply by that much"
+        );
 
         ledger.credit_supply(500);
-        assert_eq!(ledger.total_supply(), 1_000_000 - burned + 500, "a mint raises the supply");
+        assert_eq!(
+            ledger.total_supply(),
+            1_000_000 - 700 + 500,
+            "a mint raises the supply"
+        );
     }
 
     #[test]

@@ -408,7 +408,9 @@ fn dispatch_vm(
         }
     } else if args.len() >= 4 {
         let selector = [args[0], args[1], args[2], args[3]];
-        ledger.call_contract(&sender, &target, selector, &args[4..], now_seconds, meter);
+        if selector != qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE) {
+            ledger.call_contract(&sender, &target, selector, &args[4..], now_seconds, meter);
+        }
     }
     true
 }
@@ -614,6 +616,7 @@ impl Node {
                 &Account::funded(account.balance, account.scheme, account.public_key.clone()),
             );
         }
+        ledger.seed_grants_account();
 
         let validators: Vec<ConsensusValidator> = genesis
             .validators
@@ -743,6 +746,7 @@ impl Node {
             .cloned()
             .unwrap_or_default();
 
+        self.ledger.set_round_proposer(&proposer);
         let included = self.execute_block();
         let included_ids: Vec<String> = included.iter().map(Wrapper::id).collect();
 
@@ -928,20 +932,49 @@ mod tests {
     }
 
     #[test]
-    fn a_transfer_fee_burns_a_portion_and_funds_the_pools() {
+    fn a_transfer_to_a_system_record_address_does_not_halt_the_executor() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let alice = keypair(300);
+        fund(&mut ledger, &alice, 10_000 * 1_000_000);
+        ledger.set_stake_pool(9_000);
+        let pool_key = qtv_crypto::sha3::sha3_256(b"qtv/stake/pool");
+        let hostile = qtv_idfmt::render_address(&pool_key).expect("a full hash reaches the floor");
+        let pool_before = ledger.stake_pool();
+        let tx = transfer(&alice, &hostile, 1, 0, &fee);
+        let included = execute_ordered(&mut ledger, &[tx], &fee, 0);
+        assert_eq!(included.len(), 1, "the crafted transfer is handled as an ordinary send");
+        assert_eq!(
+            ledger.account(&hostile).balance,
+            1,
+            "the unit lands in a domain-separated account leaf, not the system record"
+        );
+        assert!(
+            ledger.stake_pool() >= pool_before,
+            "the stake pool record stays a coherent balance and is never clobbered"
+        );
+    }
+
+    #[test]
+    fn a_transfer_fee_splits_seventy_ten_twenty_and_burns_the_supply() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
         let alice = keypair(200);
         let bob = keypair(201);
         fund(&mut ledger, &alice, 10_000 * 1_000_000);
+        ledger.seed_supply(10_000 * 1_000_000);
+
+        let proposer = qtv_idfmt::render_address(&[0x5Au8; 32]).unwrap();
+        ledger.set_round_proposer(&proposer);
+        let grants = crate::ledger::grants_address();
+        let marketing =
+            qtv_idfmt::render_address(&qtv_crypto::sha3::sha3_256(b"qtv/ecosystem/marketing")).unwrap();
+        let market_maker =
+            qtv_idfmt::render_address(&qtv_crypto::sha3::sha3_256(b"qtv/ecosystem/market-maker")).unwrap();
 
         let charged = fee.transfer_fee();
-        let pool_before = ledger.stake_pool();
-        let grants_before = ledger.grants_pool();
-        let supply_before = ledger.account(&alice.address()).balance
-            + ledger.account(&bob.address()).balance
-            + pool_before
-            + grants_before;
+        assert_eq!(charged, 500, "the devnet transfer fee");
+        let supply_before = ledger.total_supply();
 
         let tx = transfer(&alice, &bob.address(), 1_000, 0, &fee);
         assert_eq!(
@@ -950,26 +983,34 @@ mod tests {
             "the transfer is included"
         );
 
-        let pool_gain = ledger.stake_pool() - pool_before;
-        let grants_gain = ledger.grants_pool() - grants_before;
-        let burned = Ledger::fee_burned(charged);
-        assert!(pool_gain > 0 && grants_gain > 0, "both pools are funded");
-        assert!(burned > 0, "a portion is burned");
+        assert_eq!(ledger.balance(&proposer), 50, "the proposer takes a tenth");
+        assert_eq!(ledger.balance(&grants), 100, "grants takes a fifth");
+        assert_eq!(ledger.balance(&marketing), 0, "marketing takes no fee cut");
+        assert_eq!(ledger.balance(&market_maker), 0, "the market maker takes no fee cut");
+
         assert_eq!(
-            pool_gain + grants_gain + burned,
-            charged,
-            "the whole fee splits into the pools and the burn, nothing created or lost"
+            supply_before - ledger.total_supply(),
+            350,
+            "the supply falls by the seven tenths that burn"
         );
 
-        let supply_after = ledger.account(&alice.address()).balance
-            + ledger.account(&bob.address()).balance
-            + ledger.stake_pool()
-            + ledger.grants_pool();
+        let balances = ledger.balance(&alice.address())
+            + ledger.balance(&bob.address())
+            + ledger.balance(&proposer)
+            + ledger.balance(&grants);
         assert_eq!(
-            supply_before - supply_after,
-            burned,
-            "the total supply falls by exactly the burned share"
+            ledger.total_supply(),
+            balances,
+            "the supply still equals the sum of every balance after the burn"
         );
+
+        let dust = crate::ledger::FeeSplit::of(7);
+        assert_eq!(
+            (dust.burn, dust.proposer, dust.grants),
+            (4, 0, 3),
+            "the rounding dust lands in the grants share"
+        );
+        assert_eq!(dust.total(), 7, "the split conserves the fee to the unit");
     }
 
     #[test]
@@ -1077,6 +1118,60 @@ mod tests {
                 .get(&qtv_vm::abi::scalar_key(0)),
             Some(&deployer_word),
             "the genesis constructor stored the deployer at deploy"
+        );
+    }
+
+    #[test]
+    fn a_deployed_contract_rejects_a_genesis_selector_call_and_keeps_its_owner() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let owner = keypair(160);
+        let stranger = keypair(161);
+        fund(&mut ledger, &owner, 10_000 * 1_000_000);
+        fund(&mut ledger, &stranger, 10_000 * 1_000_000);
+
+        let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
+            .expect("the program assembles");
+        let genesis = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector: genesis,
+                offset: 0,
+                access: qtv_vm::container::StateAccess::default(),
+            }],
+        );
+
+        let deploy = system_tx(
+            &owner,
+            &crate::ledger::vm_deploy_address(),
+            container.canonical_bytes(),
+            0,
+            100_000,
+            &fee,
+        );
+        assert_eq!(execute_ordered(&mut ledger, &[deploy], &fee, 0).len(), 1);
+        let contract = crate::ledger::contract_address(&owner.address(), 0).unwrap();
+        let contract_id = address_bytes(&contract);
+        let owner_word =
+            u64::from_be_bytes(address_bytes(&owner.address())[0..8].try_into().unwrap());
+        assert_eq!(
+            ledger.contract_storage(&contract_id).get(&qtv_vm::abi::scalar_key(0)),
+            Some(&owner_word),
+            "the deploy runs genesis once and records the deployer as owner"
+        );
+
+        let reinvoke = system_tx(&stranger, &contract, genesis.to_vec(), 0, 100_000, &fee);
+        execute_ordered(&mut ledger, &[reinvoke], &fee, 0);
+
+        let stranger_word =
+            u64::from_be_bytes(address_bytes(&stranger.address())[0..8].try_into().unwrap());
+        assert_ne!(owner_word, stranger_word, "the two accounts are distinct");
+        assert_eq!(
+            ledger.contract_storage(&contract_id).get(&qtv_vm::abi::scalar_key(0)),
+            Some(&owner_word),
+            "a genesis selector call on a deployed contract does not overwrite the owner"
         );
     }
 
