@@ -16,8 +16,9 @@ path = "src/main.rs"
 qtv-account = { path = "../qtv-account" }
 
 # The node engine: the genesis, the account and validator specs, the fee schedule,
-# and the committee selection the daemon drives.
-qtv-node = { path = "../qtv-node", features = ["test-fixtures"] }
+# and the committee selection the daemon drives. No test fixtures, so the daemon binary
+# carries no path that turns a validator id into key material.
+qtv-node = { path = "../qtv-node" }
 
 # The block model, for the header arbitrary data limit the daemon checks a note
 # against before handing it to the node.
@@ -28,8 +29,8 @@ qtv-net = { path = "../qtv-net" }
 
 # The devnet node and its round primitives. The daemon reuses DevNode as the one
 # node core rather than forking it, and drives it over a continuous production loop
-# instead of the harness measurement loop.
-qtv-devnet = { path = "../qtv-devnet", features = ["test-fixtures"] }
+# instead of the harness measurement loop. No test fixtures on this path.
+qtv-devnet = { path = "../qtv-devnet" }
 
 # The RPC gateway. The daemon runs it in process as a thread, feeding client requests
 # to the round loop over a channel so the node stays the single owner of its state.

@@ -7,30 +7,33 @@ mod util;
 
 use std::collections::HashMap;
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use qtv_devnet::config::{DevnetConfig, NodeConfig, FULL_FANOUT};
+use qtv_devnet::node::peer_id_of;
 use qtv_devnet::DevNode;
+use qtv_net::PeerId;
+use qtv_node::consensus::ValidatorRegistration;
+use qtv_node::node::ValidatorSpec;
 
 fn main() {
-    match run() {
-        Ok(()) => {}
-        Err(reason) => {
-            util::log(&format!("quantovad stopped: {reason}"));
-            std::process::exit(1);
-        }
+    let outcome = match Command::parse() {
+        Ok(Command::Run { config }) => run(&config),
+        Ok(Command::Register(args)) => register(args),
+        Err(reason) => Err(reason),
+    };
+    if let Err(reason) = outcome {
+        util::log(&format!("quantovad stopped: {reason}"));
+        std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), String> {
-    let args = Args::parse()?;
-    guard_derived_keys(args.dev);
-
-    let settings = config::NodeSettings::load(&args.config)?;
+fn run(config_path: &Path) -> Result<(), String> {
+    let settings = config::NodeSettings::load(config_path)?;
     let genesis_file = genesis::GenesisFile::load(&settings.genesis_path)?;
 
     let mut ids: Vec<u64> = genesis_file
@@ -45,30 +48,50 @@ fn run() -> Result<(), String> {
     if ids != expected {
         return Err(format!(
             "the genesis validator ids must be the contiguous set 1..={n}, found {ids:?}. \
-             numbering validators from one is a current build simplification, since a \
-             validator's identity derives from its id"
+             the id is only this build's index into the peer and address tables, not a source \
+             of any key material, and numbering from one is a current build simplification"
         ));
     }
 
     let my_id = settings.id;
-    let my_stake = genesis_file
+    let my_spec = genesis_file
         .genesis
         .validators
         .iter()
         .find(|v| v.id == my_id)
-        .map(|v| v.stake)
+        .cloned()
         .ok_or_else(|| format!("this node's id {my_id} is not in the genesis validator set"))?;
     let idx = (my_id - 1) as usize;
+
+    let secret = qtv_node::keys::load_or_generate(&settings.keystore_path).map_err(|e| {
+        format!("reading the keystore {}: {e}", settings.keystore_path.display())
+    })?;
+
+    let own = ValidatorSpec::from_secret(
+        my_id,
+        my_spec.stake,
+        my_spec.online,
+        &secret,
+        genesis_file.slots,
+    );
+    if own != my_spec {
+        return Err(format!(
+            "the keystore {} does not hold the secret behind this node's genesis registration \
+             for id {my_id}. Regenerate the genesis line from this keystore with 'quantovad \
+             register', or point the config at the keystore that produced the published line",
+            settings.keystore_path.display()
+        ));
+    }
 
     let devnet = build_devnet(&genesis_file);
     let my_node = NodeConfig {
         id: my_id,
-        stake: my_stake,
+        stake: my_spec.stake,
         online: true,
         store_dir: settings.store_dir.clone(),
         bootstrap: settings.peers.iter().map(|(id, _)| *id).collect(),
         address: settings.listen.clone(),
-        secret: qtv_node::keys::fixture_secret(my_id),
+        secret,
     };
 
     let mut node =
@@ -95,6 +118,11 @@ fn run() -> Result<(), String> {
         peer_addrs[(*pid - 1) as usize] = Some(addr.clone());
     }
 
+    let mut peer_ids: Vec<Option<PeerId>> = vec![None; n];
+    for v in &genesis_file.genesis.validators {
+        peer_ids[(v.id - 1) as usize] = Some(peer_id_of(&v.p2p_public));
+    }
+
     let port = port_of(&settings.listen)?;
     let listener = TcpListener::bind(("0.0.0.0", port))
         .map_err(|e| format!("binding the transport port {port}: {e}"))?;
@@ -103,7 +131,15 @@ fn run() -> Result<(), String> {
     log_startup(&settings, &genesis_file, my_id, n, idx, port, &node);
 
     util::log("standing up the mesh, waiting for any configured peers");
-    let mesh = mesh::build_mesh(listener, &peer_addrs, idx, n, &identity, genesis_file.hash);
+    let mesh = mesh::build_mesh(
+        listener,
+        &peer_addrs,
+        &peer_ids,
+        idx,
+        n,
+        &identity,
+        genesis_file.hash,
+    );
     util::log("mesh up, driving the round");
 
     let stop_path = settings.store_dir.join("STOP");
@@ -146,28 +182,39 @@ fn run() -> Result<(), String> {
 }
 
 fn build_devnet(genesis_file: &genesis::GenesisFile) -> DevnetConfig {
-    let mut validators = genesis_file.genesis.validators.clone();
-    validators.sort_by_key(|v| v.id);
-    let nodes: Vec<NodeConfig> = validators
+    let roster: Vec<ValidatorRegistration> = genesis_file
+        .genesis
+        .validators
         .iter()
-        .map(|v| NodeConfig {
-            id: v.id,
-            stake: v.stake,
-            online: v.online,
-            store_dir: PathBuf::new(),
-            bootstrap: Vec::new(),
-            address: String::new(),
-            secret: qtv_node::keys::fixture_secret(v.id),
-        })
+        .map(ValidatorRegistration::from_spec)
         .collect();
     DevnetConfig {
         fee_params: genesis_file.genesis.fee_params,
         accounts: genesis_file.genesis.accounts.clone(),
-        nodes,
+        nodes: Vec::new(),
         genesis_time: genesis_file.genesis.genesis_time,
         fanout: FULL_FANOUT,
         slots: genesis_file.slots,
+        published_roster: Some(roster),
     }
+}
+
+fn register(args: RegisterArgs) -> Result<(), String> {
+    let secret = qtv_node::keys::load_or_generate(&args.keystore)
+        .map_err(|e| format!("reading the keystore {}: {e}", args.keystore.display()))?;
+    let spec = ValidatorSpec::from_secret(args.id, args.stake, args.online, &secret, args.slots);
+    let online = if spec.online { "online" } else { "offline" };
+    println!(
+        "validator = {} {} {} {} {} {} {}",
+        spec.id,
+        spec.stake,
+        online,
+        spec.bond_address,
+        util::hex(&spec.root.digest),
+        util::hex(&spec.attest_pk),
+        util::hex(&spec.p2p_public),
+    );
+    Ok(())
 }
 
 fn log_startup(
@@ -186,6 +233,7 @@ fn log_startup(
         util::log(&format!("genesis message, {}", genesis_file.message));
     }
     util::log(&format!("node id {my_id} of {n} validators, index {idx}"));
+    util::log(&format!("keystore {}", settings.keystore_path.display()));
     util::log(&format!("stores {}", settings.store_dir.display()));
     util::log(&format!(
         "listen {}, binding port {port} on every interface",
@@ -213,9 +261,8 @@ fn log_startup(
         settings.block_interval_ms, settings.view_timeout_ms
     ));
     util::log(
-        "dev mode on, the roster of commitments is derived from reproducible per index \
-         fixtures; the node holds only its own secret and forms the committee from published \
-         reveals",
+        "the node holds only its own secret from its keystore and reads every peer's public \
+         registration from genesis; the committee forms from the reveals each validator publishes",
     );
     if settings.peers.is_empty() {
         util::log("no peers configured, this node is a committee of one and its own supermajority");
@@ -278,64 +325,87 @@ fn spawn_stop_watcher(path: PathBuf, stopped: Arc<AtomicBool>) {
     });
 }
 
-fn guard_derived_keys(dev: bool) {
-    if dev {
-        return;
-    }
-    eprintln!(
-        "\nquantovad refuses to start.\n\n\
-         This build derives every validator's key material from a per index development\n\
-         fixture. It is a single owner simulation: one party can reproduce every\n\
-         validator's secret, fine on that party's own machines and unacceptable the moment\n\
-         a second party runs a node, because the second party's identity would be one this\n\
-         party can reproduce.\n\n\
-         Committee formation no longer holds a roster of secrets: a node holds only its\n\
-         own secret, computes only its own reveal, and forms the committee from the reveals\n\
-         each validator publishes for itself, verified against that validator's on chain\n\
-         commitment. What remains before the network leaves one pair of hands is that each\n\
-         party generate its own secret from the operating system CSPRNG in its own keystore\n\
-         and publish its commitments (its bond address, its sortition root, its attestation\n\
-         key, and its peer id) in a multi party genesis, so no party can reproduce another's\n\
-         key material.\n\n\
-         Pass --dev to run this single owner simulation on your own boxes.\n\n\
-         Stopping rather than letting this slide because it happens to work.\n"
-    );
-    std::process::exit(1);
+enum Command {
+    Run { config: PathBuf },
+    Register(RegisterArgs),
 }
 
-struct Args {
-    config: PathBuf,
-    dev: bool,
+struct RegisterArgs {
+    keystore: PathBuf,
+    id: u64,
+    stake: u64,
+    online: bool,
+    slots: u64,
 }
 
-impl Args {
-    fn parse() -> Result<Args, String> {
-        let mut config: Option<PathBuf> = None;
-        let mut dev = false;
+const USAGE: &str = "usage: quantovad --config <path>\n       quantovad register --keystore <path> \
+                     --id <id> --stake <stake> [--online|--offline] --slots <slots>";
+
+impl Command {
+    fn parse() -> Result<Command, String> {
         let mut args = std::env::args().skip(1);
-        while let Some(arg) = args.next() {
+        let first = args.next();
+        if first.as_deref() == Some("register") {
+            return Ok(Command::Register(RegisterArgs::parse(args)?));
+        }
+        let mut config: Option<PathBuf> = None;
+        let mut current = first;
+        while let Some(arg) = current.take() {
             match arg.as_str() {
-                "--dev" => dev = true,
                 "--config" => {
                     let path = args.next().ok_or("--config needs a path")?;
                     config = Some(PathBuf::from(path));
                 }
                 "--help" | "-h" => {
-                    println!("usage: quantovad --config <path> [--dev]");
+                    println!("{USAGE}");
                     std::process::exit(0);
                 }
                 other => match other.strip_prefix("--config=") {
                     Some(path) => config = Some(PathBuf::from(path)),
-                    None => {
-                        return Err(format!(
-                            "unknown argument '{other}'. usage: quantovad --config <path> [--dev]"
-                        ))
-                    }
+                    None => return Err(format!("unknown argument '{other}'. {USAGE}")),
                 },
             }
+            current = args.next();
         }
-        let config = config
-            .ok_or("missing --config <path>. usage: quantovad --config <path> [--dev]")?;
-        Ok(Args { config, dev })
+        let config = config.ok_or_else(|| format!("missing --config <path>. {USAGE}"))?;
+        Ok(Command::Run { config })
     }
+}
+
+impl RegisterArgs {
+    fn parse(mut args: impl Iterator<Item = String>) -> Result<RegisterArgs, String> {
+        let mut keystore: Option<PathBuf> = None;
+        let mut id: Option<u64> = None;
+        let mut stake: Option<u64> = None;
+        let mut online = true;
+        let mut slots: Option<u64> = None;
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--keystore" => keystore = Some(PathBuf::from(need(&mut args, "--keystore")?)),
+                "--id" => id = Some(parse_u64(&mut args, "--id")?),
+                "--stake" => stake = Some(parse_u64(&mut args, "--stake")?),
+                "--slots" => slots = Some(parse_u64(&mut args, "--slots")?),
+                "--online" => online = true,
+                "--offline" => online = false,
+                other => return Err(format!("unknown register argument '{other}'. {USAGE}")),
+            }
+        }
+        Ok(RegisterArgs {
+            keystore: keystore.ok_or("register needs --keystore <path>")?,
+            id: id.ok_or("register needs --id <id>")?,
+            stake: stake.ok_or("register needs --stake <stake>")?,
+            online,
+            slots: slots.ok_or("register needs --slots <slots>")?,
+        })
+    }
+}
+
+fn need(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
+    args.next().ok_or_else(|| format!("{flag} needs a value"))
+}
+
+fn parse_u64(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<u64, String> {
+    need(args, flag)?
+        .parse()
+        .map_err(|_| format!("{flag} needs a whole number"))
 }

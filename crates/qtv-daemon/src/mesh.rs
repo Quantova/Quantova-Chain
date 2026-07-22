@@ -4,8 +4,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-use qtv_devnet::node::node_peer_id;
-use qtv_net::{Channel, Identity};
+use qtv_net::{Channel, Identity, PeerId};
 
 use crate::util::{hex, log};
 
@@ -22,6 +21,7 @@ pub struct Mesh {
 pub fn build_mesh(
     listener: TcpListener,
     peer_addrs: &[Option<String>],
+    peer_ids: &[Option<PeerId>],
     idx: usize,
     n: usize,
     identity: &Identity,
@@ -41,6 +41,7 @@ pub fn build_mesh(
 
     let identity_acc = identity.clone();
     let up_acc = up.clone();
+    let peer_ids_acc: Vec<Option<PeerId>> = peer_ids.to_vec();
     let acceptor = thread::spawn(move || {
         for _ in 0..up_peers {
             let (stream, _) = listener.accept().expect("accept an inbound peer connection");
@@ -50,7 +51,9 @@ pub fn build_mesh(
             };
             let peer = channel.peer_id().clone();
             let from = (0..n).find(|&q| {
-                q != idx && up_acc.get(q).copied().unwrap_or(false) && node_peer_id(q as u64 + 1) == peer
+                q != idx
+                    && up_acc.get(q).copied().unwrap_or(false)
+                    && peer_ids_acc.get(q).and_then(|p| p.as_ref()) == Some(&peer)
             });
             if let Some(from) = from {
                 let _ = accepted_tx.send((from, channel));
@@ -65,13 +68,16 @@ pub fn build_mesh(
             Some(addr) if q != idx => (q, addr),
             _ => continue,
         };
+        let Some(peer) = peer_ids.get(q).and_then(|p| p.clone()) else {
+            log(&format!("no published peer id for peer {}, dropping it", q + 1));
+            continue;
+        };
         let stream = loop {
             match TcpStream::connect(addr) {
                 Ok(stream) => break stream,
                 Err(_) => thread::sleep(Duration::from_millis(20)),
             }
         };
-        let peer = node_peer_id(q as u64 + 1);
         let mut channel =
             Channel::connect_pinned(stream, identity, &peer).expect("initiator handshake");
         if channel.send(&hello).is_err() {
