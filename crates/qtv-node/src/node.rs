@@ -124,6 +124,7 @@ impl Finalized {
 pub enum ProduceError {
     NoCommittee,
     NotFinalized,
+    DoubleSignRefused,
 }
 
 /// The bond and reward address of the validator behind a fixture secret index, for
@@ -603,6 +604,7 @@ pub struct Node {
     slashed: Vec<u64>,
     exec_threads: usize,
     equivocator: Option<u64>,
+    sign_guard: Option<crate::watermark::SignGuard>,
 }
 
 /// Reweigh the public roster from the live ledger bonds, moving only stake weight and
@@ -728,11 +730,17 @@ impl Node {
             slashed: Vec::new(),
             exec_threads: min_validator_cores(),
             equivocator: None,
+            sign_guard: None,
         }
     }
 
     pub fn force_equivocation(&mut self, id: u64) {
         self.equivocator = Some(id);
+    }
+
+    pub fn with_sign_guard(mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        self.sign_guard = Some(crate::watermark::SignGuard::open(path)?);
+        Ok(self)
     }
 
     /// The reveals every simulated validator publishes for the slot.
@@ -787,6 +795,11 @@ impl Node {
             .consensus
             .select(&self.beacon, slot, &published)
             .ok_or(ProduceError::NoCommittee)?;
+        if let Some(guard) = self.sign_guard.as_mut() {
+            if !guard.try_sign(height, 0).unwrap_or(false) {
+                return Err(ProduceError::DoubleSignRefused);
+            }
+        }
         let proposer = self
             .validator_addresses
             .get(&selection.leader)
