@@ -7,13 +7,13 @@
 //! host dropping, and two hosts dropping. It asserts the harness degrades honestly under
 //! each and never turns a broken run into a clean looking number.
 //!
-//! A slow host is still a present committee member, so the round waits for it and its
-//! cost lands in the finality distribution: the tail of the slow run is wider than the
-//! healthy tail. One host dropping leaves a supermajority, so the run continues, but the
-//! dropped host's heights rotate through a view change, so the finalised throughput
-//! falls, the finalised count per unit wall clock dropping because only finalised
-//! transactions are counted. Two hosts dropping leaves the online set below the
-//! supermajority, so no height finalises and the run reports the stall, never a number.
+//! Finality reaches an absolute threshold derived from the registered committee, not a
+//! fraction of whoever published. A slow host is still a present committee member, so the
+//! round waits for it and the tail of the slow run is wider than the healthy tail. One
+//! host dropping leaves three publishers, which still meets the threshold, so the run
+//! finalises the whole run at zero margin over the three that remain. Two hosts dropping
+//! leaves two publishers, a minority below the threshold, so no height finalises however
+//! the two rotate the view, and the run reports the stall, never a number.
 //!
 //! Every figure here is a loopback multi process figure over real sockets with near zero
 //! propagation, exactly as the loopback run was labelled. It is not a network number.
@@ -28,17 +28,14 @@ fn validator_bin() -> String {
 }
 
 /// A small fast scenario shared by the faults, so the whole test runs in seconds. The
-/// committee is four, the supermajority three, the block width small so a healthy height
-/// finalises in tens of milliseconds well under the view timeout, and the run is a short
-/// fixed height count so every up host stops together.
+/// registered committee is four and the absolute threshold three, the block width small so
+/// a healthy height finalises in tens of milliseconds well under the view timeout, and the
+/// run is a short fixed height count so every up host stops together.
 fn base_scenario() -> Scenario {
     Scenario {
         validators: 4,
         senders_n: 12,
-        // A long enough run that the dropped host is elected leader several times, so
-        // the view change that routes around it is exercised without depending on a
-        // single lucky election.
-        heights: 30,
+        heights: 16,
         warmup: 2,
         height_cap: (qtv_loopback::HARNESS_SLOTS as usize) - 64,
         view_ms: 400,
@@ -59,14 +56,10 @@ fn ingress(reports: &[RunReport]) -> RunReport {
         .expect("the ingress host reported")
 }
 
-// Under the published reveal committee a host that publishes no reveal is not in the
-// committee, so the drop assertions here depend on the committee denominator, a founder
-// decision. Out of the default run until it is settled.
 #[test]
-#[ignore = "committee denominator under the published reveal committee is a founder decision"]
 fn faults_degrade_honestly_over_real_sockets() {
-    // The healthy baseline: four up hosts, no fault. It finalises the full run and every
-    // up host agrees on a byte identical chain, the reference the faults move against.
+    // The healthy baseline. Four up hosts, no fault, the committee is the whole
+    // registered set and finality reaches the absolute threshold with a margin.
     let healthy = base_scenario();
     let healthy_reports = run_scenario(&healthy);
     let base = ingress(&healthy_reports);
@@ -77,8 +70,6 @@ fn faults_degrade_honestly_over_real_sockets() {
     );
     let base_dist = base.finality().expect("the baseline has a finality distribution");
     let base_tail = base_dist.p99;
-    let base_throughput = base.throughput();
-    // Every up host finalised the byte identical chain over the healthy run.
     for report in &healthy_reports {
         assert_eq!(
             report.block_hashes, base.block_hashes,
@@ -108,37 +99,31 @@ fn faults_degrade_honestly_over_real_sockets() {
         base_tail
     );
 
-    // Fault two, one host dropping. Host three is down. Three of four remain, still the
-    // supermajority, so the run continues and finalises the whole height count, but the
-    // dropped host's heights rotate through a view change, so the finalised throughput
-    // falls. Assert the run continued and the throughput fell.
+    // Fault two, one host dropping. Host three is down, so three of four publish. Three
+    // meets the absolute threshold, so the run still finalises the whole height count over
+    // the three that remain, now at zero margin. The committee is the three publishers.
     let mut drop_one = base_scenario();
     drop_one.up[3] = false;
     let drop_one_reports = run_scenario(&drop_one);
     let drop_one_ingress = ingress(&drop_one_reports);
     assert!(
         !drop_one_ingress.stalled,
-        "one host dropping leaves a supermajority, so the run continues"
+        "three publishers meet the threshold, so one host dropping does not stall the run"
     );
     assert_eq!(
         drop_one_ingress.heights as usize, drop_one.heights,
         "the degraded run still finalises the whole height count on the remaining hosts"
     );
-    assert!(
-        drop_one_ingress.rotations > 0,
-        "the dropped host's heights must rotate through a view change, none were seen"
-    );
-    assert!(
-        drop_one_ingress.throughput() < base_throughput,
-        "the finalised throughput must fall when a host drops: degraded {:.0} tx/s was not \
-         below the healthy {:.0} tx/s",
-        drop_one_ingress.throughput(),
-        base_throughput
-    );
+    for report in &drop_one_reports {
+        assert_eq!(
+            report.block_hashes, drop_one_ingress.block_hashes,
+            "every up host finalises the byte identical chain when one host drops"
+        );
+    }
 
-    // Fault three, two hosts dropping. Hosts two and three are down. Two of four remain,
-    // below the supermajority, so no height can finalise. Assert the run reports the
-    // stall with no finalised heights, never a fabricated number.
+    // Fault three, two hosts dropping. Hosts two and three are down, so two of four
+    // publish. Two is below the absolute threshold, so no height reaches it however the two
+    // rotate the view, and the run reports the stall rather than finalising on a minority.
     let mut drop_two = base_scenario();
     drop_two.up[2] = false;
     drop_two.up[3] = false;
@@ -146,12 +131,11 @@ fn faults_degrade_honestly_over_real_sockets() {
     let drop_two_ingress = ingress(&drop_two_reports);
     assert!(
         drop_two_ingress.stalled,
-        "two hosts dropping leaves the online set below the supermajority, which must be \
-         reported as a stall"
+        "two publishers are below the absolute threshold, which must be reported as a stall"
     );
     assert_eq!(
         drop_two_ingress.heights, 0,
-        "a stalled run finalises no measured height, so it reports a stall and not a number"
+        "a minority of publishers finalises no measured height, so it reports a stall"
     );
     assert!(
         drop_two_ingress.finality().is_none(),

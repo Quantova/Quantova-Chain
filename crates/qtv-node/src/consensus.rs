@@ -113,6 +113,8 @@ pub struct Selection {
     pub commitment: CommitteeCommitment,
     pub members: Vec<u64>,
     pub leader: u64,
+    pub tau: u64,
+    pub expected: u64,
 }
 
 pub fn genesis_beacon() -> Beacon {
@@ -227,10 +229,14 @@ impl Consensus {
             .collect();
         let commitment = CommitteeCommitment::from_member_keys(slot, member_keys, self.budget);
         let leader = view.elect_leader(&committee, beacon, slot)?.id;
+        let expected = qtv_sampler::sortition::expected_committee(&view.weights(), self.budget);
+        let tau = qtv_sampler::params::finality_threshold(expected);
         Some(Selection {
             commitment,
             members,
             leader,
+            tau,
+            expected,
         })
     }
 
@@ -262,6 +268,7 @@ impl Consensus {
             &selection.commitment,
             beacon,
             attestations,
+            selection.tau,
         )
     }
 
@@ -272,7 +279,7 @@ impl Consensus {
         beacon: &Beacon,
     ) -> bool {
         certificate
-            .verify(&selection.commitment, beacon)
+            .verify(&selection.commitment, beacon, selection.tau)
             .is_verified()
     }
 }
@@ -414,6 +421,89 @@ mod tests {
     }
 
     #[test]
+    fn a_suppressed_minority_below_tau_cannot_finalise() {
+        let validators = secrets(&[true, true, true, true]);
+        let consensus = consensus_for(&validators);
+        let sim = Sim::new(&validators);
+        let beacon = genesis_beacon();
+        let all = sim.published(&consensus, &beacon, 1);
+        let minority: Vec<PublishedReveal> =
+            all.into_iter().filter(|r| r.id == 1 || r.id == 2).collect();
+        let selection = consensus.select(&beacon, 1, &minority).expect("committee");
+        assert_eq!(selection.members, vec![1, 2]);
+        assert_eq!(selection.expected, 4);
+        assert_eq!(selection.tau, 3);
+        let atts = sim.attestations(&selection, 1, 1, block_for(1), &beacon);
+        assert_eq!(atts.len(), 2);
+        assert!(consensus
+            .finalize(&selection, 1, 1, block_for(1), &beacon, &atts)
+            .is_none());
+    }
+
+    #[test]
+    fn the_honest_online_set_reaches_tau_and_finalises() {
+        let validators = secrets(&[true, true, true, true]);
+        let consensus = consensus_for(&validators);
+        let sim = Sim::new(&validators);
+        let beacon = genesis_beacon();
+        let published = sim.published(&consensus, &beacon, 1);
+        let selection = consensus.select(&beacon, 1, &published).expect("committee");
+        assert_eq!(selection.expected, 4);
+        assert_eq!(selection.tau, 3);
+        let atts = sim.attestations(&selection, 1, 1, block_for(1), &beacon);
+        let cert = consensus
+            .finalize(&selection, 1, 1, block_for(1), &beacon, &atts)
+            .expect("finality");
+        assert!(cert.attesters().len() as u64 >= selection.tau);
+        assert!(consensus.verify(&cert, &selection, &beacon));
+    }
+
+    #[test]
+    fn tau_is_absolute_and_does_not_follow_the_published_set() {
+        let validators = secrets(&[true, true, true, true]);
+        let consensus = consensus_for(&validators);
+        let sim = Sim::new(&validators);
+        let beacon = genesis_beacon();
+        let full = sim.published(&consensus, &beacon, 1);
+        let two: Vec<PublishedReveal> =
+            full.iter().cloned().filter(|r| r.id == 1 || r.id == 2).collect();
+        let three: Vec<PublishedReveal> = full
+            .iter()
+            .cloned()
+            .filter(|r| r.id == 1 || r.id == 2 || r.id == 3)
+            .collect();
+        let by_two = consensus.select(&beacon, 1, &two).expect("committee");
+        let by_three = consensus.select(&beacon, 1, &three).expect("committee");
+        let by_four = consensus.select(&beacon, 1, &full).expect("committee");
+        assert_eq!((by_two.tau, by_three.tau, by_four.tau), (3, 3, 3));
+    }
+
+    #[test]
+    fn two_conflicting_blocks_cannot_both_finalise() {
+        let validators = secrets(&[true, true, true, true]);
+        let consensus = consensus_for(&validators);
+        let sim = Sim::new(&validators);
+        let beacon = genesis_beacon();
+        let published = sim.published(&consensus, &beacon, 1);
+        let selection = consensus.select(&beacon, 1, &published).expect("committee");
+        assert_eq!(selection.expected, 4);
+        assert_eq!(selection.tau, 3);
+        let mk_a = || block_for(1);
+        let mk_b = || Block::new(1, header_value(&[42u8; 32]), Parent::Genesis);
+        let att =
+            |id: u64, block: Block| sim.attesters.get(&id).unwrap().attest(1, 1, block, &beacon);
+        let atts_a = vec![att(1, mk_a()), att(2, mk_a()), att(4, mk_a())];
+        let atts_b = vec![att(3, mk_b()), att(4, mk_b())];
+        let cert_a = consensus.finalize(&selection, 1, 1, mk_a(), &beacon, &atts_a);
+        let cert_b = consensus.finalize(&selection, 1, 1, mk_b(), &beacon, &atts_b);
+        assert!(cert_b.is_none(), "one honest seat plus the adversary cannot reach the threshold");
+        assert!(
+            !(cert_a.is_some() && cert_b.is_some()),
+            "two conflicting blocks must never both finalise"
+        );
+    }
+
+    #[test]
     fn the_header_value_is_a_deterministic_fold() {
         assert_eq!(header_value(&[3u8; 32]), header_value(&[3u8; 32]));
         assert_ne!(header_value(&[3u8; 32]), header_value(&[4u8; 32]));
@@ -503,7 +593,7 @@ mod tests {
 
         assert!(!consensus.verify(&forged, &selection, &beacon));
         assert_eq!(
-            forged.verify(&selection.commitment, &beacon),
+            forged.verify(&selection.commitment, &beacon, selection.tau),
             Verdict::Rejected(RejectReason::NotEntitled)
         );
     }

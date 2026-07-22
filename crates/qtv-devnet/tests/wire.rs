@@ -187,14 +187,14 @@ fn a_certificate_carrying_block_round_trips_and_still_verifies() {
         b.attest(1, 0, block, &beacon),
         c.attest(1, 0, block, &beacon),
     ];
-    let cert = aggregate(1, 0, block, &commitment, &beacon, &atts).expect("quorum");
+    let cert = aggregate(1, 0, block, &commitment, &beacon, &atts, 3).expect("quorum");
 
     // The certificate slot round trips to the same certificate, and it still
     // verifies from public inputs alone, the check a syncing node runs.
     let cert_bytes = certificate_to_bytes(&cert);
     let decoded = certificate_from_bytes(&cert_bytes).expect("cert decodes");
     assert_eq!(decoded.digest(), cert.digest());
-    assert!(decoded.verify(&commitment, &beacon).is_verified());
+    assert!(decoded.verify(&commitment, &beacon, 3).is_verified());
 
     // A finalized block carrying the certificate round trips through the sync
     // response, header, slot, and body preserved.
