@@ -92,6 +92,7 @@ pub struct Finalized {
     pub certificate: Certificate,
     pub leader: u64,
     pub committee_size: usize,
+    pub members: Vec<u64>,
     pub attesters: Vec<u64>,
 }
 
@@ -388,6 +389,10 @@ fn dispatch_vm(
     }
     let charged = u64::try_from(wrapper.body().fee().min(u128::from(fee_params.ceiling_fee())))
         .unwrap_or_else(|_| fee_params.ceiling_fee());
+    let value = wrapper.body().value();
+    if account.balance < charged.saturating_add(value) {
+        return false;
+    }
     let target = wrapper.body().call().target().to_string();
     let args = wrapper.body().call().args().to_vec();
     let nonce = account.nonce;
@@ -404,12 +409,28 @@ fn dispatch_vm(
             let mut genesis_memory =
                 vec![0u8; crate::ledger::CONTRACT_CONTEXT_BYTES + params.len()];
             genesis_memory[crate::ledger::CONTRACT_CONTEXT_BYTES..].copy_from_slice(params);
-            ledger.call_contract(&sender, &contract, genesis, &genesis_memory, now_seconds, meter);
+            ledger.call_contract(
+                &sender,
+                &contract,
+                genesis,
+                &genesis_memory,
+                now_seconds,
+                meter,
+                value,
+            );
         }
     } else if args.len() >= 4 {
         let selector = [args[0], args[1], args[2], args[3]];
         if selector != qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE) {
-            ledger.call_contract(&sender, &target, selector, &args[4..], now_seconds, meter);
+            ledger.call_contract(
+                &sender,
+                &target,
+                selector,
+                &args[4..],
+                now_seconds,
+                meter,
+                value,
+            );
         }
     }
     true
@@ -430,6 +451,9 @@ fn execute_ordered_across(
     let mut included = Vec::new();
     let mut vm_meter: u64 = 0;
     for (index, wrapper) in candidates.iter().enumerate() {
+        if wrapper.body().chain_id() != fee_params.chain_id {
+            continue;
+        }
         if ledger.is_blacklisted(wrapper.body().sender()) {
             continue;
         }
@@ -561,6 +585,7 @@ pub struct Node {
     chain: Vec<Finalized>,
     slashed: Vec<u64>,
     exec_threads: usize,
+    equivocator: Option<u64>,
 }
 
 /// Reweigh the public roster from the live ledger bonds, moving only stake weight and
@@ -685,7 +710,12 @@ impl Node {
             chain: Vec::new(),
             slashed: Vec::new(),
             exec_threads: min_validator_cores(),
+            equivocator: None,
         }
+    }
+
+    pub fn force_equivocation(&mut self, id: u64) {
+        self.equivocator = Some(id);
     }
 
     /// The reveals every simulated validator publishes for the slot.
@@ -733,8 +763,8 @@ impl Node {
         let slot = height;
 
         let reweighed = committee_weights(&self.ledger, &self.base_validators);
-        self.consensus
-            .reweight(crate::consensus::roster_of(&reweighed, self.slots));
+        let roster = crate::consensus::roster_of(&reweighed, self.slots);
+        self.consensus.reweight(roster.clone());
         let published = self.published_reveals(slot);
         let selection = self
             .consensus
@@ -783,6 +813,22 @@ impl Node {
             .filter_map(|id| self.sim_attesters.get(id))
             .map(|attester| attester.attest(height, slot, block, &self.beacon))
             .collect();
+
+        let mut evidence = attestations.clone();
+        if let Some(bad) = self.equivocator {
+            if selection.members.contains(&bad) {
+                if let Some(attester) = self.sim_attesters.get(&bad) {
+                    let conflicting = crate::consensus::Block::new(
+                        height,
+                        header_value(&[0xEE; 32]),
+                        self.parent_val,
+                    );
+                    evidence.push(attester.attest(height, slot, conflicting, &self.beacon));
+                }
+            }
+        }
+        let offenders = crate::consensus::equivocation_offenders(&evidence, &roster);
+
         let certificate = self
             .consensus
             .finalize(&selection, height, slot, block, &self.beacon, &attestations)
@@ -800,15 +846,24 @@ impl Node {
             certificate,
             leader: selection.leader,
             committee_size: selection.commitment.len(),
+            members: selection.members.clone(),
             attesters,
         };
 
-        self.beacon = self.beacon.advance(&cert_digest, height);
+        self.beacon = self.beacon.advance_from_reveals(slot, &selection.reveals);
         self.parent_header_hash = header_hash;
         self.parent_val = Parent::Value(value);
         self.height += 1;
         self.mempool.remove_included(&included_ids);
         self.chain.push(finalized);
+
+        for id in &offenders {
+            if let Some(address) = self.validator_addresses.get(id).cloned() {
+                if self.ledger.slash_validator(&address) && !self.slashed.contains(id) {
+                    self.slashed.push(*id);
+                }
+            }
+        }
 
         Ok(self.chain.last().expect("a block was just finalized"))
     }
@@ -920,6 +975,28 @@ mod tests {
             meter,
             u128::from(fee.transfer_fee()),
             call,
+        );
+        sign(from, &body)
+    }
+
+    fn payable_tx(
+        from: &KeyAccount,
+        target: &str,
+        args: Vec<u8>,
+        nonce: u64,
+        meter: u64,
+        fee: &FeeParams,
+        value: u64,
+    ) -> Wrapper {
+        let call = qtv_tx::Call::new(target.to_string(), args);
+        let body = Body::with_context(
+            from.address(),
+            nonce,
+            meter,
+            u128::from(fee.transfer_fee()),
+            call,
+            value,
+            qtv_tx::LOCAL_CHAIN_ID,
         );
         sign(from, &body)
     }
@@ -1172,6 +1249,160 @@ mod tests {
             ledger.contract_storage(&contract_id).get(&qtv_vm::abi::scalar_key(0)),
             Some(&owner_word),
             "a genesis selector call on a deployed contract does not overwrite the owner"
+        );
+    }
+
+    fn payer_contract(amount: u64) -> qtv_vm::container::Container {
+        let pull =
+            qtv_vm::asm::assemble("LDI r0, 0\nLDI r1, 32\nLDC r2, 0\nSEND r0, r1, r2\nHALT")
+                .expect("assembles");
+        let deposit_offset = pull.len() as u32;
+        let mut code = pull;
+        code.extend_from_slice(&qtv_vm::asm::assemble("HALT").expect("assembles"));
+        qtv_vm::container::Container::new(
+            code,
+            vec![amount],
+            vec![
+                qtv_vm::container::Entry {
+                    selector: qtv_vm::container::selector("pull()"),
+                    offset: 0,
+                    access: qtv_vm::container::StateAccess::default(),
+                },
+                qtv_vm::container::Entry {
+                    selector: qtv_vm::container::selector("deposit()"),
+                    offset: deposit_offset,
+                    access: qtv_vm::container::StateAccess::default(),
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn a_contract_sends_and_receives_real_native_funds_with_value_conserved() {
+        let fee = FeeParams::devnet();
+        let charged = fee.transfer_fee();
+        let mut ledger = Ledger::new();
+        let deployer = keypair(180);
+        let payee = keypair(181);
+        let deployer_start = 10_000 * 1_000_000u64;
+        let payee_start = 1_000_000u64;
+        fund(&mut ledger, &deployer, deployer_start);
+        fund(&mut ledger, &payee, payee_start);
+
+        let payout = 2_000u64;
+        let deposit_value = 5_000u64;
+        let container = payer_contract(payout);
+        let deploy = system_tx(
+            &deployer,
+            &crate::ledger::vm_deploy_address(),
+            container.canonical_bytes(),
+            0,
+            100_000,
+            &fee,
+        );
+        assert_eq!(execute_ordered(&mut ledger, &[deploy], &fee, 0).len(), 1);
+        let contract = crate::ledger::contract_address(&deployer.address(), 0).unwrap();
+        assert!(ledger.is_contract(&contract));
+        assert_eq!(ledger.balance(&contract), 0, "a fresh contract holds nothing");
+
+        let deposit_sel = qtv_vm::container::selector("deposit()");
+        let deposit = payable_tx(
+            &deployer,
+            &contract,
+            deposit_sel.to_vec(),
+            1,
+            100_000,
+            &fee,
+            deposit_value,
+        );
+        assert_eq!(execute_ordered(&mut ledger, &[deposit], &fee, 0).len(), 1);
+        assert_eq!(
+            ledger.balance(&contract),
+            deposit_value,
+            "the contract took custody of the native value it was sent"
+        );
+        assert_eq!(
+            ledger.balance(&deployer.address()),
+            deployer_start - 2 * charged - deposit_value,
+            "the depositor paid two fees and parted with the value it sent"
+        );
+
+        let supply_before = ledger.balance(&contract) + ledger.balance(&payee.address());
+        let pull_sel = qtv_vm::container::selector("pull()");
+        let pull = system_tx(&payee, &contract, pull_sel.to_vec(), 0, 100_000, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[pull], &fee, 0).len(), 1);
+
+        assert_eq!(
+            ledger.balance(&contract),
+            deposit_value - payout,
+            "the contract paid the amount out of its own balance"
+        );
+        assert_eq!(
+            ledger.balance(&payee.address()),
+            payee_start - charged + payout,
+            "the caller received the native funds the contract sent"
+        );
+        let supply_after = ledger.balance(&contract) + ledger.balance(&payee.address());
+        assert_eq!(
+            supply_after + charged,
+            supply_before,
+            "the only change beyond the paid fee is a conserved move from the contract to the caller"
+        );
+    }
+
+    #[test]
+    fn a_contract_send_over_its_balance_reverts_and_creates_nothing() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let deployer = keypair(182);
+        let payee = keypair(183);
+        fund(&mut ledger, &deployer, 10_000 * 1_000_000);
+        fund(&mut ledger, &payee, 1_000_000);
+
+        let container = payer_contract(9_999u64);
+        let deploy = system_tx(
+            &deployer,
+            &crate::ledger::vm_deploy_address(),
+            container.canonical_bytes(),
+            0,
+            100_000,
+            &fee,
+        );
+        execute_ordered(&mut ledger, &[deploy], &fee, 0);
+        let contract = crate::ledger::contract_address(&deployer.address(), 0).unwrap();
+
+        let deposit = payable_tx(
+            &deployer,
+            &contract,
+            qtv_vm::container::selector("deposit()").to_vec(),
+            1,
+            100_000,
+            &fee,
+            1_000u64,
+        );
+        execute_ordered(&mut ledger, &[deposit], &fee, 0);
+        assert_eq!(ledger.balance(&contract), 1_000);
+
+        let payee_before = ledger.balance(&payee.address());
+        let pull = system_tx(
+            &payee,
+            &contract,
+            qtv_vm::container::selector("pull()").to_vec(),
+            0,
+            100_000,
+            &fee,
+        );
+        execute_ordered(&mut ledger, &[pull], &fee, 0);
+
+        assert_eq!(
+            ledger.balance(&contract),
+            1_000,
+            "an overdrawn send moves nothing out of the contract"
+        );
+        assert_eq!(
+            ledger.balance(&payee.address()),
+            payee_before - fee.transfer_fee(),
+            "the caller minted no funds and only paid the fee"
         );
     }
 

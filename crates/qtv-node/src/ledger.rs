@@ -485,6 +485,20 @@ impl Ledger {
         self.set_account(address, &account);
     }
 
+    fn apply_balance_delta(&mut self, address: &str, delta: i128) {
+        if delta == 0 {
+            return;
+        }
+        let mut account = self.account(address);
+        let updated = i128::from(account.balance) + delta;
+        account.balance = if updated < 0 {
+            0
+        } else {
+            u64::try_from(updated).unwrap_or(u64::MAX)
+        };
+        self.set_account(address, &account);
+    }
+
     pub fn apply_fee_split(&mut self, split: FeeSplit) {
         let grants = grants_address();
         match self.round_proposer.clone() {
@@ -530,6 +544,29 @@ impl Ledger {
 
     pub fn set_stake_banned(&mut self, id: &[u8; 32]) {
         self.trie.insert(stake_banned_key(id), vec![1]);
+    }
+
+    pub fn is_validator_banned(&self, address: &str) -> bool {
+        match address_id(address) {
+            Some(id) => self.is_stake_banned(&id),
+            None => false,
+        }
+    }
+
+    pub fn slash_validator(&mut self, address: &str) -> bool {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return false,
+        };
+        if self.is_stake_banned(&id) {
+            return false;
+        }
+        self.set_stake_banned(&id);
+        if let Some(bond) = self.stake_bond(&id) {
+            self.debit_supply(bond.amount);
+            self.clear_stake_bond(&id);
+        }
+        true
     }
 
     fn is_gov_blacklisted(&self, id: &[u8; 32]) -> bool {
@@ -753,6 +790,7 @@ impl Ledger {
         user_memory: &[u8],
         now_seconds: u64,
         meter: u64,
+        value: u64,
     ) -> bool {
         let contract_id = match address_id(contract) {
             Some(id) => id,
@@ -762,6 +800,9 @@ impl Ledger {
             Some(code) => code,
             None => return false,
         };
+        if value > 0 && self.balance(caller) < value {
+            return false;
+        }
         let storage = self.contract_storage(&contract_id);
         let mut memory = vec![0u8; user_memory.len().max(CONTRACT_CONTEXT_BYTES)];
         memory[..user_memory.len()].copy_from_slice(user_memory);
@@ -771,12 +812,35 @@ impl Ledger {
         memory[64..72].copy_from_slice(&now_seconds.to_be_bytes());
         match crate::execution::execute_contract_call(&code, selector, storage, &memory, meter) {
             Ok(outcome) => {
-                if outcome
-                    .effects
-                    .iter()
-                    .any(|effect| matches!(effect, qtv_vm::interp::Effect::Transfer { .. }))
-                {
+                let mut credits: Vec<(String, u64)> = Vec::new();
+                let mut total_sent: u64 = 0;
+                for effect in &outcome.effects {
+                    if let qtv_vm::interp::Effect::Transfer { to, amount } = effect {
+                        let target = match id_bytes_to_address(to) {
+                            Some(address) => address,
+                            None => return false,
+                        };
+                        total_sent = match total_sent.checked_add(*amount) {
+                            Some(sum) => sum,
+                            None => return false,
+                        };
+                        credits.push((target, *amount));
+                    }
+                }
+                let funded = match self.balance(contract).checked_add(value) {
+                    Some(funded) => funded,
+                    None => return false,
+                };
+                if funded < total_sent {
                     return false;
+                }
+                if value > 0 {
+                    self.apply_balance_delta(caller, -i128::from(value));
+                    self.apply_balance_delta(contract, i128::from(value));
+                }
+                for (target, amount) in &credits {
+                    self.apply_balance_delta(contract, -i128::from(*amount));
+                    self.apply_balance_delta(target, i128::from(*amount));
                 }
                 for effect in &outcome.effects {
                     if let qtv_vm::interp::Effect::Event { selector, data } = effect {
@@ -1310,12 +1374,12 @@ mod stake_state_tests {
         l.set_contract_code(&contract_id, &container.canonical_bytes());
 
         let caller = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
-        assert!(l.call_contract(&caller, &contract, selector, &[], 0, 100_000));
+        assert!(l.call_contract(&caller, &contract, selector, &[], 0, 100_000, 0));
         let expected = u64::from_be_bytes([9u8; 8]);
         assert_eq!(l.contract_storage(&contract_id).get(&[9u8; 32]), Some(&expected));
 
         let empty = qtv_idfmt::render_address(&[71u8; 32]).unwrap();
-        assert!(!l.call_contract(&caller, &empty, selector, &[], 0, 100_000));
+        assert!(!l.call_contract(&caller, &empty, selector, &[], 0, 100_000, 0));
     }
 
     #[test]
@@ -1350,14 +1414,14 @@ mod stake_state_tests {
         let c1 = qtv_idfmt::render_address(&p1).unwrap();
         let c2 = qtv_idfmt::render_address(&p2).unwrap();
 
-        assert!(l.call_contract(&c1, &contract, selector, &[], 0, 100_000));
+        assert!(l.call_contract(&c1, &contract, selector, &[], 0, 100_000, 0));
         let seen1 = *l.contract_storage(&contract_id).get(&p1).unwrap();
         assert_eq!(
             l.contract_storage(&contract_id).get(&contract_id),
             Some(&u64::from_be_bytes([70u8; 8]))
         );
 
-        assert!(l.call_contract(&c2, &contract, selector, &[], 0, 100_000));
+        assert!(l.call_contract(&c2, &contract, selector, &[], 0, 100_000, 0));
         let seen2 = *l.contract_storage(&contract_id).get(&p2).unwrap();
 
         assert_eq!(seen1, u64::from_be_bytes([0xA1u8; 8]));
