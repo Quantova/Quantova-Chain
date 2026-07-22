@@ -6,7 +6,9 @@ use std::thread;
 #[cfg(any(test, feature = "test-fixtures"))]
 use qtv_block::{Block as ChainBlock, Header};
 use qtv_codec::{Decode, Decoder};
+pub use qtv_crypto::ml_dsa::PublicKey;
 use qtv_governance::{Action, Conviction};
+pub use qtv_sampler::onetime::Root;
 use qtv_tx::Wrapper;
 
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -23,37 +25,36 @@ use crate::parallel::execute_parallel;
 #[cfg(any(test, feature = "test-fixtures"))]
 use qtv_attest::Certificate;
 
+/// A validator's own published registration. Every field is a public commitment the
+/// operator derived from the one secret it holds and never anything a second party can
+/// reproduce from an id: the bond and reward address, the one time sortition root, the
+/// attestation public key, and the peer to peer identity public key. Genesis carries
+/// these and nothing else of a validator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatorSpec {
     pub id: u64,
     pub stake: u64,
     pub online: bool,
-    /// The published bond and reward account address. This is the commitment the
-    /// validator's operator secret derives to; genesis seeds the bond to it and the
-    /// committee is weighed under it. It carries no secret and is never id derived.
     pub bond_address: String,
+    pub root: Root,
+    pub attest_pk: PublicKey,
+    pub p2p_public: PublicKey,
 }
 
-// Per id spec constructors for tests and the single process simulation, sourcing the
-// bond address from the gated fixture. A production spec carries the committed address
-// the operator published from its own secret; these are absent from a default build.
-#[cfg(any(test, feature = "test-fixtures"))]
 impl ValidatorSpec {
-    pub fn online(id: u64, stake: u64) -> Self {
+    /// The registration a validator's own secret derives to. The operator runs this on
+    /// its own machine over the secret in its keystore and contributes the public result
+    /// to genesis; no one else holds the secret and no field is a function of the id.
+    pub fn from_secret(id: u64, stake: u64, online: bool, secret: &[u8; 32], slots: u64) -> Self {
+        let attester = qtv_attest::Attester::from_secret_with_slots(id, secret, stake, slots);
         ValidatorSpec {
             id,
             stake,
-            online: true,
-            bond_address: crate::keys::validator_address(&crate::keys::fixture_secret(id)),
-        }
-    }
-
-    pub fn offline(id: u64, stake: u64) -> Self {
-        ValidatorSpec {
-            id,
-            stake,
-            online: false,
-            bond_address: crate::keys::validator_address(&crate::keys::fixture_secret(id)),
+            online,
+            bond_address: crate::keys::validator_address(secret),
+            root: attester.root(),
+            attest_pk: *attester.attest_public_key(),
+            p2p_public: crate::keys::p2p_public(secret),
         }
     }
 }

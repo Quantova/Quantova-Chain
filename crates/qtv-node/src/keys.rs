@@ -23,6 +23,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
 
+use qtv_crypto::ml_dsa;
 use qtv_crypto::sha3::shake256;
 
 /// The length of a validator's root secret in bytes.
@@ -34,6 +35,8 @@ pub const SECRET_LEN: usize = 32;
 // independent derived keys and no derived key or public commitment reveals the
 // others or the secret.
 const VALIDATOR_ACCOUNT_DOMAIN: &[u8] = b"QORUS/validator-keying/v1/ledger-bond-account";
+
+const P2P_IDENTITY_DOMAIN: &[u8] = b"QORUS/validator-keying/v1/p2p-identity";
 
 /// A freshly generated 32 byte secret from the operating system CSPRNG. This is how a
 /// validator's secret comes into being on first run: a real random draw the operator
@@ -130,6 +133,25 @@ pub fn validator_account(secret: &[u8; SECRET_LEN]) -> qtv_account::Account {
 /// no secret and cannot be turned back into the seed or the secret behind it.
 pub fn validator_address(secret: &[u8; SECRET_LEN]) -> String {
     validator_account(secret).address()
+}
+
+/// Expand a validator's secret into the seed of its peer to peer identity key, under
+/// a domain distinct from the ledger account, so the two derived keys are independent.
+pub fn p2p_identity_seed(secret: &[u8; SECRET_LEN]) -> [u8; SECRET_LEN] {
+    const D: usize = P2P_IDENTITY_DOMAIN.len();
+    let mut buf = [0u8; D + SECRET_LEN];
+    buf[..D].copy_from_slice(P2P_IDENTITY_DOMAIN);
+    buf[D..].copy_from_slice(secret);
+    let mut out = [0u8; SECRET_LEN];
+    shake256(&buf, &mut out);
+    out
+}
+
+/// The published peer to peer identity public key of the node holding `secret`. It is
+/// the ML-DSA public half of the identity the secret derives to; the peer id is its
+/// hash. It carries no secret and cannot be turned back into one.
+pub fn p2p_public(secret: &[u8; SECRET_LEN]) -> ml_dsa::PublicKey {
+    ml_dsa::keygen(&p2p_identity_seed(secret)).0
 }
 
 fn parse_hex32(hex: &str) -> Option<[u8; SECRET_LEN]> {

@@ -63,6 +63,7 @@ pub struct NodeSettings {
     pub store_dir: PathBuf,
     pub listen: String,
     pub genesis_path: PathBuf,
+    pub keystore_path: PathBuf,
     pub block_interval_ms: u64,
     pub view_timeout_ms: u64,
     pub peers: Vec<(u64, String)>,
@@ -80,6 +81,7 @@ impl NodeSettings {
         let mut store_dir: Option<PathBuf> = None;
         let mut listen: Option<String> = None;
         let mut genesis_path: Option<PathBuf> = None;
+        let mut keystore_path: Option<PathBuf> = None;
         let mut block_interval_ms = DEFAULT_BLOCK_INTERVAL_MS;
         let mut view_timeout_ms = DEFAULT_VIEW_TIMEOUT_MS;
         let mut peers: Vec<(u64, String)> = Vec::new();
@@ -92,6 +94,7 @@ impl NodeSettings {
                 "store_dir" => store_dir = Some(PathBuf::from(&field.value)),
                 "listen" => listen = Some(field.value.clone()),
                 "genesis" => genesis_path = Some(PathBuf::from(&field.value)),
+                "keystore" => keystore_path = Some(PathBuf::from(&field.value)),
                 "block_interval_ms" => block_interval_ms = field.u64("block_interval_ms")?,
                 "view_timeout_ms" => view_timeout_ms = field.u64("view_timeout_ms")?,
                 "peer" => peers.push(parse_peer(field)?),
@@ -104,12 +107,18 @@ impl NodeSettings {
         let genesis_path = genesis_path.ok_or("the config is missing 'genesis'")?;
         let genesis_path = resolve(path, genesis_path);
         let block_messages_path = block_messages_path.map(|p| resolve(path, p));
+        let store_dir = store_dir.ok_or("the config is missing 'store_dir'")?;
+        let keystore_path = match keystore_path {
+            Some(p) => resolve(path, p),
+            None => store_dir.join("keystore"),
+        };
 
         Ok(NodeSettings {
             id: id.ok_or("the config is missing 'id'")?,
-            store_dir: store_dir.ok_or("the config is missing 'store_dir'")?,
+            store_dir,
             listen: listen.ok_or("the config is missing 'listen'")?,
             genesis_path,
+            keystore_path,
             block_interval_ms,
             view_timeout_ms,
             peers,

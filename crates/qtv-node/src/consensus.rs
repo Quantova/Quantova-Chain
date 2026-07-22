@@ -6,9 +6,10 @@ use qtv_crypto::ml_dsa::PublicKey;
 use qtv_sampler::committee::{CommitteeView, PublishedReveal};
 use qtv_sampler::onetime::Root;
 use qtv_sampler::sortition::Credential;
-use qtv_sampler::validator::{Registration, DEFAULT_SLOTS};
+use qtv_sampler::validator::Registration;
 
 pub use qtv_attest::{Beacon, Block, Parent};
+pub use qtv_sampler::validator::DEFAULT_SLOTS;
 
 /// A validator named together with its operator secret, used by the holder of a secret
 /// to derive its commitments. A node consumes the derived `ValidatorRegistration`.
@@ -48,7 +49,7 @@ impl ConsensusValidator {
 /// The on chain commitment a node holds for a validator, its id and stake, its online
 /// expectation, its bond and reward address, its sortition root, and its attestation
 /// public key.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ValidatorRegistration {
     pub id: u64,
     pub stake: u64,
@@ -80,6 +81,20 @@ impl ValidatorRegistration {
             &validator.secret,
             slots,
         )
+    }
+
+    /// The registration read from a validator's own published genesis registration. It
+    /// carries only commitments, so a node assembles the roster from peers' public
+    /// registrations without holding or reconstructing any peer secret.
+    pub fn from_spec(spec: &crate::node::ValidatorSpec) -> Self {
+        ValidatorRegistration {
+            id: spec.id,
+            stake: spec.stake,
+            online: spec.online,
+            bond_address: spec.bond_address.clone(),
+            root: spec.root,
+            attest_pk: spec.attest_pk,
+        }
     }
 
     fn member_key(&self) -> MemberKey {

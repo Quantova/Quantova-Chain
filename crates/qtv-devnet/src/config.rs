@@ -75,24 +75,36 @@ pub struct DevnetConfig {
     pub genesis_time: u64,
     pub fanout: usize,
     pub slots: u64,
+    /// The public roster read from a multi party genesis, one own published registration
+    /// per validator. When set, a node assembles the committee from it and holds no peer
+    /// secret. When absent, the single process simulation derives the roster from the
+    /// secrets it holds for every node it stands up.
+    pub published_roster: Option<Vec<ValidatorRegistration>>,
 }
 
 impl DevnetConfig {
     pub fn validator_specs(&self) -> Vec<ValidatorSpec> {
         self.nodes
             .iter()
-            .map(|node| ValidatorSpec {
-                id: node.id,
-                stake: node.stake,
-                online: node.online,
-                bond_address: node.bond_address(),
+            .map(|node| {
+                ValidatorSpec::from_secret(
+                    node.id,
+                    node.stake,
+                    node.online,
+                    &node.secret,
+                    self.slots,
+                )
             })
             .collect()
     }
 
-    /// The public consensus roster, one commitment per validator, derived from the
-    /// fixtures the simulation config holds.
+    /// The public consensus roster, one commitment per validator. It is the roster the
+    /// genesis publishes when one is set, otherwise the one derived from the secrets the
+    /// single process simulation holds for the whole set.
     pub fn roster(&self) -> Vec<ValidatorRegistration> {
+        if let Some(roster) = &self.published_roster {
+            return roster.clone();
+        }
         self.nodes
             .iter()
             .map(|node| {

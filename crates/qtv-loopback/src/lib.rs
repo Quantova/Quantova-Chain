@@ -59,6 +59,7 @@ pub fn devnet_config(base: &PathBuf, validators: usize, senders: &[Account]) -> 
         genesis_time: GENESIS_TIME,
         fanout: FULL_FANOUT,
         slots: HARNESS_SLOTS,
+        published_roster: None,
     }
 }
 

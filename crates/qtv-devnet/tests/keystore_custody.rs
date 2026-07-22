@@ -57,6 +57,7 @@ fn a_devnet_of_keystore_backed_nodes_stands_up_and_finalizes() {
         genesis_time: GENESIS_TIME,
         fanout: FULL_FANOUT,
         slots: DEFAULT_SLOTS,
+        published_roster: None,
     };
 
     let mut devnet =

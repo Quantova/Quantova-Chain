@@ -41,7 +41,7 @@ The dependency wiring is explicit. The in repository crates are path dependencie
 
 ## The daemon and the harnesses
 
-**qtv-daemon** produces the **`quantovad`** binary. It reads a node config and a shared `genesis.q`, opens a node against on disk stores, stands up the qtv-net mesh, and runs a continuous round that finalizes and persists each block and resumes from disk on restart. A committee of one is its own supermajority, so a single `quantovad` is a live chain on its own. It refuses to start outside the single operator development model unless run with `--dev`.
+**qtv-daemon** produces the **`quantovad`** binary. It reads a node config and a shared `genesis.q`, opens a node against on disk stores, stands up the qtv-net mesh, and runs a continuous round that finalizes and persists each block and resumes from disk on restart. A committee of one is its own supermajority, so a single `quantovad` is a live chain on its own. The node holds only its own secret in its keystore and reads every peer's public registration from the genesis. `quantovad register` prints the registration line an operator contributes to the genesis.
 
 Alongside the daemon, **qtv-devnet** is the multi node core the daemon and gateway drive, and **qtv-live**, **qtv-loopback**, and **qtv-widearea** are in process, multi process, and cross host measurement harnesses that finalize real blocks and record sustained throughput and finality distribution.
 

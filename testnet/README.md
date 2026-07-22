@@ -20,15 +20,16 @@ cargo build --release --manifest-path ../QCore.rs/Cargo.toml --bin qcore
 QCORE=./target/release/qcore OUT=./testnet-live CHAIN_ID=Q-test-net-1 ./testnet/setup.sh
 ```
 
-This creates a fresh faucet wallet, writes the genesis file and the node config under `OUT`, and prints
-the faucet seed once. Save that seed. It funds the faucet account and it is never written into the
-genesis or committed anywhere, only the faucet public key goes into the genesis so the account can
-sign from the first block.
+This creates a fresh faucet wallet, generates the node keystore, writes the genesis file and the node
+config under `OUT`, and prints the faucet seed once. Save that seed. It funds the faucet account and it
+is never written into the genesis or committed anywhere, only the faucet public key goes into the
+genesis so the account can sign from the first block. The node keystore holds the validator secret and
+stays under `OUT/store`, only the node's public registration line goes into the genesis.
 
 ## Run the node and the faucet
 
 ```
-quantovad --config ./testnet-live/node.conf --dev
+quantovad --config ./testnet-live/node.conf
 cd ../Transparency-Website/faucet-service
 FAUCET_OPERATOR_SEED=<the seed setup printed> FAUCET_RPC=http://127.0.0.1:8645 npm start
 ```
@@ -40,10 +41,13 @@ claim from the faucet, and send a transfer.
 
 ## Two things to know before a public run
 
-The validator identity is derived from its id, which is correct while one operator runs every
-validator, and the daemon refuses to start without the development flag for exactly that reason. A
-second party running a validator needs operator held keys, one secret per validator that no one else
-can derive, which is a separate step before the network leaves one pair of hands.
+Each validator holds its own secret in its own keystore and publishes only its registration, its bond
+address, its sortition root, its attestation key, and its peer identity, into the genesis. A node reads
+every peer's public registration from the genesis and forms the committee from the reveals each
+validator publishes for itself. It never holds or reconstructs a peer secret. To add a second
+validator, that operator runs `quantovad register --keystore <their keystore> --id <n> --stake <stake>
+--online --slots <slots>` on their own machine and hands you the printed `validator = ...` line for the
+genesis. No party can reproduce another's key material.
 
 The slot budget is the height horizon. The sortition keys are one time, so the chain halts honestly at
 that height. The default of one hundred thousand blocks is about a day at a one second block interval.

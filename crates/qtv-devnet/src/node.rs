@@ -6,7 +6,6 @@ use std::io;
 use qtv_attest::Attestation;
 use qtv_block::{event_root, transaction_root, Block as ChainBlock, Header};
 use qtv_codec::{to_bytes, Decoder};
-use qtv_crypto::sha3::shake256;
 use qtv_net::{Identity, PeerId};
 use qtv_node::consensus::{
     genesis_beacon, header_value, Beacon, Block as ConsensusBlock, Consensus, Parent, Selection,
@@ -27,27 +26,17 @@ pub type Height = u64;
 
 pub type View = u64;
 
-// Domain tag under which a validator's secret is expanded into the seed of its peer
-// to peer network identity key. It is distinct from the sortition tree and signing
-// key domains in the consensus crates, so the one secret a node holds yields three
-// independent derived keys and none reveals the others.
-const P2P_IDENTITY_DOMAIN: &[u8] = b"QORUS/validator-keying/v1/p2p-identity";
-
-fn p2p_identity_seed(secret: &[u8; 32]) -> [u8; 32] {
-    const D: usize = P2P_IDENTITY_DOMAIN.len();
-    let mut buf = [0u8; D + 32];
-    buf[..D].copy_from_slice(P2P_IDENTITY_DOMAIN);
-    buf[D..].copy_from_slice(secret);
-    let mut out = [0u8; 32];
-    shake256(&buf, &mut out);
-    out
-}
-
 /// A node's peer to peer identity, derived from the one secret the node holds. Only
 /// the public peer id is ever published; the secret half never leaves the node and is
 /// not recomputable from the public id.
 pub fn p2p_identity(secret: &[u8; 32]) -> Identity {
-    Identity::from_seed(&p2p_identity_seed(secret))
+    Identity::from_seed(&qtv_node::keys::p2p_identity_seed(secret))
+}
+
+/// The peer id of a published peer to peer identity public key. This is how a running
+/// node pins a peer read from the genesis roster, never by recomputing it from an id.
+pub fn peer_id_of(public: &qtv_crypto::ml_dsa::PublicKey) -> PeerId {
+    PeerId::from_public(public)
 }
 
 /// The published public peer id of the node holding `secret`. This is the commitment
