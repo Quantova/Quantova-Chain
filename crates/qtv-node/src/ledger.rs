@@ -566,6 +566,7 @@ impl Ledger {
             self.debit_supply(bond.amount);
             self.clear_stake_bond(&id);
         }
+        self.clear_stake_rewards(&id);
         true
     }
 
@@ -634,6 +635,10 @@ impl Ledger {
         self.trie.insert(stake_rewards_key(id), to_bytes(book));
     }
 
+    fn clear_stake_rewards(&mut self, id: &[u8; 32]) {
+        self.trie.insert(stake_rewards_key(id), Vec::new());
+    }
+
     pub fn accrue_reward(&mut self, address: &str, session: Session, now_day: u64) -> u64 {
         match address_id(address) {
             Some(id) => self.accrue_reward_by_id(&id, session, now_day),
@@ -673,6 +678,9 @@ impl Ledger {
             Some(id) => id,
             None => return 0,
         };
+        if self.is_stake_banned(&id) || self.is_gov_blacklisted(&id) {
+            return 0;
+        }
         self.stake_rewards(&id)
             .tranches
             .iter()
@@ -688,6 +696,9 @@ impl Ledger {
             Some(id) => id,
             None => return 0,
         };
+        if self.is_stake_banned(&id) || self.is_gov_blacklisted(&id) {
+            return 0;
+        }
         let mut book = self.stake_rewards(&id);
         let mut credited = 0u64;
         for tranche in book.tranches.iter_mut() {
@@ -1295,6 +1306,7 @@ impl Ledger {
         if let qtv_staking::Fault::Attributable = fault {
             self.clear_stake_bond(&id);
             self.set_stake_banned(&id);
+            self.clear_stake_rewards(&id);
         } else {
             self.set_stake_bond(
                 &id,
@@ -1678,6 +1690,41 @@ mod stake_state_tests {
         assert_eq!(l.claim_reward(&addr, full_day), 15 * 1_000_000);
         assert_eq!(l.balance(&addr), 20 * 1_000_000);
         assert_eq!(l.claimable_reward(&addr, full_day + 1_000), 0);
+    }
+
+    #[test]
+    fn an_attributable_slash_wipes_accrued_rewards_and_a_banned_validator_cannot_claim() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[16u8; 32]).unwrap();
+        let id = [16u8; 32];
+        l.seed_stake_pool(700_000 * 1_000_000);
+        l.seed_validator_bond(&addr, 2_000 * 1_000_000);
+        l.set_stake_mainnet_start(0);
+        l.set_stake_price(70 * 1_000_000);
+        assert_eq!(l.accrue_reward(&addr, qtv_staking::Session::Low, 400), 20 * 1_000_000);
+        assert_eq!(l.claimable_reward(&addr, 400 + 365), 5 * 1_000_000);
+        l.slash_stake(&addr, qtv_staking::Fault::Attributable);
+        assert!(l.is_stake_banned(&id));
+        assert_eq!(l.claimable_reward(&addr, 400 + 365), 0);
+        assert_eq!(l.claim_reward(&addr, 400 + 365), 0);
+        assert_eq!(l.balance(&addr), 0);
+    }
+
+    #[test]
+    fn a_gov_blacklisted_validator_cannot_claim_accrued_rewards() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[17u8; 32]).unwrap();
+        let id = [17u8; 32];
+        l.seed_stake_pool(700_000 * 1_000_000);
+        l.seed_validator_bond(&addr, 2_000 * 1_000_000);
+        l.set_stake_mainnet_start(0);
+        l.set_stake_price(70 * 1_000_000);
+        l.accrue_reward(&addr, qtv_staking::Session::Low, 400);
+        assert_eq!(l.claimable_reward(&addr, 400 + 365), 5 * 1_000_000);
+        l.set_gov_blacklisted(&id);
+        assert_eq!(l.claimable_reward(&addr, 400 + 365), 0);
+        assert_eq!(l.claim_reward(&addr, 400 + 365), 0);
+        assert_eq!(l.balance(&addr), 0);
     }
 
     #[test]
