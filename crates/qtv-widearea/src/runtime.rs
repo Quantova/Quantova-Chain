@@ -97,6 +97,41 @@ impl Runtime {
         }
     }
 
+    fn expected_reveal_ids(&self) -> Vec<u64> {
+        (0..self.n)
+            .filter(|&q| self.up.get(q).copied().unwrap_or(false))
+            .map(|q| q as u64 + 1)
+            .collect()
+    }
+
+    /// Publish this node's own reveal for the height and gather the peers' reveals,
+    /// until the up set is heard from or a bounded window elapses.
+    fn disseminate_reveals(&mut self) {
+        if self.i_am_up() {
+            if let Some(note) = self.node.own_reveal_note() {
+                let bytes = Message::Reveal(Box::new(note)).encode();
+                self.broadcast(&bytes);
+            }
+        }
+        let expected = self.expected_reveal_ids();
+        let deadline = Instant::now() + self.view_timeout;
+        while Instant::now() < deadline {
+            let have = self.node.collected_reveal_ids();
+            if expected.iter().all(|id| have.contains(id)) {
+                break;
+            }
+            match self.inbound.recv_timeout(Duration::from_millis(10)) {
+                Ok((_, bytes)) => match Message::decode(&bytes) {
+                    Ok(Message::Reveal(note)) => self.node.collect_reveal(*note),
+                    Ok(_) => self.buffered.push((0, bytes)),
+                    Err(_) => {}
+                },
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
+
     fn enter_current_view(&mut self, selection: &Selection, view: u64) {
         let up = self.i_am_up();
         let messages = self.node.enter_round(selection, up);
@@ -181,6 +216,7 @@ impl Runtime {
                 }
                 self.try_justified(selection);
             }
+            Message::Reveal(note) => self.node.collect_reveal(*note),
             Message::Peers(_)
             | Message::Status(_)
             | Message::GetBlocks { .. }
@@ -221,6 +257,7 @@ impl Runtime {
         batch: Option<Vec<qtv_tx::Wrapper>>,
     ) -> Result<HeightOutcome, String> {
         let start_height = self.node.height();
+        self.disseminate_reveals();
         let selection = self.node.select().map_err(|e| format!("select: {e:?}"))?;
 
         let fill_start = Instant::now();

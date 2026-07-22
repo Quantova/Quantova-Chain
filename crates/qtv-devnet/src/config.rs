@@ -1,7 +1,7 @@
 
 use std::path::PathBuf;
 
-use qtv_node::consensus::ConsensusValidator;
+use qtv_node::consensus::ValidatorRegistration;
 use qtv_node::fee::FeeParams;
 use qtv_node::node::{Genesis, GenesisAccount, ValidatorSpec};
 
@@ -90,15 +90,19 @@ impl DevnetConfig {
             .collect()
     }
 
-    /// The consensus roster for the single process simulation: one entry per node
-    /// carrying its stake, its committed bond address, and the secret this process
-    /// holds on its behalf. The secret is present only because one process stands up
-    /// the whole committee; it is never serialized into genesis or the roster.
-    pub fn consensus_validators(&self) -> Vec<ConsensusValidator> {
+    /// The public consensus roster, one commitment per validator, derived from the
+    /// fixtures the simulation config holds.
+    pub fn roster(&self) -> Vec<ValidatorRegistration> {
         self.nodes
             .iter()
             .map(|node| {
-                ConsensusValidator::from_secret(node.id, node.stake, node.online, node.secret)
+                ValidatorRegistration::from_secret(
+                    node.id,
+                    node.stake,
+                    node.online,
+                    &node.secret,
+                    self.slots,
+                )
             })
             .collect()
     }

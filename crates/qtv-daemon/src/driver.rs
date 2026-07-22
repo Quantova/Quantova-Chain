@@ -100,6 +100,7 @@ impl Driver {
         stopped: &AtomicBool,
     ) -> Result<(), String> {
         let start_height = self.node.height();
+        self.disseminate_reveals(view_timeout);
         let selection = self.node.select().map_err(|e| {
             format!(
                 "cannot select a committee at height {start_height}: {e:?}. the one time \
@@ -145,6 +146,37 @@ impl Driver {
                 Ok((_, bytes)) => self.handle_incoming(bytes, start_height, &selection),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => thread::sleep(TICK),
+            }
+        }
+    }
+
+    /// Publish this node's own reveal for the height and gather the peers' reveals,
+    /// until the up set is heard from or the window elapses.
+    fn disseminate_reveals(&mut self, window: Duration) {
+        if let Some(note) = self.node.own_reveal_note() {
+            let bytes = Message::Reveal(Box::new(note)).encode();
+            self.broadcast(&bytes);
+        }
+        let expected: Vec<u64> = (0..self.n)
+            .filter(|&q| self.up.get(q).copied().unwrap_or(false))
+            .map(|q| q as u64 + 1)
+            .collect();
+        let deadline = Instant::now() + window;
+        while Instant::now() < deadline {
+            let have = self.node.collected_reveal_ids();
+            if expected.iter().all(|id| have.contains(id)) {
+                break;
+            }
+            match self.inbound.recv_timeout(TICK) {
+                Ok((_, bytes)) => {
+                    if let Ok(Message::Reveal(note)) = Message::decode(&bytes) {
+                        self.node.collect_reveal(*note);
+                    } else {
+                        self.buffered.push(bytes);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
             }
         }
     }
@@ -222,6 +254,7 @@ impl Driver {
                 }
                 self.try_justified(selection);
             }
+            Message::Reveal(note) => self.node.collect_reveal(*note),
             Message::Peers(_)
             | Message::Status(_)
             | Message::GetBlocks { .. }
@@ -322,6 +355,7 @@ fn message_height(message: &Message) -> Option<u64> {
         Message::CodedProposal(c) => Some(c.header.height()),
         Message::Attest(a) => Some(a.height),
         Message::ViewChange(v) => Some(v.height),
+        Message::Reveal(r) => Some(r.height),
         Message::Tx(_)
         | Message::Peers(_)
         | Message::Status(_)

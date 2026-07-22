@@ -20,6 +20,7 @@ const TAG_GET_BLOCKS: u8 = 6;
 const TAG_BLOCKS: u8 = 7;
 const TAG_VIEW_CHANGE: u8 = 8;
 const TAG_CODED_PROPOSAL: u8 = 9;
+const TAG_REVEAL: u8 = 10;
 
 const PARENT_GENESIS: u8 = 0;
 const PARENT_VALUE: u8 = 1;
@@ -75,6 +76,15 @@ pub struct ViewChange {
     pub att: Attestation,
 }
 
+/// A validator's own sortition reveal for a height, its height, author id, and
+/// credential, published so peers admit it to the committee.
+#[derive(Clone)]
+pub struct RevealNote {
+    pub height: u64,
+    pub id: u64,
+    pub credential: Credential,
+}
+
 #[derive(Clone)]
 pub enum Message {
     Tx(Wrapper),
@@ -86,6 +96,7 @@ pub enum Message {
     GetBlocks { from: u64, to: u64 },
     Blocks(Vec<ChainBlock>),
     ViewChange(Box<ViewChange>),
+    Reveal(Box<RevealNote>),
 }
 
 #[derive(Debug)]
@@ -168,6 +179,12 @@ impl Message {
                 encoder.put_tag(TAG_VIEW_CHANGE);
                 encode_view_change(&mut encoder, record);
             }
+            Message::Reveal(note) => {
+                encoder.put_tag(TAG_REVEAL);
+                encoder.put_u64(note.height);
+                encoder.put_u64(note.id);
+                encode_credential(&mut encoder, &note.credential);
+            }
         }
         encoder.into_bytes()
     }
@@ -239,6 +256,16 @@ impl Message {
                 Message::Blocks(blocks)
             }
             TAG_VIEW_CHANGE => Message::ViewChange(Box::new(decode_view_change(&mut decoder)?)),
+            TAG_REVEAL => {
+                let height = decoder.get_u64()?;
+                let id = decoder.get_u64()?;
+                let credential = decode_credential(&mut decoder)?;
+                Message::Reveal(Box::new(RevealNote {
+                    height,
+                    id,
+                    credential,
+                }))
+            }
             tag => return Err(DecodeError::UnknownTag(tag)),
         };
         decoder.finish()?;

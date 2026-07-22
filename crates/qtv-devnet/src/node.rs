@@ -3,25 +3,25 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 
-use qtv_attest::aggregate::aggregate;
-use qtv_attest::{Attestation, Attester};
+use qtv_attest::Attestation;
 use qtv_block::{event_root, transaction_root, Block as ChainBlock, Header};
 use qtv_codec::{to_bytes, Decoder};
 use qtv_crypto::sha3::shake256;
 use qtv_net::{Identity, PeerId};
 use qtv_node::consensus::{
-    genesis_beacon, header_value, Beacon, Block as ConsensusBlock, Consensus, ConsensusValidator,
-    Parent, Selection,
+    genesis_beacon, header_value, Beacon, Block as ConsensusBlock, Consensus, Parent, Selection,
+    ValidatorRegistration,
 };
 use qtv_node::fee::FeeParams;
 use qtv_node::ledger::{account_key, Account, BlockEvent, Ledger};
 use qtv_node::mempool::{Admitted, Mempool, Reject};
-use qtv_node::node::{committee_weights, day_of_height, execute_ordered, Genesis};
+use qtv_node::node::{day_of_height, execute_ordered, reweigh_roster, Genesis};
+use qtv_sampler::committee::PublishedReveal;
 use qtv_store::{BlockStore, StateStore};
 use qtv_tx::Wrapper;
 
 use crate::config::{DevnetConfig, NodeConfig};
-use crate::wire::{LockedBlock, Message, Proposal, ViewChange};
+use crate::wire::{LockedBlock, Message, Proposal, RevealNote, ViewChange};
 
 pub type Height = u64;
 
@@ -166,8 +166,8 @@ pub struct DevNode {
     ledger: Ledger,
     mempool: Mempool,
     consensus: Consensus,
-    base_validators: Vec<ConsensusValidator>,
-    attester: Attester,
+    base_roster: Vec<ValidatorRegistration>,
+    reveals: Vec<PublishedReveal>,
     fee_params: FeeParams,
     beacon: Beacon,
     height: Height,
@@ -197,7 +197,7 @@ impl DevNode {
         let block_store = BlockStore::open(node.store_dir.join("blocks.log"))?;
         let state_store = StateStore::open(node.store_dir.join("state.log"))?;
 
-        let validators: Vec<ConsensusValidator> = devnet.consensus_validators();
+        let roster: Vec<ValidatorRegistration> = devnet.roster();
 
         let secret = node.secret;
         let mut dev = DevNode {
@@ -205,9 +205,9 @@ impl DevNode {
             identity: p2p_identity(&secret),
             ledger: Ledger::new(),
             mempool: Mempool::new(),
-            consensus: Consensus::with_slots(&validators, devnet.slots),
-            base_validators: validators.clone(),
-            attester: Attester::from_secret_with_slots(node.id, &secret, node.stake, devnet.slots),
+            consensus: Consensus::with_slots(node.id, &secret, roster.clone(), devnet.slots),
+            base_roster: roster,
+            reveals: Vec::new(),
             fee_params: devnet.fee_params,
             beacon: genesis_beacon(),
             height: qtv_bft::params::MIN_HEIGHT,
@@ -253,7 +253,7 @@ impl DevNode {
         self.state_store.put_account(pool_key, pool_value)?;
         supply = supply.saturating_add(qtv_staking::STAKING_POOL);
         let mut validator_ids: Vec<[u8; 32]> = Vec::new();
-        for v in &self.base_validators {
+        for v in &self.base_roster {
             let address = &v.bond_address;
             let bond = v.stake.saturating_mul(qtv_staking::NATIVE_UNIT as u64);
             if let Some((bond_key, bond_value)) = self.ledger.seed_validator_bond(address, bond) {
@@ -278,7 +278,54 @@ impl DevNode {
 
     fn refresh_committee(&mut self) {
         self.consensus
-            .reweight(&committee_weights(&self.ledger, &self.base_validators));
+            .reweight(reweigh_roster(&self.ledger, &self.base_roster));
+        self.reveals.clear();
+        *self.selection_cache.borrow_mut() = None;
+        self.record_own_reveal();
+    }
+
+    /// Record this node's own reveal for the current height when it is selected.
+    fn record_own_reveal(&mut self) {
+        if let Some(reveal) = self.consensus.published_self(&self.beacon, self.height) {
+            if !self.reveals.iter().any(|r| r.id == reveal.id) {
+                self.reveals.push(reveal);
+                *self.selection_cache.borrow_mut() = None;
+            }
+        }
+    }
+
+    /// The ids of the validators whose reveal this node has collected for the height.
+    pub fn collected_reveal_ids(&self) -> Vec<u64> {
+        self.reveals.iter().map(|r| r.id).collect()
+    }
+
+    /// This node's own reveal for the current height, as a note to publish, when selected.
+    pub fn own_reveal_note(&self) -> Option<RevealNote> {
+        self.consensus
+            .published_self(&self.beacon, self.height)
+            .map(|reveal| RevealNote {
+                height: self.height,
+                id: reveal.id,
+                credential: reveal.credential,
+            })
+    }
+
+    /// Admit a peer reveal for the current height, verified against the peer's committed
+    /// root. Reveals for another height, that do not authenticate, or duplicates are
+    /// dropped.
+    pub fn collect_reveal(&mut self, note: RevealNote) {
+        if note.height != self.height {
+            return;
+        }
+        let reveal = PublishedReveal::new(note.id, note.credential);
+        if self.reveals.iter().any(|r| r.id == reveal.id) {
+            return;
+        }
+        if !self.consensus.verify_published(&self.beacon, self.height, &reveal) {
+            return;
+        }
+        self.reveals.push(reveal);
+        *self.selection_cache.borrow_mut() = None;
     }
 
     fn reload(&mut self) -> Result<(), RoundError> {
@@ -348,13 +395,15 @@ impl DevNode {
             .admit_batch(batch, &self.ledger, &self.fee_params);
     }
 
+    /// The committee for the current height, assembled from the reveals collected so far
+    /// and cached until a new reveal is admitted or the height advances.
     pub fn select(&self) -> Result<Selection, RoundError> {
         if let Some(selection) = self.selection_cache.borrow().as_ref() {
             return Ok(selection.clone());
         }
         let selection = self
             .consensus
-            .select(&self.beacon, self.height)
+            .select(&self.beacon, self.height, &self.reveals)
             .ok_or(RoundError::NoCommittee)?;
         *self.selection_cache.borrow_mut() = Some(selection.clone());
         Ok(selection)
@@ -465,8 +514,8 @@ impl DevNode {
     pub fn attest(&self) -> Result<Attestation, RoundError> {
         let staged = self.staged.as_ref().ok_or(RoundError::NotStaged)?;
         Ok(self
-            .attester
-            .attest(self.height, self.height, staged.block, &self.beacon))
+            .consensus
+            .own_attestation(self.height, self.height, staged.block, &self.beacon))
     }
 
     pub fn finalize(
@@ -475,15 +524,17 @@ impl DevNode {
         attestations: &[Attestation],
     ) -> Result<(), RoundError> {
         let block = self.staged.as_ref().ok_or(RoundError::NotStaged)?.block;
-        let certificate = aggregate(
-            self.height,
-            self.height,
-            block,
-            &selection.commitment,
-            &self.beacon,
-            attestations,
-        )
-        .ok_or(RoundError::NotFinalized)?;
+        let certificate = self
+            .consensus
+            .finalize(
+                selection,
+                self.height,
+                self.height,
+                block,
+                &self.beacon,
+                attestations,
+            )
+            .ok_or(RoundError::NotFinalized)?;
         let staged = self.staged.take().expect("the staged block is present");
 
         self.ledger = staged.ledger;
@@ -628,8 +679,8 @@ impl DevNode {
         let subject =
             view_change_subject(self.height, target_view, lock_view, locked_value, has_lock);
         let att = self
-            .attester
-            .attest(self.height, self.height, subject, &self.beacon);
+            .consensus
+            .own_attestation(self.height, self.height, subject, &self.beacon);
         ViewChange {
             height: self.height,
             target_view,
@@ -896,11 +947,39 @@ impl DevNode {
     /// this node holds. The address is a commitment; it is never recomputed from the
     /// id.
     fn validator_address(&self, id: u64) -> String {
-        self.base_validators
+        self.base_roster
             .iter()
             .find(|v| v.id == id)
             .map(|v| v.bond_address.clone())
             .unwrap_or_default()
+    }
+
+    /// Reconstruct the committee a finalized block was formed over from the reveals its
+    /// certificate carries, adding this node's own reveal when needed, and accept it only
+    /// when its committee digest matches the one the certificate commits to.
+    fn committee_for_certificate(
+        &self,
+        height: u64,
+        certificate: &qtv_attest::Certificate,
+    ) -> Option<Selection> {
+        let target = certificate.envelope.committee;
+        let mut reveals: Vec<PublishedReveal> = certificate
+            .attestations
+            .iter()
+            .map(|att| PublishedReveal::new(att.from, att.membership.clone()))
+            .collect();
+        if let Some(selection) = self.consensus.select(&self.beacon, height, &reveals) {
+            if selection.commitment.digest() == target {
+                return Some(selection);
+            }
+        }
+        if let Some(mine) = self.consensus.published_self(&self.beacon, height) {
+            if !reveals.iter().any(|r| r.id == mine.id) {
+                reveals.push(mine);
+            }
+        }
+        let selection = self.consensus.select(&self.beacon, height, &reveals)?;
+        (selection.commitment.digest() == target).then_some(selection)
     }
 
     pub fn height(&self) -> Height {
@@ -997,7 +1076,6 @@ impl DevNode {
         if header.beacon_seed() != self.beacon.seed() {
             return Err(SyncError::WrongBeacon);
         }
-        let selection = self.select().map_err(|_| SyncError::NoCommittee)?;
         let certificate = crate::wire::certificate_from_bytes(block.certificate())
             .map_err(|_| SyncError::BadCertificate)?;
         let subject =
@@ -1008,6 +1086,9 @@ impl DevNode {
         {
             return Err(SyncError::WrongSubject);
         }
+        let selection = self
+            .committee_for_certificate(self.height, &certificate)
+            .ok_or(SyncError::NoCommittee)?;
         if !certificate
             .verify(&selection.commitment, &self.beacon)
             .is_verified()

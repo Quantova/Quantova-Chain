@@ -15,14 +15,21 @@ use qtv_devnet::wire::Message;
 
 use support::{config, unique_base, user};
 
-/// Open every node of a config as a standalone node, so a test can drive the lock
-/// rule directly without the round loop.
+/// Open every node standalone and exchange the height's reveals so each forms the
+/// committee, the step the round loop does before a height.
 fn open_nodes(config: &DevnetConfig) -> Vec<DevNode> {
-    config
+    let mut nodes: Vec<DevNode> = config
         .nodes
         .iter()
         .map(|node| DevNode::open(node, config).expect("node opens"))
-        .collect()
+        .collect();
+    let notes: Vec<_> = nodes.iter().filter_map(|node| node.own_reveal_note()).collect();
+    for node in &mut nodes {
+        for note in &notes {
+            node.collect_reveal(note.clone());
+        }
+    }
+    nodes
 }
 
 /// The index of the node holding a committee id.
