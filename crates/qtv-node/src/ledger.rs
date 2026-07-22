@@ -80,6 +80,7 @@ const STAKE_PRICE_TAG: &[u8] = b"qtv/stake/price";
 const STAKE_MAINNET_TAG: &[u8] = b"qtv/stake/mainnet";
 const STAKE_METER_TAG: &[u8] = b"qtv/stake/meter";
 const STAKE_VALIDATORS_TAG: &[u8] = b"qtv/stake/validators";
+const STAKE_TOTAL_TAG: &[u8] = b"qtv/stake/total";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FeeSplit {
@@ -398,7 +399,13 @@ impl Ledger {
             bonded_at_day: 0,
             exit_requested_at: None,
         };
+        let existing = self.stake_bond(&id).map(|b| b.amount).unwrap_or(0);
         self.set_stake_bond(&id, &bond);
+        if amount >= existing {
+            self.credit_staked(amount - existing);
+        } else {
+            self.debit_staked(existing - amount);
+        }
         Some((stake_bond_key(&id), to_bytes(&bond)))
     }
 
@@ -429,6 +436,34 @@ impl Ledger {
     pub fn set_stake_treasury(&mut self, amount: u64) {
         self.trie
             .insert(stake_singleton_key(STAKE_TREASURY_TAG), to_bytes(&amount));
+    }
+
+    pub fn total_staked(&self) -> u64 {
+        self.trie
+            .get(&stake_singleton_key(STAKE_TOTAL_TAG))
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical staked total"))
+            .unwrap_or(0)
+    }
+
+    fn set_total_staked(&mut self, amount: u64) {
+        self.trie
+            .insert(stake_singleton_key(STAKE_TOTAL_TAG), to_bytes(&amount));
+    }
+
+    fn credit_staked(&mut self, amount: u64) {
+        if amount == 0 {
+            return;
+        }
+        let next = self.total_staked().saturating_add(amount);
+        self.set_total_staked(next);
+    }
+
+    fn debit_staked(&mut self, amount: u64) {
+        if amount == 0 {
+            return;
+        }
+        let next = self.total_staked().saturating_sub(amount);
+        self.set_total_staked(next);
     }
 
     pub fn total_supply(&self) -> u64 {
@@ -564,6 +599,7 @@ impl Ledger {
         self.set_stake_banned(&id);
         if let Some(bond) = self.stake_bond(&id) {
             self.debit_supply(bond.amount);
+            self.debit_staked(bond.amount);
             self.clear_stake_bond(&id);
         }
         self.clear_stake_rewards(&id);
@@ -1088,7 +1124,7 @@ impl Ledger {
         if referendum.status != Status::Deciding {
             return Some(referendum.status);
         }
-        let electorate = self.gov_total_locked();
+        let electorate = self.total_staked() as u128;
         let status = referendum.resolve(now, electorate);
         if status == Status::Deciding {
             return Some(status);
@@ -1249,6 +1285,7 @@ impl Ledger {
                 exit_requested_at: None,
             },
         );
+        self.credit_staked(amount);
         true
     }
 
@@ -1288,6 +1325,7 @@ impl Ledger {
                 exit_requested_at: None,
             },
         );
+        self.credit_staked(amount);
         true
     }
 
@@ -1303,6 +1341,7 @@ impl Ledger {
         let taken = qtv_staking::slash(bond.amount, fault);
         let treasury = self.stake_treasury() + taken;
         self.set_stake_treasury(treasury);
+        self.debit_staked(taken);
         if let qtv_staking::Fault::Attributable = fault {
             self.clear_stake_bond(&id);
             self.set_stake_banned(&id);
@@ -1346,6 +1385,7 @@ impl Ledger {
             _ => return false,
         };
         self.clear_stake_bond(&id);
+        self.debit_staked(bond.amount);
         let mut account = self.account(address);
         account.balance += bond.amount;
         self.set_account(address, &account);
@@ -1463,6 +1503,7 @@ mod stake_state_tests {
     #[test]
     fn a_qip_deposit_returns_on_support_and_a_spam_deposit_is_forfeit() {
         let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
         let proposer = gov_addr(20);
         fund(&mut l, &proposer, 20_000 * 1_000_000);
         let action = qtv_governance::Action::Parameter {
@@ -1501,6 +1542,7 @@ mod stake_state_tests {
     #[test]
     fn governance_enacts_a_parameter_change_that_sets_the_reward_price() {
         let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
         let proposer = gov_addr(22);
         fund(&mut l, &proposer, 20_000 * 1_000_000);
         let action = qtv_governance::Action::Parameter {
@@ -1535,6 +1577,7 @@ mod stake_state_tests {
     #[test]
     fn an_unimplemented_action_fails_to_enact_rather_than_claiming_success() {
         let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 1_000_000 * 1_000_000);
         let proposer = gov_addr(30);
         fund(&mut l, &proposer, 2_000_000 * 1_000_000);
         let action = qtv_governance::Action::Upgrade { blob: vec![1, 2, 3] };
@@ -1559,6 +1602,7 @@ mod stake_state_tests {
     #[test]
     fn governance_mints_uncapped_to_the_target_on_the_mint_track() {
         let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
         let proposer = gov_addr(24);
         fund(&mut l, &proposer, 300_000 * 1_000_000);
         let target = gov_addr(30);
@@ -1574,6 +1618,38 @@ mod stake_state_tests {
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         l.gov_enact(id, 3 * 86_400 + 1).unwrap();
         assert_eq!(l.balance(&target), 1_000_000 * 1_000_000);
+    }
+
+    #[test]
+    fn a_lone_voter_no_longer_passes_a_proposal_a_real_supermajority_would_reject() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 1_000_000 * 1_000_000);
+        assert_eq!(l.total_staked(), 1_000_000 * 1_000_000);
+
+        let action = || qtv_governance::Action::Parameter {
+            key: b"price".to_vec(),
+            value: 70_000_000u128.to_le_bytes().to_vec(),
+        };
+        let proposer = gov_addr(80);
+        fund(&mut l, &proposer, 100_000 * 1_000_000);
+        let close = 7 * 86_400 + 1;
+
+        let lone = l
+            .gov_propose(&proposer, qtv_governance::Track::Parameter, action(), 0)
+            .unwrap();
+        let solo = gov_addr(81);
+        fund(&mut l, &solo, 10_000 * 1_000_000);
+        assert!(l.gov_vote(&solo, lone, true, qtv_governance::Conviction::Liquid, 2_000 * 1_000_000, 0));
+        assert!(l.gov_referendum(lone).unwrap().tally.reached_approval(qtv_governance::Track::Parameter));
+        assert_eq!(l.gov_conclude(lone, close), Some(qtv_governance::Status::Rejected));
+
+        let real = l
+            .gov_propose(&proposer, qtv_governance::Track::Parameter, action(), 0)
+            .unwrap();
+        let backer = gov_addr(82);
+        fund(&mut l, &backer, 600_000 * 1_000_000);
+        assert!(l.gov_vote(&backer, real, true, qtv_governance::Conviction::Liquid, 500_000 * 1_000_000, 0));
+        assert_eq!(l.gov_conclude(real, close), Some(qtv_governance::Status::Approved));
     }
 
     #[test]
