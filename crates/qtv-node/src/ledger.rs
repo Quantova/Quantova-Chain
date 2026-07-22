@@ -1221,7 +1221,10 @@ impl Ledger {
             return false;
         }
         let existing = self.stake_bond(&id).map(|b| b.amount).unwrap_or(0);
-        let total = existing + amount;
+        let total = match existing.checked_add(amount) {
+            Some(total) => total,
+            None => return false,
+        };
         if !qtv_staking::eligible(total) {
             return false;
         }
@@ -1761,6 +1764,23 @@ mod stake_state_tests {
         assert_eq!(l.balance(&addr), 2_000 * 1_000_000);
         l.set_stake_banned(&id);
         assert!(!l.bond(&addr, 100 * 1_000_000, 0));
+    }
+
+    #[test]
+    fn bond_rejects_an_addition_that_would_overflow_the_stake_word() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[15u8; 32]).unwrap();
+        let id = [15u8; 32];
+        l.set_account(&addr, &Account::funded(3_000 * 1_000_000, 1, vec![]));
+        let ceiling = Bond {
+            amount: u64::MAX - 1_000,
+            bonded_at_day: 0,
+            exit_requested_at: None,
+        };
+        l.set_stake_bond(&id, &ceiling);
+        assert!(!l.bond(&addr, 2_000 * 1_000_000, 0));
+        assert_eq!(l.balance(&addr), 3_000 * 1_000_000);
+        assert_eq!(l.stake_bond(&id).unwrap().amount, u64::MAX - 1_000);
     }
 
     #[test]
