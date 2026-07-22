@@ -36,6 +36,7 @@ fn chain_config(base: &std::path::Path, count: usize) -> DevnetConfig {
         // fanout, so the peer tables converge the same whatever the overlay degree.
         fanout: 2,
         slots: qtv_devnet::config::DEFAULT_SLOTS,
+        published_roster: None,
     }
 }
 
