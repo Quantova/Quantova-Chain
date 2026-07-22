@@ -108,6 +108,39 @@ fn hash_scheme_signs_and_verifies() {
 }
 
 #[test]
+fn the_chain_id_is_bound_into_the_signature() {
+    let account = derive(&master(), 0);
+    let target = derive(&master(), 1);
+    let call = Call::new(target.address(), vec![1, 2, 3]);
+    let mainnet = Body::with_context(
+        account.address(),
+        7,
+        21_000,
+        1_000_000,
+        call.clone(),
+        0,
+        qtv_tx::MAINNET_CHAIN_ID,
+    );
+    let wrapper = sign(&account, &mainnet);
+    assert!(verify(&wrapper, account.public_key()));
+
+    let testnet = Body::with_context(
+        account.address(),
+        7,
+        21_000,
+        1_000_000,
+        call,
+        0,
+        qtv_tx::TESTNET_CHAIN_ID,
+    );
+    let replayed = Wrapper::new(testnet, wrapper.scheme(), wrapper.signature().to_vec());
+    assert!(
+        !verify(&replayed, account.public_key()),
+        "a mainnet signature does not authenticate the same body on another network"
+    );
+}
+
+#[test]
 fn body_encoding_is_byte_identical() {
     let body = sample_body();
     let first = qtv_codec::to_bytes(&body);
