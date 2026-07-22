@@ -1,5 +1,20 @@
 use qtv_codec::{Decode, Decoder, Encode, Encoder, Error};
 
+const PREALLOC_LIMIT: usize = 4096;
+const MIN_SEIZURE: usize = 16;
+const MIN_BYTES_VEC: usize = 8;
+
+fn bounded_capacity(remaining: usize, count: u64, min_element: usize) -> Result<usize, Error> {
+    let ceiling = (remaining / min_element.max(1)) as u64;
+    if count > ceiling {
+        return Err(Error::LengthOverrun {
+            length: count,
+            found: remaining,
+        });
+    }
+    Ok((count as usize).min(PREALLOC_LIMIT))
+}
+
 pub const NATIVE_UNIT: u64 = 1_000_000;
 pub const BPS_DENOM: u128 = 10_000;
 
@@ -418,7 +433,8 @@ impl Decode for Action {
                 let scope: [u8; 32] = scope_bytes.try_into().map_err(|_| Error::UnknownTag { tag })?;
                 let victim = Vec::<u8>::decode(decoder)?;
                 let count = u64::decode(decoder)?;
-                let mut seizures = Vec::with_capacity(count as usize);
+                let mut seizures =
+                    Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_SEIZURE)?);
                 for _ in 0..count {
                     seizures.push(Seizure::decode(decoder)?);
                 }
@@ -430,7 +446,8 @@ impl Decode for Action {
             }
             5 => {
                 let count = u64::decode(decoder)?;
-                let mut targets = Vec::with_capacity(count as usize);
+                let mut targets =
+                    Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_BYTES_VEC)?);
                 for _ in 0..count {
                     targets.push(Vec::<u8>::decode(decoder)?);
                 }
@@ -934,5 +951,36 @@ mod tests {
         let bytes = to_bytes(&r);
         let back: Referendum = from_bytes(&bytes).unwrap();
         assert_eq!(r, back);
+    }
+
+    #[test]
+    fn a_recovery_action_with_a_huge_seizure_count_and_a_tiny_body_is_rejected() {
+        let mut encoder = Encoder::new();
+        encoder.put_u8(4);
+        encoder.put_bytes(&[0u8; 32]);
+        vec![1u8, 2, 3, 4].encode(&mut encoder);
+        u64::MAX.encode(&mut encoder);
+        let bytes = encoder.into_bytes();
+        let result: Result<Action, Error> = from_bytes(&bytes);
+        assert!(matches!(result, Err(Error::LengthOverrun { .. })));
+    }
+
+    #[test]
+    fn a_freeze_action_with_a_huge_target_count_and_a_tiny_body_is_rejected() {
+        let mut encoder = Encoder::new();
+        encoder.put_u8(5);
+        u64::MAX.encode(&mut encoder);
+        let bytes = encoder.into_bytes();
+        let result: Result<Action, Error> = from_bytes(&bytes);
+        assert!(matches!(result, Err(Error::LengthOverrun { .. })));
+    }
+
+    #[test]
+    fn bounded_capacity_rejects_a_count_that_overruns_the_remaining_bytes() {
+        assert!(matches!(
+            bounded_capacity(0, u64::MAX, MIN_SEIZURE),
+            Err(Error::LengthOverrun { .. })
+        ));
+        assert_eq!(bounded_capacity(1_000_000, 2, MIN_SEIZURE).unwrap(), 2);
     }
 }
