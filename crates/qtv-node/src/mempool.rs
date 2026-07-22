@@ -18,6 +18,13 @@ pub enum Reject {
     MeterLimitTooLow,
     FeeTooLow,
     InsufficientFunds,
+    WrongChain,
+    PoolFull,
+    SenderQueueFull,
+}
+
+pub fn chain_ok(wrapper: &Wrapper, fee_params: &FeeParams) -> bool {
+    wrapper.body().chain_id() == fee_params.chain_id
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +106,10 @@ fn plan_from_account_checks(
 ) -> Result<TransferPlan, Reject> {
     let body = wrapper.body();
     let sender = body.sender().to_string();
+
+    if !chain_ok(wrapper, fee_params) {
+        return Err(Reject::WrongChain);
+    }
 
     if body.nonce() != account.nonce {
         return Err(Reject::BadNonce {
@@ -182,15 +193,103 @@ fn verify_signatures(ledger: &Ledger, batch: &[Wrapper], verify_cores: usize) ->
 
 const CONTRACTS_ENABLED: bool = true;
 
-#[derive(Debug, Clone, Default)]
+pub const DEFAULT_MEMPOOL_CAP: usize = 65_536;
+
+pub const DEFAULT_PER_SENDER_CAP: usize = 1_024;
+
+pub const DEFAULT_PRIORITY_RESERVE: usize = 512;
+
+pub fn is_priority(wrapper: &Wrapper) -> bool {
+    wrapper.body().call().target() == crate::ledger::gov_system_address()
+}
+
+#[derive(Debug, Clone)]
 pub struct Mempool {
     pending: Vec<Wrapper>,
+    cap: usize,
+    per_sender: usize,
+    reserve: usize,
+}
+
+impl Default for Mempool {
+    fn default() -> Self {
+        Mempool::new()
+    }
 }
 
 impl Mempool {
     pub fn new() -> Self {
+        Mempool::with_limits(
+            DEFAULT_MEMPOOL_CAP,
+            DEFAULT_PER_SENDER_CAP,
+            DEFAULT_PRIORITY_RESERVE,
+        )
+    }
+
+    pub fn with_limits(cap: usize, per_sender: usize, reserve: usize) -> Self {
         Mempool {
             pending: Vec::new(),
+            cap: cap.max(1),
+            per_sender: per_sender.max(1),
+            reserve: reserve.min(cap.saturating_sub(1)),
+        }
+    }
+
+    fn lowest_fee_normal(&self) -> Option<(usize, u128)> {
+        self.pending
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| !is_priority(w))
+            .min_by(|a, b| a.1.body().fee().cmp(&b.1.body().fee()))
+            .map(|(index, w)| (index, w.body().fee()))
+    }
+
+    fn lowest_fee_priority(&self) -> Option<(usize, u128)> {
+        self.pending
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| is_priority(w))
+            .min_by(|a, b| a.1.body().fee().cmp(&b.1.body().fee()))
+            .map(|(index, w)| (index, w.body().fee()))
+    }
+
+    fn make_room(&mut self, incoming: &Wrapper) -> Result<(), Reject> {
+        let sender = incoming.body().sender();
+        let sender_count = self
+            .pending
+            .iter()
+            .filter(|w| w.body().sender() == sender)
+            .count();
+        if sender_count >= self.per_sender {
+            return Err(Reject::SenderQueueFull);
+        }
+        if is_priority(incoming) {
+            if self.pending.len() < self.cap {
+                return Ok(());
+            }
+            if let Some((index, _)) = self.lowest_fee_normal() {
+                self.pending.remove(index);
+                return Ok(());
+            }
+            match self.lowest_fee_priority() {
+                Some((index, fee)) if fee < incoming.body().fee() => {
+                    self.pending.remove(index);
+                    Ok(())
+                }
+                _ => Err(Reject::PoolFull),
+            }
+        } else {
+            let normal = self.pending.iter().filter(|w| !is_priority(w)).count();
+            if normal < self.cap.saturating_sub(self.reserve) && self.pending.len() < self.cap {
+                return Ok(());
+            }
+            match self.lowest_fee_normal() {
+                Some((index, fee)) if fee < incoming.body().fee() => {
+                    self.pending.remove(index);
+                    Ok(())
+                }
+                _ => Err(Reject::PoolFull),
+            }
         }
     }
 
@@ -212,6 +311,9 @@ impl Mempool {
         ledger: &Ledger,
         fee_params: &FeeParams,
     ) -> Result<Admitted, Reject> {
+        if !chain_ok(&wrapper, fee_params) {
+            return Err(Reject::WrongChain);
+        }
         if crate::node::is_vm_op(ledger, &wrapper) {
             if !CONTRACTS_ENABLED {
                 return Err(Reject::BadCall);
@@ -241,6 +343,7 @@ impl Mempool {
         if self.pending.iter().any(|w| w.id() == id) {
             return Ok(Admitted::Known);
         }
+        self.make_room(&wrapper)?;
         self.pending.push(wrapper);
         Ok(Admitted::Fresh)
     }
@@ -267,6 +370,9 @@ impl Mempool {
         let verified = verify_signatures(ledger, &batch, verify_cores);
         let mut admitted = Vec::new();
         for (index, wrapper) in batch.into_iter().enumerate() {
+            if !chain_ok(&wrapper, fee_params) {
+                continue;
+            }
             let admissible = if crate::node::is_vm_op(ledger, &wrapper) {
                 if !CONTRACTS_ENABLED {
                     false
@@ -289,6 +395,9 @@ impl Mempool {
             }
             let id = wrapper.id();
             if self.pending.iter().any(|w| w.id() == id) {
+                continue;
+            }
+            if self.make_room(&wrapper).is_err() {
                 continue;
             }
             self.pending.push(wrapper.clone());
@@ -355,6 +464,116 @@ mod tests {
         );
         let mut pool = Mempool::new();
         assert!(pool.admit(tx, &ledger, &params).is_ok());
+        assert_eq!(pool.len(), 1);
+    }
+
+    fn gov_release(from: &KeyAccount, nonce: u64, fee: u128) -> Wrapper {
+        let call = qtv_tx::Call::new(crate::ledger::gov_system_address(), vec![5]);
+        let body = Body::new(from.address(), nonce, TRANSFER_METER, fee, call);
+        sign(from, &body)
+    }
+
+    #[test]
+    fn the_mempool_is_bounded_and_a_priority_tx_is_always_includable() {
+        let params = FeeParams::devnet();
+        let fee = u128::from(params.transfer_fee());
+        let mut ledger = Ledger::new();
+        let mut pool = Mempool::with_limits(4, 100, 2);
+
+        let recipient = keypair(200);
+        for i in 0..2u64 {
+            let sender = keypair(100 + i);
+            fund(&mut ledger, &sender, 10_000_000);
+            let tx = signed_transfer(&sender, &recipient.address(), 100, 0, fee);
+            assert!(pool.admit(tx, &ledger, &params).is_ok());
+        }
+        for i in 0..2u64 {
+            let guardian = keypair(140 + i);
+            fund(&mut ledger, &guardian, 10_000_000);
+            assert!(pool.admit(gov_release(&guardian, 0, fee), &ledger, &params).is_ok());
+        }
+        assert_eq!(pool.len(), 4, "the pool is at its hard cap");
+
+        let crowd = keypair(160);
+        fund(&mut ledger, &crowd, 10_000_000);
+        let crowd_tx = signed_transfer(&crowd, &recipient.address(), 100, 0, fee);
+        assert_eq!(
+            pool.admit(crowd_tx, &ledger, &params),
+            Err(Reject::PoolFull),
+            "a fee competing transfer cannot exceed the bound"
+        );
+        assert_eq!(pool.len(), 4, "the pool stays bounded");
+
+        let sentinel = keypair(170);
+        fund(&mut ledger, &sentinel, 10_000_000);
+        assert!(
+            pool.admit(gov_release(&sentinel, 0, fee), &ledger, &params).is_ok(),
+            "a safety transaction is always includable through the reserved lane"
+        );
+        assert_eq!(pool.len(), 4, "admitting a safety transaction keeps the pool bounded");
+        assert_eq!(
+            pool.candidates().iter().filter(|w| is_priority(w)).count(),
+            3,
+            "the safety transaction displaced a fee competing transfer, not another safety one"
+        );
+    }
+
+    #[test]
+    fn a_per_sender_flood_is_bounded() {
+        let params = FeeParams::devnet();
+        let fee = u128::from(params.transfer_fee());
+        let mut ledger = Ledger::new();
+        let mut pool = Mempool::with_limits(64, 3, 2);
+        let spammer = keypair(0);
+        let recipient = keypair(1);
+        fund(&mut ledger, &spammer, 10_000_000);
+        for amount in 0..3u64 {
+            let tx = signed_transfer(&spammer, &recipient.address(), 100 + amount, 0, fee);
+            assert!(pool.admit(tx, &ledger, &params).is_ok());
+        }
+        let over = signed_transfer(&spammer, &recipient.address(), 999, 0, fee);
+        assert_eq!(
+            pool.admit(over, &ledger, &params),
+            Err(Reject::SenderQueueFull)
+        );
+        assert_eq!(pool.len(), 3);
+    }
+
+    #[test]
+    fn a_transaction_for_another_chain_is_rejected() {
+        let params = FeeParams::devnet();
+        let alice = keypair(0);
+        let bob = keypair(1);
+        let mut ledger = Ledger::new();
+        fund(&mut ledger, &alice, 10_000);
+
+        let fee = u128::from(params.transfer_fee());
+        let foreign = Body::with_context(
+            alice.address(),
+            0,
+            TRANSFER_METER,
+            fee,
+            transfer_call(&bob.address(), 500),
+            0,
+            qtv_tx::TESTNET_CHAIN_ID,
+        );
+        let mut pool = Mempool::new();
+        assert_eq!(
+            pool.admit(sign(&alice, &foreign), &ledger, &params),
+            Err(Reject::WrongChain)
+        );
+        assert!(pool.is_empty());
+
+        let native = Body::with_context(
+            alice.address(),
+            0,
+            TRANSFER_METER,
+            fee,
+            transfer_call(&bob.address(), 500),
+            0,
+            params.chain_id,
+        );
+        assert!(pool.admit(sign(&alice, &native), &ledger, &params).is_ok());
         assert_eq!(pool.len(), 1);
     }
 
