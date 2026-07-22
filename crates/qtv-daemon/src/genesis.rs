@@ -70,6 +70,11 @@ impl GenesisFile {
 
         let chain_id = chain_id.ok_or("the genesis is missing 'chain_id'")?;
         let genesis_time = genesis_time.ok_or("the genesis is missing 'genesis_time'")?;
+        let chain_binding = u64::from_be_bytes(
+            sha3::sha3_256(chain_id.as_bytes())[..8]
+                .try_into()
+                .expect("eight bytes"),
+        );
         let fee_params = FeeParams {
             transfer_micro_usd: transfer_micro_usd
                 .ok_or("the genesis is missing 'fee_transfer_micro_usd'")?,
@@ -77,6 +82,7 @@ impl GenesisFile {
                 .ok_or("the genesis is missing 'fee_rate_micro_usd_per_qtov'")?,
             native_unit: native_unit.ok_or("the genesis is missing 'fee_native_unit'")?,
             max_fee_native: max_fee_native.ok_or("the genesis is missing 'fee_max_native'")?,
+            chain_id: chain_binding,
         };
         if fee_params.rate_micro_usd_per_qtov == 0 {
             return Err("the genesis 'fee_rate_micro_usd_per_qtov' is zero, so the fee \
