@@ -6,6 +6,12 @@ license.workspace = true
 repository.workspace = true
 description = "The first in process node that composes the chain crates, the virtual machine, and the consensus core into a state transition and finalization loop."
 
+[features]
+# Deterministic, per index secret and validator constructors for the test suite and
+# the single process simulation. Off by default, so a default node build carries no id
+# derived key path; the secret comes only from a keystore file or an explicit caller.
+test-fixtures = []
+
 [dependencies]
 qtv-idfmt = { path = "../qtv-idfmt" }
 qtv-codec = { path = "../qtv-codec" }
@@ -20,3 +26,8 @@ qtv-vm = { git = "https://github.com/Quantova/QVM.git", tag = "v0.5.0" }
 qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", tag = "v0.7.0" }
 qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", tag = "v0.7.0" }
 qtv-attest = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", tag = "v0.7.0" }
+
+[dev-dependencies]
+# Enable the test only fixtures for this crate's own integration tests, the standard
+# way to turn a feature on for a crate testing itself.
+qtv-node = { path = ".", features = ["test-fixtures"] }

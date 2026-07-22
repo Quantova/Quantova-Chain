@@ -16,19 +16,28 @@ use crate::parallel::execute_parallel;
 
 use qtv_attest::Certificate;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatorSpec {
     pub id: u64,
     pub stake: u64,
     pub online: bool,
+    /// The published bond and reward account address. This is the commitment the
+    /// validator's operator secret derives to; genesis seeds the bond to it and the
+    /// committee is weighed under it. It carries no secret and is never id derived.
+    pub bond_address: String,
 }
 
+// Per id spec constructors for tests and the single process simulation, sourcing the
+// bond address from the gated fixture. A production spec carries the committed address
+// the operator published from its own secret; these are absent from a default build.
+#[cfg(any(test, feature = "test-fixtures"))]
 impl ValidatorSpec {
     pub fn online(id: u64, stake: u64) -> Self {
         ValidatorSpec {
             id,
             stake,
             online: true,
+            bond_address: crate::keys::validator_address(&crate::keys::fixture_secret(id)),
         }
     }
 
@@ -37,6 +46,7 @@ impl ValidatorSpec {
             id,
             stake,
             online: false,
+            bond_address: crate::keys::validator_address(&crate::keys::fixture_secret(id)),
         }
     }
 }
@@ -104,15 +114,13 @@ pub enum ProduceError {
     NotFinalized,
 }
 
-fn validator_seed(id: u64) -> [u8; 32] {
-    let mut seed = [0u8; 32];
-    seed[..8].copy_from_slice(&id.to_le_bytes());
-    seed[8..15].copy_from_slice(b"QTVNODE");
-    seed
-}
-
+/// The bond and reward address of the validator behind a fixture secret index, for
+/// tests and the single process simulation only. A production caller derives the
+/// address from the operator secret it holds through `crate::keys::validator_address`,
+/// never from the public id; this convenience is absent from a default node build.
+#[cfg(any(test, feature = "test-fixtures"))]
 pub fn validator_address(id: u64) -> String {
-    qtv_account::derive(&validator_seed(id), 0).address()
+    crate::keys::validator_address(&crate::keys::fixture_secret(id))
 }
 
 pub fn execute_ordered(
@@ -542,8 +550,10 @@ pub fn committee_weights(
         .iter()
         .map(|v| ConsensusValidator {
             id: v.id,
-            stake: ledger.staked_weight(&validator_address(v.id)),
+            stake: ledger.staked_weight(&v.bond_address),
             online: v.online,
+            secret: v.secret,
+            bond_address: v.bond_address.clone(),
         })
         .collect();
     if derived.iter().all(|v| v.stake == 0) {
@@ -553,7 +563,11 @@ pub fn committee_weights(
 }
 
 impl Node {
-    pub fn new(genesis: Genesis) -> Self {
+    /// Build a single process node from genesis and the per validator secret roster.
+    /// The genesis carries only commitments; the secret behind each validator is
+    /// supplied here because one process simulates the whole committee. Nothing about
+    /// a validator is derived from its public id, and no secret is written to genesis.
+    pub fn new(genesis: Genesis, secrets: &BTreeMap<u64, [u8; 32]>) -> Self {
         let mut ledger = Ledger::new();
         for account in &genesis.accounts {
             ledger.set_account(
@@ -569,21 +583,24 @@ impl Node {
                 id: v.id,
                 stake: v.stake,
                 online: v.online,
+                secret: *secrets
+                    .get(&v.id)
+                    .expect("a secret for every genesis validator"),
+                bond_address: v.bond_address.clone(),
             })
             .collect();
         let validator_addresses = genesis
             .validators
             .iter()
-            .map(|v| (v.id, validator_address(v.id)))
+            .map(|v| (v.id, v.bond_address.clone()))
             .collect();
         let mut validator_ids: Vec<[u8; 32]> = Vec::new();
-        for v in &validators {
-            let address = validator_address(v.id);
+        for v in &genesis.validators {
             ledger.seed_validator_bond(
-                &address,
+                &v.bond_address,
                 v.stake.saturating_mul(qtv_staking::NATIVE_UNIT as u64),
             );
-            if let Ok(payload) = qtv_idfmt::parse_address(&address) {
+            if let Ok(payload) = qtv_idfmt::parse_address(&v.bond_address) {
                 if let Ok(id) = <[u8; 32]>::try_from(payload) {
                     validator_ids.push(id);
                 }
