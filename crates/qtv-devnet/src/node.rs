@@ -328,10 +328,14 @@ impl DevNode {
             .block_by_height(head)
             .ok_or(RoundError::Decode)?
             .to_vec();
-        let (header, cert_digest) = decode_head(&bytes)?;
+        let (header, certificate) = decode_head(&bytes)?;
         self.parent_header_hash = header.hash();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
-        self.beacon = Beacon::from_seed(*header.beacon_seed()).advance(&cert_digest, head);
+        self.beacon = Beacon::from_seed(*header.beacon_seed());
+        let selection = self
+            .committee_for_certificate(head, &certificate)
+            .ok_or(RoundError::Decode)?;
+        self.beacon = self.beacon.advance_from_reveals(head, &selection.reveals);
         self.height = head + 1;
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();
@@ -536,13 +540,14 @@ impl DevNode {
         if !block_events.is_empty() {
             self.events_by_height.insert(self.height, block_events);
         }
-        let cert_digest = certificate.digest();
         let attesters = certificate.attesters();
         let cert_slot = crate::wire::certificate_to_bytes(&certificate);
         let chain_block = ChainBlock::new(staged.header, cert_slot, staged.body);
         self.persist(&chain_block)?;
 
-        self.beacon = self.beacon.advance(&cert_digest, self.height);
+        self.beacon = self
+            .beacon
+            .advance_from_reveals(self.height, &selection.reveals);
         self.parent_header_hash = chain_block.header_hash();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
         self.height += 1;
@@ -1107,7 +1112,6 @@ impl DevNode {
             self.events_by_height.insert(self.height, block_events);
         }
         self.persist(&block).map_err(|_| SyncError::Io)?;
-        let cert_digest = certificate.digest();
         let leader = selection
             .members
             .iter()
@@ -1116,7 +1120,9 @@ impl DevNode {
             .unwrap_or(selection.leader);
         let attesters = certificate.attesters();
         let included_ids: Vec<String> = block.body().iter().map(Wrapper::id).collect();
-        self.beacon = self.beacon.advance(&cert_digest, self.height);
+        self.beacon = self
+            .beacon
+            .advance_from_reveals(self.height, &selection.reveals);
         self.parent_header_hash = block.header_hash();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
         self.height += 1;
@@ -1168,11 +1174,11 @@ fn justified_choice(records: &[ViewChange]) -> Option<LockedBlock> {
         .map(|(_, _, block)| block.clone())
 }
 
-fn decode_head(bytes: &[u8]) -> Result<(Header, [u8; 32]), RoundError> {
+fn decode_head(bytes: &[u8]) -> Result<(Header, qtv_attest::Certificate), RoundError> {
     let mut decoder = Decoder::new(bytes);
     let header = Header::decode(&mut decoder).map_err(|_| RoundError::Decode)?;
     let cert_slot = decoder.get_bytes().map_err(|_| RoundError::Decode)?;
     let certificate =
         crate::wire::certificate_from_bytes(cert_slot).map_err(|_| RoundError::Decode)?;
-    Ok((header, certificate.digest()))
+    Ok((header, certificate))
 }
