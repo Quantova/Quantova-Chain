@@ -51,13 +51,14 @@ impl Decode for Account {
     }
 }
 
+const ACCOUNT_TAG: &[u8] = b"qtv/account/";
+
 pub(crate) fn state_key(address: &str) -> Key {
-    let mut key = [0u8; KEY_LEN];
-    if let Ok(payload) = qtv_idfmt::parse_address(address) {
-        let n = payload.len().min(KEY_LEN);
-        key[..n].copy_from_slice(&payload[..n]);
-    }
-    key
+    let payload = qtv_idfmt::parse_address(address).unwrap_or_default();
+    let mut input = Vec::with_capacity(ACCOUNT_TAG.len() + payload.len());
+    input.extend_from_slice(ACCOUNT_TAG);
+    input.extend_from_slice(&payload);
+    sha3::sha3_256(&input)
 }
 
 pub fn account_key(address: &str) -> Key {
@@ -1776,7 +1777,7 @@ impl Ledger {
 
     pub fn account(&self, address: &str) -> Account {
         match self.trie.get(&state_key(address)) {
-            Some(bytes) => from_bytes(bytes).expect("state holds a canonical account record"),
+            Some(bytes) => from_bytes(bytes).unwrap_or_default(),
             None => Account::default(),
         }
     }
@@ -1873,5 +1874,15 @@ mod tests {
         two.set_account(&b, &Account::funded(20, 0, Vec::new()));
         two.set_account(&a, &Account::funded(10, 0, Vec::new()));
         assert_eq!(one.state_root(), two.state_root());
+    }
+
+    #[test]
+    fn an_address_over_a_system_record_reads_as_the_default_and_never_panics() {
+        let mut ledger = Ledger::new();
+        ledger.set_stake_pool(9_000);
+        let pool_key = stake_singleton_key(STAKE_POOL_TAG);
+        let hostile = qtv_idfmt::render_address(&pool_key).expect("a full hash reaches the floor");
+        assert_eq!(ledger.account(&hostile), Account::default());
+        assert_eq!(ledger.stake_pool(), 9_000);
     }
 }
