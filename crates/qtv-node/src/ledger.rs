@@ -198,11 +198,19 @@ const GOV_ACTION_TAG: &[u8] = b"qtv/gov/action/";
 const GOV_BALLOT_TAG: &[u8] = b"qtv/gov/ballot/";
 const GOV_LOCK_TAG: &[u8] = b"qtv/gov/lock/";
 const GOV_BLACKLIST_TAG: &[u8] = b"qtv/gov/blacklist/";
+const GOV_FREEZE_TAG: &[u8] = b"qtv/gov/freeze/";
 const GOV_RECEIPT_TAG: &[u8] = b"qtv/gov/receipt/";
 
 fn gov_blacklist_key(id: &[u8; 32]) -> Key {
     let mut input = Vec::with_capacity(GOV_BLACKLIST_TAG.len() + id.len());
     input.extend_from_slice(GOV_BLACKLIST_TAG);
+    input.extend_from_slice(id);
+    sha3::sha3_256(&input)
+}
+
+fn gov_freeze_key(id: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(GOV_FREEZE_TAG.len() + id.len());
+    input.extend_from_slice(GOV_FREEZE_TAG);
     input.extend_from_slice(id);
     sha3::sha3_256(&input)
 }
@@ -355,6 +363,13 @@ fn id_from_slice(id: &[u8]) -> Option<[u8; 32]> {
 
 fn u64_from_le(bytes: &[u8]) -> Option<u64> {
     bytes.try_into().ok().map(u64::from_le_bytes)
+}
+
+fn action_is_enactable(action: &Action) -> bool {
+    !matches!(
+        action,
+        Action::Upgrade { .. } | Action::BridgeMigration { .. } | Action::AddAsset { .. }
+    )
 }
 
 fn u128_from_le(bytes: &[u8]) -> Option<u128> {
@@ -617,6 +632,21 @@ impl Ledger {
     pub fn is_blacklisted(&self, address: &str) -> bool {
         match address_id(address) {
             Some(id) => self.is_gov_blacklisted(&id),
+            None => false,
+        }
+    }
+
+    fn is_frozen_id(&self, id: &[u8; 32]) -> bool {
+        matches!(self.trie.get(&gov_freeze_key(id)), Some(bytes) if !bytes.is_empty())
+    }
+
+    fn set_frozen(&mut self, id: &[u8; 32]) {
+        self.trie.insert(gov_freeze_key(id), vec![1]);
+    }
+
+    pub fn is_frozen(&self, address: &str) -> bool {
+        match address_id(address) {
+            Some(id) => self.is_frozen_id(&id),
             None => false,
         }
     }
@@ -1052,6 +1082,9 @@ impl Ledger {
         if action.track() != track {
             return None;
         }
+        if !action_is_enactable(&action) {
+            return None;
+        }
         let proposer_id = address_id(proposer)?;
         let deposit = track.deposit();
         let mut account = self.account(proposer);
@@ -1214,10 +1247,17 @@ impl Ledger {
                 self.set_account(&victim_addr, &account);
                 Ok(())
             }
+            Action::Freeze { targets } => {
+                for target in targets {
+                    if let Some(id) = id_from_slice(target) {
+                        self.set_frozen(&id);
+                    }
+                }
+                Ok(())
+            }
             Action::Upgrade { .. }
             | Action::BridgeMigration { .. }
-            | Action::AddAsset { .. }
-            | Action::Freeze { .. } => Err(EnactError::NotImplemented),
+            | Action::AddAsset { .. } => Err(EnactError::NotImplemented),
         }
     }
 
@@ -1575,28 +1615,74 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn an_unimplemented_action_fails_to_enact_rather_than_claiming_success() {
+    fn a_track_with_no_enactment_cannot_be_proposed_and_keeps_the_deposit() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 1_000_000 * 1_000_000);
         let proposer = gov_addr(30);
         fund(&mut l, &proposer, 2_000_000 * 1_000_000);
-        let action = qtv_governance::Action::Upgrade { blob: vec![1, 2, 3] };
+        assert!(l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::ChainUpgrade,
+                qtv_governance::Action::Upgrade { blob: vec![1, 2, 3] },
+                0,
+            )
+            .is_none());
+        assert!(l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::BridgeMigration { vault: vec![4; 32] },
+                0,
+            )
+            .is_none());
+        assert!(l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::AddAsset,
+                qtv_governance::Action::AddAsset { asset: vec![6; 32] },
+                0,
+            )
+            .is_none());
+        assert_eq!(l.balance(&proposer), 2_000_000 * 1_000_000);
+    }
+
+    #[test]
+    fn governance_freezes_a_named_account_and_shields_protected_stake_from_a_freeze() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        let proposer = gov_addr(40);
+        fund(&mut l, &proposer, 300_000 * 1_000_000);
+        let target = gov_addr(41);
         let id = l
-            .gov_propose(&proposer, qtv_governance::Track::ChainUpgrade, action, 0)
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BlacklistKill,
+                qtv_governance::Action::Freeze { targets: vec![[41u8; 32].to_vec()] },
+                0,
+            )
             .unwrap();
-        let voter = gov_addr(31);
-        fund(&mut l, &voter, 2_000_000 * 1_000_000);
-        l.gov_vote(
-            &voter,
-            id,
-            true,
-            qtv_governance::Conviction::Liquid,
-            1_000_000 * 1_000_000,
-            0,
+        let voter = gov_addr(42);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+        l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        assert!(!l.is_frozen(&target));
+        l.gov_enact(id, 2 * 86_400 + 1).unwrap();
+        assert!(l.is_frozen(&target));
+
+        let bonded = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BlacklistKill,
+                qtv_governance::Action::Freeze { targets: vec![[99u8; 32].to_vec()] },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, bonded, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        assert_eq!(
+            l.gov_enact(bonded, 2 * 86_400 + 1),
+            Err(EnactError::Constitution(
+                qtv_governance::Violation::FreezeTouchesProtected
+            ))
         );
-        let result = l.gov_enact(id, 14 * 86_400 + 1);
-        assert_eq!(result, Err(EnactError::NotImplemented));
-        assert!(l.gov_receipt(id).is_none(), "a failed enactment writes no receipt");
     }
 
     #[test]
