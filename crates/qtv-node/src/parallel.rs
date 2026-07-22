@@ -157,6 +157,7 @@ pub fn execute_parallel(
             || target == key_register_address.as_str()
             || ledger.is_blacklisted(sender)
             || ledger.is_blacklisted(target)
+            || ledger.is_frozen(sender)
             || crate::node::is_vm_op(ledger, wrapper)
     }) {
         return crate::node::execute_ordered(ledger, candidates, fee_params, day);
