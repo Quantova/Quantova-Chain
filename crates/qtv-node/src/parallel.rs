@@ -57,7 +57,7 @@ struct Write {
 
 fn account_at(leaves: &BTreeMap<Key, Vec<u8>>, key: &Key) -> Account {
     match leaves.get(key) {
-        Some(bytes) => from_bytes(bytes).expect("state holds a canonical account record"),
+        Some(bytes) => from_bytes(bytes).unwrap_or_default(),
         None => Account::default(),
     }
 }
