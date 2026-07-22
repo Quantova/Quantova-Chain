@@ -334,6 +334,7 @@ pub enum Action {
     Blacklist { target: Vec<u8> },
     AddAsset { asset: Vec<u8> },
     Parameter { key: Vec<u8>, value: Vec<u8> },
+    Spend { from: Vec<u8>, to: Vec<u8>, amount: u64 },
 }
 
 impl Action {
@@ -347,6 +348,7 @@ impl Action {
             Action::Freeze { .. } => Track::BlacklistKill,
             Action::AddAsset { .. } => Track::AddAsset,
             Action::Parameter { .. } => Track::Parameter,
+            Action::Spend { .. } => Track::Mint,
         }
     }
 
@@ -410,6 +412,12 @@ impl Encode for Action {
                 key.encode(encoder);
                 value.encode(encoder);
             }
+            Action::Spend { from, to, amount } => {
+                encoder.put_u8(9);
+                from.encode(encoder);
+                to.encode(encoder);
+                encoder.put_u64(*amount);
+            }
         }
     }
 }
@@ -462,6 +470,11 @@ impl Decode for Action {
             8 => Ok(Action::Parameter {
                 key: Vec::<u8>::decode(decoder)?,
                 value: Vec::<u8>::decode(decoder)?,
+            }),
+            9 => Ok(Action::Spend {
+                from: Vec::<u8>::decode(decoder)?,
+                to: Vec::<u8>::decode(decoder)?,
+                amount: decoder.get_u64()?,
             }),
             other => Err(Error::UnknownTag { tag: other }),
         }
@@ -935,11 +948,26 @@ mod tests {
                 key: b"price".to_vec(),
                 value: 70_000_000u128.to_le_bytes().to_vec(),
             },
+            Action::Spend {
+                from: vec![7; 32],
+                to: vec![8; 32],
+                amount: 42_000_000,
+            },
         ];
         for action in actions {
             let back: Action = from_bytes(&to_bytes(&action)).unwrap();
             assert_eq!(action, back);
         }
+    }
+
+    #[test]
+    fn a_treasury_spend_rides_the_mint_track() {
+        let spend = Action::Spend {
+            from: vec![1; 32],
+            to: vec![2; 32],
+            amount: 1_000,
+        };
+        assert_eq!(spend.track(), Track::Mint);
     }
 
     #[test]
