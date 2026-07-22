@@ -13,7 +13,7 @@ use crate::coded::{code_proposal, ProposalAssembler};
 use crate::config::DevnetConfig;
 use crate::discovery::{PeerEntry, PeerTable};
 use crate::network::Network;
-use crate::node::{leader_for, net_identity, DevNode, Height, RoundError, SyncError, View};
+use crate::node::{leader_for, node_identity, DevNode, Height, RoundError, SyncError, View};
 use crate::overlay::{ring_lattice, Seen};
 use crate::transport::{connect_duplex_pair, Mesh};
 use crate::wire::{gossip_id, CodedProposal, Message, Proposal};
@@ -38,7 +38,7 @@ pub struct Devnet<S> {
 impl Devnet<DuplexStream> {
     pub fn over_duplex(config: DevnetConfig) -> Result<Self, RoundError> {
         let n = config.nodes.len();
-        let identities: Vec<Identity> = config.nodes.iter().map(|c| net_identity(c.id)).collect();
+        let identities: Vec<Identity> = config.nodes.iter().map(|c| node_identity(c.id)).collect();
         let addresses: Vec<String> = config.nodes.iter().map(|c| c.address.clone()).collect();
         let bootstrap = bootstrap_adjacency(&config);
 
@@ -143,7 +143,7 @@ impl Devnet<DuplexStream> {
 impl<S> Devnet<S> {
     pub fn from_parts(config: DevnetConfig, mesh: Mesh<S>) -> Result<Self, RoundError> {
         let n = config.nodes.len();
-        let identities: Vec<Identity> = config.nodes.iter().map(|c| net_identity(c.id)).collect();
+        let identities: Vec<Identity> = config.nodes.iter().map(|c| node_identity(c.id)).collect();
         let mut nodes = Vec::with_capacity(n);
         for node_config in &config.nodes {
             nodes.push(DevNode::open(node_config, &config)?);

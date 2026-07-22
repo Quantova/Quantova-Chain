@@ -57,11 +57,28 @@ impl Consensus {
     pub fn with_slots(validators: &[ConsensusValidator], slots: u64) -> Self {
         let sampler = validators
             .iter()
-            .map(|v| SamplerValidator::with_slots(v.id, v.stake, slots))
+            .map(|v| {
+                SamplerValidator::from_secret_with_slots(
+                    v.id,
+                    &crate::keys::node_secret(v.id),
+                    v.stake,
+                    slots,
+                )
+            })
             .collect();
         let attesters = validators
             .iter()
-            .map(|v| (v.id, Attester::with_slots(v.id, v.stake, slots)))
+            .map(|v| {
+                (
+                    v.id,
+                    Attester::from_secret_with_slots(
+                        v.id,
+                        &crate::keys::node_secret(v.id),
+                        v.stake,
+                        slots,
+                    ),
+                )
+            })
             .collect();
         let online = validators.iter().map(|v| (v.id, v.online)).collect();
         Consensus {
@@ -76,12 +93,29 @@ impl Consensus {
     pub fn reweight(&mut self, validators: &[ConsensusValidator]) {
         let sampler = validators
             .iter()
-            .map(|v| SamplerValidator::with_slots(v.id, v.stake, self.slots))
+            .map(|v| {
+                SamplerValidator::from_secret_with_slots(
+                    v.id,
+                    &crate::keys::node_secret(v.id),
+                    v.stake,
+                    self.slots,
+                )
+            })
             .collect();
         self.registry = Registry::new(sampler);
         self.attesters = validators
             .iter()
-            .map(|v| (v.id, Attester::with_slots(v.id, v.stake, self.slots)))
+            .map(|v| {
+                (
+                    v.id,
+                    Attester::from_secret_with_slots(
+                        v.id,
+                        &crate::keys::node_secret(v.id),
+                        v.stake,
+                        self.slots,
+                    ),
+                )
+            })
             .collect();
         self.online = validators.iter().map(|v| (v.id, v.online)).collect();
     }

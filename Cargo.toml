@@ -16,3 +16,12 @@ opt-level = 3
 
 [profile.test.package.qtv-crypto]
 opt-level = 3
+
+# Local override to build against the QRC-CONSENSUS working tree that binds
+# validator key material to a per validator secret. Before release this override is
+# dropped and the git tag pin in each crate is bumped to the tag that carries the
+# change.
+[patch."https://github.com/Quantova/QRC-CONSENSUS.git"]
+qtv-bft = { path = "../QRC-CONSENSUS/crates/qtv-bft" }
+qtv-sampler = { path = "../QRC-CONSENSUS/crates/qtv-sampler" }
+qtv-attest = { path = "../QRC-CONSENSUS/crates/qtv-attest" }

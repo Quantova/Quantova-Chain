@@ -3,7 +3,7 @@ use std::io::Write;
 use std::net::TcpListener;
 use std::time::Duration;
 
-use qtv_devnet::node::net_identity;
+use qtv_devnet::node::node_identity;
 use qtv_devnet::DevNode;
 
 use qtv_loopback::{
@@ -70,7 +70,7 @@ fn main() {
     let listener =
         TcpListener::bind(("0.0.0.0", port)).expect("bind the transport port on every interface");
 
-    let identity = net_identity(idx as u64 + 1);
+    let identity = node_identity(idx as u64 + 1);
     let senders = accounts(senders_n);
     let recipient_addrs = recipients(&senders);
     let config = devnet_config(&base, n, &senders);
