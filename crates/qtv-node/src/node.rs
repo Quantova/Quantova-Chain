@@ -408,7 +408,9 @@ fn dispatch_vm(
         }
     } else if args.len() >= 4 {
         let selector = [args[0], args[1], args[2], args[3]];
-        ledger.call_contract(&sender, &target, selector, &args[4..], now_seconds, meter);
+        if selector != qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE) {
+            ledger.call_contract(&sender, &target, selector, &args[4..], now_seconds, meter);
+        }
     }
     true
 }
@@ -1101,6 +1103,60 @@ mod tests {
                 .get(&qtv_vm::abi::scalar_key(0)),
             Some(&deployer_word),
             "the genesis constructor stored the deployer at deploy"
+        );
+    }
+
+    #[test]
+    fn a_deployed_contract_rejects_a_genesis_selector_call_and_keeps_its_owner() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let owner = keypair(160);
+        let stranger = keypair(161);
+        fund(&mut ledger, &owner, 10_000 * 1_000_000);
+        fund(&mut ledger, &stranger, 10_000 * 1_000_000);
+
+        let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
+            .expect("the program assembles");
+        let genesis = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector: genesis,
+                offset: 0,
+                access: qtv_vm::container::StateAccess::default(),
+            }],
+        );
+
+        let deploy = system_tx(
+            &owner,
+            &crate::ledger::vm_deploy_address(),
+            container.canonical_bytes(),
+            0,
+            100_000,
+            &fee,
+        );
+        assert_eq!(execute_ordered(&mut ledger, &[deploy], &fee, 0).len(), 1);
+        let contract = crate::ledger::contract_address(&owner.address(), 0).unwrap();
+        let contract_id = address_bytes(&contract);
+        let owner_word =
+            u64::from_be_bytes(address_bytes(&owner.address())[0..8].try_into().unwrap());
+        assert_eq!(
+            ledger.contract_storage(&contract_id).get(&qtv_vm::abi::scalar_key(0)),
+            Some(&owner_word),
+            "the deploy runs genesis once and records the deployer as owner"
+        );
+
+        let reinvoke = system_tx(&stranger, &contract, genesis.to_vec(), 0, 100_000, &fee);
+        execute_ordered(&mut ledger, &[reinvoke], &fee, 0);
+
+        let stranger_word =
+            u64::from_be_bytes(address_bytes(&stranger.address())[0..8].try_into().unwrap());
+        assert_ne!(owner_word, stranger_word, "the two accounts are distinct");
+        assert_eq!(
+            ledger.contract_storage(&contract_id).get(&qtv_vm::abi::scalar_key(0)),
+            Some(&owner_word),
+            "a genesis selector call on a deployed contract does not overwrite the owner"
         );
     }
 
