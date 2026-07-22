@@ -124,6 +124,16 @@ impl Finalized {
 pub enum ProduceError {
     NoCommittee,
     NotFinalized,
+    DoubleSignRefused,
+    FinalityViolation,
+}
+
+#[cfg(any(test, feature = "test-fixtures"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinalityHalt {
+    pub height: u64,
+    pub finalized: [u8; 32],
+    pub conflicting: [u8; 32],
 }
 
 /// The bond and reward address of the validator behind a fixture secret index, for
@@ -603,6 +613,8 @@ pub struct Node {
     slashed: Vec<u64>,
     exec_threads: usize,
     equivocator: Option<u64>,
+    sign_guard: Option<crate::watermark::SignGuard>,
+    finality: crate::consensus::FinalityLedger,
 }
 
 /// Reweigh the public roster from the live ledger bonds, moving only stake weight and
@@ -728,11 +740,18 @@ impl Node {
             slashed: Vec::new(),
             exec_threads: min_validator_cores(),
             equivocator: None,
+            sign_guard: None,
+            finality: crate::consensus::FinalityLedger::new(),
         }
     }
 
     pub fn force_equivocation(&mut self, id: u64) {
         self.equivocator = Some(id);
+    }
+
+    pub fn with_sign_guard(mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        self.sign_guard = Some(crate::watermark::SignGuard::open(path)?);
+        Ok(self)
     }
 
     /// The reveals every simulated validator publishes for the slot.
@@ -787,6 +806,11 @@ impl Node {
             .consensus
             .select(&self.beacon, slot, &published)
             .ok_or(ProduceError::NoCommittee)?;
+        if let Some(guard) = self.sign_guard.as_mut() {
+            if !guard.try_sign(height, 0).unwrap_or(false) {
+                return Err(ProduceError::DoubleSignRefused);
+            }
+        }
         let proposer = self
             .validator_addresses
             .get(&selection.leader)
@@ -853,6 +877,12 @@ impl Node {
         debug_assert!(self
             .consensus
             .verify(&certificate, &selection, &self.beacon));
+
+        if let crate::consensus::FinalityStatus::Violation { .. } =
+            self.finality.observe(height, value)
+        {
+            return Err(ProduceError::FinalityViolation);
+        }
 
         let cert_digest = certificate.digest();
         let attesters = certificate.attesters();
@@ -922,6 +952,29 @@ impl Node {
 
     pub fn slashed(&self) -> &[u64] {
         &self.slashed
+    }
+
+    pub fn finalized_value(&self, height: u64) -> Option<[u8; 32]> {
+        self.finality.finalized_value(height)
+    }
+
+    pub fn observe_certificate(
+        &mut self,
+        height: u64,
+        value: [u8; 32],
+    ) -> Result<crate::consensus::FinalityStatus, FinalityHalt> {
+        match self.finality.observe(height, value) {
+            crate::consensus::FinalityStatus::Violation {
+                height,
+                finalized,
+                conflicting,
+            } => Err(FinalityHalt {
+                height,
+                finalized,
+                conflicting,
+            }),
+            status => Ok(status),
+        }
     }
 }
 

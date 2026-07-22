@@ -424,3 +424,72 @@ fn a_validator_is_hard_wired_to_use_at_least_half_its_cores() {
         "a validator may use more than the floor"
     );
 }
+
+fn boot_guarded(genesis: Genesis, path: &std::path::Path) -> Node {
+    let secrets = genesis
+        .validators
+        .iter()
+        .map(|v| (v.id, qtv_node::keys::fixture_secret(v.id)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    Node::new(genesis, &secrets)
+        .with_sign_guard(path)
+        .expect("open the sign watermark")
+}
+
+#[test]
+fn a_restarted_node_will_not_sign_a_height_it_already_signed() {
+    let unique = format!(
+        "qtv-node-watermark-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let path = std::env::temp_dir().join(unique);
+
+    let mut first = boot_guarded(genesis(vec![], &[true, true, true, true]), &path);
+    first.run(3).expect("three heights finalize");
+    assert_eq!(first.height(), 4);
+    drop(first);
+
+    let mut restarted = boot_guarded(genesis(vec![], &[true, true, true, true]), &path);
+    assert_eq!(restarted.height(), 1, "a restart brings the node back to genesis height");
+    assert_eq!(
+        restarted.produce().err(),
+        Some(ProduceError::DoubleSignRefused),
+        "the on disk watermark refuses a height already signed"
+    );
+
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_file(path.with_extension("tmp")).ok();
+}
+
+#[test]
+fn a_conflicting_certificate_at_a_finalized_height_halts_loudly() {
+    let mut node = boot(genesis(vec![], &[true, true, true, true]));
+    node.produce().expect("height one finalizes");
+    let finalized = node
+        .finalized_value(1)
+        .expect("the node recorded its finalized value");
+
+    assert_eq!(
+        node.observe_certificate(1, finalized),
+        Ok(qtv_node::consensus::FinalityStatus::Confirms),
+        "the same certificate re confirms without alarm"
+    );
+
+    let mut conflicting = finalized;
+    conflicting[0] ^= 0xFF;
+    let halt = node
+        .observe_certificate(1, conflicting)
+        .expect_err("a conflicting certificate at a finalized height must halt the node");
+    assert_eq!(halt.height, 1);
+    assert_eq!(halt.finalized, finalized);
+    assert_eq!(halt.conflicting, conflicting);
+    assert_eq!(
+        node.finalized_value(1),
+        Some(finalized),
+        "the node never silently adopts the conflicting certificate"
+    );
+}
