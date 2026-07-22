@@ -164,8 +164,16 @@ pub fn execute_contract_call(
     meter_limit: u64,
 ) -> Result<ContractOutcome, ExecError> {
     let container = decode_container(container_bytes).ok_or(ExecError::BadContainer)?;
-    let outcome = Interpreter::for_entry(&container, selector, meter_limit)
-        .map_err(|_| ExecError::BadContainer)?
+    let offset = container
+        .entry_offset(&selector)
+        .ok_or(ExecError::BadContainer)?;
+    let interpreter = if offset == 0 {
+        Interpreter::new(&container.code, &container.consts, meter_limit)
+    } else {
+        Interpreter::for_entry(&container, selector, meter_limit)
+            .map_err(|_| ExecError::BadContainer)?
+    };
+    let outcome = interpreter
         .with_storage(storage)
         .with_memory(memory)
         .run()
