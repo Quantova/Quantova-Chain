@@ -85,6 +85,13 @@ pub fn plan_verified(
     plan_from_account_checks(wrapper, account, fee_params)
 }
 
+fn canonical_address(address: &str) -> bool {
+    matches!(
+        qtv_idfmt::parse_address(address),
+        Ok(payload) if payload.len() == qtv_idfmt::DIGEST_LEN
+    )
+}
+
 fn plan_from_account_checks(
     wrapper: &Wrapper,
     account: &Account,
@@ -100,9 +107,12 @@ fn plan_from_account_checks(
         });
     }
 
+    if !canonical_address(&sender) {
+        return Err(Reject::UnknownSender);
+    }
     let amount = transfer_amount(body.call()).ok_or(Reject::BadCall)?;
     let recipient = body.call().target().to_string();
-    if qtv_idfmt::parse_address(&recipient).is_err() {
+    if !canonical_address(&recipient) {
         return Err(Reject::BadCall);
     }
     if recipient == sender {
