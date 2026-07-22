@@ -186,6 +186,16 @@ pub fn stake_claim_address() -> String {
         .expect("a full hash reaches the address floor")
 }
 
+pub fn stake_exit_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/stake/exit"))
+        .expect("a full hash reaches the address floor")
+}
+
+pub fn stake_withdraw_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/stake/withdraw"))
+        .expect("a full hash reaches the address floor")
+}
+
 pub fn grants_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/gov/grants"))
         .expect("a full hash reaches the address floor")
@@ -850,6 +860,49 @@ impl Ledger {
         self.collect_fee(fee);
         self.claim_reward(address, now_day);
         true
+    }
+
+    pub fn request_exit_with_fee(&mut self, address: &str, fee: u64, now_day: u64) -> bool {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return false,
+        };
+        let ready = matches!(
+            self.stake_bond(&id),
+            Some(bond) if bond.exit_requested_at.is_none() && bond.can_request_exit(now_day)
+        );
+        if !ready {
+            return false;
+        }
+        let mut account = self.account(address);
+        if account.balance < fee {
+            return false;
+        }
+        account.balance -= fee;
+        account.nonce += 1;
+        self.set_account(address, &account);
+        self.collect_fee(fee);
+        self.request_stake_exit(address, now_day)
+    }
+
+    pub fn withdraw_with_fee(&mut self, address: &str, fee: u64, now_day: u64) -> bool {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return false,
+        };
+        let ready = matches!(self.stake_bond(&id), Some(bond) if bond.can_withdraw(now_day));
+        if !ready {
+            return false;
+        }
+        let mut account = self.account(address);
+        if account.balance < fee {
+            return false;
+        }
+        account.balance -= fee;
+        account.nonce += 1;
+        self.set_account(address, &account);
+        self.collect_fee(fee);
+        self.withdraw_stake(address, now_day)
     }
 
     pub fn record_session(&mut self, transactions: u64, now_day: u64) -> Option<Session> {
@@ -2234,6 +2287,34 @@ mod stake_state_tests {
         assert_eq!(l.stake_bond(&id).unwrap().amount, 2_000 * 1_000_000);
         assert_eq!(l.stake_bond(&id).unwrap().bonded_at_day, 7);
         assert_eq!(l.account(&addr).nonce, 1);
+    }
+
+    #[test]
+    fn exit_and_withdraw_run_through_the_fee_charging_wrappers() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[18u8; 32]).unwrap();
+        let id = [18u8; 32];
+        l.set_account(&addr, &Account::funded(5_000 * 1_000_000, 1, vec![]));
+        assert!(l.bond(&addr, 2_000 * 1_000_000, 0));
+        assert_eq!(l.total_staked(), 2_000 * 1_000_000);
+
+        assert!(!l.request_exit_with_fee(&addr, 1_000_000, 89));
+        assert_eq!(l.balance(&addr), 3_000 * 1_000_000, "a refused exit charges no fee");
+        assert_eq!(l.account(&addr).nonce, 0);
+
+        assert!(l.request_exit_with_fee(&addr, 1_000_000, 90));
+        assert_eq!(l.balance(&addr), 3_000 * 1_000_000 - 1_000_000);
+        assert_eq!(l.account(&addr).nonce, 1);
+
+        assert!(!l.withdraw_with_fee(&addr, 1_000_000, 90 + 20));
+        assert!(l.withdraw_with_fee(&addr, 1_000_000, 90 + 21));
+        assert_eq!(
+            l.balance(&addr),
+            3_000 * 1_000_000 - 2_000_000 + 2_000 * 1_000_000
+        );
+        assert_eq!(l.account(&addr).nonce, 2);
+        assert!(l.stake_bond(&id).is_none());
+        assert_eq!(l.total_staked(), 0);
     }
 
     #[test]
