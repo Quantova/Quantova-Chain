@@ -4,7 +4,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-use qtv_devnet::node::net_identity;
+use qtv_devnet::node::node_peer_id;
 use qtv_net::{Channel, Identity};
 
 use crate::util::{hex, log};
@@ -50,7 +50,7 @@ pub fn build_mesh(
             };
             let peer = channel.peer_id().clone();
             let from = (0..n).find(|&q| {
-                q != idx && up_acc.get(q).copied().unwrap_or(false) && net_identity(q as u64 + 1).peer_id() == peer
+                q != idx && up_acc.get(q).copied().unwrap_or(false) && node_peer_id(q as u64 + 1) == peer
             });
             if let Some(from) = from {
                 let _ = accepted_tx.send((from, channel));
@@ -71,7 +71,7 @@ pub fn build_mesh(
                 Err(_) => thread::sleep(Duration::from_millis(20)),
             }
         };
-        let peer = net_identity(q as u64 + 1).peer_id();
+        let peer = node_peer_id(q as u64 + 1);
         let mut channel =
             Channel::connect_pinned(stream, identity, &peer).expect("initiator handshake");
         if channel.send(&hello).is_err() {

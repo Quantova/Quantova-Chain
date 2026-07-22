@@ -9,7 +9,7 @@ use qtv_block::{empty_transaction_root, Header};
 use qtv_node::fee::FeeParams;
 
 use qtv_devnet::discovery::PeerEntry;
-use qtv_devnet::node::net_identity;
+use qtv_devnet::node::node_identity;
 use qtv_devnet::coded::code_proposal;
 use qtv_devnet::wire::{certificate_from_bytes, certificate_to_bytes, Message, Proposal};
 
@@ -112,7 +112,7 @@ fn a_coded_proposal_shard_round_trips_and_still_verifies() {
 
 #[test]
 fn an_attestation_message_round_trips_and_still_verifies() {
-    let attester = Attester::new(1, 2_000);
+    let attester = Attester::from_secret(1, &[1u8; 32], 2_000);
     let beacon = Beacon::genesis();
     let block = Block::new(1, [5u8; 32], Parent::Genesis);
     let attestation = attester.attest(1, 1, block, &beacon);
@@ -137,8 +137,8 @@ fn an_attestation_message_round_trips_and_still_verifies() {
 
 #[test]
 fn a_peer_list_message_round_trips() {
-    let one = net_identity(1);
-    let two = net_identity(2);
+    let one = node_identity(1);
+    let two = node_identity(2);
     let peers = vec![
         PeerEntry::from_identity(&one, "mem://1"),
         PeerEntry::from_identity(&two, "mem://2"),
@@ -175,10 +175,10 @@ fn a_status_and_a_block_request_round_trip() {
 fn a_certificate_carrying_block_round_trips_and_still_verifies() {
     // Build a real stage one certificate, saturating each member share so a valid
     // draw is entitled, exactly as the aggregation layer is exercised.
-    let a = Attester::new(1, 100);
-    let b = Attester::new(2, 100);
-    let c = Attester::new(3, 100);
-    let d = Attester::new(4, 100);
+    let a = Attester::from_secret(1, &[1u8; 32], 100);
+    let b = Attester::from_secret(2, &[2u8; 32], 100);
+    let c = Attester::from_secret(3, &[3u8; 32], 100);
+    let d = Attester::from_secret(4, &[4u8; 32], 100);
     let beacon = Beacon::genesis();
     let block = Block::new(1, [9u8; 32], Parent::Genesis);
     let commitment = CommitteeCommitment::from_attesters_with_budget(0, &[&a, &b, &c, &d], 4);

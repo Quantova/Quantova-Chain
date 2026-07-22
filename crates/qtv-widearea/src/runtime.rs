@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use qtv_devnet::coded::{code_proposal, ProposalAssembler};
-use qtv_devnet::node::net_identity;
+use qtv_devnet::node::node_peer_id;
 use qtv_devnet::wire::Message;
 use qtv_devnet::{leader_for, DevNode};
 use qtv_net::{Channel, Identity};
@@ -379,7 +379,7 @@ pub fn build_mesh(
                 .find(|&q| {
                     q != idx
                         && up_ids.get(q).copied().unwrap_or(false)
-                        && net_identity(q as u64 + 1).peer_id() == peer
+                        && node_peer_id(q as u64 + 1) == peer
                 })
                 .expect("the inbound peer is a known up validator");
             accepted_tx
@@ -400,7 +400,7 @@ pub fn build_mesh(
                 Err(_) => thread::sleep(Duration::from_millis(20)),
             }
         };
-        let peer = net_identity(q as u64 + 1).peer_id();
+        let peer = node_peer_id(q as u64 + 1);
         let channel =
             Channel::connect_pinned(stream, identity, &peer).expect("initiator handshake");
         send[q] = Some(channel);

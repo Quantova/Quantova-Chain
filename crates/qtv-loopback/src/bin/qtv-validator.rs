@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use qtv_devnet::coded::{code_proposal, ProposalAssembler};
-use qtv_devnet::node::net_identity;
+use qtv_devnet::node::{node_identity, node_peer_id};
 use qtv_devnet::wire::Message;
 use qtv_devnet::{leader_for, DevNode};
 use qtv_net::{Channel, Identity};
@@ -216,7 +216,7 @@ fn build_mesh(
             let channel = Channel::accept(stream, &identity_acc).expect("responder handshake");
             let peer = channel.peer_id().clone();
             let from = (0..n)
-                .find(|&q| q != idx && net_identity(q as u64 + 1).peer_id() == peer)
+                .find(|&q| q != idx && node_peer_id(q as u64 + 1) == peer)
                 .expect("the inbound peer is a known validator");
             accepted_tx
                 .send((from, channel))
@@ -236,7 +236,7 @@ fn build_mesh(
                 Err(_) => thread::sleep(Duration::from_millis(20)),
             }
         };
-        let peer = net_identity(q as u64 + 1).peer_id();
+        let peer = node_peer_id(q as u64 + 1);
         let channel =
             Channel::connect_pinned(stream, identity, &peer).expect("initiator handshake");
         send[q] = Some(channel);
@@ -294,7 +294,7 @@ fn main() {
         .collect();
     assert_eq!(ports.len(), n, "one port per validator");
 
-    let identity = net_identity(idx as u64 + 1);
+    let identity = node_identity(idx as u64 + 1);
     let senders = accounts(senders_n);
     let recipient_addrs = recipients(&senders);
     let config = devnet_config(&base, n, &senders);

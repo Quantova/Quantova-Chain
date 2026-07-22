@@ -11,7 +11,7 @@ use qtv_net::{Channel, Identity};
 use qtv_node::fee::FeeParams;
 use qtv_node::node::GenesisAccount;
 
-use qtv_devnet::node::net_identity;
+use qtv_devnet::node::node_identity;
 use qtv_devnet::{Devnet, Mesh};
 
 use support::{config, encoded_chain, transfer, unique_base, user};
@@ -51,7 +51,7 @@ fn the_devnet_reaches_finality_over_localhost_tcp() {
     let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
     let cfg = config(&base, &[true, true, true], accounts);
 
-    let identities: Vec<Identity> = cfg.nodes.iter().map(|n| net_identity(n.id)).collect();
+    let identities: Vec<Identity> = cfg.nodes.iter().map(|n| node_identity(n.id)).collect();
     let mesh = tcp_mesh(&identities);
     let mut devnet = Devnet::from_parts(cfg, mesh).expect("devnet over tcp");
 

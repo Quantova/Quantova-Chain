@@ -7,6 +7,7 @@ use qtv_attest::aggregate::aggregate;
 use qtv_attest::{Attestation, Attester};
 use qtv_block::{event_root, transaction_root, Block as ChainBlock, Header};
 use qtv_codec::{to_bytes, Decoder};
+use qtv_crypto::sha3::shake256;
 use qtv_net::{Identity, PeerId};
 use qtv_node::consensus::{
     genesis_beacon, header_value, Beacon, Block as ConsensusBlock, Consensus, ConsensusValidator,
@@ -28,13 +29,48 @@ pub type Height = u64;
 
 pub type View = u64;
 
-const NET_ID_DOMAIN: &[u8; 8] = b"QTVNETID";
+// Domain tag under which a validator's secret is expanded into the seed of its peer
+// to peer network identity key. It is distinct from the sortition tree and signing
+// key domains in the consensus crates, so the one secret a node holds yields three
+// independent derived keys and none reveals the others.
+const P2P_IDENTITY_DOMAIN: &[u8] = b"QORUS/validator-keying/v1/p2p-identity";
 
-pub fn net_identity(id: u64) -> Identity {
-    let mut seed = [0u8; 32];
-    seed[..8].copy_from_slice(&id.to_le_bytes());
-    seed[8..16].copy_from_slice(NET_ID_DOMAIN);
-    Identity::from_seed(&seed)
+fn p2p_identity_seed(secret: &[u8; 32]) -> [u8; 32] {
+    const D: usize = P2P_IDENTITY_DOMAIN.len();
+    let mut buf = [0u8; D + 32];
+    buf[..D].copy_from_slice(P2P_IDENTITY_DOMAIN);
+    buf[D..].copy_from_slice(secret);
+    let mut out = [0u8; 32];
+    shake256(&buf, &mut out);
+    out
+}
+
+/// A node's peer to peer identity, derived from the one secret the node holds. Only
+/// the public peer id is ever published; the secret half never leaves the node and is
+/// not recomputable from the public id.
+pub fn p2p_identity(secret: &[u8; 32]) -> Identity {
+    Identity::from_seed(&p2p_identity_seed(secret))
+}
+
+/// The published public peer id of the node holding `secret`. This is the commitment
+/// a peer pins against; it carries no secret and cannot be turned back into one.
+pub fn p2p_peer_id(secret: &[u8; 32]) -> PeerId {
+    p2p_identity(secret).peer_id()
+}
+
+/// The peer to peer identity of validator `id`, sourced from its per node secret. A
+/// node calls this for its OWN id; the secret half is present only because the node
+/// holds the secret behind the id. In a keystore deployment this reads the node's own
+/// stored secret rather than deriving it.
+pub fn node_identity(id: u64) -> Identity {
+    p2p_identity(&qtv_node::keys::node_secret(id))
+}
+
+/// The published public peer id of validator `id`, for pinning a peer without any
+/// secret. In a keystore deployment this reads the peer's published commitment from
+/// the roster rather than recomputing it.
+pub fn node_peer_id(id: u64) -> PeerId {
+    p2p_peer_id(&qtv_node::keys::node_secret(id))
 }
 
 pub fn leader_for(selection: &Selection, view: View) -> u64 {
@@ -170,14 +206,15 @@ impl DevNode {
             })
             .collect();
 
+        let secret = qtv_node::keys::node_secret(node.id);
         let mut dev = DevNode {
             id: node.id,
-            identity: net_identity(node.id),
+            identity: p2p_identity(&secret),
             ledger: Ledger::new(),
             mempool: Mempool::new(),
             consensus: Consensus::with_slots(&validators, devnet.slots),
             base_validators: validators.clone(),
-            attester: Attester::with_slots(node.id, node.stake, devnet.slots),
+            attester: Attester::from_secret_with_slots(node.id, &secret, node.stake, devnet.slots),
             fee_params: devnet.fee_params,
             beacon: genesis_beacon(),
             height: qtv_bft::params::MIN_HEIGHT,
