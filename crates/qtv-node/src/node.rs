@@ -2385,6 +2385,8 @@ mod tests {
             offender: offender.clone(),
             height: 1,
             slot: 1,
+            view_a: 0,
+            view_b: 0,
             block_a: block_a.to_bytes(),
             sig_a: a.sig.to_vec(),
             block_b: block_b.to_bytes(),
