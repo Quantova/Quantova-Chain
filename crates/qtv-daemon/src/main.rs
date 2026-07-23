@@ -151,7 +151,6 @@ fn run(config_path: &Path) -> Result<(), String> {
     spawn_stop_watcher(stop_path, stopped.clone());
 
     let mut driver = driver::Driver::new(node, idx, mesh);
-    driver.set_budget(genesis_file.slots);
 
     if let Some(rpc_addr) = settings.rpc_listen.clone() {
         let rpc_listener = TcpListener::bind(&rpc_addr)
@@ -249,7 +248,7 @@ fn log_startup(
         ));
     }
     util::log(&format!(
-        "slot budget {}, the heights before the one time sortition keys are spent",
+        "epoch length {} heights, the validators rotate their one time keys on each boundary and run on",
         genesis_file.slots
     ));
     util::log(&format!(
