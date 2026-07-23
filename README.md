@@ -65,7 +65,7 @@ This is the repository that turns the components into a chain. It depends on Q-C
 
 ## Status
 
-At testnet. The `quantovad` daemon is complete and runs the chain, testnet bring up is scripted under `testnet/` with the chain id `Q-test-net-1` and a faucet that dispenses TQTOV. Native transfers, staking, and governance are live, and contract execution is metered under a per block compute budget and an admission ceiling. Multi operator key rotation past the one time sortition horizon is a known open item, so a run either sets a height horizon it will reach and resets, or waits for key rotation.
+At testnet. The `quantovad` daemon is complete and runs the chain, testnet bring up is scripted under `testnet/` with the chain id `Q-test-net-1` and a faucet that dispenses TQTOV. Native transfers and governance are live, staking bonds and slashing operate while reward accrual stays inert until governance sets a mainnet start day so no staking rewards pay on the testnet, and contract execution is metered under a per block compute budget and an admission ceiling. Multi operator key rotation past the one time sortition horizon is a known open item, so a run either sets a height horizon it will reach and resets, or waits for key rotation.
 
 ## License
 
