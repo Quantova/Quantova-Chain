@@ -14,12 +14,12 @@ use qtv_node::consensus::{
 use qtv_node::evidence::{Equivocation, EvidencePool};
 use qtv_node::watermark::SignGuard;
 use qtv_node::fee::FeeParams;
-use qtv_node::ledger::{account_key, Account, BlockEvent, Ledger};
+use qtv_node::ledger::{account_key, evidence_address, Account, BlockEvent, Ledger};
 use qtv_node::mempool::{Admitted, Mempool, Reject};
 use qtv_node::node::{day_of_height, execute_ordered, reweigh_roster, Genesis};
 use qtv_sampler::committee::PublishedReveal;
 use qtv_store::{BlockStore, StateStore};
-use qtv_tx::Wrapper;
+use qtv_tx::{Body, Call, Wrapper};
 
 use crate::config::{DevnetConfig, NodeConfig};
 use crate::wire::{LockedBlock, Message, Proposal, RegisterNote, RevealNote, ViewChange};
@@ -558,7 +558,13 @@ impl DevNode {
     fn build_proposal_at(&mut self, selection: &Selection, view: View) -> Proposal {
         let height = self.height;
         let proposer = self.validator_address(leader_for(selection, view));
-        let candidates = self.mempool.candidates();
+        let chain_id = self.fee_params.chain_id;
+        let mut candidates: Vec<Wrapper> = self
+            .pending_evidence()
+            .iter()
+            .map(|evidence| evidence_transaction(evidence, chain_id))
+            .collect();
+        candidates.extend(self.mempool.candidates());
         let mut ledger = self.ledger.clone();
         ledger.clear_block_events();
         ledger.set_round_proposer(&proposer);
@@ -1417,6 +1423,17 @@ impl DevNode {
         });
         Ok(())
     }
+}
+
+/// Wrap attributed equivocation evidence as a fee free system transaction the leader
+/// carries in the block it produces. It authenticates on its own against the offender's
+/// attestation key held in state, so every node that executes the block reaches the same
+/// slash whether or not it saw the equivocation itself.
+fn evidence_transaction(evidence: &Equivocation, chain_id: u64) -> Wrapper {
+    let target = evidence_address();
+    let call = Call::new(target.clone(), evidence.encode());
+    let body = Body::with_context(target, 0, 0, 0, call, 0, chain_id);
+    Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new())
 }
 
 fn view_change_subject(
