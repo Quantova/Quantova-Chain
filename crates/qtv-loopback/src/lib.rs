@@ -92,6 +92,7 @@ pub fn message_height(message: &Message) -> Option<u64> {
         Message::Attest(a) => Some(a.height),
         Message::ViewChange(v) => Some(v.height),
         Message::Reveal(r) => Some(r.height),
+        Message::Register(r) => Some(r.height),
         Message::Peers(_)
         | Message::Status(_)
         | Message::GetBlocks { .. }

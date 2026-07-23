@@ -17,7 +17,7 @@ pub use config::{DevnetConfig, NodeConfig};
 pub use devnet::Devnet;
 pub use discovery::{PeerEntry, PeerTable};
 pub use network::Network;
-pub use node::{leader_for, DevNode, FinalizedBlock, Height, SyncError, View};
+pub use node::{leader_for, DevNode, Fatal, FinalizedBlock, Height, SyncError, View};
 pub use overlay::Seen;
 pub use transport::{connect_duplex_mesh, connect_duplex_overlay, connect_duplex_pair, Mesh};
 pub use wire::Message;

@@ -104,6 +104,43 @@ impl Runtime {
             .collect()
     }
 
+    /// At an epoch boundary publish this node's signed re registration of its rotated one
+    /// time root, gather the peers' re registrations, and re form the committee. A no op in
+    /// the genesis epoch, whose roots the roster already carries.
+    fn disseminate_registrations(&mut self) {
+        if self.node.epoch() == 0 {
+            return;
+        }
+        if self.i_am_up() {
+            if let Some(note) = self.node.own_registration_note() {
+                let bytes = Message::Register(Box::new(note)).encode();
+                self.broadcast(&bytes);
+            }
+        }
+        let expected: Vec<u64> = self
+            .expected_reveal_ids()
+            .into_iter()
+            .filter(|&id| id != self.node.id())
+            .collect();
+        let deadline = Instant::now() + self.view_timeout;
+        while Instant::now() < deadline {
+            let have = self.node.collected_registration_ids();
+            if expected.iter().all(|id| have.contains(id)) {
+                break;
+            }
+            match self.inbound.recv_timeout(Duration::from_millis(10)) {
+                Ok((_, bytes)) => match Message::decode(&bytes) {
+                    Ok(Message::Register(note)) => self.node.collect_registration(*note),
+                    Ok(_) => self.buffered.push((0, bytes)),
+                    Err(_) => {}
+                },
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        self.node.apply_registrations();
+    }
+
     /// Publish this node's own reveal for the height and gather the peers' reveals,
     /// until the up set is heard from or a bounded window elapses.
     fn disseminate_reveals(&mut self) {
@@ -217,6 +254,10 @@ impl Runtime {
                 self.try_justified(selection);
             }
             Message::Reveal(note) => self.node.collect_reveal(*note),
+            Message::Register(note) => {
+                self.node.collect_registration(*note);
+                self.node.apply_registrations();
+            }
             Message::Peers(_)
             | Message::Status(_)
             | Message::GetBlocks { .. }
@@ -257,6 +298,7 @@ impl Runtime {
         batch: Option<Vec<qtv_tx::Wrapper>>,
     ) -> Result<HeightOutcome, String> {
         let start_height = self.node.height();
+        self.disseminate_registrations();
         self.disseminate_reveals();
         let selection = self.node.select().map_err(|e| format!("select: {e:?}"))?;
 
