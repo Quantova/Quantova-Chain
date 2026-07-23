@@ -1221,8 +1221,10 @@ impl DevNode {
     }
 
     /// Feed an observed attestation to the evidence pool, keyed by the signer's bond
-    /// address. A second attestation from the same signer at the same height for a
-    /// different block is turned into attributable evidence a block can carry.
+    /// address and tagged with the view this node holds for the height. A second attestation
+    /// from the same signer at the same height in the same view for a different block is
+    /// turned into attributable evidence a block can carry. A conflicting attestation in a
+    /// higher view is a justified vote change and is never attributed.
     fn watch_for_equivocation(&mut self, attestation: &Attestation) {
         let Some(offender) = self
             .base_roster
@@ -1232,10 +1234,12 @@ impl DevNode {
         else {
             return;
         };
+        let view = self.view;
         self.evidence_pool.observe(
             &offender,
             attestation.height,
             attestation.slot,
+            view,
             attestation.block.to_bytes(),
             attestation.sig.to_vec(),
         );

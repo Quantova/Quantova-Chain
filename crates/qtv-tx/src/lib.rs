@@ -13,11 +13,26 @@ pub const SCHEME_FALCON: u8 = qtv_account::SCHEME_FALCON;
 
 pub const DOMAIN_TX: &[u8] = b"quantova.transaction.v1";
 
-pub const LOCAL_CHAIN_ID: u64 = 0x5154_5644_4556_4E31;
+pub const LOCAL_CHAIN_NAME: &str = "Q-dev-net-1";
 
-pub const MAINNET_CHAIN_ID: u64 = 0x5154_4F56_4D41_494E;
+pub const TESTNET_CHAIN_NAME: &str = "Q-test-net-1";
 
-pub const TESTNET_CHAIN_ID: u64 = 0x5154_4F56_5445_5354;
+pub const MAINNET_CHAIN_NAME: &str = "Q-main-net-1";
+
+pub const LOCAL_CHAIN_ID: u64 = 0xbed0_278f_e00c_ba98;
+
+pub const TESTNET_CHAIN_ID: u64 = 0x37f6_dc26_8589_06ae;
+
+pub const MAINNET_CHAIN_ID: u64 = 0x4981_7c4d_fed1_fafd;
+
+pub fn chain_id_from_name(name: &str) -> u64 {
+    let digest = sha3::sha3_256(name.as_bytes());
+    u64::from_be_bytes(
+        digest[..8]
+            .try_into()
+            .expect("a sha3 256 digest carries eight leading bytes"),
+    )
+}
 
 const SIGN_RANDOMIZER: [u8; 32] = [0u8; 32];
 
@@ -46,7 +61,8 @@ impl Call {
 
 impl Encode for Call {
     fn encode(&self, encoder: &mut Encoder) {
-        encoder.put_bytes(self.target.as_bytes());
+        let target = qtv_idfmt::parse_address(&self.target).unwrap_or_default();
+        encoder.put_bytes(&target);
         encoder.put_bytes(&self.args);
     }
 }
@@ -118,7 +134,8 @@ impl Body {
 
 impl Encode for Body {
     fn encode(&self, encoder: &mut Encoder) {
-        encoder.put_bytes(self.sender.as_bytes());
+        let sender = qtv_idfmt::parse_address(&self.sender).unwrap_or_default();
+        encoder.put_bytes(&sender);
         self.nonce.encode(encoder);
         self.meter_limit.encode(encoder);
         self.fee.encode(encoder);

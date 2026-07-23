@@ -46,3 +46,30 @@ fn a_running_node_attributes_an_equivocation_from_conflicting_attestations() {
     // Drained once, the evidence is not re emitted.
     assert!(node.pending_evidence().is_empty());
 }
+
+#[test]
+fn a_running_node_does_not_attribute_an_honest_cross_view_re_vote() {
+    let base = unique_base("evidence-cross-view");
+    let cfg = config(&base, &[true, true, true, true], vec![]);
+    let mut node = DevNode::open(&cfg.nodes[0], &cfg).expect("open");
+
+    let offender_id = 2u64;
+    let secret = qtv_node::keys::fixture_secret(offender_id);
+    let offender =
+        Attester::from_secret_with_slots(offender_id, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+    let beacon = genesis_beacon();
+    let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
+    let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
+    let att_a = offender.attest(1, 1, block_a, &beacon);
+    let att_b = offender.attest(1, 1, block_b, &beacon);
+
+    node.on_attestation(att_a);
+    assert!(node.pending_evidence().is_empty());
+
+    node.jump_to(1);
+    node.on_attestation(att_b);
+    assert!(
+        node.pending_evidence().is_empty(),
+        "a conflicting block in a higher view is a justified vote change, not a double vote"
+    );
+}
