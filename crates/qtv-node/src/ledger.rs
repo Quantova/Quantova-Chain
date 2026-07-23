@@ -187,6 +187,11 @@ pub fn evidence_address() -> String {
         .expect("a full hash reaches the address floor")
 }
 
+pub fn registration_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/registration"))
+        .expect("a full hash reaches the address floor")
+}
+
 fn address_id(address: &str) -> Option<[u8; 32]> {
     let payload = qtv_idfmt::parse_address(address).ok()?;
     if payload.len() != KEY_LEN {
@@ -2553,6 +2558,17 @@ mod tests {
         let ledger = Ledger::new();
         assert_eq!(ledger.account(&address(0)), Account::default());
         assert_eq!(ledger.balance(&address(0)), 0);
+    }
+
+    #[test]
+    fn the_registration_address_is_a_distinct_canonical_system_address() {
+        let reg = registration_address();
+        assert!(
+            qtv_idfmt::parse_address(&reg).is_ok(),
+            "the registration address is a canonical address"
+        );
+        assert_ne!(reg, evidence_address(), "it is its own system address");
+        assert_eq!(registration_address(), reg, "and it is fixed");
     }
 
     #[test]
