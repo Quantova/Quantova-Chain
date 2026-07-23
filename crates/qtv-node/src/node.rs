@@ -662,7 +662,17 @@ pub fn committee_weights(
 impl Node {
     /// Build a single process node from genesis and the per validator secret roster.
     pub fn new(genesis: Genesis, secrets: &BTreeMap<u64, [u8; 32]>) -> Self {
-        let slots = qtv_sampler::validator::DEFAULT_SLOTS;
+        Self::new_with_slots(genesis, secrets, qtv_sampler::validator::DEFAULT_SLOTS)
+    }
+
+    /// Build a single process node whose one time sortition trees each cover `slots`
+    /// heights, so `slots` is both the tree budget and the key rotation epoch length. At
+    /// every multiple of it the whole set rotates onto fresh trees and runs on.
+    pub fn new_with_slots(
+        genesis: Genesis,
+        secrets: &BTreeMap<u64, [u8; 32]>,
+        slots: u64,
+    ) -> Self {
         let mut ledger = Ledger::new();
         for account in &genesis.accounts {
             ledger.set_account(
@@ -796,11 +806,33 @@ impl Node {
 
     pub fn produce(&mut self) -> Result<&Finalized, ProduceError> {
         let height = self.height;
-        let slot = height;
+        let epoch = qtv_sampler::epoch::epoch_of(height, self.slots);
+        let slot = qtv_sampler::epoch::slot_in_epoch(height, self.slots);
 
+        if epoch != self.consensus.epoch() {
+            for attester in self.sim_attesters.values_mut() {
+                *attester = attester.at_epoch(epoch);
+            }
+        }
         let reweighed = committee_weights(&self.ledger, &self.base_validators);
-        let roster = crate::consensus::roster_of(&reweighed, self.slots);
-        self.consensus.reweight(roster.clone());
+        let roster: Vec<crate::consensus::ValidatorRegistration> = reweighed
+            .iter()
+            .map(|v| {
+                let att = self
+                    .sim_attesters
+                    .get(&v.id)
+                    .expect("an attester for every validator");
+                crate::consensus::ValidatorRegistration {
+                    id: v.id,
+                    stake: v.stake,
+                    online: v.online,
+                    bond_address: v.bond_address.clone(),
+                    root: att.root(),
+                    attest_pk: *att.attest_public_key(),
+                }
+            })
+            .collect();
+        self.consensus.rotate_to_epoch(epoch, roster.clone());
         let published = self.published_reveals(slot);
         let selection = self
             .consensus
@@ -940,6 +972,10 @@ impl Node {
 
     pub fn height(&self) -> u64 {
         self.height
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.consensus.epoch()
     }
 
     pub fn chain(&self) -> &[Finalized] {
