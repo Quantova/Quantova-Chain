@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod consensus;
+pub mod evidence;
 pub mod execution;
 pub mod fee;
 pub mod keys;
