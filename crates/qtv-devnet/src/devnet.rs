@@ -16,7 +16,7 @@ use crate::network::Network;
 use crate::node::{leader_for, p2p_identity, DevNode, Height, RoundError, SyncError, View};
 use crate::overlay::{ring_lattice, Seen};
 use crate::transport::{connect_duplex_pair, Mesh};
-use crate::wire::{gossip_id, CodedProposal, Message, Proposal, RevealNote};
+use crate::wire::{gossip_id, CodedProposal, Message, Proposal, RegisterNote, RevealNote};
 
 const MAX_VIEW: View = 16;
 
@@ -277,6 +277,26 @@ impl<S> Devnet<S> {
             for note in &notes {
                 node.collect_reveal(note.clone());
             }
+        }
+    }
+
+    /// Disseminate the epoch re registrations. At an epoch boundary every node commits a
+    /// fresh one time sortition root and signs it under its stable attestation key; each
+    /// node admits the peers' rotated roots and re forms its committee, so the next
+    /// committee draws from the rotated roots. It is a no op in the genesis epoch, whose
+    /// roots the roster already carries.
+    fn exchange_registrations(&mut self) {
+        let notes: Vec<RegisterNote> = (0..self.nodes.len())
+            .filter_map(|i| self.nodes[i].own_registration_note())
+            .collect();
+        if notes.is_empty() {
+            return;
+        }
+        for node in &mut self.nodes {
+            for note in &notes {
+                node.collect_registration(note.clone());
+            }
+            node.apply_registrations();
         }
     }
 
@@ -553,6 +573,10 @@ impl<S: Read + Write> Devnet<S> {
                         self.deliver_view_change(to, *record, ceiling, active)?;
                     }
                     Message::Reveal(note) => self.nodes[to].collect_reveal(*note),
+                    Message::Register(note) => {
+                        self.nodes[to].collect_registration(*note);
+                        self.nodes[to].apply_registrations();
+                    }
                     Message::Peers(_)
                     | Message::Status(_)
                     | Message::GetBlocks { .. }
@@ -584,6 +608,7 @@ impl<S: Read + Write> Devnet<S> {
         if active.is_empty() {
             return Ok(());
         }
+        self.exchange_registrations();
         self.exchange_reveals();
         for &i in &active {
             if self.nodes[i].height() < ceiling {
@@ -658,6 +683,7 @@ impl<S: Read + Write> Devnet<S> {
         if active.is_empty() {
             return Ok(());
         }
+        self.exchange_registrations();
         self.exchange_reveals();
         for &i in &active {
             if self.nodes[i].height() < ceiling {
