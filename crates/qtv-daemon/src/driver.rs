@@ -49,10 +49,6 @@ impl Driver {
         }
     }
 
-    pub fn set_budget(&mut self, budget: u64) {
-        self.budget = budget;
-    }
-
     pub fn attach_rpc(&mut self, context: NodeContext, requests: Receiver<GatewayCall>) {
         self.rpc_context = Some(context);
         self.rpc_requests = Some(requests);
@@ -81,9 +77,7 @@ impl Driver {
         while !stopped.load(Ordering::SeqCst) {
             if self.node.height() >= self.budget {
                 log(&format!(
-                    "reached the one time slot budget at height {}, halting cleanly. The \
-                     sortition keys are spent; a larger budget in the genesis, or the epoch \
-                     and key rotation mechanism, is needed to run further",
+                    "reached the configured height cap {}, halting cleanly",
                     self.budget.saturating_sub(1)
                 ));
                 return Ok(());
@@ -100,13 +94,12 @@ impl Driver {
         stopped: &AtomicBool,
     ) -> Result<(), String> {
         let start_height = self.node.height();
+        self.disseminate_registrations(view_timeout);
         self.disseminate_reveals(view_timeout);
         let selection = self.node.select().map_err(|e| {
             format!(
-                "cannot select a committee at height {start_height}: {e:?}. the one time \
-                 sortition slot budget is spent, so no further height can finalise. running \
-                 past the budget needs an epoch or key rotation mechanism in the consensus, \
-                 which is a named open item and not something the daemon papers over"
+                "cannot select a committee at height {start_height}: {e:?}. too few validators \
+                 re registered their rotated one time root this epoch to draw a committee"
             )
         })?;
 
@@ -148,6 +141,43 @@ impl Driver {
                 Err(RecvTimeoutError::Disconnected) => thread::sleep(TICK),
             }
         }
+    }
+
+    /// At an epoch boundary publish this node's signed re registration of its rotated one
+    /// time root and gather the peers' re registrations, until the up set is heard from or
+    /// the window elapses, then re form the committee from the rotated roots. A no op in
+    /// the genesis epoch, whose roots the roster already carries.
+    fn disseminate_registrations(&mut self, window: Duration) {
+        if self.node.epoch() == 0 {
+            return;
+        }
+        if let Some(note) = self.node.own_registration_note() {
+            let bytes = Message::Register(Box::new(note)).encode();
+            self.broadcast(&bytes);
+        }
+        let expected: Vec<u64> = (0..self.n)
+            .filter(|&q| q != self.idx && self.up.get(q).copied().unwrap_or(false))
+            .map(|q| q as u64 + 1)
+            .collect();
+        let deadline = Instant::now() + window;
+        while Instant::now() < deadline {
+            let have = self.node.collected_registration_ids();
+            if expected.iter().all(|id| have.contains(id)) {
+                break;
+            }
+            match self.inbound.recv_timeout(TICK) {
+                Ok((_, bytes)) => {
+                    if let Ok(Message::Register(note)) = Message::decode(&bytes) {
+                        self.node.collect_registration(*note);
+                    } else {
+                        self.buffered.push(bytes);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        self.node.apply_registrations();
     }
 
     /// Publish this node's own reveal for the height and gather the peers' reveals,
@@ -255,6 +285,10 @@ impl Driver {
                 self.try_justified(selection);
             }
             Message::Reveal(note) => self.node.collect_reveal(*note),
+            Message::Register(note) => {
+                self.node.collect_registration(*note);
+                self.node.apply_registrations();
+            }
             Message::Peers(_)
             | Message::Status(_)
             | Message::GetBlocks { .. }
@@ -356,6 +390,7 @@ fn message_height(message: &Message) -> Option<u64> {
         Message::Attest(a) => Some(a.height),
         Message::ViewChange(v) => Some(v.height),
         Message::Reveal(r) => Some(r.height),
+        Message::Register(r) => Some(r.height),
         Message::Tx(_)
         | Message::Peers(_)
         | Message::Status(_)
