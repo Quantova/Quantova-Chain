@@ -99,6 +99,10 @@ impl Runtime {
             Message::Attest(attestation) => self.node.on_attestation(*attestation),
             Message::ViewChange(record) => self.node.collect_view_change(selection, *record),
             Message::Reveal(note) => self.node.collect_reveal(*note),
+            Message::Register(note) => {
+                self.node.collect_registration(*note);
+                self.node.apply_registrations();
+            }
             Message::Peers(_)
             | Message::Status(_)
             | Message::GetBlocks { .. }
@@ -119,6 +123,39 @@ impl Runtime {
         self.node
             .try_finalize(selection)
             .map_err(|e| format!("finalize failed: {e:?}"))
+    }
+
+    /// At an epoch boundary publish this node's signed re registration of its rotated one
+    /// time root, gather the peers' re registrations, and re form the committee. A no op in
+    /// the genesis epoch.
+    fn disseminate_registrations(&mut self) {
+        if self.node.epoch() == 0 {
+            return;
+        }
+        if let Some(note) = self.node.own_registration_note() {
+            let bytes = Message::Register(Box::new(note)).encode();
+            self.broadcast(&bytes, None);
+        }
+        let expected: Vec<u64> = (1..=self.n as u64).filter(|&id| id != self.node.id()).collect();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let have = self.node.collected_registration_ids();
+            if expected.iter().all(|id| have.contains(id)) {
+                break;
+            }
+            match self.inbound.recv_timeout(Duration::from_millis(10)) {
+                Ok((from, bytes)) => {
+                    if let Ok(Message::Register(note)) = Message::decode(&bytes) {
+                        self.node.collect_registration(*note);
+                    } else {
+                        self.buffered.push((from, bytes));
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        self.node.apply_registrations();
     }
 
     /// Publish this node's own reveal for the height and gather the peers' reveals.
@@ -150,6 +187,7 @@ impl Runtime {
 
     fn drive_height(&mut self, batch: Option<Vec<qtv_tx::Wrapper>>) -> Result<HeightOutcome, String> {
         let start_height = self.node.height();
+        self.disseminate_registrations();
         self.disseminate_reveals();
         let selection = self.node.select().map_err(|e| format!("select: {e:?}"))?;
         let online: Vec<u64> = selection.members.clone();
