@@ -340,51 +340,43 @@ pub(crate) fn is_evidence(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::evidence_address()
 }
 
-/// Apply an equivocation evidence transaction as a deterministic in block state
-/// transition. The reporter pays the fee, and the slash lands only when the carried
-/// evidence authenticates against the offender's attestation key held in state, so every
-/// node executing the same block reaches the same slash with no access to the live roster.
-fn dispatch_evidence(
-    ledger: &mut Ledger,
-    wrapper: &Wrapper,
-    signature_ok: bool,
-    fee_params: &FeeParams,
-) -> bool {
-    let sender = wrapper.body().sender().to_string();
-    if ledger.is_blacklisted(&sender) {
-        return false;
-    }
-    let body = wrapper.body();
-    let account = ledger.account(&sender);
-    if !account.has_key() || !qtv_tx::scheme_supported(wrapper.scheme()) || !signature_ok {
-        return false;
-    }
-    if body.nonce() != account.nonce || body.meter_limit() < crate::execution::TRANSFER_METER {
-        return false;
-    }
-    if body.fee() < u128::from(fee_params.transfer_fee()) {
-        return false;
-    }
-    let charged = u64::try_from(body.fee().min(u128::from(fee_params.ceiling_fee())))
-        .unwrap_or_else(|_| fee_params.ceiling_fee());
-    if account.balance < charged {
-        return false;
-    }
-    let evidence = match crate::evidence::Equivocation::decode(body.call().args()) {
+/// Whether the carried equivocation evidence would slash a validator, so a node admits it
+/// with no fee and no signature. It holds only when the evidence decodes, the named
+/// offender has an attestation key in state, the evidence authenticates against that key,
+/// and the offender is not already banned.
+pub(crate) fn evidence_admissible(wrapper: &Wrapper, ledger: &Ledger) -> bool {
+    let evidence = match crate::evidence::Equivocation::decode(wrapper.body().call().args()) {
         Some(evidence) => evidence,
         None => return false,
     };
-    let mut updated = account;
-    updated.balance -= charged;
-    updated.nonce += 1;
-    ledger.set_account(&sender, &updated);
-    ledger.collect_fee(charged);
-    if let Some(attest_pk) = ledger.validator_attest_key(&evidence.offender) {
-        if evidence.attributes(&attest_pk) {
-            ledger.slash_validator(&evidence.offender);
-        }
+    if ledger.is_validator_banned(&evidence.offender) {
+        return false;
     }
-    true
+    match ledger.validator_attest_key(&evidence.offender) {
+        Some(attest_pk) => evidence.attributes(&attest_pk),
+        None => false,
+    }
+}
+
+/// Apply an equivocation evidence transaction as a deterministic in block state
+/// transition. The evidence carries no fee and authenticates on its own, so any sender can
+/// submit it and the block leader can inject it. The slash lands only when the carried
+/// evidence authenticates against the offender's attestation key held in state and the
+/// offender is not already banned, so every node executing the same block reaches the same
+/// slash with no access to the live roster.
+fn dispatch_evidence(ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
+    let evidence = match crate::evidence::Equivocation::decode(wrapper.body().call().args()) {
+        Some(evidence) => evidence,
+        None => return false,
+    };
+    let attest_pk = match ledger.validator_attest_key(&evidence.offender) {
+        Some(attest_pk) => attest_pk,
+        None => return false,
+    };
+    if !evidence.attributes(&attest_pk) {
+        return false;
+    }
+    ledger.slash_validator(&evidence.offender)
 }
 
 const VM_BLOCK_METER_BUDGET: u64 = 50_000_000;
@@ -547,7 +539,7 @@ fn execute_ordered_across(
             continue;
         }
         if is_evidence(wrapper) {
-            if dispatch_evidence(ledger, wrapper, verified[index], fee_params) {
+            if dispatch_evidence(ledger, wrapper) {
                 included.push(wrapper.clone());
             }
             continue;
@@ -2342,5 +2334,63 @@ mod tests {
             included.push(wrapper.clone());
         }
         included
+    }
+
+    #[test]
+    fn a_no_fee_unsigned_evidence_transaction_from_any_sender_slashes_the_offender() {
+        use qtv_attest::{Attester, Beacon, Block, Parent};
+
+        let fee = FeeParams::devnet();
+        let offender_secret = [9u8; 32];
+        let offender = crate::keys::validator_address(&offender_secret);
+        let attester = Attester::from_secret(1, &offender_secret, 2_000);
+        let offender_pk = attester.attest_public_key().to_vec();
+
+        let beacon = Beacon::genesis();
+        let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
+        let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
+        let a = attester.attest(1, 1, block_a, &beacon);
+        let b = attester.attest(1, 1, block_b, &beacon);
+        let evidence = crate::evidence::Equivocation {
+            offender: offender.clone(),
+            height: 1,
+            slot: 1,
+            block_a: block_a.to_bytes(),
+            sig_a: a.sig.to_vec(),
+            block_b: block_b.to_bytes(),
+            sig_b: b.sig.to_vec(),
+        };
+
+        let mut ledger = Ledger::new();
+        ledger.seed_supply(1_000_000_000);
+        ledger.seed_validator_bond(&offender, 2_000 * 1_000_000);
+        ledger.set_validator_attest_key(&offender, &offender_pk);
+
+        let call = qtv_tx::Call::new(crate::ledger::evidence_address(), evidence.encode());
+        let body = Body::with_context(
+            crate::ledger::evidence_address(),
+            0,
+            0,
+            0,
+            call,
+            0,
+            fee.chain_id,
+        );
+        let tx = Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new());
+
+        assert!(!ledger.is_validator_banned(&offender));
+        let included = execute_ordered(&mut ledger, &[tx.clone()], &fee, 0);
+        assert_eq!(included.len(), 1, "the zero fee unsigned evidence is included");
+        assert!(
+            ledger.is_validator_banned(&offender),
+            "the offender is slashed though no fee was paid and no sender signed"
+        );
+        assert_eq!(ledger.staked_weight(&offender), 0, "the offender's stake is slashed");
+
+        let replay = execute_ordered(&mut ledger, &[tx], &fee, 0);
+        assert!(
+            replay.is_empty(),
+            "evidence against an already banned offender is not included again"
+        );
     }
 }
