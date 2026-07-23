@@ -46,7 +46,8 @@ impl Call {
 
 impl Encode for Call {
     fn encode(&self, encoder: &mut Encoder) {
-        encoder.put_bytes(self.target.as_bytes());
+        let target = qtv_idfmt::parse_address(&self.target).unwrap_or_default();
+        encoder.put_bytes(&target);
         encoder.put_bytes(&self.args);
     }
 }
@@ -118,7 +119,8 @@ impl Body {
 
 impl Encode for Body {
     fn encode(&self, encoder: &mut Encoder) {
-        encoder.put_bytes(self.sender.as_bytes());
+        let sender = qtv_idfmt::parse_address(&self.sender).unwrap_or_default();
+        encoder.put_bytes(&sender);
         self.nonce.encode(encoder);
         self.meter_limit.encode(encoder);
         self.fee.encode(encoder);
