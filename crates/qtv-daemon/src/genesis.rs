@@ -133,10 +133,10 @@ impl GenesisFile {
 }
 
 pub const CAPTURE_CAP_NUM: u128 = 1;
-pub const CAPTURE_CAP_DEN: u128 = 2;
+pub const CAPTURE_CAP_DEN: u128 = 3;
 
-fn over_majority(holding: u128, total: u128) -> bool {
-    holding * CAPTURE_CAP_DEN > total * CAPTURE_CAP_NUM
+fn reaches_fault_threshold(holding: u128, total: u128) -> bool {
+    holding * CAPTURE_CAP_DEN >= total * CAPTURE_CAP_NUM
 }
 
 fn enforce_no_capture(
@@ -146,12 +146,14 @@ fn enforce_no_capture(
     if validators.len() >= 2 {
         let total_stake: u128 = validators.iter().map(|v| v.stake as u128).sum();
         for v in validators {
-            if over_majority(v.stake as u128, total_stake) {
+            if reaches_fault_threshold(v.stake as u128, total_stake) {
                 return Err(format!(
-                    "validator {} bonds {} of {} total genesis stake, more than a committee \
-                     majority of the stake, so it could capture the chain at launch. Spread the \
-                     stake so no single validator bonds more than a {} in {} share of the total",
-                    v.id, v.stake, total_stake, CAPTURE_CAP_NUM, CAPTURE_CAP_DEN
+                    "validator {} bonds {} of {} total genesis stake, a {} in {} share or more, \
+                     which reaches the BFT fault threshold and could stall or capture the chain at \
+                     launch. Spread the stake so no single validator bonds a {} in {} share of the \
+                     total or more",
+                    v.id, v.stake, total_stake, CAPTURE_CAP_NUM, CAPTURE_CAP_DEN, CAPTURE_CAP_NUM,
+                    CAPTURE_CAP_DEN
                 ));
             }
         }
@@ -160,12 +162,14 @@ fn enforce_no_capture(
     if accounts.len() >= 2 {
         let total_balance: u128 = accounts.iter().map(|a| a.balance as u128).sum();
         for a in accounts {
-            if over_majority(a.balance as u128, total_balance) {
+            if reaches_fault_threshold(a.balance as u128, total_balance) {
                 return Err(format!(
-                    "account {} holds {} of {} total genesis balance, more than a committee \
-                     majority share it could bond to capture the chain at launch. Spread the supply \
-                     so no single account holds more than a {} in {} share of the total",
-                    a.address, a.balance, total_balance, CAPTURE_CAP_NUM, CAPTURE_CAP_DEN
+                    "account {} holds {} of {} total genesis balance, a {} in {} share or more it \
+                     could bond, which reaches the BFT fault threshold and could stall or capture \
+                     the chain at launch. Spread the supply so no single account holds a {} in {} \
+                     share of the total or more",
+                    a.address, a.balance, total_balance, CAPTURE_CAP_NUM, CAPTURE_CAP_DEN,
+                    CAPTURE_CAP_NUM, CAPTURE_CAP_DEN
                 ));
             }
         }
@@ -298,9 +302,17 @@ mod tests {
 
     #[test]
     fn a_spread_validator_set_and_account_set_pass_the_cap() {
-        let validators = vec![validator(1, 2_000), validator(2, 2_000), validator(3, 2_000)];
-        let accounts = vec![account(1, 100), account(2, 100), account(3, 100)];
-        assert!(enforce_no_capture(&validators, &accounts).is_ok());
+        let validators = vec![
+            validator(1, 2_000),
+            validator(2, 2_000),
+            validator(3, 2_000),
+            validator(4, 2_000),
+        ];
+        let accounts = vec![account(1, 100), account(2, 100), account(3, 100), account(4, 100)];
+        assert!(
+            enforce_no_capture(&validators, &accounts).is_ok(),
+            "a spread where every share sits strictly under a third clears the cap"
+        );
     }
 
     #[test]
@@ -309,30 +321,49 @@ mod tests {
         let accounts = vec![account(1, 1_000_000_000_000)];
         assert!(
             enforce_no_capture(&validators, &accounts).is_ok(),
-            "a lone bootstrap validator and faucet has no committee majority to capture from"
+            "a lone bootstrap validator and faucet has no committee to capture from"
         );
     }
 
     #[test]
-    fn a_validator_over_a_committee_majority_bond_is_rejected() {
-        let validators = vec![validator(1, 2_000), validator(2, 2_000), validator(3, 5_000)];
-        let err = enforce_no_capture(&validators, &[]).expect_err("the whale validator is rejected");
-        assert!(err.contains("validator 3"), "{err}");
+    fn a_validator_at_the_fault_threshold_bond_is_rejected() {
+        let validators = vec![validator(1, 2_000), validator(2, 2_000), validator(3, 2_000)];
+        let err = enforce_no_capture(&validators, &[])
+            .expect_err("a share at exactly a third is rejected");
+        assert!(err.contains("validator 1"), "{err}");
+        assert!(err.contains("fault threshold"), "{err}");
     }
 
     #[test]
-    fn two_equal_validators_each_at_exactly_half_are_allowed() {
+    fn a_validator_over_the_fault_threshold_bond_is_rejected() {
+        let validators = vec![
+            validator(1, 2_000),
+            validator(2, 2_000),
+            validator(3, 2_000),
+            validator(4, 9_000),
+        ];
+        let err = enforce_no_capture(&validators, &[]).expect_err("the whale validator is rejected");
+        assert!(err.contains("validator 4"), "{err}");
+    }
+
+    #[test]
+    fn two_equal_validators_each_at_half_are_rejected() {
         let validators = vec![validator(1, 2_000), validator(2, 2_000)];
         assert!(
-            enforce_no_capture(&validators, &[]).is_ok(),
-            "exactly half the stake is not a committee majority"
+            enforce_no_capture(&validators, &[]).is_err(),
+            "half the stake is at or above the fault threshold"
         );
     }
 
     #[test]
-    fn an_account_over_a_committee_majority_balance_is_rejected() {
+    fn an_account_over_the_fault_threshold_balance_is_rejected() {
         let accounts = vec![account(1, 1_000), account(2, 9_000), account(3, 1_000)];
-        let validators = vec![validator(1, 2_000), validator(2, 2_000), validator(3, 2_000)];
+        let validators = vec![
+            validator(1, 2_000),
+            validator(2, 2_000),
+            validator(3, 2_000),
+            validator(4, 2_000),
+        ];
         let err = enforce_no_capture(&validators, &accounts)
             .expect_err("the whale account is rejected");
         assert!(err.contains("account qtv1account2"), "{err}");

@@ -336,6 +336,10 @@ impl Mempool {
             {
                 return Err(Reject::BadCall);
             }
+        } else if crate::node::is_evidence(&wrapper) {
+            if !crate::node::evidence_admissible(&wrapper, ledger) {
+                return Err(Reject::BadCall);
+            }
         } else {
             validate(&wrapper, ledger, fee_params)?;
         }
@@ -387,6 +391,8 @@ impl Mempool {
                 let account = ledger.account(wrapper.body().sender());
                 crate::node::governance_admissible(&wrapper, &account, fee_params, verified[index])
                     .is_some()
+            } else if crate::node::is_evidence(&wrapper) {
+                crate::node::evidence_admissible(&wrapper, ledger)
             } else {
                 validate_verified(&wrapper, ledger, fee_params, verified[index]).is_ok()
             };
@@ -446,6 +452,67 @@ mod tests {
         let call = transfer_call(to, amount);
         let body = Body::new(from.address(), nonce, TRANSFER_METER, fee, call);
         sign(from, &body)
+    }
+
+    fn seeded_evidence(offender_secret: &[u8; 32]) -> (Ledger, Wrapper, String) {
+        use qtv_attest::{Attester, Beacon, Block as AttBlock, Parent};
+
+        let params = FeeParams::devnet();
+        let offender = crate::keys::validator_address(offender_secret);
+        let attester = Attester::from_secret(1, offender_secret, 2_000);
+        let offender_pk = attester.attest_public_key().to_vec();
+
+        let beacon = Beacon::genesis();
+        let block_a = AttBlock::new(1, [1u8; 32], Parent::Genesis);
+        let block_b = AttBlock::new(1, [2u8; 32], Parent::Genesis);
+        let a = attester.attest(1, 1, block_a, &beacon);
+        let b = attester.attest(1, 1, block_b, &beacon);
+        let evidence = crate::evidence::Equivocation {
+            offender: offender.clone(),
+            height: 1,
+            slot: 1,
+            block_a: block_a.to_bytes(),
+            sig_a: a.sig.to_vec(),
+            block_b: block_b.to_bytes(),
+            sig_b: b.sig.to_vec(),
+        };
+
+        let mut ledger = Ledger::new();
+        ledger.seed_supply(1_000_000_000);
+        ledger.seed_validator_bond(&offender, 2_000 * 1_000_000);
+        ledger.set_validator_attest_key(&offender, &offender_pk);
+
+        let call = qtv_tx::Call::new(crate::ledger::evidence_address(), evidence.encode());
+        let body = Body::with_context(
+            crate::ledger::evidence_address(),
+            0,
+            0,
+            0,
+            call,
+            0,
+            params.chain_id,
+        );
+        (ledger, Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new()), offender)
+    }
+
+    #[test]
+    fn a_no_fee_evidence_transaction_is_admitted_and_a_forged_one_is_refused() {
+        let params = FeeParams::devnet();
+        let (ledger, tx, _offender) = seeded_evidence(&[9u8; 32]);
+        let mut pool = Mempool::new();
+        assert_eq!(pool.admit(tx, &ledger, &params), Ok(Admitted::Fresh));
+        assert_eq!(pool.len(), 1, "valid evidence rides with no fee and no signature");
+
+        let (bare, forged, _) = seeded_evidence(&[11u8; 32]);
+        let empty = Ledger::new();
+        let _ = bare;
+        let mut pool = Mempool::new();
+        assert_eq!(
+            pool.admit(forged, &empty, &params),
+            Err(Reject::BadCall),
+            "evidence naming an offender with no attestation key in state is refused"
+        );
+        assert!(pool.is_empty());
     }
 
     #[test]

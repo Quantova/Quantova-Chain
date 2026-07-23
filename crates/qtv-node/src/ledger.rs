@@ -187,6 +187,11 @@ pub fn evidence_address() -> String {
         .expect("a full hash reaches the address floor")
 }
 
+pub fn registration_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/registration"))
+        .expect("a full hash reaches the address floor")
+}
+
 fn address_id(address: &str) -> Option<[u8; 32]> {
     let payload = qtv_idfmt::parse_address(address).ok()?;
     if payload.len() != KEY_LEN {
@@ -2516,7 +2521,11 @@ impl Ledger {
     /// from the trie so the slot frees. A funded address and a reserved system pot are never
     /// reaped. Reaping credits no one.
     pub fn reap(&mut self, address: &str) -> bool {
-        if self.balance(address) != 0 {
+        let account = self.account(address);
+        if account.balance != 0 {
+            return false;
+        }
+        if account.nonce != 0 {
             return false;
         }
         if let Some(id) = address_id(address) {
@@ -2549,6 +2558,17 @@ mod tests {
         let ledger = Ledger::new();
         assert_eq!(ledger.account(&address(0)), Account::default());
         assert_eq!(ledger.balance(&address(0)), 0);
+    }
+
+    #[test]
+    fn the_registration_address_is_a_distinct_canonical_system_address() {
+        let reg = registration_address();
+        assert!(
+            qtv_idfmt::parse_address(&reg).is_ok(),
+            "the registration address is a canonical address"
+        );
+        assert_ne!(reg, evidence_address(), "it is its own system address");
+        assert_eq!(registration_address(), reg, "and it is fixed");
     }
 
     #[test]
@@ -2650,6 +2670,45 @@ mod tests {
         assert_eq!(ledger.total_supply(), supply - dust, "the dust is burned, not paid out");
         assert_eq!(ledger.balance(&victim.address()), 1_000_000, "no other balance changed");
         assert_eq!(ledger.balance(&grants), 0, "the reap credits no one");
+    }
+
+    #[test]
+    fn an_account_past_nonce_zero_keeps_its_record_so_a_reap_cannot_reset_its_nonce() {
+        let mut ledger = Ledger::new();
+        ledger.seed_supply(10_000_000);
+        let spender = qtv_account::derive(&[7u8; 32], 30);
+        let mut account =
+            Account::funded(50, spender.scheme(), spender.public_key().to_vec());
+        account.nonce = 3;
+        ledger.set_account(&spender.address(), &account);
+        assert!(!ledger.is_rent_exempt(&spender.address()));
+
+        let footprint = ledger.account_footprint(&spender.address());
+        ledger.charge_rent(&spender.address(), footprint as u64 * 50);
+        assert_eq!(ledger.balance(&spender.address()), 0, "the balance is spent to rent");
+        assert_eq!(
+            ledger.nonce(&spender.address()),
+            3,
+            "the nonce floor survives, so a recreated account cannot replay a lower nonce"
+        );
+        assert!(
+            ledger.account(&spender.address()).has_key(),
+            "the record is kept rather than reaped"
+        );
+        assert!(
+            !ledger.reap(&spender.address()),
+            "an emptied account past nonce zero is never reaped"
+        );
+
+        let fresh = qtv_account::derive(&[7u8; 32], 31);
+        ledger.set_account(
+            &fresh.address(),
+            &Account::funded(0, fresh.scheme(), fresh.public_key().to_vec()),
+        );
+        assert!(
+            ledger.reap(&fresh.address()),
+            "an emptied account still at nonce zero authored nothing to replay and is reaped"
+        );
     }
 
     #[test]
