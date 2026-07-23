@@ -14,7 +14,7 @@ use qtv_node::consensus::{
 use qtv_node::evidence::{Equivocation, EvidencePool};
 use qtv_node::watermark::SignGuard;
 use qtv_node::fee::FeeParams;
-use qtv_node::ledger::{account_key, evidence_address, Account, BlockEvent, Ledger};
+use qtv_node::ledger::{account_key, evidence_address, registration_address, Account, BlockEvent, Ledger};
 use qtv_node::mempool::{Admitted, Mempool, Reject};
 use qtv_node::node::{day_of_height, execute_ordered, reweigh_roster, Genesis};
 use qtv_sampler::committee::PublishedReveal;
@@ -22,7 +22,10 @@ use qtv_store::{BlockStore, StateStore};
 use qtv_tx::{Body, Call, Wrapper};
 
 use crate::config::{DevnetConfig, NodeConfig};
-use crate::wire::{LockedBlock, Message, Proposal, RegisterNote, RevealNote, ViewChange};
+use crate::wire::{
+    decode_register_note, encode_register_note, LockedBlock, Message, Proposal, RegisterNote,
+    RevealNote, ViewChange,
+};
 use qtv_sampler::onetime::Root;
 
 pub type Height = u64;
@@ -211,6 +214,7 @@ pub struct DevNode {
     events_by_height: HashMap<Height, Vec<BlockEvent>>,
     block_messages: HashMap<u64, Vec<u8>>,
     epoch_roots: HashMap<u64, Root>,
+    epoch_notes: HashMap<u64, RegisterNote>,
     sign_guard: SignGuard,
     finality: FinalityLedger,
     guarded_height: Option<Height>,
@@ -259,6 +263,7 @@ impl DevNode {
             events_by_height: HashMap::new(),
             block_messages: HashMap::new(),
             epoch_roots: HashMap::new(),
+            epoch_notes: HashMap::new(),
             sign_guard,
             finality: FinalityLedger::new(),
             guarded_height: None,
@@ -328,7 +333,10 @@ impl DevNode {
     }
 
     fn epoch_roster(&self) -> Vec<ValidatorRegistration> {
-        let epoch = self.consensus.epoch_for(self.height);
+        self.epoch_roster_for(self.consensus.epoch_for(self.height))
+    }
+
+    fn epoch_roster_for(&self, epoch: u64) -> Vec<ValidatorRegistration> {
         let own_id = self.consensus.own_id();
         let own_root = self.consensus.own_epoch_root(epoch);
         reweigh_roster(&self.ledger, &self.base_roster)
@@ -348,6 +356,7 @@ impl DevNode {
         let epoch = self.consensus.epoch_for(self.height);
         if epoch != self.consensus.epoch() {
             self.epoch_roots.clear();
+            self.epoch_notes.clear();
         }
         let roster = self.epoch_roster();
         self.consensus.rotate_to_epoch(epoch, roster);
@@ -395,6 +404,7 @@ impl DevNode {
         ) {
             return;
         }
+        self.epoch_notes.insert(note.id, note.clone());
         self.epoch_roots.insert(note.id, note.root);
     }
 
@@ -426,6 +436,67 @@ impl DevNode {
     /// The ids of the peers whose rotated epoch root this node has admitted this epoch.
     pub fn collected_registration_ids(&self) -> Vec<u64> {
         self.epoch_roots.keys().copied().collect()
+    }
+
+    /// The signed re registrations this node holds for the current epoch, its own and every
+    /// peer's it has admitted, ordered by id so the block a leader carries is deterministic.
+    fn epoch_registration_notes(&self) -> Vec<RegisterNote> {
+        let mut notes: Vec<RegisterNote> = Vec::new();
+        if let Some(own) = self.own_registration_note() {
+            notes.push(own);
+        }
+        let mut ids: Vec<u64> = self.epoch_notes.keys().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            if let Some(note) = self.epoch_notes.get(&id) {
+                notes.push(note.clone());
+            }
+        }
+        notes
+    }
+
+    /// Rebuild the rotated epoch roots for the head's epoch from the registration records
+    /// carried in the chain, so a node that restarts within an epoch draws the same
+    /// committee at once rather than waiting for the next boundary to re gossip. Each record
+    /// is verified against the registered stable attestation key before it is trusted.
+    fn rebuild_epoch_registrations(&mut self, head: Height) {
+        let epoch = self.consensus.epoch_for(head);
+        if epoch == 0 {
+            return;
+        }
+        for height in qtv_bft::params::MIN_HEIGHT..=head {
+            let Some(block) = self
+                .block_store
+                .block_by_height(height)
+                .and_then(|bytes| crate::wire::chain_block_from_bytes(bytes).ok())
+            else {
+                continue;
+            };
+            for wrapper in block.body() {
+                if wrapper.body().call().target() != registration_address() {
+                    continue;
+                }
+                let Ok(note) = decode_register_note(wrapper.body().call().args()) else {
+                    continue;
+                };
+                if note.epoch != epoch || note.id == self.id {
+                    continue;
+                }
+                let Some(reg) = self.base_roster.iter().find(|r| r.id == note.id) else {
+                    continue;
+                };
+                if qtv_attest::epoch_registration_verifies(
+                    &reg.attest_pk,
+                    note.id,
+                    note.epoch,
+                    &note.root,
+                    &note.sig,
+                ) {
+                    self.epoch_notes.insert(note.id, note.clone());
+                    self.epoch_roots.insert(note.id, note.root);
+                }
+            }
+        }
     }
 
     /// This node's own reveal for the current height, as a note to publish, when selected.
@@ -469,6 +540,13 @@ impl DevNode {
         self.parent_header_hash = header.hash();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
         self.beacon = Beacon::from_seed(*header.beacon_seed());
+        let head_epoch = self.consensus.epoch_for(head);
+        if head_epoch != 0 {
+            self.rebuild_epoch_registrations(head);
+            let roster = self.epoch_roster_for(head_epoch);
+            self.consensus.rotate_to_epoch(head_epoch, roster);
+            *self.selection_cache.borrow_mut() = None;
+        }
         let selection = self
             .committee_for_certificate(head, &certificate)
             .ok_or(RoundError::Decode)?;
@@ -564,6 +642,12 @@ impl DevNode {
             .iter()
             .map(|evidence| evidence_transaction(evidence, chain_id))
             .collect();
+        let epoch = self.consensus.epoch_for(height);
+        if epoch != 0 && qtv_sampler::epoch::is_epoch_start(height, self.consensus.epoch_len()) {
+            for note in self.epoch_registration_notes() {
+                candidates.push(registration_transaction(&note, chain_id));
+            }
+        }
         candidates.extend(self.mempool.candidates());
         let mut ledger = self.ledger.clone();
         ledger.clear_block_events();
@@ -1432,6 +1516,16 @@ impl DevNode {
 fn evidence_transaction(evidence: &Equivocation, chain_id: u64) -> Wrapper {
     let target = evidence_address();
     let call = Call::new(target.clone(), evidence.encode());
+    let body = Body::with_context(target, 0, 0, 0, call, 0, chain_id);
+    Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new())
+}
+
+/// Wrap a signed epoch re registration as a fee free system transaction a leader carries in
+/// the block, so the rotated root is persisted in chain history and a restarting node reads
+/// it back rather than waiting for the next boundary.
+fn registration_transaction(note: &RegisterNote, chain_id: u64) -> Wrapper {
+    let target = registration_address();
+    let call = Call::new(target.clone(), encode_register_note(note));
     let body = Body::with_context(target, 0, 0, 0, call, 0, chain_id);
     Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new())
 }
