@@ -38,6 +38,31 @@ fn equivocation(offender_address: &str) -> Equivocation {
         offender: offender_address.to_string(),
         height: 1,
         slot: 1,
+        view_a: 0,
+        view_b: 0,
+        block_a: block_a.to_bytes(),
+        sig_a: a.sig.to_vec(),
+        block_b: block_b.to_bytes(),
+        sig_b: b.sig.to_vec(),
+    }
+}
+
+/// A cross view re vote by the offender secret, block A signed in view 0 and block B signed
+/// in view 1 at the same height. The signatures are genuine but the views differ, so the
+/// evidence is a justified vote change rather than a double vote.
+fn cross_view_re_vote(offender_address: &str) -> Equivocation {
+    let attester = Attester::from_secret(1, &offender_secret(), 2_000);
+    let beacon = Beacon::genesis();
+    let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
+    let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
+    let a = attester.attest(1, 1, block_a, &beacon);
+    let b = attester.attest(1, 1, block_b, &beacon);
+    Equivocation {
+        offender: offender_address.to_string(),
+        height: 1,
+        slot: 1,
+        view_a: 0,
+        view_b: 1,
         block_a: block_a.to_bytes(),
         sig_a: a.sig.to_vec(),
         block_b: block_b.to_bytes(),
@@ -131,5 +156,30 @@ fn forged_evidence_naming_an_innocent_validator_slashes_no_one() {
         ledger.staked_weight(&innocent),
         2_000,
         "the innocent validator keeps its whole stake"
+    );
+}
+
+#[test]
+fn a_cross_view_re_vote_carried_in_a_block_slashes_no_one() {
+    let fee = FeeParams::devnet();
+    let offender = qtv_node::keys::validator_address(&offender_secret());
+    let offender_pk = Attester::from_secret(1, &offender_secret(), 2_000)
+        .attest_public_key()
+        .to_vec();
+    let tx = evidence_tx(&cross_view_re_vote(&offender), &fee);
+
+    let mut ledger = seeded_ledger(&offender, &offender_pk);
+    assert!(!ledger.is_validator_banned(&offender));
+
+    execute_ordered(&mut ledger, &[tx], &fee, 0);
+
+    assert!(
+        !ledger.is_validator_banned(&offender),
+        "an honest cross view re vote is never slashed as a double vote"
+    );
+    assert_eq!(
+        ledger.staked_weight(&offender),
+        2_000,
+        "the validator keeps its whole stake across a view change"
     );
 }
