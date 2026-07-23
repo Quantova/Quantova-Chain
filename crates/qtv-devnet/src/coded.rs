@@ -344,8 +344,12 @@ mod tests {
     fn sample_block(count: usize) -> ChainBlock {
         let mut body = Vec::with_capacity(count);
         for i in 0..count {
-            let call = Call::new(format!("account-{i}"), vec![(i % 251) as u8; 64]);
-            let inner = Body::new(format!("sender-{i}"), i as u64, 21_000, 1, call);
+            let target = qtv_idfmt::render_address(&[(i as u8).wrapping_add(1); 32])
+                .expect("a full width payload renders");
+            let sender = qtv_idfmt::render_address(&[(i as u8).wrapping_add(151); 32])
+                .expect("a full width payload renders");
+            let call = Call::new(target, vec![(i % 251) as u8; 64]);
+            let inner = Body::new(sender, i as u64, 21_000, 1, call);
             let signature = vec![(i % 253) as u8; 2420];
             body.push(Wrapper::new(inner, 1, signature));
         }
