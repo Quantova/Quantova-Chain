@@ -336,6 +336,57 @@ fn dispatch_key_register(ledger: &mut Ledger, wrapper: &Wrapper, fee_params: &Fe
     true
 }
 
+pub(crate) fn is_evidence(wrapper: &Wrapper) -> bool {
+    wrapper.body().call().target() == crate::ledger::evidence_address()
+}
+
+/// Apply an equivocation evidence transaction as a deterministic in block state
+/// transition. The reporter pays the fee, and the slash lands only when the carried
+/// evidence authenticates against the offender's attestation key held in state, so every
+/// node executing the same block reaches the same slash with no access to the live roster.
+fn dispatch_evidence(
+    ledger: &mut Ledger,
+    wrapper: &Wrapper,
+    signature_ok: bool,
+    fee_params: &FeeParams,
+) -> bool {
+    let sender = wrapper.body().sender().to_string();
+    if ledger.is_blacklisted(&sender) {
+        return false;
+    }
+    let body = wrapper.body();
+    let account = ledger.account(&sender);
+    if !account.has_key() || !qtv_tx::scheme_supported(wrapper.scheme()) || !signature_ok {
+        return false;
+    }
+    if body.nonce() != account.nonce || body.meter_limit() < crate::execution::TRANSFER_METER {
+        return false;
+    }
+    if body.fee() < u128::from(fee_params.transfer_fee()) {
+        return false;
+    }
+    let charged = u64::try_from(body.fee().min(u128::from(fee_params.ceiling_fee())))
+        .unwrap_or_else(|_| fee_params.ceiling_fee());
+    if account.balance < charged {
+        return false;
+    }
+    let evidence = match crate::evidence::Equivocation::decode(body.call().args()) {
+        Some(evidence) => evidence,
+        None => return false,
+    };
+    let mut updated = account;
+    updated.balance -= charged;
+    updated.nonce += 1;
+    ledger.set_account(&sender, &updated);
+    ledger.collect_fee(charged);
+    if let Some(attest_pk) = ledger.validator_attest_key(&evidence.offender) {
+        if evidence.attributes(&attest_pk) {
+            ledger.slash_validator(&evidence.offender);
+        }
+    }
+    true
+}
+
 const VM_BLOCK_METER_BUDGET: u64 = 50_000_000;
 
 pub(crate) fn is_vm_op(ledger: &Ledger, wrapper: &Wrapper) -> bool {
@@ -491,6 +542,12 @@ fn execute_ordered_across(
         }
         if is_key_register(wrapper) {
             if dispatch_key_register(ledger, wrapper, fee_params) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
+        if is_evidence(wrapper) {
+            if dispatch_evidence(ledger, wrapper, verified[index], fee_params) {
                 included.push(wrapper.clone());
             }
             continue;
@@ -706,6 +763,7 @@ impl Node {
                 &v.bond_address,
                 v.stake.saturating_mul(qtv_staking::NATIVE_UNIT as u64),
             );
+            ledger.set_validator_attest_key(&v.bond_address, &v.attest_pk);
             if let Ok(payload) = qtv_idfmt::parse_address(&v.bond_address) {
                 if let Ok(id) = <[u8; 32]>::try_from(payload) {
                     validator_ids.push(id);

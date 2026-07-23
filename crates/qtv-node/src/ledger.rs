@@ -173,6 +173,20 @@ fn stake_banned_key(id: &[u8; 32]) -> Key {
     sha3::sha3_256(&input)
 }
 
+const STAKE_ATTEST_TAG: &[u8] = b"qtv/stake/attest/";
+
+fn stake_attest_key(id: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(STAKE_ATTEST_TAG.len() + id.len());
+    input.extend_from_slice(STAKE_ATTEST_TAG);
+    input.extend_from_slice(id);
+    sha3::sha3_256(&input)
+}
+
+pub fn evidence_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/evidence"))
+        .expect("a full hash reaches the address floor")
+}
+
 fn address_id(address: &str) -> Option<[u8; 32]> {
     let payload = qtv_idfmt::parse_address(address).ok()?;
     if payload.len() != KEY_LEN {
@@ -638,6 +652,34 @@ impl Ledger {
             Some(id) => self.is_stake_banned(&id),
             None => false,
         }
+    }
+
+    /// The registered attestation public key of a validator, held in state so a block can
+    /// carry equivocation evidence and every node verifies and applies the slash from the
+    /// same committed key with no access to the live roster.
+    pub fn validator_attest_key(&self, address: &str) -> Option<Vec<u8>> {
+        let id = address_id(address)?;
+        self.trie
+            .get(&stake_attest_key(&id))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| bytes.to_vec())
+    }
+
+    pub fn set_validator_attest_key(&mut self, address: &str, attest_pk: &[u8]) {
+        if let Some(id) = address_id(address) {
+            self.trie.insert(stake_attest_key(&id), attest_pk.to_vec());
+        }
+    }
+
+    pub fn seed_validator_attest_key(
+        &mut self,
+        address: &str,
+        attest_pk: &[u8],
+    ) -> Option<(Key, Vec<u8>)> {
+        let id = address_id(address)?;
+        let key = stake_attest_key(&id);
+        self.trie.insert(key, attest_pk.to_vec());
+        Some((key, attest_pk.to_vec()))
     }
 
     pub fn slash_validator(&mut self, address: &str) -> bool {
