@@ -75,6 +75,7 @@ impl Driver {
         stopped: &AtomicBool,
     ) -> Result<(), String> {
         while !stopped.load(Ordering::SeqCst) {
+            self.halt_if_fatal()?;
             if self.node.height() >= self.budget {
                 log(&format!(
                     "reached the configured height cap {}, halting cleanly",
@@ -85,6 +86,23 @@ impl Driver {
             self.drive_one_height(block_interval, view_timeout, stopped)?;
         }
         Ok(())
+    }
+
+    /// Stop the node loudly the moment a safety guard trips. A double sign refusal from the
+    /// persistent watermark or a finality violation from the finality ledger is not
+    /// something the driver rides through, it halts the node and surfaces the reason.
+    fn halt_if_fatal(&self) -> Result<(), String> {
+        match self.node.fatal() {
+            Some(fatal) => {
+                let reason = format!(
+                    "FATAL safety guard tripped {fatal:?}, the node halts and will not sign or \
+                     finalise another height"
+                );
+                log(&reason);
+                Err(reason)
+            }
+            None => Ok(()),
+        }
     }
 
     fn drive_one_height(
@@ -113,6 +131,7 @@ impl Driver {
             if stopped.load(Ordering::SeqCst) {
                 return Ok(());
             }
+            self.halt_if_fatal()?;
             self.serve_rpc();
             if self.node.height() > start_height {
                 self.log_finalized();
