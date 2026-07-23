@@ -158,3 +158,145 @@ fn transaction_id_round_trips_through_the_format() {
     assert_eq!(id, again);
     assert!(id.starts_with("QTX1"));
 }
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The seed the cross language conformance vectors share.
+fn shared_seed() -> [u8; 32] {
+    let mut seed = [0u8; 32];
+    for (i, byte) in seed.iter_mut().enumerate() {
+        *byte = i as u8;
+    }
+    seed
+}
+
+#[test]
+fn the_body_binds_the_decoded_payload_not_the_rendered_string() {
+    let body = sample_body();
+    let encoded = qtv_codec::to_bytes(&body);
+    let payload = qtv_idfmt::parse_address(body.sender()).unwrap();
+    assert_eq!(payload.len(), 32, "an address payload is thirty two bytes");
+    let mut prefix = Vec::new();
+    prefix.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    prefix.extend_from_slice(&payload);
+    assert!(
+        encoded.starts_with(&prefix),
+        "the leading field is the raw payload"
+    );
+    assert!(
+        !encoded.starts_with(body.sender().as_bytes()),
+        "the leading field is not the rendered string"
+    );
+}
+
+#[test]
+fn address_case_can_never_change_the_signature() {
+    let account = derive(&master(), 0);
+    let target = derive(&master(), 1);
+    let upper = target.address();
+    let lower = upper.to_ascii_lowercase();
+    assert_ne!(upper, lower, "the two casings differ");
+
+    let call_upper = Call::new(upper.clone(), vec![4, 2]);
+    let call_lower = Call::new(lower.clone(), vec![4, 2]);
+    let sender_upper = account.address();
+    let sender_lower = sender_upper.to_ascii_lowercase();
+
+    let body_upper = Body::new(sender_upper, 9, 21_000, 1_000_000, call_upper);
+    let body_lower = Body::new(sender_lower, 9, 21_000, 1_000_000, call_lower);
+
+    assert_eq!(
+        qtv_codec::to_bytes(&body_upper),
+        qtv_codec::to_bytes(&body_lower),
+        "casing the sender or the target does not move the signed bytes"
+    );
+
+    let signed_upper = sign(&account, &body_upper);
+    let signed_lower = sign(&account, &body_lower);
+    assert_eq!(signed_upper.signature(), signed_lower.signature());
+    assert_eq!(signed_upper.id(), signed_lower.id());
+}
+
+#[test]
+fn a_raw_byte_signed_transaction_verifies() {
+    let account = derive(&master(), 0);
+    let target = derive(&master(), 1);
+    let call = Call::new(target.address().to_ascii_lowercase(), vec![1, 2, 3]);
+    let body = Body::new(account.address().to_ascii_lowercase(), 7, 21_000, 1_000_000, call);
+    let wrapper = sign(&account, &body);
+    assert!(
+        verify(&wrapper, account.public_key()),
+        "the verifier recomputes the digest over the decoded payload"
+    );
+}
+
+#[test]
+fn the_chain_id_follows_the_display_string_hash() {
+    assert_eq!(
+        qtv_tx::chain_id_from_name(qtv_tx::LOCAL_CHAIN_NAME),
+        qtv_tx::LOCAL_CHAIN_ID
+    );
+    assert_eq!(
+        qtv_tx::chain_id_from_name(qtv_tx::TESTNET_CHAIN_NAME),
+        qtv_tx::TESTNET_CHAIN_ID
+    );
+    assert_eq!(
+        qtv_tx::chain_id_from_name(qtv_tx::MAINNET_CHAIN_NAME),
+        qtv_tx::MAINNET_CHAIN_ID
+    );
+    assert_eq!(qtv_tx::LOCAL_CHAIN_NAME, "Q-dev-net-1");
+    assert_eq!(qtv_tx::TESTNET_CHAIN_NAME, "Q-test-net-1");
+    assert_eq!(qtv_tx::MAINNET_CHAIN_NAME, "Q-main-net-1");
+}
+
+#[test]
+fn the_body_reproduces_the_qcore_js_transfer_vector() {
+    let seed = shared_seed();
+    let sender = derive(&seed, 7);
+    let target = derive(&seed, 8);
+    assert_eq!(
+        sender.address(),
+        "Q133C9CYVYZNQ7X25H0JJWUDHU8U5G3DN7CQC4J64LFTRSUH66ZNCQWDRA8R"
+    );
+    assert_eq!(
+        target.address(),
+        "Q1H2PLGDKK73HPS8PM4EQT5NL7MV8K9ENUMCDQC4V0GKDEJC3FTYAS70UVL8"
+    );
+    let call = Call::new(target.address(), vec![0xde, 0xad, 0xbe, 0xef]);
+    let body = Body::with_context(
+        sender.address(),
+        3,
+        21_000,
+        1_000_000,
+        call,
+        0,
+        qtv_tx::LOCAL_CHAIN_ID,
+    );
+    let want = "20000000000000008c705c118414c1e32a977ca4ee36fc3f2888b67ec031596abf4ac70e5f5a14f00300000000000000085200000000000040420f000000000000000000000000002000000000000000ba83f436d6f46e181c3bae40ba4ffedb0f62e67cde1a0c558f459b996229593b0400000000000000deadbeef000000000000000098ba0ce08f27d0be";
+    assert_eq!(hex(&qtv_codec::to_bytes(&body)), want);
+}
+
+#[test]
+fn the_signed_transaction_reproduces_the_qcore_js_payable_vector() {
+    let seed = shared_seed();
+    let sender = derive(&seed, 7);
+    let target = derive(&seed, 8);
+    let call = Call::new(target.address(), vec![0xde, 0xad, 0xbe, 0xef]);
+    let body = Body::with_context(
+        sender.address(),
+        3,
+        21_000,
+        1_000_000,
+        call,
+        250_000,
+        qtv_tx::TESTNET_CHAIN_ID,
+    );
+    let wrapper = sign(&sender, &body);
+    assert!(verify(&wrapper, sender.public_key()));
+    assert_eq!(
+        wrapper.id(),
+        "QTX1XJ7SXNWD3G65KATFC76F07SD00QTXC26KZAXG72022VFVD5VUJJQ9JAV5J"
+    );
+}

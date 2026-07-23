@@ -17,13 +17,14 @@ fn bounded_capacity(remaining: usize, count: u64, min_element: usize) -> Result<
 
 pub const NATIVE_UNIT: u64 = 1_000_000;
 pub const BPS_DENOM: u128 = 10_000;
+pub const THRESHOLD_BPS: u128 = 4_000;
 
 pub const DAY_SECONDS: u64 = 86_400;
 pub const HOUR_SECONDS: u64 = 3_600;
 pub const MONTH_SECONDS: u64 = 30 * DAY_SECONDS;
 pub const YEAR_SECONDS: u64 = 365 * DAY_SECONDS;
 
-pub const BRIDGE_FREEZE_BOND: u64 = 100_000 * NATIVE_UNIT;
+pub const BRIDGE_FREEZE_BOND: u64 = 1_500_000 * NATIVE_UNIT;
 pub const BRIDGE_FREEZE_DURATION: u64 = 7 * DAY_SECONDS;
 pub const BRIDGE_FREEZE_COOLDOWN: u64 = DAY_SECONDS;
 
@@ -34,58 +35,28 @@ pub enum Track {
     BridgeMigration,
     FreezeRecovery,
     BlacklistKill,
-    AddAsset,
-    Parameter,
 }
 
 impl Track {
-    pub fn all() -> [Track; 7] {
+    pub fn all() -> [Track; 5] {
         [
             Track::ChainUpgrade,
             Track::Mint,
             Track::BridgeMigration,
             Track::FreezeRecovery,
             Track::BlacklistKill,
-            Track::AddAsset,
-            Track::Parameter,
         ]
     }
 
     pub fn deposit(self) -> u64 {
         let whole = match self {
-            Track::ChainUpgrade => 600_000,
-            Track::Mint => 250_000,
-            Track::BridgeMigration => 200_000,
-            Track::FreezeRecovery => 150_000,
-            Track::BlacklistKill => 200_000,
-            Track::AddAsset => 30_000,
-            Track::Parameter => 15_000,
+            Track::ChainUpgrade => 2_250_000,
+            Track::Mint => 4_000_000,
+            Track::BridgeMigration => 1_500_000,
+            Track::FreezeRecovery => 292_500,
+            Track::BlacklistKill => 390_000,
         };
         whole * NATIVE_UNIT
-    }
-
-    pub fn approval_bps(self) -> u128 {
-        match self {
-            Track::ChainUpgrade => 8_000,
-            Track::Mint => 8_000,
-            Track::BridgeMigration => 8_000,
-            Track::FreezeRecovery => 7_500,
-            Track::BlacklistKill => 7_500,
-            Track::AddAsset => 6_000,
-            Track::Parameter => 5_000,
-        }
-    }
-
-    pub fn support_bps(self) -> u128 {
-        match self {
-            Track::ChainUpgrade => 4_000,
-            Track::Mint => 3_500,
-            Track::BridgeMigration => 4_000,
-            Track::FreezeRecovery => 3_000,
-            Track::BlacklistKill => 3_000,
-            Track::AddAsset => 1_000,
-            Track::Parameter => 400,
-        }
     }
 
     pub fn period_seconds(self) -> u64 {
@@ -95,8 +66,6 @@ impl Track {
             Track::BridgeMigration => 5 * DAY_SECONDS,
             Track::FreezeRecovery => 6 * HOUR_SECONDS,
             Track::BlacklistKill => 2 * DAY_SECONDS,
-            Track::AddAsset => 7 * DAY_SECONDS,
-            Track::Parameter => 7 * DAY_SECONDS,
         }
     }
 
@@ -107,8 +76,6 @@ impl Track {
             Track::BridgeMigration => 3,
             Track::FreezeRecovery => 4,
             Track::BlacklistKill => 5,
-            Track::AddAsset => 6,
-            Track::Parameter => 7,
         }
     }
 
@@ -253,51 +220,40 @@ impl Decode for Lock {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Tally {
-    pub aye_weight: u128,
-    pub nay_weight: u128,
-    pub turnout_stake: u128,
+    pub aye_stake: u128,
+    pub nay_stake: u128,
 }
 
 impl Tally {
-    pub fn record(&mut self, aye: bool, conviction: Conviction, stake: u64) {
-        let weight = conviction.weight(stake);
+    pub fn record(&mut self, aye: bool, stake: u64) {
         if aye {
-            self.aye_weight += weight;
+            self.aye_stake += stake as u128;
         } else {
-            self.nay_weight += weight;
+            self.nay_stake += stake as u128;
         }
-        self.turnout_stake += stake as u128;
     }
 
-    pub fn reached_support(&self, track: Track, electorate_stake: u128) -> bool {
-        electorate_stake > 0
-            && self.turnout_stake * BPS_DENOM >= electorate_stake * track.support_bps()
+    pub fn turnout(&self) -> u128 {
+        self.aye_stake + self.nay_stake
     }
 
-    pub fn reached_approval(&self, track: Track) -> bool {
-        let cast = self.aye_weight + self.nay_weight;
-        cast > 0 && self.aye_weight * BPS_DENOM >= cast * track.approval_bps()
-    }
-
-    pub fn approved(&self, track: Track, electorate_stake: u128) -> bool {
-        self.reached_approval(track) && self.reached_support(track, electorate_stake)
+    pub fn approved(&self, electorate_stake: u128) -> bool {
+        electorate_stake > 0 && self.aye_stake * BPS_DENOM >= electorate_stake * THRESHOLD_BPS
     }
 }
 
 impl Encode for Tally {
     fn encode(&self, encoder: &mut Encoder) {
-        encoder.put_u128(self.aye_weight);
-        encoder.put_u128(self.nay_weight);
-        encoder.put_u128(self.turnout_stake);
+        encoder.put_u128(self.aye_stake);
+        encoder.put_u128(self.nay_stake);
     }
 }
 
 impl Decode for Tally {
     fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
         Ok(Tally {
-            aye_weight: decoder.get_u128()?,
-            nay_weight: decoder.get_u128()?,
-            turnout_stake: decoder.get_u128()?,
+            aye_stake: decoder.get_u128()?,
+            nay_stake: decoder.get_u128()?,
         })
     }
 }
@@ -336,7 +292,6 @@ pub enum Action {
     },
     Freeze { targets: Vec<Vec<u8>> },
     Blacklist { target: Vec<u8> },
-    AddAsset { asset: Vec<u8> },
     Parameter { key: Vec<u8>, value: Vec<u8> },
     Spend { from: Vec<u8>, to: Vec<u8>, amount: u64 },
     Unfreeze { targets: Vec<Vec<u8>> },
@@ -351,8 +306,7 @@ impl Action {
             Action::FreezeRecovery { .. } => Track::FreezeRecovery,
             Action::Blacklist { .. } => Track::BlacklistKill,
             Action::Freeze { .. } => Track::BlacklistKill,
-            Action::AddAsset { .. } => Track::AddAsset,
-            Action::Parameter { .. } => Track::Parameter,
+            Action::Parameter { .. } => Track::ChainUpgrade,
             Action::Spend { .. } => Track::Mint,
             Action::Unfreeze { .. } => Track::BlacklistKill,
         }
@@ -408,10 +362,6 @@ impl Encode for Action {
             Action::Blacklist { target } => {
                 encoder.put_u8(6);
                 target.encode(encoder);
-            }
-            Action::AddAsset { asset } => {
-                encoder.put_u8(7);
-                asset.encode(encoder);
             }
             Action::Parameter { key, value } => {
                 encoder.put_u8(8);
@@ -476,9 +426,6 @@ impl Decode for Action {
             }
             6 => Ok(Action::Blacklist {
                 target: Vec::<u8>::decode(decoder)?,
-            }),
-            7 => Ok(Action::AddAsset {
-                asset: Vec::<u8>::decode(decoder)?,
             }),
             8 => Ok(Action::Parameter {
                 key: Vec::<u8>::decode(decoder)?,
@@ -703,7 +650,7 @@ impl Referendum {
         if !self.ready(now) {
             return Status::Deciding;
         }
-        self.status = if self.tally.approved(self.track, electorate_stake) {
+        self.status = if self.tally.approved(electorate_stake) {
             Status::Approved
         } else {
             Status::Rejected
@@ -712,7 +659,7 @@ impl Referendum {
     }
 
     pub fn deposit_refunded(&self, electorate_stake: u128) -> bool {
-        !self.killed && self.tally.reached_support(self.track, electorate_stake)
+        !self.killed && self.tally.approved(electorate_stake)
     }
 }
 
@@ -801,30 +748,26 @@ mod tests {
     use qtv_codec::{from_bytes, to_bytes};
 
     #[test]
-    fn the_seven_tracks_carry_the_canonical_parameters() {
-        assert_eq!(Track::all().len(), 7);
-        assert_eq!(Track::ChainUpgrade.deposit(), 600_000 * NATIVE_UNIT);
-        assert_eq!(Track::ChainUpgrade.approval_bps(), 8_000);
-        assert_eq!(Track::ChainUpgrade.support_bps(), 4_000);
+    fn the_five_tracks_carry_the_canonical_parameters() {
+        assert_eq!(Track::all().len(), 5);
+        assert_eq!(Track::ChainUpgrade.deposit(), 2_250_000 * NATIVE_UNIT);
         assert_eq!(Track::ChainUpgrade.period_seconds(), 14 * DAY_SECONDS);
 
-        assert_eq!(Track::Mint.deposit(), 250_000 * NATIVE_UNIT);
-        assert_eq!(Track::Mint.support_bps(), 3_500);
+        assert_eq!(Track::Mint.deposit(), 4_000_000 * NATIVE_UNIT);
         assert_eq!(Track::Mint.period_seconds(), 3 * DAY_SECONDS);
 
-        assert_eq!(Track::FreezeRecovery.deposit(), 150_000 * NATIVE_UNIT);
-        assert_eq!(Track::FreezeRecovery.approval_bps(), 7_500);
-        assert_eq!(Track::FreezeRecovery.support_bps(), 3_000);
+        assert_eq!(Track::BridgeMigration.deposit(), 1_500_000 * NATIVE_UNIT);
+        assert_eq!(Track::BridgeMigration.period_seconds(), 5 * DAY_SECONDS);
+
+        assert_eq!(Track::FreezeRecovery.deposit(), 292_500 * NATIVE_UNIT);
         assert_eq!(Track::FreezeRecovery.period_seconds(), 6 * HOUR_SECONDS);
 
-        assert_eq!(Track::AddAsset.deposit(), 30_000 * NATIVE_UNIT);
-        assert_eq!(Track::AddAsset.approval_bps(), 6_000);
-        assert_eq!(Track::AddAsset.support_bps(), 1_000);
+        assert_eq!(Track::BlacklistKill.deposit(), 390_000 * NATIVE_UNIT);
+        assert_eq!(Track::BlacklistKill.period_seconds(), 2 * DAY_SECONDS);
 
-        assert_eq!(Track::Parameter.deposit(), 15_000 * NATIVE_UNIT);
-        assert_eq!(Track::Parameter.approval_bps(), 5_000);
-        assert_eq!(Track::Parameter.support_bps(), 400);
-        assert_eq!(Track::Parameter.period_seconds(), 7 * DAY_SECONDS);
+        assert_eq!(THRESHOLD_BPS, 4_000);
+        assert!(Track::from_code(6).is_none());
+        assert!(Track::from_code(7).is_none());
     }
 
     #[test]
@@ -842,40 +785,42 @@ mod tests {
     }
 
     #[test]
-    fn a_tally_must_clear_both_the_approval_and_the_support_bar() {
-        let mut t = Tally::default();
-        t.record(true, Conviction::Liquid, 3_000);
-        t.record(false, Conviction::Liquid, 2_000);
-        assert!(t.reached_approval(Track::Parameter));
-        assert!(t.reached_support(Track::Parameter, 100_000));
-        assert!(t.approved(Track::Parameter, 100_000));
-        assert!(!t.reached_approval(Track::ChainUpgrade));
-        assert!(!t.reached_support(Track::ChainUpgrade, 100_000));
-        assert!(!t.approved(Track::ChainUpgrade, 100_000));
+    fn a_tally_passes_at_forty_percent_of_total_staked_and_fails_just_below() {
+        let mut pass = Tally::default();
+        pass.record(true, 400_000);
+        assert!(pass.approved(1_000_000));
+
+        let mut fail = Tally::default();
+        fail.record(true, 399_999);
+        assert!(!fail.approved(1_000_000));
+
+        let mut none = Tally::default();
+        none.record(true, 500_000);
+        assert!(!none.approved(0));
     }
 
     #[test]
-    fn approval_is_conviction_weighted_but_support_is_raw_stake() {
+    fn a_tally_counts_raw_stake_on_each_side() {
         let mut t = Tally::default();
-        t.record(true, Conviction::TwoYear, 2_000);
-        t.record(false, Conviction::Liquid, 2_000);
-        assert_eq!(t.aye_weight, 5_000);
-        assert_eq!(t.nay_weight, 2_000);
-        assert_eq!(t.turnout_stake, 4_000);
+        t.record(true, 2_000);
+        t.record(false, 2_000);
+        assert_eq!(t.aye_stake, 2_000);
+        assert_eq!(t.nay_stake, 2_000);
+        assert_eq!(t.turnout(), 4_000);
     }
 
     #[test]
-    fn a_deposit_returns_on_support_and_is_forfeit_on_spam_or_a_kill() {
-        let mut passed = Referendum::open(1, Track::Parameter, vec![1; 32], 0);
-        passed.tally.record(true, Conviction::Liquid, 5_000);
+    fn a_deposit_returns_when_the_bar_is_met_and_is_forfeit_on_a_miss_or_a_kill() {
+        let mut passed = Referendum::open(1, Track::ChainUpgrade, vec![1; 32], 0);
+        passed.tally.record(true, 40_000);
         assert!(passed.deposit_refunded(100_000));
 
-        let mut spam = Referendum::open(2, Track::Parameter, vec![2; 32], 0);
-        spam.tally.record(true, Conviction::Liquid, 100);
-        assert!(!spam.deposit_refunded(100_000));
+        let mut miss = Referendum::open(2, Track::ChainUpgrade, vec![2; 32], 0);
+        miss.tally.record(true, 39_999);
+        assert!(!miss.deposit_refunded(100_000));
 
-        let mut killed = Referendum::open(3, Track::Parameter, vec![3; 32], 0);
-        killed.tally.record(true, Conviction::Liquid, 5_000);
+        let mut killed = Referendum::open(3, Track::ChainUpgrade, vec![3; 32], 0);
+        killed.tally.record(true, 40_000);
         killed.killed = true;
         assert!(!killed.deposit_refunded(100_000));
     }
@@ -883,7 +828,7 @@ mod tests {
     #[test]
     fn a_referendum_decides_only_when_its_window_closes() {
         let mut r = Referendum::open(1, Track::Mint, vec![1; 32], 1_000);
-        r.tally.record(true, Conviction::Liquid, 40_000);
+        r.tally.record(true, 40_000);
         assert_eq!(
             r.resolve(1_000 + 3 * DAY_SECONDS - 1, 100_000),
             Status::Deciding
@@ -892,14 +837,14 @@ mod tests {
         assert_eq!(r.resolve(1_000 + 30 * DAY_SECONDS, 100_000), Status::Approved);
 
         let mut thin = Referendum::open(2, Track::Mint, vec![2; 32], 0);
-        thin.tally.record(true, Conviction::Liquid, 10_000);
+        thin.tally.record(true, 39_999);
         assert_eq!(thin.resolve(3 * DAY_SECONDS, 100_000), Status::Rejected);
     }
 
     #[test]
     fn a_killed_referendum_is_rejected_the_moment_it_resolves() {
         let mut r = Referendum::open(1, Track::Mint, vec![1; 32], 0);
-        r.tally.record(true, Conviction::Liquid, 90_000);
+        r.tally.record(true, 90_000);
         r.killed = true;
         assert_eq!(r.resolve(0, 100_000), Status::Rejected);
     }
@@ -912,7 +857,24 @@ mod tests {
         };
         assert_eq!(check_enactment(Track::Mint, &mint, true, |_| false), Ok(()));
         assert_eq!(
-            check_enactment(Track::Parameter, &mint, true, |_| false),
+            check_enactment(Track::BlacklistKill, &mint, true, |_| false),
+            Err(Violation::WrongTrack)
+        );
+    }
+
+    #[test]
+    fn a_parameter_change_rides_the_chain_upgrade_track_and_no_other() {
+        let action = Action::Parameter {
+            key: b"price".to_vec(),
+            value: 70_000_000u128.to_le_bytes().to_vec(),
+        };
+        assert_eq!(action.track(), Track::ChainUpgrade);
+        assert_eq!(
+            check_enactment(Track::ChainUpgrade, &action, true, |_| false),
+            Ok(())
+        );
+        assert_eq!(
+            check_enactment(Track::Mint, &action, true, |_| false),
             Err(Violation::WrongTrack)
         );
     }
@@ -992,7 +954,7 @@ mod tests {
     #[test]
     fn an_enactment_receipt_round_trips_through_the_codec() {
         let mut tally = Tally::default();
-        tally.record(true, Conviction::TwoYear, 3_000);
+        tally.record(true, 3_000);
         let receipt = EnactmentReceipt {
             referendum: 7,
             proposal_hash: [9u8; 32],
@@ -1052,7 +1014,6 @@ mod tests {
                 targets: vec![vec![1; 32], vec![2; 32]],
             },
             Action::Blacklist { target: vec![5; 32] },
-            Action::AddAsset { asset: vec![6; 32] },
             Action::Parameter {
                 key: b"price".to_vec(),
                 value: 70_000_000u128.to_le_bytes().to_vec(),
@@ -1114,8 +1075,8 @@ mod tests {
     #[test]
     fn a_referendum_round_trips_through_the_codec() {
         let mut r = Referendum::open(42, Track::FreezeRecovery, vec![9; 32], 123);
-        r.tally.record(true, Conviction::TwoYear, 1_000);
-        r.tally.record(false, Conviction::Year, 400);
+        r.tally.record(true, 1_000);
+        r.tally.record(false, 400);
         r.status = Status::Approved;
         let bytes = to_bytes(&r);
         let back: Referendum = from_bytes(&bytes).unwrap();
@@ -1166,7 +1127,7 @@ mod tests {
 
     #[test]
     fn the_bridge_freeze_bond_holds_for_longer_than_a_migration_runs() {
-        assert_eq!(BRIDGE_FREEZE_BOND, 100_000 * NATIVE_UNIT);
+        assert_eq!(BRIDGE_FREEZE_BOND, 1_500_000 * NATIVE_UNIT);
         assert_eq!(BRIDGE_FREEZE_DURATION, 7 * DAY_SECONDS);
         assert_eq!(BRIDGE_FREEZE_COOLDOWN, DAY_SECONDS);
         assert!(BRIDGE_FREEZE_DURATION > Track::BridgeMigration.period_seconds());

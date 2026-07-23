@@ -1967,7 +1967,7 @@ mod tests {
         ledger.seed_validator_bond(&qtv_idfmt::render_address(&[201u8; 32]).unwrap(), 10_000 * 1_000_000);
         let proposer = keypair(100);
         let voter = keypair(101);
-        fund(&mut ledger, &proposer, 30_000 * 1_000_000);
+        fund(&mut ledger, &proposer, 2_260_000 * 1_000_000);
         fund(&mut ledger, &voter, 10_000 * 1_000_000);
 
         let propose = gov_call_tx(&proposer, propose_price_args(70_000_000), 0, &fee);
@@ -1982,12 +1982,12 @@ mod tests {
         enact.put_u8(3);
         enact.put_u64(1);
         let enact_tx = gov_call_tx(&proposer, enact.into_bytes(), 1, &fee);
-        let included = execute_ordered(&mut ledger, &[enact_tx], &fee, 8);
+        let included = execute_ordered(&mut ledger, &[enact_tx], &fee, 15);
         assert_eq!(included.len(), 1);
         assert_eq!(ledger.stake_price(), 70_000_000);
 
         let bad = gov_call_tx(&proposer, vec![99u8], 2, &fee);
-        assert!(execute_ordered(&mut ledger, &[bad], &fee, 8).is_empty());
+        assert!(execute_ordered(&mut ledger, &[bad], &fee, 15).is_empty());
     }
 
     #[test]
@@ -1999,7 +1999,7 @@ mod tests {
         let voter = keypair(113);
         let hostile = keypair(114);
         let peer = keypair(115);
-        fund(&mut ledger, &proposer, 300_000 * 1_000_000);
+        fund(&mut ledger, &proposer, 400_000 * 1_000_000);
         fund(&mut ledger, &voter, 10_000 * 1_000_000);
         fund(&mut ledger, &hostile, 10_000 * 1_000_000);
         fund(&mut ledger, &peer, 10_000 * 1_000_000);
@@ -2044,7 +2044,7 @@ mod tests {
         let voter = keypair(141);
         let hostile = keypair(142);
         let peer = keypair(143);
-        fund(&mut ledger, &proposer, 300_000 * 1_000_000);
+        fund(&mut ledger, &proposer, 400_000 * 1_000_000);
         fund(&mut ledger, &voter, 10_000 * 1_000_000);
         fund(&mut ledger, &hostile, 10_000 * 1_000_000);
         fund(&mut ledger, &peer, 10_000 * 1_000_000);
@@ -2125,7 +2125,7 @@ mod tests {
         let proposer = keypair(130);
         let voter = keypair(131);
         let hostile = keypair(132);
-        fund(&mut ledger, &proposer, 300_000 * 1_000_000);
+        fund(&mut ledger, &proposer, 400_000 * 1_000_000);
         fund(&mut ledger, &voter, 10_000 * 1_000_000);
         fund(&mut ledger, &hostile, 10_000 * 1_000_000);
 
@@ -2210,7 +2210,7 @@ mod tests {
         let voter = keypair(103);
         let base = {
             let mut ledger = Ledger::new();
-            fund(&mut ledger, &proposer, 30_000 * 1_000_000);
+            fund(&mut ledger, &proposer, 2_260_000 * 1_000_000);
             fund(&mut ledger, &voter, 10_000 * 1_000_000);
             ledger
         };
@@ -2462,7 +2462,7 @@ mod tests {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
         let freezer = keypair(220);
-        let start = 500_000 * 1_000_000;
+        let start = 2_000_000 * 1_000_000;
         fund(&mut ledger, &freezer, start);
         let charged = fee.transfer_fee();
 
@@ -2490,7 +2490,7 @@ mod tests {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
         let freezer = keypair(221);
-        let start = 500_000 * 1_000_000;
+        let start = 2_000_000 * 1_000_000;
         fund(&mut ledger, &freezer, start);
         let charged = fee.transfer_fee();
 
@@ -2519,7 +2519,7 @@ mod tests {
         let freezer = keypair(223);
         let user = keypair(224);
         fund(&mut ledger, &deployer, 10_000 * 1_000_000);
-        fund(&mut ledger, &freezer, 500_000 * 1_000_000);
+        fund(&mut ledger, &freezer, 2_000_000 * 1_000_000);
         fund(&mut ledger, &user, 10_000 * 1_000_000);
 
         let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 0\nSSTORE r2, r0\nHALT")
