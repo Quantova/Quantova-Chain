@@ -97,6 +97,14 @@ fn run(config_path: &Path) -> Result<(), String> {
     let mut node =
         DevNode::open(&my_node, &devnet).map_err(|e| format!("opening the node: {e:?}"))?;
 
+    if let Some((height, value)) = settings.checkpoint {
+        node.set_checkpoint(qtv_devnet::Checkpoint { height, value });
+        util::log(&format!(
+            "carrying weak subjectivity checkpoint at height {height}, refusing any sync that \
+             conflicts with it",
+        ));
+    }
+
     if let Some(msg_path) = &settings.block_messages_path {
         let messages = load_block_messages(msg_path)?;
         util::log(&format!(
