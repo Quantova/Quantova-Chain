@@ -166,8 +166,7 @@ fn chain_params() -> Json {
             object(vec![
                 ("code", Json::Int(u64::from(track.code()))),
                 ("deposit", Json::Int(track.deposit())),
-                ("approval_bps", Json::Int(track.approval_bps() as u64)),
-                ("support_bps", Json::Int(track.support_bps() as u64)),
+                ("threshold_bps", Json::Int(qtv_governance::THRESHOLD_BPS as u64)),
                 ("period_seconds", Json::Int(track.period_seconds())),
             ])
         })
