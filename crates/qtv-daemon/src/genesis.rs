@@ -112,6 +112,7 @@ impl GenesisFile {
         if slots == 0 {
             return Err("the genesis slot budget is zero, so no height can finalise".to_string());
         }
+        enforce_no_capture(&validators, &accounts)?;
 
         let genesis = Genesis {
             fee_params,
@@ -129,6 +130,47 @@ impl GenesisFile {
             hash,
         })
     }
+}
+
+pub const CAPTURE_CAP_NUM: u128 = 1;
+pub const CAPTURE_CAP_DEN: u128 = 2;
+
+fn over_majority(holding: u128, total: u128) -> bool {
+    holding * CAPTURE_CAP_DEN > total * CAPTURE_CAP_NUM
+}
+
+fn enforce_no_capture(
+    validators: &[ValidatorSpec],
+    accounts: &[GenesisAccount],
+) -> Result<(), String> {
+    if validators.len() >= 2 {
+        let total_stake: u128 = validators.iter().map(|v| v.stake as u128).sum();
+        for v in validators {
+            if over_majority(v.stake as u128, total_stake) {
+                return Err(format!(
+                    "validator {} bonds {} of {} total genesis stake, more than a committee \
+                     majority of the stake, so it could capture the chain at launch. Spread the \
+                     stake so no single validator bonds more than a {} in {} share of the total",
+                    v.id, v.stake, total_stake, CAPTURE_CAP_NUM, CAPTURE_CAP_DEN
+                ));
+            }
+        }
+    }
+
+    if accounts.len() >= 2 {
+        let total_balance: u128 = accounts.iter().map(|a| a.balance as u128).sum();
+        for a in accounts {
+            if over_majority(a.balance as u128, total_balance) {
+                return Err(format!(
+                    "account {} holds {} of {} total genesis balance, more than a committee \
+                     majority share it could bond to capture the chain at launch. Spread the supply \
+                     so no single account holds more than a {} in {} share of the total",
+                    a.address, a.balance, total_balance, CAPTURE_CAP_NUM, CAPTURE_CAP_DEN
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_validator(field: &Field, slots: u64) -> Result<ValidatorSpec, String> {
@@ -235,4 +277,64 @@ fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) ->
 fn put_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
     buf.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
     buf.extend_from_slice(bytes);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn validator(id: u64, stake: u64) -> ValidatorSpec {
+        ValidatorSpec::from_secret(id, stake, true, &[id as u8; 32], 64)
+    }
+
+    fn account(tag: u8, balance: u64) -> GenesisAccount {
+        GenesisAccount {
+            address: format!("qtv1account{tag}"),
+            balance,
+            scheme: 0,
+            public_key: vec![tag],
+        }
+    }
+
+    #[test]
+    fn a_spread_validator_set_and_account_set_pass_the_cap() {
+        let validators = vec![validator(1, 2_000), validator(2, 2_000), validator(3, 2_000)];
+        let accounts = vec![account(1, 100), account(2, 100), account(3, 100)];
+        assert!(enforce_no_capture(&validators, &accounts).is_ok());
+    }
+
+    #[test]
+    fn a_single_validator_and_faucet_bootstrap_is_allowed() {
+        let validators = vec![validator(1, 2_000)];
+        let accounts = vec![account(1, 1_000_000_000_000)];
+        assert!(
+            enforce_no_capture(&validators, &accounts).is_ok(),
+            "a lone bootstrap validator and faucet has no committee majority to capture from"
+        );
+    }
+
+    #[test]
+    fn a_validator_over_a_committee_majority_bond_is_rejected() {
+        let validators = vec![validator(1, 2_000), validator(2, 2_000), validator(3, 5_000)];
+        let err = enforce_no_capture(&validators, &[]).expect_err("the whale validator is rejected");
+        assert!(err.contains("validator 3"), "{err}");
+    }
+
+    #[test]
+    fn two_equal_validators_each_at_exactly_half_are_allowed() {
+        let validators = vec![validator(1, 2_000), validator(2, 2_000)];
+        assert!(
+            enforce_no_capture(&validators, &[]).is_ok(),
+            "exactly half the stake is not a committee majority"
+        );
+    }
+
+    #[test]
+    fn an_account_over_a_committee_majority_balance_is_rejected() {
+        let accounts = vec![account(1, 1_000), account(2, 9_000), account(3, 1_000)];
+        let validators = vec![validator(1, 2_000), validator(2, 2_000), validator(3, 2_000)];
+        let err = enforce_no_capture(&validators, &accounts)
+            .expect_err("the whale account is rejected");
+        assert!(err.contains("account qtv1account2"), "{err}");
+    }
 }
