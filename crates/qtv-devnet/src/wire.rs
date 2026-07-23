@@ -315,6 +315,35 @@ pub fn gossip_id(bytes: &[u8]) -> [u8; 32] {
     sha3_256(bytes)
 }
 
+pub fn encode_register_note(note: &RegisterNote) -> Vec<u8> {
+    let mut encoder = Encoder::new();
+    encoder.put_u64(note.height);
+    encoder.put_u64(note.id);
+    encoder.put_u64(note.epoch);
+    encoder.put_bytes(&note.root.digest);
+    encoder.put_u64(note.root.slots);
+    encoder.put_bytes(&note.sig);
+    encoder.into_bytes()
+}
+
+pub fn decode_register_note(bytes: &[u8]) -> Result<RegisterNote, DecodeError> {
+    let mut decoder = Decoder::new(bytes);
+    let height = decoder.get_u64()?;
+    let id = decoder.get_u64()?;
+    let epoch = decoder.get_u64()?;
+    let digest: [u8; NODE_BYTES] = read_fixed(&mut decoder)?;
+    let slots = decoder.get_u64()?;
+    let sig: [u8; SIGNATURE_BYTES] = read_fixed(&mut decoder)?;
+    decoder.finish()?;
+    Ok(RegisterNote {
+        height,
+        id,
+        epoch,
+        root: Root { digest, slots },
+        sig,
+    })
+}
+
 fn read_text(decoder: &mut Decoder<'_>) -> Result<String, DecodeError> {
     let bytes = decoder.get_bytes()?;
     String::from_utf8(bytes.to_vec()).map_err(|_| DecodeError::Utf8)
@@ -692,6 +721,31 @@ mod tests {
         assert_eq!(
             bounded_capacity(1_000_000_000, 100_000, MIN_SIBLING).unwrap(),
             PREALLOC_LIMIT
+        );
+    }
+
+    #[test]
+    fn a_registration_note_round_trips_through_the_carried_encoding() {
+        let note = RegisterNote {
+            height: 7,
+            id: 3,
+            epoch: 2,
+            root: Root {
+                digest: [9u8; NODE_BYTES],
+                slots: 4,
+            },
+            sig: [5u8; SIGNATURE_BYTES],
+        };
+        let decoded = decode_register_note(&encode_register_note(&note)).expect("round trip");
+        assert_eq!(decoded.height, note.height);
+        assert_eq!(decoded.id, note.id);
+        assert_eq!(decoded.epoch, note.epoch);
+        assert_eq!(decoded.root.digest, note.root.digest);
+        assert_eq!(decoded.root.slots, note.root.slots);
+        assert_eq!(decoded.sig, note.sig);
+        assert!(
+            decode_register_note(&[0u8; 3]).is_err(),
+            "a truncated record is refused"
         );
     }
 }
