@@ -14,15 +14,27 @@ fn attestation_message(height: u64, slot: u64, block_bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Attributable equivocation evidence, the two conflicting attestations one validator
-/// signed at one height for two different blocks. It carries the offender's bond address,
-/// the height and slot, and each signed block with its signature. It authenticates against
-/// the offender's registered attestation key alone, so any node can verify it from state
-/// with no access to the live roster and slash the same offender deterministically.
+/// signed at one height in one view for two different blocks. It carries the offender's bond
+/// address, the height and slot, the view each conflicting attestation was cast in, and each
+/// signed block with its signature. It authenticates against the offender's registered
+/// attestation key alone, so any node can verify it from state with no access to the live
+/// roster and slash the same offender deterministically.
+///
+/// The two views gate the offence. Only a same view double vote, the same target voted twice
+/// with two different blocks, attributes and is slashable. A pair whose views differ is a
+/// justified vote change, a block that failed to lock in one view followed by a different
+/// block in a higher view, and it never attributes. The view fields ride alongside the
+/// attestation and are not covered by the offender's signature, so this gate binds the
+/// same view offence that an honest reporter records truthfully. Binding the view against a
+/// reporter that forges an equal view over an honest cross view pair needs the view committed
+/// inside the signed attestation message in qtv-attest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Equivocation {
     pub offender: String,
     pub height: u64,
     pub slot: u64,
+    pub view_a: u64,
+    pub view_b: u64,
     pub block_a: Vec<u8>,
     pub sig_a: Vec<u8>,
     pub block_b: Vec<u8>,
@@ -32,6 +44,9 @@ pub struct Equivocation {
 impl Equivocation {
     pub fn attributes(&self, attest_pk: &[u8]) -> bool {
         if self.block_a == self.block_b {
+            return false;
+        }
+        if self.view_a != self.view_b {
             return false;
         }
         let pk: [u8; PUBLIC_KEY_BYTES] = match attest_pk.try_into() {
@@ -57,6 +72,8 @@ impl Equivocation {
         encoder.put_bytes(self.offender.as_bytes());
         encoder.put_u64(self.height);
         encoder.put_u64(self.slot);
+        encoder.put_u64(self.view_a);
+        encoder.put_u64(self.view_b);
         encoder.put_bytes(&self.block_a);
         encoder.put_bytes(&self.sig_a);
         encoder.put_bytes(&self.block_b);
@@ -69,6 +86,8 @@ impl Equivocation {
         let offender = String::from_utf8(decoder.get_bytes().ok()?.to_vec()).ok()?;
         let height = decoder.get_u64().ok()?;
         let slot = decoder.get_u64().ok()?;
+        let view_a = decoder.get_u64().ok()?;
+        let view_b = decoder.get_u64().ok()?;
         let block_a = decoder.get_bytes().ok()?.to_vec();
         let sig_a = decoder.get_bytes().ok()?.to_vec();
         let block_b = decoder.get_bytes().ok()?.to_vec();
@@ -78,6 +97,8 @@ impl Equivocation {
             offender,
             height,
             slot,
+            view_a,
+            view_b,
             block_a,
             sig_a,
             block_b,
@@ -87,12 +108,15 @@ impl Equivocation {
 }
 
 /// A pool that watches the attestations a node sees and turns two conflicting attestations
-/// from one validator at one height into attributable evidence. The first attestation seen
-/// for a validator at a height is remembered; a later attestation for a different block at
-/// the same height is an equivocation the pool emits once for a block to carry.
+/// from one validator at one height in one view into attributable evidence. The first
+/// attestation seen for a validator at a height is remembered with the view it was cast in. A
+/// later attestation for a different block in the same view is an equivocation the pool emits
+/// once for a block to carry. A later attestation in a higher view is a justified vote change,
+/// so the pool supersedes the remembered vote and emits nothing. A later attestation in a
+/// lower view arrived after the node moved on and is ignored.
 #[derive(Default)]
 pub struct EvidencePool {
-    seen: HashMap<(String, u64), (u64, Vec<u8>, Vec<u8>)>,
+    seen: HashMap<(String, u64), (u64, u64, Vec<u8>, Vec<u8>)>,
     pending: Vec<Equivocation>,
     flagged: Vec<(String, u64)>,
 }
@@ -107,12 +131,23 @@ impl EvidencePool {
         offender: &str,
         height: u64,
         slot: u64,
+        view: u64,
         block_bytes: Vec<u8>,
         sig: Vec<u8>,
     ) -> Option<Equivocation> {
         let key = (offender.to_string(), height);
         match self.seen.get(&key) {
-            Some((_, prev_block, prev_sig)) if *prev_block != block_bytes => {
+            Some((prev_view, _, prev_block, prev_sig)) => {
+                if view > *prev_view {
+                    self.seen.insert(key, (view, slot, block_bytes, sig));
+                    return None;
+                }
+                if view < *prev_view {
+                    return None;
+                }
+                if *prev_block == block_bytes {
+                    return None;
+                }
                 if self.flagged.contains(&key) {
                     return None;
                 }
@@ -120,6 +155,8 @@ impl EvidencePool {
                     offender: offender.to_string(),
                     height,
                     slot,
+                    view_a: *prev_view,
+                    view_b: view,
                     block_a: prev_block.clone(),
                     sig_a: prev_sig.clone(),
                     block_b: block_bytes,
@@ -129,9 +166,8 @@ impl EvidencePool {
                 self.pending.push(evidence.clone());
                 Some(evidence)
             }
-            Some(_) => None,
             None => {
-                self.seen.insert(key, (slot, block_bytes, sig));
+                self.seen.insert(key, (view, slot, block_bytes, sig));
                 None
             }
         }
@@ -168,6 +204,8 @@ mod tests {
             offender: address.to_string(),
             height: 1,
             slot: 1,
+            view_a: 0,
+            view_b: 0,
             block_a: block_a.to_bytes(),
             sig_a: a.sig.to_vec(),
             block_b: block_b.to_bytes(),
@@ -194,6 +232,8 @@ mod tests {
             offender: address,
             height: 1,
             slot: 1,
+            view_a: 0,
+            view_b: 0,
             block_a: block.to_bytes(),
             sig_a: a.sig.to_vec(),
             block_b: block.to_bytes(),
@@ -211,6 +251,87 @@ mod tests {
     }
 
     #[test]
+    fn a_same_view_double_vote_attributes_and_is_slashable() {
+        let (attester, address) = attester();
+        let beacon = Beacon::genesis();
+        let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
+        let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
+        let a = attester.attest(1, 1, block_a, &beacon);
+        let b = attester.attest(1, 1, block_b, &beacon);
+
+        let mut pool = EvidencePool::new();
+        assert!(pool
+            .observe(&address, 1, 1, 0, block_a.to_bytes(), a.sig.to_vec())
+            .is_none());
+        let flagged = pool
+            .observe(&address, 1, 1, 0, block_b.to_bytes(), b.sig.to_vec())
+            .expect("a conflicting block in the same view is a genuine double vote");
+        assert_eq!((flagged.view_a, flagged.view_b), (0, 0));
+        assert!(
+            flagged.attributes(attester.attest_public_key()),
+            "the same view double vote authenticates and slashes"
+        );
+    }
+
+    #[test]
+    fn an_honest_cross_view_re_vote_is_not_slashed() {
+        let (attester, address) = attester();
+        let beacon = Beacon::genesis();
+        let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
+        let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
+        let a = attester.attest(1, 1, block_a, &beacon);
+        let b = attester.attest(1, 1, block_b, &beacon);
+
+        let mut pool = EvidencePool::new();
+        assert!(pool
+            .observe(&address, 1, 1, 0, block_a.to_bytes(), a.sig.to_vec())
+            .is_none());
+        assert!(
+            pool.observe(&address, 1, 1, 1, block_b.to_bytes(), b.sig.to_vec())
+                .is_none(),
+            "a higher view re vote is a justified vote change"
+        );
+        assert!(pool.drain().is_empty(), "no evidence is attributed for a view change");
+
+        let hand_built = Equivocation {
+            offender: address,
+            height: 1,
+            slot: 1,
+            view_a: 0,
+            view_b: 1,
+            block_a: block_a.to_bytes(),
+            sig_a: a.sig.to_vec(),
+            block_b: block_b.to_bytes(),
+            sig_b: b.sig.to_vec(),
+        };
+        assert!(
+            !hand_built.attributes(attester.attest_public_key()),
+            "the deterministic gate refuses a cross view pair even with valid signatures"
+        );
+    }
+
+    #[test]
+    fn a_lower_view_attestation_arriving_late_is_ignored() {
+        let (attester, address) = attester();
+        let beacon = Beacon::genesis();
+        let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
+        let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
+        let a = attester.attest(1, 1, block_a, &beacon);
+        let b = attester.attest(1, 1, block_b, &beacon);
+
+        let mut pool = EvidencePool::new();
+        assert!(pool
+            .observe(&address, 1, 1, 2, block_b.to_bytes(), b.sig.to_vec())
+            .is_none());
+        assert!(
+            pool.observe(&address, 1, 1, 0, block_a.to_bytes(), a.sig.to_vec())
+                .is_none(),
+            "an older view arriving after the node advanced is not evidence"
+        );
+        assert!(pool.drain().is_empty());
+    }
+
+    #[test]
     fn the_pool_emits_evidence_once_on_the_second_conflicting_attestation() {
         let (attester, address) = attester();
         let beacon = Beacon::genesis();
@@ -221,14 +342,14 @@ mod tests {
 
         let mut pool = EvidencePool::new();
         assert!(pool
-            .observe(&address, 1, 1, block_a.to_bytes(), a.sig.to_vec())
+            .observe(&address, 1, 1, 0, block_a.to_bytes(), a.sig.to_vec())
             .is_none());
         let flagged = pool
-            .observe(&address, 1, 1, block_b.to_bytes(), b.sig.to_vec())
+            .observe(&address, 1, 1, 0, block_b.to_bytes(), b.sig.to_vec())
             .expect("the conflicting attestation is flagged");
         assert!(flagged.attributes(attester.attest_public_key()));
         assert!(pool
-            .observe(&address, 1, 1, block_b.to_bytes(), b.sig.to_vec())
+            .observe(&address, 1, 1, 0, block_b.to_bytes(), b.sig.to_vec())
             .is_none(), "a validator is flagged only once");
         assert_eq!(pool.drain().len(), 1);
     }
