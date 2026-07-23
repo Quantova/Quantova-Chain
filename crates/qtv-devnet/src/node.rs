@@ -11,6 +11,7 @@ use qtv_node::consensus::{
     genesis_beacon, header_value, Beacon, Block as ConsensusBlock, Consensus, FinalityLedger,
     FinalityStatus, Parent, Selection, ValidatorRegistration,
 };
+use qtv_node::evidence::{Equivocation, EvidencePool};
 use qtv_node::watermark::SignGuard;
 use qtv_node::fee::FeeParams;
 use qtv_node::ledger::{account_key, Account, BlockEvent, Ledger};
@@ -215,6 +216,7 @@ pub struct DevNode {
     guarded_height: Option<Height>,
     fatal: Option<Fatal>,
     checkpoint: Option<Checkpoint>,
+    evidence_pool: EvidencePool,
 }
 
 impl DevNode {
@@ -262,6 +264,7 @@ impl DevNode {
             guarded_height: None,
             fatal: None,
             checkpoint: None,
+            evidence_pool: EvidencePool::new(),
         };
 
         if dev.block_store.is_empty() {
@@ -295,6 +298,11 @@ impl DevNode {
             if let Some((bond_key, bond_value)) = self.ledger.seed_validator_bond(address, bond) {
                 self.state_store.put_account(bond_key, bond_value)?;
                 supply = supply.saturating_add(bond);
+            }
+            if let Some((attest_key, attest_value)) =
+                self.ledger.seed_validator_attest_key(address, &v.attest_pk)
+            {
+                self.state_store.put_account(attest_key, attest_value)?;
             }
             if let Ok(payload) = qtv_idfmt::parse_address(address) {
                 if let Ok(id) = <[u8; 32]>::try_from(payload) {
@@ -1112,6 +1120,7 @@ impl DevNode {
     }
 
     fn record_attestation(&mut self, attestation: &Attestation) {
+        self.watch_for_equivocation(attestation);
         let seen = self
             .round_atts
             .iter()
@@ -1119,6 +1128,33 @@ impl DevNode {
         if !seen {
             self.round_atts.push(attestation.clone());
         }
+    }
+
+    /// Feed an observed attestation to the evidence pool, keyed by the signer's bond
+    /// address. A second attestation from the same signer at the same height for a
+    /// different block is turned into attributable evidence a block can carry.
+    fn watch_for_equivocation(&mut self, attestation: &Attestation) {
+        let Some(offender) = self
+            .base_roster
+            .iter()
+            .find(|r| r.id == attestation.from)
+            .map(|r| r.bond_address.clone())
+        else {
+            return;
+        };
+        self.evidence_pool.observe(
+            &offender,
+            attestation.height,
+            attestation.slot,
+            attestation.block.to_bytes(),
+            attestation.sig.to_vec(),
+        );
+    }
+
+    /// The equivocation evidence this node has attributed from the attestations it has seen,
+    /// ready for a block to carry so every node applies the same slash on execution.
+    pub fn pending_evidence(&mut self) -> Vec<Equivocation> {
+        self.evidence_pool.drain()
     }
 
     fn buffer_proposal(&mut self, proposal: Proposal) {
