@@ -444,6 +444,9 @@ fn dispatch_vm(
     if ledger.is_blacklisted(&sender) {
         return false;
     }
+    if ledger.bridge_is_frozen() && ledger.is_bridge_gateway(wrapper.body().call().target()) {
+        return false;
+    }
     let account = ledger.account(&sender);
     if !vm_admissible(wrapper, &account, fee_params, signature_ok) {
         return false;
@@ -510,7 +513,10 @@ fn execute_ordered_across(
     let exit_address = crate::ledger::stake_exit_address();
     let withdraw_address = crate::ledger::stake_withdraw_address();
     let gov_address = crate::ledger::gov_system_address();
+    let bridge_freeze_address = crate::ledger::bridge_freeze_address();
+    let bridge_unfreeze_address = crate::ledger::bridge_unfreeze_address();
     let now_seconds = day.saturating_mul(86_400);
+    ledger.bridge_expire(now_seconds);
     let mut included = Vec::new();
     let mut vm_meter: u64 = 0;
     for (index, wrapper) in candidates.iter().enumerate() {
@@ -580,6 +586,18 @@ fn execute_ordered_across(
         }
         if plan.recipient == withdraw_address {
             if ledger.withdraw_with_fee(&plan.sender, plan.fee, day) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
+        if plan.recipient == bridge_freeze_address {
+            if ledger.bridge_freeze_with_fee(&plan.sender, plan.fee, now_seconds) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
+        if plan.recipient == bridge_unfreeze_address {
+            if ledger.bridge_unfreeze_with_fee(&plan.sender, plan.fee, now_seconds) {
                 included.push(wrapper.clone());
             }
             continue;
@@ -2435,5 +2453,116 @@ mod tests {
             Account::default(),
             "the registration record creates no account of its own"
         );
+    }
+
+    #[test]
+    fn a_bridge_freeze_and_unfreeze_ride_their_system_addresses_and_return_the_bond() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let freezer = keypair(220);
+        let start = 500_000 * 1_000_000;
+        fund(&mut ledger, &freezer, start);
+        let charged = fee.transfer_fee();
+
+        let freeze = transfer(&freezer, &crate::ledger::bridge_freeze_address(), 0, 0, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[freeze], &fee, 0).len(), 1);
+        assert!(ledger.bridge_is_frozen(), "the freeze halts the bridge the block it lands");
+        assert_eq!(
+            ledger.balance(&freezer.address()),
+            start - qtv_governance::BRIDGE_FREEZE_BOND - charged,
+            "the bond and the fee leave the caller"
+        );
+
+        let unfreeze = transfer(&freezer, &crate::ledger::bridge_unfreeze_address(), 0, 1, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[unfreeze], &fee, 0).len(), 1);
+        assert!(!ledger.bridge_is_frozen());
+        assert_eq!(
+            ledger.balance(&freezer.address()),
+            start - 2 * charged,
+            "the full bond returns and only the two fees are spent"
+        );
+    }
+
+    #[test]
+    fn a_bridge_freeze_auto_expires_across_blocks_and_refunds_the_bond() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let freezer = keypair(221);
+        let start = 500_000 * 1_000_000;
+        fund(&mut ledger, &freezer, start);
+        let charged = fee.transfer_fee();
+
+        let freeze = transfer(&freezer, &crate::ledger::bridge_freeze_address(), 0, 0, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[freeze], &fee, 0).len(), 1);
+        assert!(ledger.bridge_is_frozen());
+
+        let horizon_day = qtv_governance::BRIDGE_FREEZE_DURATION / 86_400;
+        execute_ordered(&mut ledger, &[], &fee, horizon_day - 1);
+        assert!(ledger.bridge_is_frozen(), "the freeze stands before its horizon");
+
+        execute_ordered(&mut ledger, &[], &fee, horizon_day);
+        assert!(!ledger.bridge_is_frozen(), "a block at the horizon sweeps the freeze");
+        assert_eq!(
+            ledger.balance(&freezer.address()),
+            start - charged,
+            "auto expiry refunds the whole bond"
+        );
+    }
+
+    #[test]
+    fn a_frozen_bridge_rejects_a_call_to_the_registered_gateway_contract() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let deployer = keypair(222);
+        let freezer = keypair(223);
+        let user = keypair(224);
+        fund(&mut ledger, &deployer, 10_000 * 1_000_000);
+        fund(&mut ledger, &freezer, 500_000 * 1_000_000);
+        fund(&mut ledger, &user, 10_000 * 1_000_000);
+
+        let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 0\nSSTORE r2, r0\nHALT")
+            .expect("the program assembles");
+        let selector = [1u8, 2, 3, 4];
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![0],
+                },
+            }],
+        );
+        let deploy = system_tx(
+            &deployer,
+            &crate::ledger::vm_deploy_address(),
+            container.canonical_bytes(),
+            0,
+            100_000,
+            &fee,
+        );
+        assert_eq!(execute_ordered(&mut ledger, &[deploy], &fee, 0).len(), 1);
+        let gateway = crate::ledger::contract_address(&deployer.address(), 0).unwrap();
+        ledger.seed_bridge_gateway(&address_bytes(&gateway));
+
+        let open_call = system_tx(&user, &gateway, selector.to_vec(), 0, 100_000, &fee);
+        assert_eq!(
+            execute_ordered(&mut ledger, &[open_call], &fee, 0).len(),
+            1,
+            "an open bridge serves gateway calls"
+        );
+
+        let freeze = transfer(&freezer, &crate::ledger::bridge_freeze_address(), 0, 0, &fee);
+        let frozen_call = system_tx(&user, &gateway, selector.to_vec(), 1, 100_000, &fee);
+        let included = execute_ordered(&mut ledger, &[freeze, frozen_call], &fee, 0);
+        assert_eq!(
+            included.len(),
+            1,
+            "the freeze rides but the gateway call is halted in the same block"
+        );
+        assert!(ledger.bridge_is_frozen());
+        assert_eq!(ledger.account(&user.address()).nonce, 1, "the halted call never advanced the caller");
     }
 }

@@ -23,6 +23,10 @@ pub const HOUR_SECONDS: u64 = 3_600;
 pub const MONTH_SECONDS: u64 = 30 * DAY_SECONDS;
 pub const YEAR_SECONDS: u64 = 365 * DAY_SECONDS;
 
+pub const BRIDGE_FREEZE_BOND: u64 = 100_000 * NATIVE_UNIT;
+pub const BRIDGE_FREEZE_DURATION: u64 = 7 * DAY_SECONDS;
+pub const BRIDGE_FREEZE_COOLDOWN: u64 = DAY_SECONDS;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Track {
     ChainUpgrade,
@@ -496,6 +500,35 @@ impl Decode for Action {
             }
             other => Err(Error::UnknownTag { tag: other }),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeFreeze {
+    pub who: [u8; 32],
+    pub bond: u64,
+    pub until: u64,
+}
+
+impl Encode for BridgeFreeze {
+    fn encode(&self, encoder: &mut Encoder) {
+        encoder.put_bytes(&self.who);
+        encoder.put_u64(self.bond);
+        encoder.put_u64(self.until);
+    }
+}
+
+impl Decode for BridgeFreeze {
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
+        let who: [u8; 32] = decoder
+            .get_bytes()?
+            .try_into()
+            .map_err(|_| Error::UnknownTag { tag: 0 })?;
+        Ok(BridgeFreeze {
+            who,
+            bond: decoder.get_u64()?,
+            until: decoder.get_u64()?,
+        })
     }
 }
 
@@ -1118,5 +1151,25 @@ mod tests {
             Err(Error::LengthOverrun { .. })
         ));
         assert_eq!(bounded_capacity(1_000_000, 2, MIN_SEIZURE).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_bridge_freeze_record_round_trips_through_the_codec() {
+        let record = BridgeFreeze {
+            who: [0x2Au8; 32],
+            bond: BRIDGE_FREEZE_BOND,
+            until: 1_000 + BRIDGE_FREEZE_DURATION,
+        };
+        let back: BridgeFreeze = from_bytes(&to_bytes(&record)).unwrap();
+        assert_eq!(record, back);
+    }
+
+    #[test]
+    fn the_bridge_freeze_bond_holds_for_longer_than_a_migration_runs() {
+        assert_eq!(BRIDGE_FREEZE_BOND, 100_000 * NATIVE_UNIT);
+        assert_eq!(BRIDGE_FREEZE_DURATION, 7 * DAY_SECONDS);
+        assert_eq!(BRIDGE_FREEZE_COOLDOWN, DAY_SECONDS);
+        assert!(BRIDGE_FREEZE_DURATION > Track::BridgeMigration.period_seconds());
+        assert!(BRIDGE_FREEZE_COOLDOWN > 0);
     }
 }
