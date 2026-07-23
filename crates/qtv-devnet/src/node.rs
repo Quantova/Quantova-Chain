@@ -114,7 +114,19 @@ pub enum SyncError {
     WrongSubject,
     UnverifiedCertificate,
     WrongStateRoot,
+    CheckpointConflict,
     Io,
+}
+
+/// A weak subjectivity checkpoint, a finalised height paired with the value the node
+/// trusts at it. The node build carries a recent one and the node advances it each epoch.
+/// A block at the checkpoint height whose value differs is a long range fork the node
+/// refuses to sync across, before it ever checks the certificate that a fork could forge
+/// from retired validator keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub height: Height,
+    pub value: [u8; 32],
 }
 
 /// A condition the running node must never cross. Either it was asked to sign a height
@@ -202,6 +214,7 @@ pub struct DevNode {
     finality: FinalityLedger,
     guarded_height: Option<Height>,
     fatal: Option<Fatal>,
+    checkpoint: Option<Checkpoint>,
 }
 
 impl DevNode {
@@ -248,6 +261,7 @@ impl DevNode {
             finality: FinalityLedger::new(),
             guarded_height: None,
             fatal: None,
+            checkpoint: None,
         };
 
         if dev.block_store.is_empty() {
@@ -734,6 +748,13 @@ impl DevNode {
             .advance_from_reveals(self.slot(), &selection.reveals);
         self.parent_header_hash = chain_block.header_hash();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
+        let finalised_height = self.height;
+        if qtv_sampler::epoch::is_epoch_start(finalised_height, self.consensus.epoch_len()) {
+            self.checkpoint = Some(Checkpoint {
+                height: finalised_height,
+                value: block.val,
+            });
+        }
         self.height += 1;
         self.view = 0;
         self.round_atts.clear();
@@ -1183,6 +1204,22 @@ impl DevNode {
         self.consensus.epoch_for(self.height)
     }
 
+    /// The weak subjectivity checkpoint the node currently trusts.
+    pub fn checkpoint(&self) -> Option<Checkpoint> {
+        self.checkpoint
+    }
+
+    /// Install the recent finalised checkpoint the node build carries. A node that syncs
+    /// will refuse any block at the checkpoint height whose value differs from it.
+    pub fn set_checkpoint(&mut self, checkpoint: Checkpoint) {
+        self.checkpoint = Some(checkpoint);
+    }
+
+    /// Whether a block at `height` with `value` conflicts with the trusted checkpoint.
+    pub fn conflicts_with_checkpoint(&self, height: Height, value: [u8; 32]) -> bool {
+        matches!(self.checkpoint, Some(cp) if cp.height == height && cp.value != value)
+    }
+
     pub fn identity(&self) -> &Identity {
         &self.identity
     }
@@ -1266,6 +1303,9 @@ impl DevNode {
         let header = block.header().clone();
         if header.height() != self.height {
             return Err(SyncError::WrongHeight);
+        }
+        if self.conflicts_with_checkpoint(header.height(), header_value(&header.hash())) {
+            return Err(SyncError::CheckpointConflict);
         }
         if *header.parent_hash() != self.parent_header_hash {
             return Err(SyncError::WrongParent);

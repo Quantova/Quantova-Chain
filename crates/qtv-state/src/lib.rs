@@ -252,6 +252,18 @@ impl Trie {
         self.persist_dirty.insert(key);
     }
 
+    /// Remove a leaf so its slot returns to the default, freeing the state it occupied. The
+    /// key is marked dirty so the change persists, and the root falls back to what it would
+    /// be had the leaf never existed.
+    pub fn remove(&mut self, key: &Key) -> bool {
+        let existed = self.leaves.remove(key).is_some();
+        if existed {
+            self.cache.get_mut().changed.insert(*key);
+            self.persist_dirty.insert(*key);
+        }
+        existed
+    }
+
     pub fn get(&self, key: &Key) -> Option<&[u8]> {
         self.leaves.get(key).map(|value| value.as_slice())
     }
@@ -524,6 +536,26 @@ mod incremental {
             single * 20 < full,
             "a single change cost {single} hashes against a full recompute of {full}"
         );
+    }
+
+    #[test]
+    fn a_removed_leaf_frees_its_slot_and_returns_the_root() {
+        let mut rng = Rng(987654321);
+        let mut trie = Trie::new();
+        for _ in 0..64 {
+            trie.insert(rng.key(), rng.value());
+        }
+        let before = trie.root();
+
+        let key = rng.key();
+        trie.insert(key, b"a transient account".to_vec());
+        assert!(trie.get(&key).is_some());
+        assert_ne!(trie.root(), before, "the inserted leaf moved the root");
+
+        assert!(trie.remove(&key), "the leaf was present and removed");
+        assert!(trie.get(&key).is_none(), "the slot is freed after removal");
+        assert_eq!(trie.root(), before, "removal returns the root to its prior value");
+        assert!(!trie.remove(&key), "removing an absent key reports nothing removed");
     }
 
     #[test]

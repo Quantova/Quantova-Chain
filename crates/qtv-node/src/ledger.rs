@@ -76,6 +76,13 @@ pub const FEE_PROPOSER_BPS: u64 = 1_000;
 pub const FEE_GRANTS_BPS: u64 = 2_000;
 const _: () = assert!(FEE_BURN_BPS + FEE_PROPOSER_BPS + FEE_GRANTS_BPS == 10_000);
 
+pub const RENT_EXEMPT_PER_BYTE: u64 = 1_000;
+pub const RENT_PER_BYTE_PER_PERIOD: u64 = 1;
+
+pub fn rent_exempt_minimum_for(footprint: usize) -> u64 {
+    (footprint as u64).saturating_mul(RENT_EXEMPT_PER_BYTE)
+}
+
 const STAKE_PRICE_TAG: &[u8] = b"qtv/stake/price";
 const STAKE_MAINNET_TAG: &[u8] = b"qtv/stake/mainnet";
 const STAKE_METER_TAG: &[u8] = b"qtv/stake/meter";
@@ -2411,6 +2418,79 @@ impl Ledger {
         qtv_idfmt::render_state(&self.state_root())
             .expect("a state root is the fixed digest length")
     }
+
+    /// The number of state bytes an address occupies, its account record plus any contract
+    /// code and storage held under it. The rent exempt deposit is proportional to it, so a
+    /// larger footprint costs proportionally more to keep permanently.
+    pub fn account_footprint(&self, address: &str) -> usize {
+        let mut bytes = to_bytes(&self.account(address)).len();
+        if let Some(id) = address_id(address) {
+            if let Some(code) = self.contract_code(&id) {
+                bytes += code.len();
+                bytes += encode_storage(&self.contract_storage(&id)).len();
+            }
+        }
+        bytes
+    }
+
+    /// The refundable storage deposit an address must hold to be rent exempt. It is
+    /// proportional to the address's state footprint. An address holding at least this much
+    /// is never rent charged and its deposit stays its own, withdrawable in full.
+    pub fn rent_exempt_minimum(&self, address: &str) -> u64 {
+        rent_exempt_minimum_for(self.account_footprint(address))
+    }
+
+    pub fn is_rent_exempt(&self, address: &str) -> bool {
+        self.balance(address) >= self.rent_exempt_minimum(address)
+    }
+
+    /// Charge rent to an address that holds less than its rent exempt deposit, proportional
+    /// to its footprint and the periods elapsed, never more than its balance. A rent exempt
+    /// address is untouched. An address the charge empties is reaped, freeing its slot. The
+    /// rent is burned from supply, so a reaped address returns nothing to anyone.
+    pub fn charge_rent(&mut self, address: &str, periods: u64) -> u64 {
+        let footprint = self.account_footprint(address);
+        let mut account = self.account(address);
+        if account.balance >= rent_exempt_minimum_for(footprint) {
+            return 0;
+        }
+        let due = (footprint as u64)
+            .saturating_mul(RENT_PER_BYTE_PER_PERIOD)
+            .saturating_mul(periods);
+        let charged = due.min(account.balance);
+        if charged == 0 {
+            return 0;
+        }
+        account.balance -= charged;
+        self.debit_supply(charged);
+        self.set_account(address, &account);
+        if account.balance == 0 {
+            self.reap(address);
+        }
+        charged
+    }
+
+    /// Reap an empty address, removing its account record and any contract code and storage
+    /// from the trie so the slot frees. A funded address and a reserved system pot are never
+    /// reaped. Reaping credits no one.
+    pub fn reap(&mut self, address: &str) -> bool {
+        if self.balance(address) != 0 {
+            return false;
+        }
+        if let Some(id) = address_id(address) {
+            if is_reserved_pot(&id) {
+                return false;
+            }
+        }
+        let mut freed = self.trie.remove(&state_key(address));
+        if let Some(id) = address_id(address) {
+            if self.contract_code(&id).is_some() {
+                freed |= self.trie.remove(&contract_code_key(&id));
+                freed |= self.trie.remove(&contract_store_key(&id));
+            }
+        }
+        freed
+    }
 }
 
 #[cfg(test)]
@@ -2427,6 +2507,107 @@ mod tests {
         let ledger = Ledger::new();
         assert_eq!(ledger.account(&address(0)), Account::default());
         assert_eq!(ledger.balance(&address(0)), 0);
+    }
+
+    #[test]
+    fn the_rent_exempt_deposit_is_proportional_to_the_state_footprint() {
+        let mut ledger = Ledger::new();
+        let small = qtv_account::derive(&[7u8; 32], 10);
+        let large = qtv_account::derive(&[7u8; 32], 11);
+        ledger.set_account(
+            &small.address(),
+            &Account::funded(0, small.scheme(), small.public_key()[..8].to_vec()),
+        );
+        ledger.set_account(
+            &large.address(),
+            &Account::funded(0, large.scheme(), large.public_key().to_vec()),
+        );
+
+        let f_small = ledger.account_footprint(&small.address());
+        let f_large = ledger.account_footprint(&large.address());
+        assert!(f_large > f_small, "the larger record occupies more state");
+        assert_eq!(
+            ledger.rent_exempt_minimum(&small.address()),
+            f_small as u64 * RENT_EXEMPT_PER_BYTE,
+            "the deposit is exactly the per byte rate times the footprint"
+        );
+        assert_eq!(
+            ledger.rent_exempt_minimum(&large.address()),
+            f_large as u64 * RENT_EXEMPT_PER_BYTE,
+        );
+        assert!(
+            ledger.rent_exempt_minimum(&large.address())
+                > ledger.rent_exempt_minimum(&small.address()),
+            "adding state costs proportionally more to keep permanently"
+        );
+    }
+
+    #[test]
+    fn a_well_funded_account_is_rent_exempt_and_its_deposit_is_never_taken() {
+        let mut ledger = Ledger::new();
+        ledger.seed_supply(10_000_000);
+        let holder = qtv_account::derive(&[7u8; 32], 12);
+        ledger.set_account(
+            &holder.address(),
+            &Account::funded(5_000_000, holder.scheme(), holder.public_key().to_vec()),
+        );
+        assert!(ledger.is_rent_exempt(&holder.address()));
+        assert_eq!(
+            ledger.charge_rent(&holder.address(), 1_000_000),
+            0,
+            "a rent exempt account is never charged"
+        );
+        assert_eq!(
+            ledger.balance(&holder.address()),
+            5_000_000,
+            "the refundable deposit stays the holder's in full"
+        );
+    }
+
+    #[test]
+    fn a_reaped_account_frees_its_slot_and_returns_nothing_to_an_attacker() {
+        let mut ledger = Ledger::new();
+        let supply = 10_000_000u64;
+        ledger.seed_supply(supply);
+        let victim = qtv_account::derive(&[7u8; 32], 20);
+        let victim_account = Account::funded(1_000_000, victim.scheme(), victim.public_key().to_vec());
+        ledger.set_account(&victim.address(), &victim_account);
+        let grants = grants_address();
+
+        let attacker = qtv_account::derive(&[7u8; 32], 21);
+        let dust = 40u64;
+        ledger.set_account(
+            &attacker.address(),
+            &Account::funded(dust, attacker.scheme(), attacker.public_key().to_vec()),
+        );
+        assert!(
+            !ledger.is_rent_exempt(&attacker.address()),
+            "the dust account is below its rent exempt deposit"
+        );
+
+        let footprint = ledger.account_footprint(&attacker.address());
+        let charged = ledger.charge_rent(&attacker.address(), footprint as u64 * dust);
+        assert_eq!(charged, dust, "the whole dust balance is charged as rent, never more");
+
+        assert_eq!(ledger.balance(&attacker.address()), 0, "the account is emptied");
+        assert_eq!(
+            ledger.account(&attacker.address()),
+            Account::default(),
+            "the reaped account record is gone from state"
+        );
+
+        let mut reference = Ledger::new();
+        reference.seed_supply(supply - dust);
+        reference.set_account(&victim.address(), &victim_account);
+        assert_eq!(
+            ledger.state_root(),
+            reference.state_root(),
+            "the reaped slot is freed, the state is identical to one that never held it"
+        );
+
+        assert_eq!(ledger.total_supply(), supply - dust, "the dust is burned, not paid out");
+        assert_eq!(ledger.balance(&victim.address()), 1_000_000, "no other balance changed");
+        assert_eq!(ledger.balance(&grants), 0, "the reap credits no one");
     }
 
     #[test]
