@@ -8,9 +8,10 @@ use qtv_block::{event_root, transaction_root, Block as ChainBlock, Header};
 use qtv_codec::{to_bytes, Decoder};
 use qtv_net::{Identity, PeerId};
 use qtv_node::consensus::{
-    genesis_beacon, header_value, Beacon, Block as ConsensusBlock, Consensus, Parent, Selection,
-    ValidatorRegistration,
+    genesis_beacon, header_value, Beacon, Block as ConsensusBlock, Consensus, FinalityLedger,
+    FinalityStatus, Parent, Selection, ValidatorRegistration,
 };
+use qtv_node::watermark::SignGuard;
 use qtv_node::fee::FeeParams;
 use qtv_node::ledger::{account_key, Account, BlockEvent, Ledger};
 use qtv_node::mempool::{Admitted, Mempool, Reject};
@@ -116,6 +117,23 @@ pub enum SyncError {
     Io,
 }
 
+/// A condition the running node must never cross. Either it was asked to sign a height
+/// its persisted watermark says it already signed, or it saw a certificate that conflicts
+/// with a height it already finalised. Both halt the node loudly rather than let it double
+/// sign or adopt a forked finality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fatal {
+    DoubleSignRefused {
+        height: Height,
+        view: View,
+    },
+    FinalityViolation {
+        height: Height,
+        finalized: [u8; 32],
+        conflicting: [u8; 32],
+    },
+}
+
 pub struct FinalizedBlock {
     pub block: ChainBlock,
     pub leader: u64,
@@ -180,6 +198,10 @@ pub struct DevNode {
     events_by_height: HashMap<Height, Vec<BlockEvent>>,
     block_messages: HashMap<u64, Vec<u8>>,
     epoch_roots: HashMap<u64, Root>,
+    sign_guard: SignGuard,
+    finality: FinalityLedger,
+    guarded_height: Option<Height>,
+    fatal: Option<Fatal>,
 }
 
 impl DevNode {
@@ -187,6 +209,7 @@ impl DevNode {
         std::fs::create_dir_all(&node.store_dir)?;
         let block_store = BlockStore::open(node.store_dir.join("blocks.log"))?;
         let state_store = StateStore::open(node.store_dir.join("state.log"))?;
+        let sign_guard = SignGuard::open(node.store_dir.join("sign.watermark"))?;
 
         let roster: Vec<ValidatorRegistration> = devnet.roster();
 
@@ -221,6 +244,10 @@ impl DevNode {
             events_by_height: HashMap::new(),
             block_messages: HashMap::new(),
             epoch_roots: HashMap::new(),
+            sign_guard,
+            finality: FinalityLedger::new(),
+            guarded_height: None,
+            fatal: None,
         };
 
         if dev.block_store.is_empty() {
@@ -599,11 +626,77 @@ impl DevNode {
         Ok(())
     }
 
+    /// Consult the persistent anti double sign watermark once per height before this node
+    /// signs anything at that height. It returns whether signing is permitted; a refusal,
+    /// meaning the height was already signed in an earlier run, sets a fatal halt so the
+    /// node never double signs across a restart.
+    fn guard_height(&mut self) -> bool {
+        if self.fatal.is_some() {
+            return false;
+        }
+        if self.guarded_height == Some(self.height) {
+            return true;
+        }
+        match self.sign_guard.try_sign(self.height, 0) {
+            Ok(true) => {
+                self.guarded_height = Some(self.height);
+                true
+            }
+            Ok(false) | Err(_) => {
+                self.fatal = Some(Fatal::DoubleSignRefused {
+                    height: self.height,
+                    view: self.view,
+                });
+                false
+            }
+        }
+    }
+
+    /// Observe a finalized value for a height against the finality ledger. A value that
+    /// conflicts with one already finalized at that height sets a fatal halt so the node
+    /// never carries two conflicting finalities.
+    fn observe_finality(&mut self, height: Height, value: [u8; 32]) {
+        if let FinalityStatus::Violation {
+            height,
+            finalized,
+            conflicting,
+        } = self.finality.observe(height, value)
+        {
+            self.fatal = Some(Fatal::FinalityViolation {
+                height,
+                finalized,
+                conflicting,
+            });
+        }
+    }
+
+    /// The fatal condition that halted this node, if any.
+    pub fn fatal(&self) -> Option<Fatal> {
+        self.fatal
+    }
+
+    /// Observe a certificate's finalized value for a height on the running node, returning
+    /// the fatal condition if it conflicts with a finality already held.
+    pub fn observe_certificate(&mut self, height: Height, value: [u8; 32]) -> Option<Fatal> {
+        self.observe_finality(height, value);
+        self.fatal
+    }
+
     pub fn attest(&self) -> Result<Attestation, RoundError> {
         let staged = self.staged.as_ref().ok_or(RoundError::NotStaged)?;
         Ok(self
             .consensus
             .own_attestation(self.height, self.slot(), staged.block, &self.beacon))
+    }
+
+    /// The node's attestation over the staged block, guarded by the anti double sign
+    /// watermark. It is absent when nothing is staged or when the watermark refuses to
+    /// sign the height, which sets a fatal halt.
+    fn attest_guarded(&mut self) -> Option<Attestation> {
+        if !self.guard_height() {
+            return None;
+        }
+        self.attest().ok()
     }
 
     pub fn finalize(
@@ -624,6 +717,7 @@ impl DevNode {
             )
             .ok_or(RoundError::NotFinalized)?;
         let staged = self.staged.take().expect("the staged block is present");
+        self.observe_finality(self.height, block.val);
 
         self.ledger = staged.ledger;
         let block_events = self.ledger.block_events().to_vec();
@@ -678,9 +772,10 @@ impl DevNode {
             messages.push(Message::Proposal(proposal));
         }
         if self.staged.is_some() {
-            let attestation = self.attest().expect("the staged block attests");
-            self.record_attestation(&attestation);
-            messages.push(Message::Attest(Box::new(attestation)));
+            if let Some(attestation) = self.attest_guarded() {
+                self.record_attestation(&attestation);
+                messages.push(Message::Attest(Box::new(attestation)));
+            }
         }
         messages
     }
@@ -710,9 +805,13 @@ impl DevNode {
         if self.accept_proposal(selection, &proposal).is_err() {
             return Vec::new();
         }
-        let attestation = self.attest().expect("the accepted block attests");
-        self.record_attestation(&attestation);
-        vec![Message::Attest(Box::new(attestation))]
+        match self.attest_guarded() {
+            Some(attestation) => {
+                self.record_attestation(&attestation);
+                vec![Message::Attest(Box::new(attestation))]
+            }
+            None => Vec::new(),
+        }
     }
 
     fn on_justified_proposal(&mut self, selection: &Selection, proposal: Proposal) -> Vec<Message> {
@@ -748,12 +847,17 @@ impl DevNode {
         }
         self.view = view;
         self.future_props.clear();
-        let attestation = self.attest().expect("the justified block attests");
-        self.record_attestation(&attestation);
-        vec![Message::Attest(Box::new(attestation))]
+        match self.attest_guarded() {
+            Some(attestation) => {
+                self.record_attestation(&attestation);
+                vec![Message::Attest(Box::new(attestation))]
+            }
+            None => Vec::new(),
+        }
     }
 
-    pub fn make_view_change(&self, target_view: View) -> ViewChange {
+    pub fn make_view_change(&mut self, target_view: View) -> ViewChange {
+        let _ = self.guard_height();
         let (lock_view, locked_value, has_lock, locked) = match &self.staged {
             Some(staged) => {
                 let value = header_value(&staged.header.hash());
@@ -902,7 +1006,7 @@ impl DevNode {
     }
 
     pub fn attest_staged(&mut self) -> Option<Attestation> {
-        let attestation = self.attest().ok()?;
+        let attestation = self.attest_guarded()?;
         self.record_attestation(&attestation);
         Some(attestation)
     }
@@ -1188,6 +1292,7 @@ impl DevNode {
         {
             return Err(SyncError::UnverifiedCertificate);
         }
+        self.observe_finality(self.height, subject.val);
         let mut ledger = self.ledger.clone();
         ledger.clear_block_events();
         ledger.set_round_proposer(header.proposer());
