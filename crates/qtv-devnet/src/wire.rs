@@ -122,6 +122,7 @@ pub enum DecodeError {
     BadStage(u8),
     BadLength,
     Utf8,
+    BadAddress,
 }
 
 impl From<CodecError> for DecodeError {
@@ -349,17 +350,22 @@ fn read_text(decoder: &mut Decoder<'_>) -> Result<String, DecodeError> {
     String::from_utf8(bytes.to_vec()).map_err(|_| DecodeError::Utf8)
 }
 
+fn read_address(decoder: &mut Decoder<'_>) -> Result<String, DecodeError> {
+    let payload = decoder.get_bytes()?;
+    qtv_idfmt::render_address(payload).map_err(|_| DecodeError::BadAddress)
+}
+
 fn read_fixed<const N: usize>(decoder: &mut Decoder<'_>) -> Result<[u8; N], DecodeError> {
     let bytes = decoder.get_bytes()?;
     bytes.try_into().map_err(|_| DecodeError::BadLength)
 }
 
 fn decode_wrapper(decoder: &mut Decoder<'_>) -> Result<Wrapper, DecodeError> {
-    let sender = read_text(decoder)?;
+    let sender = read_address(decoder)?;
     let nonce = decoder.get_u64()?;
     let meter_limit = decoder.get_u64()?;
     let fee = decoder.get_u128()?;
-    let target = read_text(decoder)?;
+    let target = read_address(decoder)?;
     let args = decoder.get_bytes()?.to_vec();
     let value = decoder.get_u64()?;
     let chain_id = decoder.get_u64()?;
