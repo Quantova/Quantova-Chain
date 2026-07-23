@@ -340,6 +340,14 @@ pub(crate) fn is_evidence(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::evidence_address()
 }
 
+/// A record the block leader carries so a restarting node rebuilds the rotated epoch roots
+/// from chain history. It touches no ledger state, so every node includes it identically
+/// and the block state root is unmoved. The record authenticates on its own and the node
+/// that reads it back on restart verifies it against the registered attestation key.
+pub(crate) fn is_registration(wrapper: &Wrapper) -> bool {
+    wrapper.body().call().target() == crate::ledger::registration_address()
+}
+
 /// Whether the carried equivocation evidence would slash a validator, so a node admits it
 /// with no fee and no signature. It holds only when the evidence decodes, the named
 /// offender has an attestation key in state, the evidence authenticates against that key,
@@ -542,6 +550,10 @@ fn execute_ordered_across(
             if dispatch_evidence(ledger, wrapper) {
                 included.push(wrapper.clone());
             }
+            continue;
+        }
+        if is_registration(wrapper) {
+            included.push(wrapper.clone());
             continue;
         }
         let plan = match validate_verified(wrapper, ledger, fee_params, verified[index]) {
@@ -2391,6 +2403,37 @@ mod tests {
         assert!(
             replay.is_empty(),
             "evidence against an already banned offender is not included again"
+        );
+    }
+
+    #[test]
+    fn a_registration_record_is_included_and_moves_no_account_state() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        ledger.seed_supply(1_000_000_000);
+        let holder = derive(&[4u8; 32], 0);
+        fund(&mut ledger, &holder, 1_000_000);
+
+        let call = qtv_tx::Call::new(crate::ledger::registration_address(), vec![1, 2, 3, 4]);
+        let body = Body::with_context(
+            crate::ledger::registration_address(),
+            0,
+            0,
+            0,
+            call,
+            0,
+            fee.chain_id,
+        );
+        let tx = Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new());
+
+        let included = execute_ordered(&mut ledger, &[tx], &fee, 0);
+        assert_eq!(included.len(), 1, "the registration record rides in the block");
+        assert_eq!(ledger.balance(&holder.address()), 1_000_000, "no balance moved");
+        assert_eq!(ledger.total_supply(), 1_000_000_000, "no supply moved");
+        assert_eq!(
+            ledger.account(&crate::ledger::registration_address()),
+            Account::default(),
+            "the registration record creates no account of its own"
         );
     }
 }
