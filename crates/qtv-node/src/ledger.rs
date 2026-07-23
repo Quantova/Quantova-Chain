@@ -2,8 +2,8 @@
 use qtv_codec::{from_bytes, to_bytes, Decode, Decoder, Encode, Encoder, Error};
 use qtv_crypto::sha3;
 use qtv_governance::{
-    check_enactment, Action, Ballot, Conviction, EnactmentReceipt, Lock, Referendum, Status, Track,
-    Violation,
+    check_enactment, Action, Ballot, BridgeFreeze, Conviction, EnactmentReceipt, Lock, Referendum,
+    Status, Track, Violation,
 };
 use qtv_staking::{Bond, Session, SessionMeter};
 use qtv_state::{Key, Trie, HASH_LEN, KEY_LEN};
@@ -243,6 +243,11 @@ const GOV_FREEZE_TAG: &[u8] = b"qtv/gov/freeze/";
 const GOV_GUARDIAN_TAG: &[u8] = b"qtv/gov/guardians";
 const GOV_RECEIPT_TAG: &[u8] = b"qtv/gov/receipt/";
 
+const BRIDGE_FREEZE_TAG: &[u8] = b"qtv/bridge/freeze";
+const BRIDGE_LAST_LIFT_TAG: &[u8] = b"qtv/bridge/lastlift";
+const BRIDGE_VAULT_TAG: &[u8] = b"qtv/bridge/vault";
+const BRIDGE_GATEWAY_TAG: &[u8] = b"qtv/bridge/gateway";
+
 fn is_reserved_pot(id: &[u8; 32]) -> bool {
     const POTS: &[&[u8]] = &[
         b"qtv/gov/grants",
@@ -250,6 +255,7 @@ fn is_reserved_pot(id: &[u8; 32]) -> bool {
         b"qtv/stake/pool",
         b"qtv/stake/system",
         b"qtv/gov/system",
+        b"qtv/bridge/bond",
         b"qtv/ecosystem/marketing",
         b"qtv/ecosystem/market-maker",
         b"qtv/ecosystem/foundation",
@@ -314,6 +320,21 @@ pub fn gov_system_address() -> String {
 
 pub fn key_register_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/key/register"))
+        .expect("a full hash reaches the address floor")
+}
+
+pub fn bridge_freeze_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/freeze/system"))
+        .expect("a full hash reaches the address floor")
+}
+
+pub fn bridge_unfreeze_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/unfreeze/system"))
+        .expect("a full hash reaches the address floor")
+}
+
+pub fn bridge_bond_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/bond"))
         .expect("a full hash reaches the address floor")
 }
 
@@ -398,6 +419,7 @@ pub enum EnactError {
     BadAddress,
     UnknownParameter,
     BadValue,
+    BridgeNotFrozen,
     NotImplemented,
 }
 
@@ -422,10 +444,7 @@ fn u64_from_le(bytes: &[u8]) -> Option<u64> {
 }
 
 fn action_is_enactable(action: &Action) -> bool {
-    !matches!(
-        action,
-        Action::Upgrade { .. } | Action::BridgeMigration { .. } | Action::AddAsset { .. }
-    )
+    !matches!(action, Action::Upgrade { .. } | Action::AddAsset { .. })
 }
 
 fn u128_from_le(bytes: &[u8]) -> Option<u128> {
@@ -768,6 +787,186 @@ impl Ledger {
             self.set_frozen(target);
         }
         true
+    }
+
+    pub fn bridge_freeze(&self) -> Option<BridgeFreeze> {
+        self.trie
+            .get(&stake_singleton_key(BRIDGE_FREEZE_TAG))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical bridge freeze"))
+    }
+
+    fn set_bridge_freeze(&mut self, record: &BridgeFreeze) {
+        self.trie
+            .insert(stake_singleton_key(BRIDGE_FREEZE_TAG), to_bytes(record));
+    }
+
+    fn clear_bridge_freeze(&mut self) {
+        self.trie
+            .insert(stake_singleton_key(BRIDGE_FREEZE_TAG), Vec::new());
+    }
+
+    pub fn bridge_is_frozen(&self) -> bool {
+        self.bridge_freeze().is_some()
+    }
+
+    pub fn bridge_last_lift(&self) -> Option<u64> {
+        self.trie
+            .get(&stake_singleton_key(BRIDGE_LAST_LIFT_TAG))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical bridge last lift"))
+    }
+
+    fn set_bridge_last_lift(&mut self, now: u64) {
+        self.trie
+            .insert(stake_singleton_key(BRIDGE_LAST_LIFT_TAG), to_bytes(&now));
+    }
+
+    pub fn bridge_pool_vault(&self) -> Option<[u8; 32]> {
+        self.trie
+            .get(&stake_singleton_key(BRIDGE_VAULT_TAG))
+            .filter(|bytes| bytes.len() == KEY_LEN)
+            .map(|bytes| {
+                let mut vault = [0u8; 32];
+                vault.copy_from_slice(bytes);
+                vault
+            })
+    }
+
+    fn set_bridge_pool_vault(&mut self, vault: &[u8; 32]) {
+        self.trie
+            .insert(stake_singleton_key(BRIDGE_VAULT_TAG), vault.to_vec());
+    }
+
+    pub fn bridge_gateway(&self) -> Option<[u8; 32]> {
+        self.trie
+            .get(&stake_singleton_key(BRIDGE_GATEWAY_TAG))
+            .filter(|bytes| bytes.len() == KEY_LEN)
+            .map(|bytes| {
+                let mut gateway = [0u8; 32];
+                gateway.copy_from_slice(bytes);
+                gateway
+            })
+    }
+
+    fn set_bridge_gateway(&mut self, gateway: &[u8; 32]) {
+        self.trie
+            .insert(stake_singleton_key(BRIDGE_GATEWAY_TAG), gateway.to_vec());
+    }
+
+    pub fn seed_bridge_gateway(&mut self, gateway: &[u8; 32]) -> (Key, Vec<u8>) {
+        self.set_bridge_gateway(gateway);
+        (stake_singleton_key(BRIDGE_GATEWAY_TAG), gateway.to_vec())
+    }
+
+    pub fn is_bridge_gateway(&self, address: &str) -> bool {
+        match (self.bridge_gateway(), address_id(address)) {
+            (Some(gateway), Some(id)) => gateway == id,
+            _ => false,
+        }
+    }
+
+    pub fn bridge_freeze_with_fee(&mut self, caller: &str, fee: u64, now: u64) -> bool {
+        let id = match address_id(caller) {
+            Some(id) => id,
+            None => return false,
+        };
+        if self.is_gov_blacklisted(&id) {
+            return false;
+        }
+        if self.bridge_freeze().is_some() {
+            return false;
+        }
+        if let Some(last) = self.bridge_last_lift() {
+            if now < last.saturating_add(qtv_governance::BRIDGE_FREEZE_COOLDOWN) {
+                return false;
+            }
+        }
+        let bond = qtv_governance::BRIDGE_FREEZE_BOND;
+        let debit = match fee.checked_add(bond) {
+            Some(debit) => debit,
+            None => return false,
+        };
+        let mut account = self.account(caller);
+        if account.balance < debit {
+            return false;
+        }
+        account.balance -= debit;
+        account.nonce += 1;
+        self.set_account(caller, &account);
+        self.collect_fee(fee);
+        let pot_address = bridge_bond_address();
+        let mut pot = self.account(&pot_address);
+        pot.balance = pot.balance.saturating_add(bond);
+        self.set_account(&pot_address, &pot);
+        let until = now.saturating_add(qtv_governance::BRIDGE_FREEZE_DURATION);
+        self.set_bridge_freeze(&BridgeFreeze {
+            who: id,
+            bond,
+            until,
+        });
+        true
+    }
+
+    pub fn bridge_unfreeze_with_fee(&mut self, caller: &str, fee: u64, now: u64) -> bool {
+        let id = match address_id(caller) {
+            Some(id) => id,
+            None => return false,
+        };
+        let record = match self.bridge_freeze() {
+            Some(record) => record,
+            None => return false,
+        };
+        if record.who != id {
+            return false;
+        }
+        let mut account = self.account(caller);
+        if account.balance < fee {
+            return false;
+        }
+        account.balance -= fee;
+        account.nonce += 1;
+        self.set_account(caller, &account);
+        self.collect_fee(fee);
+        self.lift_bridge_freeze(now);
+        true
+    }
+
+    pub fn guardian_bridge_unfreeze(&mut self, approvers: &[[u8; 32]], now: u64) -> bool {
+        if self.bridge_freeze().is_none() {
+            return false;
+        }
+        if !self.guardian_set().authorizes(approvers) {
+            return false;
+        }
+        self.lift_bridge_freeze(now);
+        true
+    }
+
+    pub fn bridge_expire(&mut self, now: u64) {
+        if let Some(record) = self.bridge_freeze() {
+            if now >= record.until {
+                self.lift_bridge_freeze(now);
+            }
+        }
+    }
+
+    fn lift_bridge_freeze(&mut self, now: u64) {
+        let record = match self.bridge_freeze() {
+            Some(record) => record,
+            None => return,
+        };
+        let pot_address = bridge_bond_address();
+        let mut pot = self.account(&pot_address);
+        pot.balance = pot.balance.saturating_sub(record.bond);
+        self.set_account(&pot_address, &pot);
+        if let Some(depositor) = id_bytes_to_address(&record.who) {
+            let mut account = self.account(&depositor);
+            account.balance = account.balance.saturating_add(record.bond);
+            self.set_account(&depositor, &account);
+        }
+        self.clear_bridge_freeze();
+        self.set_bridge_last_lift(now);
     }
 
     pub fn stake_price(&self) -> u128 {
@@ -1448,9 +1647,15 @@ impl Ledger {
                 }
                 Ok(())
             }
-            Action::Upgrade { .. }
-            | Action::BridgeMigration { .. }
-            | Action::AddAsset { .. } => Err(EnactError::NotImplemented),
+            Action::BridgeMigration { vault } => {
+                if !self.bridge_is_frozen() {
+                    return Err(EnactError::BridgeNotFrozen);
+                }
+                let vault_id = id_from_slice(vault).ok_or(EnactError::BadAddress)?;
+                self.set_bridge_pool_vault(&vault_id);
+                Ok(())
+            }
+            Action::Upgrade { .. } | Action::AddAsset { .. } => Err(EnactError::NotImplemented),
         }
     }
 
@@ -1464,6 +1669,11 @@ impl Ledger {
                 let day = u64_from_le(value).ok_or(EnactError::BadValue)?;
                 self.set_stake_mainnet_start(day);
                 self.set_session_meter(&SessionMeter::new(day));
+                Ok(())
+            }
+            b"bridge_gateway" => {
+                let gateway = id_from_slice(value).ok_or(EnactError::BadValue)?;
+                self.set_bridge_gateway(&gateway);
                 Ok(())
             }
             _ => Err(EnactError::UnknownParameter),
@@ -1817,14 +2027,6 @@ mod stake_state_tests {
                 &proposer,
                 qtv_governance::Track::ChainUpgrade,
                 qtv_governance::Action::Upgrade { blob: vec![1, 2, 3] },
-                0,
-            )
-            .is_none());
-        assert!(l
-            .gov_propose(
-                &proposer,
-                qtv_governance::Track::BridgeMigration,
-                qtv_governance::Action::BridgeMigration { vault: vec![4; 32] },
                 0,
             )
             .is_none());
@@ -2377,6 +2579,184 @@ mod stake_state_tests {
         assert!(a.starts_with("Q1"));
         assert_eq!(stake_system_address(), a);
         assert!(qtv_idfmt::parse_address(&a).is_ok());
+    }
+
+    #[test]
+    fn a_bridge_freeze_is_instant_and_the_deposit_returns_on_unfreeze() {
+        let mut l = Ledger::new();
+        let freezer = gov_addr(70);
+        let bond = qtv_governance::BRIDGE_FREEZE_BOND;
+        fund(&mut l, &freezer, 200_000 * 1_000_000);
+        assert!(!l.bridge_is_frozen());
+
+        assert!(l.bridge_freeze_with_fee(&freezer, 0, 100));
+        assert!(
+            l.bridge_is_frozen(),
+            "the freeze halts the bridge in the block it lands"
+        );
+        assert_eq!(l.balance(&freezer), 100_000 * 1_000_000, "the bond leaves the caller");
+        assert_eq!(l.balance(&bridge_bond_address()), bond, "the bond rests in the keyless pot");
+        let record = l.bridge_freeze().unwrap();
+        assert_eq!(record.who, [70u8; 32]);
+        assert_eq!(record.bond, bond);
+        assert_eq!(record.until, 100 + qtv_governance::BRIDGE_FREEZE_DURATION);
+
+        let rival = gov_addr(71);
+        fund(&mut l, &rival, 200_000 * 1_000_000);
+        assert!(
+            !l.bridge_freeze_with_fee(&rival, 0, 100),
+            "only one freeze is active at a time"
+        );
+
+        assert!(l.bridge_unfreeze_with_fee(&freezer, 0, 200));
+        assert!(!l.bridge_is_frozen());
+        assert_eq!(
+            l.balance(&freezer),
+            200_000 * 1_000_000,
+            "the full bond returns to the depositor and is never slashed"
+        );
+        assert_eq!(l.balance(&bridge_bond_address()), 0);
+        assert_eq!(l.bridge_last_lift(), Some(200));
+    }
+
+    #[test]
+    fn an_expired_bridge_freeze_returns_the_full_bond_and_is_never_slashed() {
+        let mut l = Ledger::new();
+        let freezer = gov_addr(72);
+        fund(&mut l, &freezer, 150_000 * 1_000_000);
+        assert!(l.bridge_freeze_with_fee(&freezer, 0, 1_000));
+        let until = 1_000 + qtv_governance::BRIDGE_FREEZE_DURATION;
+
+        l.bridge_expire(until - 1);
+        assert!(l.bridge_is_frozen(), "the freeze holds until its horizon");
+
+        l.bridge_expire(until);
+        assert!(!l.bridge_is_frozen(), "the freeze lifts itself at the horizon");
+        assert_eq!(
+            l.balance(&freezer),
+            150_000 * 1_000_000,
+            "auto expiry returns the whole bond"
+        );
+        assert_eq!(l.balance(&bridge_bond_address()), 0);
+        assert_eq!(l.bridge_last_lift(), Some(until));
+    }
+
+    #[test]
+    fn a_bridge_freeze_cooldown_blocks_an_immediate_refreeze() {
+        let mut l = Ledger::new();
+        let freezer = gov_addr(73);
+        fund(&mut l, &freezer, 400_000 * 1_000_000);
+        assert!(l.bridge_freeze_with_fee(&freezer, 0, 1_000));
+        assert!(l.bridge_unfreeze_with_fee(&freezer, 0, 2_000));
+        assert_eq!(l.bridge_last_lift(), Some(2_000));
+
+        let cooldown = qtv_governance::BRIDGE_FREEZE_COOLDOWN;
+        assert!(
+            !l.bridge_freeze_with_fee(&freezer, 0, 2_000 + cooldown - 1),
+            "a refreeze inside the cooldown window is refused"
+        );
+        assert!(!l.bridge_is_frozen());
+        assert!(
+            l.bridge_freeze_with_fee(&freezer, 0, 2_000 + cooldown),
+            "once the cooldown elapses a fresh freeze lands"
+        );
+        assert!(l.bridge_is_frozen());
+    }
+
+    #[test]
+    fn a_blacklisted_caller_cannot_freeze_the_bridge() {
+        let mut l = Ledger::new();
+        let abuser = gov_addr(74);
+        fund(&mut l, &abuser, 200_000 * 1_000_000);
+        l.set_gov_blacklisted(&[74u8; 32]);
+        assert!(!l.bridge_freeze_with_fee(&abuser, 0, 100));
+        assert!(!l.bridge_is_frozen());
+    }
+
+    #[test]
+    fn a_guardian_caucus_lifts_the_bridge_freeze_and_returns_the_bond() {
+        let mut l = Ledger::new();
+        let freezer = gov_addr(75);
+        fund(&mut l, &freezer, 200_000 * 1_000_000);
+        l.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![[1u8; 32], [2u8; 32], [3u8; 32]],
+            2,
+        ));
+        assert!(l.bridge_freeze_with_fee(&freezer, 0, 500));
+
+        assert!(
+            !l.guardian_bridge_unfreeze(&[[1u8; 32]], 600),
+            "one guardian is not a caucus"
+        );
+        assert!(l.bridge_is_frozen());
+
+        assert!(l.guardian_bridge_unfreeze(&[[1u8; 32], [2u8; 32]], 600));
+        assert!(!l.bridge_is_frozen());
+        assert_eq!(
+            l.balance(&freezer),
+            200_000 * 1_000_000,
+            "governance lifting the freeze returns the bond to the original depositor"
+        );
+        assert_eq!(l.bridge_last_lift(), Some(600));
+    }
+
+    #[test]
+    fn a_bridge_migration_needs_a_frozen_bridge_and_records_the_new_vault() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        let proposer = gov_addr(80);
+        fund(&mut l, &proposer, 500_000 * 1_000_000);
+        let voter = gov_addr(81);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+        let vault = vec![0x0Cu8; 32];
+
+        let open = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::BridgeMigration { vault: vault.clone() },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, open, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        assert_eq!(
+            l.gov_enact(open, 5 * 86_400 + 1),
+            Err(EnactError::BridgeNotFrozen),
+            "a migration is rejected while the bridge is open"
+        );
+        assert!(l.bridge_pool_vault().is_none());
+
+        let freezer = gov_addr(82);
+        fund(&mut l, &freezer, 200_000 * 1_000_000);
+        assert!(l.bridge_freeze_with_fee(&freezer, 0, 0));
+
+        let migrate = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::BridgeMigration { vault: vault.clone() },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, migrate, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        l.gov_enact(migrate, 5 * 86_400 + 1).unwrap();
+        assert_eq!(
+            l.bridge_pool_vault(),
+            Some([0x0Cu8; 32]),
+            "the migration records the designated pool vault"
+        );
+        assert!(l.bridge_is_frozen(), "the freeze still holds through the migration");
+    }
+
+    #[test]
+    fn a_registered_gateway_is_recognised_and_a_parameter_sets_it() {
+        let mut l = Ledger::new();
+        let gateway = qtv_idfmt::render_address(&[0x0Du8; 32]).unwrap();
+        assert!(!l.is_bridge_gateway(&gateway));
+        l.apply_parameter(b"bridge_gateway", &[0x0Du8; 32]).unwrap();
+        assert_eq!(l.bridge_gateway(), Some([0x0Du8; 32]));
+        assert!(l.is_bridge_gateway(&gateway));
+        assert!(!l.is_bridge_gateway(&gov_addr(90)));
     }
 }
 
