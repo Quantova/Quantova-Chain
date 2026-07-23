@@ -20,7 +20,8 @@ use qtv_store::{BlockStore, StateStore};
 use qtv_tx::Wrapper;
 
 use crate::config::{DevnetConfig, NodeConfig};
-use crate::wire::{LockedBlock, Message, Proposal, RevealNote, ViewChange};
+use crate::wire::{LockedBlock, Message, Proposal, RegisterNote, RevealNote, ViewChange};
+use qtv_sampler::onetime::Root;
 
 pub type Height = u64;
 
@@ -178,6 +179,7 @@ pub struct DevNode {
     tx_index: HashMap<String, Height>,
     events_by_height: HashMap<Height, Vec<BlockEvent>>,
     block_messages: HashMap<u64, Vec<u8>>,
+    epoch_roots: HashMap<u64, Root>,
 }
 
 impl DevNode {
@@ -218,6 +220,7 @@ impl DevNode {
             tx_index: HashMap::new(),
             events_by_height: HashMap::new(),
             block_messages: HashMap::new(),
+            epoch_roots: HashMap::new(),
         };
 
         if dev.block_store.is_empty() {
@@ -271,17 +274,94 @@ impl DevNode {
         Ok(())
     }
 
+    fn slot(&self) -> u64 {
+        self.consensus.slot_for(self.height)
+    }
+
+    fn epoch_roster(&self) -> Vec<ValidatorRegistration> {
+        let epoch = self.consensus.epoch_for(self.height);
+        let own_id = self.consensus.own_id();
+        let own_root = self.consensus.own_epoch_root(epoch);
+        reweigh_roster(&self.ledger, &self.base_roster)
+            .into_iter()
+            .map(|mut r| {
+                if r.id == own_id {
+                    r.root = own_root;
+                } else if let Some(root) = self.epoch_roots.get(&r.id) {
+                    r.root = *root;
+                }
+                r
+            })
+            .collect()
+    }
+
     fn refresh_committee(&mut self) {
-        self.consensus
-            .reweight(reweigh_roster(&self.ledger, &self.base_roster));
+        let epoch = self.consensus.epoch_for(self.height);
+        if epoch != self.consensus.epoch() {
+            self.epoch_roots.clear();
+        }
+        let roster = self.epoch_roster();
+        self.consensus.rotate_to_epoch(epoch, roster);
         self.reveals.clear();
+        *self.selection_cache.borrow_mut() = None;
+        self.record_own_reveal();
+    }
+
+    /// This node's own signed re registration of its rotated root for the current epoch,
+    /// published at an epoch boundary so peers admit its rotated reveals. It is absent in
+    /// the genesis epoch, whose roots the roster already carries.
+    pub fn own_registration_note(&self) -> Option<RegisterNote> {
+        let epoch = self.consensus.epoch_for(self.height);
+        if epoch == 0 {
+            return None;
+        }
+        let (root, sig) = self.consensus.own_epoch_registration(epoch);
+        Some(RegisterNote {
+            height: self.height,
+            id: self.id,
+            epoch,
+            root,
+            sig,
+        })
+    }
+
+    /// Admit a peer's signed re registration of its rotated root for the current epoch,
+    /// verified against the peer's stable attestation key held in the genesis roster. A
+    /// note for another epoch, from an unknown author, or with a signature that does not
+    /// authenticate is dropped.
+    pub fn collect_registration(&mut self, note: RegisterNote) {
+        let epoch = self.consensus.epoch_for(self.height);
+        if note.epoch != epoch || note.id == self.id {
+            return;
+        }
+        let Some(reg) = self.base_roster.iter().find(|r| r.id == note.id) else {
+            return;
+        };
+        if !qtv_attest::epoch_registration_verifies(
+            &reg.attest_pk,
+            note.id,
+            note.epoch,
+            &note.root,
+            &note.sig,
+        ) {
+            return;
+        }
+        self.epoch_roots.insert(note.id, note.root);
+    }
+
+    /// Re form the committee roster from the rotated roots collected for this epoch, so a
+    /// peer that has re registered is admitted with its rotated root.
+    pub fn apply_registrations(&mut self) {
+        let epoch = self.consensus.epoch_for(self.height);
+        let roster = self.epoch_roster();
+        self.consensus.rotate_to_epoch(epoch, roster);
         *self.selection_cache.borrow_mut() = None;
         self.record_own_reveal();
     }
 
     /// Record this node's own reveal for the current height when it is selected.
     fn record_own_reveal(&mut self) {
-        if let Some(reveal) = self.consensus.published_self(&self.beacon, self.height) {
+        if let Some(reveal) = self.consensus.published_self(&self.beacon, self.slot()) {
             if !self.reveals.iter().any(|r| r.id == reveal.id) {
                 self.reveals.push(reveal);
                 *self.selection_cache.borrow_mut() = None;
@@ -294,10 +374,15 @@ impl DevNode {
         self.reveals.iter().map(|r| r.id).collect()
     }
 
+    /// The ids of the peers whose rotated epoch root this node has admitted this epoch.
+    pub fn collected_registration_ids(&self) -> Vec<u64> {
+        self.epoch_roots.keys().copied().collect()
+    }
+
     /// This node's own reveal for the current height, as a note to publish, when selected.
     pub fn own_reveal_note(&self) -> Option<RevealNote> {
         self.consensus
-            .published_self(&self.beacon, self.height)
+            .published_self(&self.beacon, self.slot())
             .map(|reveal| RevealNote {
                 height: self.height,
                 id: reveal.id,
@@ -316,7 +401,7 @@ impl DevNode {
         if self.reveals.iter().any(|r| r.id == reveal.id) {
             return;
         }
-        if !self.consensus.verify_published(&self.beacon, self.height, &reveal) {
+        if !self.consensus.verify_published(&self.beacon, self.slot(), &reveal) {
             return;
         }
         self.reveals.push(reveal);
@@ -338,7 +423,9 @@ impl DevNode {
         let selection = self
             .committee_for_certificate(head, &certificate)
             .ok_or(RoundError::Decode)?;
-        self.beacon = self.beacon.advance_from_reveals(head, &selection.reveals);
+        self.beacon = self
+            .beacon
+            .advance_from_reveals(self.consensus.slot_for(head), &selection.reveals);
         self.height = head + 1;
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();
@@ -402,7 +489,7 @@ impl DevNode {
         }
         let selection = self
             .consensus
-            .select(&self.beacon, self.height, &self.reveals)
+            .select(&self.beacon, self.slot(), &self.reveals)
             .ok_or(RoundError::NoCommittee)?;
         *self.selection_cache.borrow_mut() = Some(selection.clone());
         Ok(selection)
@@ -516,7 +603,7 @@ impl DevNode {
         let staged = self.staged.as_ref().ok_or(RoundError::NotStaged)?;
         Ok(self
             .consensus
-            .own_attestation(self.height, self.height, staged.block, &self.beacon))
+            .own_attestation(self.height, self.slot(), staged.block, &self.beacon))
     }
 
     pub fn finalize(
@@ -530,7 +617,7 @@ impl DevNode {
             .finalize(
                 selection,
                 self.height,
-                self.height,
+                self.slot(),
                 block,
                 &self.beacon,
                 attestations,
@@ -550,7 +637,7 @@ impl DevNode {
 
         self.beacon = self
             .beacon
-            .advance_from_reveals(self.height, &selection.reveals);
+            .advance_from_reveals(self.slot(), &selection.reveals);
         self.parent_header_hash = chain_block.header_hash();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
         self.height += 1;
@@ -682,7 +769,7 @@ impl DevNode {
             view_change_subject(self.height, target_view, lock_view, locked_value, has_lock);
         let att = self
             .consensus
-            .own_attestation(self.height, self.height, subject, &self.beacon);
+            .own_attestation(self.height, self.slot(), subject, &self.beacon);
         ViewChange {
             height: self.height,
             target_view,
@@ -721,7 +808,7 @@ impl DevNode {
             has_lock,
         );
         if record.att.height != record.height
-            || record.att.slot != record.height
+            || record.att.slot != self.consensus.slot_for(record.height)
             || record.att.block != subject
         {
             return false;
@@ -964,27 +1051,32 @@ impl DevNode {
         certificate: &qtv_attest::Certificate,
     ) -> Option<Selection> {
         let target = certificate.envelope.committee;
+        let slot = self.consensus.slot_for(height);
         let mut reveals: Vec<PublishedReveal> = certificate
             .attestations
             .iter()
             .map(|att| PublishedReveal::new(att.from, att.membership.clone()))
             .collect();
-        if let Some(selection) = self.consensus.select(&self.beacon, height, &reveals) {
+        if let Some(selection) = self.consensus.select(&self.beacon, slot, &reveals) {
             if selection.commitment.digest() == target {
                 return Some(selection);
             }
         }
-        if let Some(mine) = self.consensus.published_self(&self.beacon, height) {
+        if let Some(mine) = self.consensus.published_self(&self.beacon, slot) {
             if !reveals.iter().any(|r| r.id == mine.id) {
                 reveals.push(mine);
             }
         }
-        let selection = self.consensus.select(&self.beacon, height, &reveals)?;
+        let selection = self.consensus.select(&self.beacon, slot, &reveals)?;
         (selection.commitment.digest() == target).then_some(selection)
     }
 
     pub fn height(&self) -> Height {
         self.height
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.consensus.epoch_for(self.height)
     }
 
     pub fn identity(&self) -> &Identity {
@@ -1082,7 +1174,7 @@ impl DevNode {
         let subject =
             ConsensusBlock::new(self.height, header_value(&header.hash()), self.parent_val);
         if certificate.envelope.height != self.height
-            || certificate.envelope.slot != self.height
+            || certificate.envelope.slot != self.slot()
             || certificate.envelope.block != subject
         {
             return Err(SyncError::WrongSubject);
@@ -1125,7 +1217,7 @@ impl DevNode {
         let included_ids: Vec<String> = block.body().iter().map(Wrapper::id).collect();
         self.beacon = self
             .beacon
-            .advance_from_reveals(self.height, &selection.reveals);
+            .advance_from_reveals(self.slot(), &selection.reveals);
         self.parent_header_hash = block.header_hash();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
         self.height += 1;
