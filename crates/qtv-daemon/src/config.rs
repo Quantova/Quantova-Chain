@@ -1,6 +1,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::util::from_hex;
+
 pub struct Field {
     pub key: String,
     pub value: String,
@@ -69,6 +71,7 @@ pub struct NodeSettings {
     pub peers: Vec<(u64, String)>,
     pub rpc_listen: Option<String>,
     pub block_messages_path: Option<PathBuf>,
+    pub checkpoint: Option<(u64, [u8; 32])>,
 }
 
 impl NodeSettings {
@@ -87,6 +90,7 @@ impl NodeSettings {
         let mut peers: Vec<(u64, String)> = Vec::new();
         let mut rpc_listen: Option<String> = None;
         let mut block_messages_path: Option<PathBuf> = None;
+        let mut checkpoint: Option<(u64, [u8; 32])> = None;
 
         for field in &fields {
             match field.key.as_str() {
@@ -100,6 +104,7 @@ impl NodeSettings {
                 "peer" => peers.push(parse_peer(field)?),
                 "rpc" => rpc_listen = Some(field.value.clone()),
                 "block_messages" => block_messages_path = Some(PathBuf::from(&field.value)),
+                "checkpoint" => checkpoint = Some(parse_checkpoint(field)?),
                 other => return Err(field.error(&format!("unknown config key '{other}'"))),
             }
         }
@@ -124,8 +129,23 @@ impl NodeSettings {
             peers,
             rpc_listen,
             block_messages_path,
+            checkpoint,
         })
     }
+}
+
+fn parse_checkpoint(field: &Field) -> Result<(u64, [u8; 32]), String> {
+    let parts: Vec<&str> = field.value.split_whitespace().collect();
+    if parts.len() != 2 {
+        return Err(field.error("a checkpoint is '<height> <value_hex>'"));
+    }
+    let height: u64 = parts[0]
+        .parse()
+        .map_err(|_| field.error("the checkpoint height is not a number"))?;
+    let bytes = from_hex(parts[1]).map_err(|e| field.error(&format!("the checkpoint value {e}")))?;
+    let value = <[u8; 32]>::try_from(bytes.as_slice())
+        .map_err(|_| field.error("the checkpoint value must be thirty two bytes"))?;
+    Ok((height, value))
 }
 
 fn parse_peer(field: &Field) -> Result<(u64, String), String> {
