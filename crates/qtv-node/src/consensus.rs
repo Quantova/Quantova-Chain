@@ -223,6 +223,8 @@ pub struct Consensus {
     roster: Vec<ValidatorRegistration>,
     budget: u64,
     slots: u64,
+    epoch: u64,
+    epoch_len: u64,
 }
 
 impl Consensus {
@@ -249,6 +251,8 @@ impl Consensus {
             roster,
             budget: qtv_sampler::params::COMMITTEE_BUDGET,
             slots,
+            epoch: 0,
+            epoch_len: slots,
         }
     }
 
@@ -257,6 +261,45 @@ impl Consensus {
         let mut roster = roster;
         roster.sort_by_key(|r| r.id);
         self.roster = roster;
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn epoch_len(&self) -> u64 {
+        self.epoch_len
+    }
+
+    /// The node's own one time sortition root for an epoch, the commitment it re registers
+    /// so peers admit its rotated reveals.
+    pub fn own_epoch_root(&self, epoch: u64) -> Root {
+        self.own.at_epoch(epoch).root()
+    }
+
+    /// The node's own signed re registration of its rotated root for an epoch, verifiable
+    /// by any peer against its stable attestation key.
+    pub fn own_epoch_registration(&self, epoch: u64) -> (Root, qtv_crypto::ml_dsa::Signature) {
+        self.own.epoch_registration(epoch)
+    }
+
+    pub fn epoch_for(&self, height: u64) -> u64 {
+        qtv_sampler::epoch::epoch_of(height, self.epoch_len)
+    }
+
+    pub fn slot_for(&self, height: u64) -> u64 {
+        qtv_sampler::epoch::slot_in_epoch(height, self.epoch_len)
+    }
+
+    /// Rotate the node's own attester onto the epoch's fresh one time sortition tree and
+    /// install the roster of rotated roots the epoch draws its committee from. Rotation
+    /// happens once per epoch boundary; a reweight within the same epoch keeps the roots.
+    pub fn rotate_to_epoch(&mut self, epoch: u64, roster: Vec<ValidatorRegistration>) {
+        if epoch != self.epoch {
+            self.own = self.own.at_epoch(epoch);
+            self.epoch = epoch;
+        }
+        self.reweight(roster);
     }
 
     pub fn own_id(&self) -> u64 {

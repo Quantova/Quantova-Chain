@@ -2,10 +2,10 @@
 use qtv_attest::{Attestation, Block, Certificate, Envelope, Parent};
 use qtv_block::{Block as ChainBlock, Header};
 use qtv_codec::{Decoder, Encode, Encoder, Error as CodecError};
-use qtv_crypto::ml_dsa::SIGNATURE_BYTES;
+use qtv_crypto::ml_dsa::{Signature, SIGNATURE_BYTES};
 use qtv_crypto::sha3::sha3_256;
 use qtv_net::erasure::{Commitment, Shard, ShardProof, DIGEST_LEN};
-use qtv_sampler::onetime::{MerklePath, NODE_BYTES, PREIMAGE_BYTES};
+use qtv_sampler::onetime::{MerklePath, Root, NODE_BYTES, PREIMAGE_BYTES};
 use qtv_sampler::sortition::Credential;
 use qtv_tx::{Body, Call, Wrapper};
 
@@ -21,6 +21,7 @@ const TAG_BLOCKS: u8 = 7;
 const TAG_VIEW_CHANGE: u8 = 8;
 const TAG_CODED_PROPOSAL: u8 = 9;
 const TAG_REVEAL: u8 = 10;
+const TAG_REGISTER: u8 = 11;
 
 const PARENT_GENESIS: u8 = 0;
 const PARENT_VALUE: u8 = 1;
@@ -85,6 +86,18 @@ pub struct RevealNote {
     pub credential: Credential,
 }
 
+/// A validator's signed re registration of its rotated one time sortition root for an
+/// epoch. The signature is over the id, epoch, and root under the validator's stable
+/// attestation key, so a peer admits the new root without holding the validator's secret.
+#[derive(Clone)]
+pub struct RegisterNote {
+    pub height: u64,
+    pub id: u64,
+    pub epoch: u64,
+    pub root: Root,
+    pub sig: Signature,
+}
+
 #[derive(Clone)]
 pub enum Message {
     Tx(Wrapper),
@@ -97,6 +110,7 @@ pub enum Message {
     Blocks(Vec<ChainBlock>),
     ViewChange(Box<ViewChange>),
     Reveal(Box<RevealNote>),
+    Register(Box<RegisterNote>),
 }
 
 #[derive(Debug)]
@@ -185,6 +199,15 @@ impl Message {
                 encoder.put_u64(note.id);
                 encode_credential(&mut encoder, &note.credential);
             }
+            Message::Register(note) => {
+                encoder.put_tag(TAG_REGISTER);
+                encoder.put_u64(note.height);
+                encoder.put_u64(note.id);
+                encoder.put_u64(note.epoch);
+                encoder.put_bytes(&note.root.digest);
+                encoder.put_u64(note.root.slots);
+                encoder.put_bytes(&note.sig);
+            }
         }
         encoder.into_bytes()
     }
@@ -264,6 +287,21 @@ impl Message {
                     height,
                     id,
                     credential,
+                }))
+            }
+            TAG_REGISTER => {
+                let height = decoder.get_u64()?;
+                let id = decoder.get_u64()?;
+                let epoch = decoder.get_u64()?;
+                let digest: [u8; NODE_BYTES] = read_fixed(&mut decoder)?;
+                let slots = decoder.get_u64()?;
+                let sig: [u8; SIGNATURE_BYTES] = read_fixed(&mut decoder)?;
+                Message::Register(Box::new(RegisterNote {
+                    height,
+                    id,
+                    epoch,
+                    root: Root { digest, slots },
+                    sig,
                 }))
             }
             tag => return Err(DecodeError::UnknownTag(tag)),

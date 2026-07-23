@@ -493,3 +493,51 @@ fn a_conflicting_certificate_at_a_finalized_height_halts_loudly() {
         "the node never silently adopts the conflicting certificate"
     );
 }
+
+fn validators_with_slots(online: &[bool], slots: u64) -> Vec<ValidatorSpec> {
+    online
+        .iter()
+        .enumerate()
+        .map(|(i, &on)| {
+            let id = i as u64 + 1;
+            ValidatorSpec::from_secret(id, VALIDATOR_STAKE, on, &qtv_node::keys::fixture_secret(id), slots)
+        })
+        .collect()
+}
+
+fn boot_with_slots(online: &[bool], slots: u64) -> Node {
+    let g = Genesis {
+        fee_params: FeeParams::devnet(),
+        accounts: vec![],
+        validators: validators_with_slots(online, slots),
+        genesis_time: GENESIS_TIME,
+    };
+    let secrets = g
+        .validators
+        .iter()
+        .map(|v| (v.id, qtv_node::keys::fixture_secret(v.id)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    Node::new_with_slots(g, &secrets, slots)
+}
+
+#[test]
+fn the_chain_finalises_across_epoch_boundaries_past_the_old_one_time_ceiling() {
+    let epoch_len = 8u64;
+    let old_ceiling = qtv_node::consensus::DEFAULT_SLOTS;
+    let target = old_ceiling + 2 * epoch_len;
+    let mut node = boot_with_slots(&[true, true, true, true], epoch_len);
+
+    assert_eq!(node.epoch(), 0);
+    for height in 1..=target {
+        node.produce()
+            .unwrap_or_else(|e| panic!("height {height} failed to finalise past the ceiling: {e:?}"));
+        assert_eq!(node.height(), height + 1);
+        assert_eq!(node.epoch(), height / epoch_len, "the epoch did not track the height at {height}");
+    }
+
+    assert!(node.height() > old_ceiling + 1, "the run did not pass the old fixed ceiling");
+    assert!(node.epoch() >= 2, "the one time keys did not rotate across at least two epoch boundaries");
+    let head = node.chain().last().expect("a finalised head");
+    assert!(head.reconciles(), "the certificate at the head does not bind its header past the ceiling");
+    assert_eq!(node.chain().len() as u64, target, "a block finalised at every height across the boundaries");
+}
