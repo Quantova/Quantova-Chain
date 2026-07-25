@@ -5,10 +5,11 @@ use qtv_crypto::ml_dsa::{self, PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
 
 use qtv_attest::params::ATTEST_CONTEXT;
 
-fn attestation_message(height: u64, slot: u64, block_bytes: &[u8]) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(16 + block_bytes.len());
+fn attestation_message(height: u64, slot: u64, view: u64, block_bytes: &[u8]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(24 + block_bytes.len());
     msg.extend_from_slice(&height.to_le_bytes());
     msg.extend_from_slice(&slot.to_le_bytes());
+    msg.extend_from_slice(&view.to_le_bytes());
     msg.extend_from_slice(block_bytes);
     msg
 }
@@ -23,11 +24,12 @@ fn attestation_message(height: u64, slot: u64, block_bytes: &[u8]) -> Vec<u8> {
 /// The two views gate the offence. Only a same view double vote, the same target voted twice
 /// with two different blocks, attributes and is slashable. A pair whose views differ is a
 /// justified vote change, a block that failed to lock in one view followed by a different
-/// block in a higher view, and it never attributes. The view fields ride alongside the
-/// attestation and are not covered by the offender's signature, so this gate binds the
-/// same view offence that an honest reporter records truthfully. Binding the view against a
-/// reporter that forges an equal view over an honest cross view pair needs the view committed
-/// inside the signed attestation message in qtv-attest.
+/// block in a higher view, and it never attributes. The view each attestation was cast in is
+/// committed inside the signed attestation message, so each view rides into its own signature
+/// preimage. A reporter that forges an equal view over an honest cross view pair no longer
+/// authenticates, since a view stated here that differs from the one the offender signed
+/// breaks the signature check. The gate binds the offender's own signed views, not a
+/// reporter's claim about them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Equivocation {
     pub offender: String,
@@ -61,8 +63,8 @@ impl Equivocation {
             Ok(sig) => sig,
             Err(_) => return false,
         };
-        let msg_a = attestation_message(self.height, self.slot, &self.block_a);
-        let msg_b = attestation_message(self.height, self.slot, &self.block_b);
+        let msg_a = attestation_message(self.height, self.slot, self.view_a, &self.block_a);
+        let msg_b = attestation_message(self.height, self.slot, self.view_b, &self.block_b);
         ml_dsa::verify(&pk, &msg_a, &sig_a, ATTEST_CONTEXT)
             && ml_dsa::verify(&pk, &msg_b, &sig_b, ATTEST_CONTEXT)
     }
@@ -198,8 +200,8 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, block_a, &beacon);
-        let b = attester.attest(1, 1, block_b, &beacon);
+        let a = attester.attest(1, 1, 0, block_a, &beacon);
+        let b = attester.attest(1, 1, 0, block_b, &beacon);
         let evidence = Equivocation {
             offender: address.to_string(),
             height: 1,
@@ -227,7 +229,7 @@ mod tests {
         let (attester, address) = attester();
         let beacon = Beacon::genesis();
         let block = Block::new(1, [1u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, block, &beacon);
+        let a = attester.attest(1, 1, 0, block, &beacon);
         let evidence = Equivocation {
             offender: address,
             height: 1,
@@ -256,8 +258,8 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, block_a, &beacon);
-        let b = attester.attest(1, 1, block_b, &beacon);
+        let a = attester.attest(1, 1, 0, block_a, &beacon);
+        let b = attester.attest(1, 1, 0, block_b, &beacon);
 
         let mut pool = EvidencePool::new();
         assert!(pool
@@ -279,8 +281,8 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, block_a, &beacon);
-        let b = attester.attest(1, 1, block_b, &beacon);
+        let a = attester.attest(1, 1, 0, block_a, &beacon);
+        let b = attester.attest(1, 1, 1, block_b, &beacon);
 
         let mut pool = EvidencePool::new();
         assert!(pool
@@ -316,8 +318,8 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, block_a, &beacon);
-        let b = attester.attest(1, 1, block_b, &beacon);
+        let a = attester.attest(1, 1, 0, block_a, &beacon);
+        let b = attester.attest(1, 1, 2, block_b, &beacon);
 
         let mut pool = EvidencePool::new();
         assert!(pool
@@ -337,8 +339,8 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, block_a, &beacon);
-        let b = attester.attest(1, 1, block_b, &beacon);
+        let a = attester.attest(1, 1, 0, block_a, &beacon);
+        let b = attester.attest(1, 1, 0, block_b, &beacon);
 
         let mut pool = EvidencePool::new();
         assert!(pool
@@ -352,5 +354,54 @@ mod tests {
             .observe(&address, 1, 1, 0, block_b.to_bytes(), b.sig.to_vec())
             .is_none(), "a validator is flagged only once");
         assert_eq!(pool.drain().len(), 1);
+    }
+
+    #[test]
+    fn a_signed_view_binds_equivocation_and_closes_the_frame() {
+        let (attester, address) = attester();
+        let beacon = Beacon::genesis();
+        let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
+        let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
+
+        // An honest validator legitimately re votes across a view change, block_a in view 0
+        // and block_b in view 1. A malicious reporter pairs the two and asserts an equal view
+        // to frame the honest signer as a same view double vote.
+        let honest_a = attester.attest(1, 1, 0, block_a, &beacon);
+        let honest_b = attester.attest(1, 1, 1, block_b, &beacon);
+        let framed = Equivocation {
+            offender: address.clone(),
+            height: 1,
+            slot: 1,
+            view_a: 0,
+            view_b: 0,
+            block_a: block_a.to_bytes(),
+            sig_a: honest_a.sig.to_vec(),
+            block_b: block_b.to_bytes(),
+            sig_b: honest_b.sig.to_vec(),
+        };
+        assert!(
+            !framed.attributes(attester.attest_public_key()),
+            "a forged equal view over a genuine cross view re vote no longer authenticates"
+        );
+
+        // Two conflicting blocks the offender actually signed in one and the same view are a
+        // genuine double vote that attributes and slashes.
+        let double_a = attester.attest(1, 1, 0, block_a, &beacon);
+        let double_b = attester.attest(1, 1, 0, block_b, &beacon);
+        let genuine = Equivocation {
+            offender: address,
+            height: 1,
+            slot: 1,
+            view_a: 0,
+            view_b: 0,
+            block_a: block_a.to_bytes(),
+            sig_a: double_a.sig.to_vec(),
+            block_b: block_b.to_bytes(),
+            sig_b: double_b.sig.to_vec(),
+        };
+        assert!(
+            genuine.attributes(attester.attest_public_key()),
+            "a genuine same signed view double vote attributes and is slashable"
+        );
     }
 }
