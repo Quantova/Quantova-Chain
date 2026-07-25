@@ -194,6 +194,20 @@ fn body_digest(body: &Body) -> [u8; 32] {
 }
 
 pub fn sign(account: &Account, body: &Body) -> Wrapper {
+    // Fail closed. Call::encode and Body::encode reduce an address to its raw payload with
+    // parse_address(..).unwrap_or_default(), so an unparseable sender or target would encode as
+    // an empty payload and the signature would stand over a body that is not the one the caller
+    // named. Encode cannot return an error without changing the whole codec, so the signer is the
+    // place that refuses a bad address before it ever reaches encode. The higher level clients
+    // already reject a bad target, this is the low level backstop that no path routes around.
+    assert!(
+        qtv_idfmt::parse_address(body.sender()).is_ok(),
+        "sign refuses a sender address that does not parse to an address payload"
+    );
+    assert!(
+        qtv_idfmt::parse_address(body.call().target()).is_ok(),
+        "sign refuses a call target that does not parse to an address payload"
+    );
     let digest = body_digest(body);
     let scheme = account.scheme();
     let signature = match scheme {
@@ -261,5 +275,40 @@ pub fn verify(wrapper: &Wrapper, public_key: &[u8]) -> bool {
             unimplemented!("fn_dsa verification is gated until the standard is final")
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod fail_closed_tests {
+    use super::*;
+    use qtv_account::derive;
+
+    #[test]
+    #[should_panic(expected = "call target that does not parse")]
+    fn signing_an_unparseable_target_is_refused() {
+        let account = derive(&[7u8; 32], 0);
+        let call = Call::new("not a Q1 address".to_string(), vec![1, 2, 3]);
+        let body = Body::new(account.address(), 0, 1_210, 500, call);
+        let _ = sign(&account, &body);
+    }
+
+    #[test]
+    #[should_panic(expected = "sender address that does not parse")]
+    fn signing_an_unparseable_sender_is_refused() {
+        let account = derive(&[7u8; 32], 0);
+        let target = derive(&[7u8; 32], 1).address();
+        let call = Call::new(target, vec![1, 2, 3]);
+        let body = Body::new("not a Q1 address".to_string(), 0, 1_210, 500, call);
+        let _ = sign(&account, &body);
+    }
+
+    #[test]
+    fn signing_a_derived_sender_and_target_still_succeeds() {
+        let account = derive(&[7u8; 32], 0);
+        let target = derive(&[7u8; 32], 1).address();
+        let call = Call::new(target, vec![1, 2, 3]);
+        let body = Body::new(account.address(), 0, 1_210, 500, call);
+        let wrapper = sign(&account, &body);
+        assert!(verify(&wrapper, account.public_key()));
     }
 }
