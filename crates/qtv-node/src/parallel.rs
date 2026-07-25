@@ -53,6 +53,9 @@ struct Write {
     recipient_key: Key,
     recipient_bytes: Vec<u8>,
     fee: u64,
+    sender_address: String,
+    recipient_address: String,
+    amount: u64,
 }
 
 fn account_at(leaves: &BTreeMap<Key, Vec<u8>>, key: &Key) -> Account {
@@ -94,6 +97,9 @@ fn run_task(
         recipient_key,
         recipient_bytes: to_bytes(&new_recipient),
         fee: plan.fee,
+        sender_address: task.sender_address.clone(),
+        recipient_address: task.recipient_address.clone(),
+        amount: plan.amount,
     })
 }
 
@@ -173,6 +179,7 @@ pub fn execute_parallel(
     let layers = plan_layers(candidates);
     let mut included: Vec<usize> = Vec::new();
     let mut fees = FeeSplit::default();
+    let mut transfer_events: Vec<(usize, String, String, u64, u64)> = Vec::new();
 
     for layer in &layers {
         let tasks: Vec<Task<'_>> = layer
@@ -198,10 +205,24 @@ pub fn execute_parallel(
             ledger.insert_raw(write.sender_key, write.sender_bytes);
             ledger.insert_raw(write.recipient_key, write.recipient_bytes);
             fees.add(FeeSplit::of(write.fee));
+            transfer_events.push((
+                write.index,
+                write.sender_address,
+                write.recipient_address,
+                write.amount,
+                write.fee,
+            ));
             included.push(write.index);
         }
     }
     ledger.apply_fee_split(fees);
+
+    // Record one transfer event per applied send in block position order, the same order the
+    // ordered path records them, so both execution paths yield the identical event root.
+    transfer_events.sort_by_key(|row| row.0);
+    for (_, from, to, amount, fee) in transfer_events {
+        ledger.record_transfer_event(&from, &to, amount, fee);
+    }
 
     included.sort_unstable();
     included
@@ -399,5 +420,51 @@ mod tests {
         let included = execute_parallel(&mut parallel, &[], &fee, 8, 0);
         assert!(included.is_empty());
         assert_eq!(parallel.state_root(), ledger.state_root());
+    }
+
+    #[test]
+    fn the_parallel_and_ordered_paths_agree_on_the_event_root() {
+        let fee = FeeParams::devnet();
+        let (ledger, keys) = population(24, 50_000_000);
+        // A mixed block that spans several dependency layers, so the parallel path applies it
+        // out of block order across layers and must still record events in block position.
+        let block: Vec<Wrapper> = (0..20)
+            .map(|i| {
+                transfer(
+                    &keys[i % 12],
+                    &keys[12 + (i % 12)].address(),
+                    500 + i as u64,
+                    (i / 12) as u64,
+                    &fee,
+                )
+            })
+            .collect();
+
+        let mut ordered = ledger.clone();
+        execute_ordered(&mut ordered, &block, &fee, 0);
+        let ordered_root = {
+            let leaves: Vec<Vec<u8>> = ordered
+                .block_events()
+                .iter()
+                .map(crate::ledger::BlockEvent::encode)
+                .collect();
+            qtv_block::event_root(&leaves)
+        };
+        assert!(!ordered.block_events().is_empty(), "the block records events");
+
+        for threads in [1usize, 2, 4, 8, 16] {
+            let mut parallel = ledger.clone();
+            execute_parallel(&mut parallel, &block, &fee, threads, 0);
+            let leaves: Vec<Vec<u8>> = parallel
+                .block_events()
+                .iter()
+                .map(crate::ledger::BlockEvent::encode)
+                .collect();
+            assert_eq!(
+                qtv_block::event_root(&leaves),
+                ordered_root,
+                "event root differs at {threads} threads"
+            );
+        }
     }
 }
