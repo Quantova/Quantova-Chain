@@ -484,6 +484,7 @@ fn dispatch_vm(
                 now_seconds,
                 meter,
                 value,
+                fee_params.chain_id,
             );
         }
     } else if args.len() >= 4 {
@@ -497,6 +498,7 @@ fn dispatch_vm(
                 now_seconds,
                 meter,
                 value,
+                fee_params.chain_id,
             );
         }
     }
@@ -1730,7 +1732,7 @@ mod tests {
         let fee = FeeParams::devnet();
         let deployer = keypair(141);
         let code = qtv_vm::asm::assemble(
-            "LDI r1, 72\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT",
+            "LDI r1, 80\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT",
         )
         .expect("the program assembles");
         let genesis_selector = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
