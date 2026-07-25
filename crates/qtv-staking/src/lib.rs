@@ -8,23 +8,22 @@ pub const NATIVE_UNIT: u128 = 1_000_000;
 pub const MIN_STAKE: u64 = 2_000 * NATIVE_UNIT as u64;
 pub const STAKING_POOL: u64 = 685_714 * NATIVE_UNIT as u64;
 
+// The staking reward emission per session. The pool above is distributed pro rata by stake at the
+// founder preference rate of about 57,143 QTOV a year, roughly two sessions a year, so about 28,571 QTOV
+// a session, for about twelve years while genesis supply stays fixed. Tunable by governance.
+pub const SESSION_EMISSION: u64 = 28_571 * NATIVE_UNIT as u64;
+
+// A staking reward becomes fully transferable twelve months after the epoch it was earned, a rolling
+// schedule that is the sell pressure control.
+pub const REWARD_VEST_DAYS: u64 = 365;
+
 pub const HIGH_SESSION_TX: u64 = 50_000_000_000;
 pub const SESSION_DAYS: u64 = 182;
-
-pub const LOW_SESSION_BPS: u128 = 100;
-pub const HIGH_SESSION_BPS: u128 = 175;
-pub const BPS_DENOM: u128 = 10_000;
-
-pub const REWARD_CAP_MICRO_USD_PER_SESSION: u128 = 4_000 * NATIVE_UNIT;
 
 pub const MAINNET_BLACKOUT_DAYS: u64 = 365;
 pub const BOND_LOCK_DAYS: u64 = 90;
 pub const UNBONDING_DAYS: u64 = 21;
 pub const EARLIEST_EXIT_DAYS: u64 = BOND_LOCK_DAYS + UNBONDING_DAYS;
-
-pub const VEST_CLIFF_DAYS: u64 = 365;
-pub const VEST_TRANCHE_DAYS: u64 = 120;
-pub const VEST_TRANCHES: u64 = 4;
 
 pub const SLASH_ATTRIBUTABLE_BPS: u128 = 10_000;
 pub const SLASH_LIVENESS_MINOR_BPS: u128 = 100;
@@ -44,42 +43,34 @@ impl Session {
             Session::Low
         }
     }
-
-    pub fn bps(self) -> u128 {
-        match self {
-            Session::Low => LOW_SESSION_BPS,
-            Session::High => HIGH_SESSION_BPS,
-        }
-    }
 }
 
 pub fn eligible(stake: u64) -> bool {
     stake >= MIN_STAKE
 }
 
-pub fn session_reward(stake: u64, session: Session, rate_micro_usd_per_qtov: u128) -> u64 {
-    let by_rate = (stake as u128).saturating_mul(session.bps()) / BPS_DENOM;
-    let bounded = if rate_micro_usd_per_qtov == 0 {
-        by_rate
-    } else {
-        let cap = REWARD_CAP_MICRO_USD_PER_SESSION.saturating_mul(NATIVE_UNIT)
-            / rate_micro_usd_per_qtov;
-        by_rate.min(cap)
-    };
-    bounded.min(u64::MAX as u128) as u64
+// The emergent staking reward. A fixed per session emission is distributed pro rata by stake, so the
+// yield finds its own level, high when little is staked to draw validators in and settling as the set
+// grows, with no cap. The earlier fixed bps curve and the USD rate cap are retired.
+pub fn session_reward(stake: u64, total_staked: u64) -> u64 {
+    if total_staked == 0 {
+        return 0;
+    }
+    ((SESSION_EMISSION as u128) * (stake as u128) / (total_staked as u128)) as u64
 }
 
 pub fn in_blackout(now_day: u64, mainnet_start_day: u64) -> bool {
     now_day.saturating_sub(mainnet_start_day) < MAINNET_BLACKOUT_DAYS
 }
 
+// A staking reward tranche is locked until twelve months after the epoch it was earned, then becomes
+// fully transferable, a rolling twelve month schedule. This replaces the earlier multi tranche vest.
 pub fn released(earned: u64, age_days: u64) -> u64 {
-    let unlocked = if age_days < VEST_CLIFF_DAYS {
+    if age_days < REWARD_VEST_DAYS {
         0
     } else {
-        (1 + (age_days - VEST_CLIFF_DAYS) / VEST_TRANCHE_DAYS).min(VEST_TRANCHES)
-    };
-    ((earned as u128) * (unlocked as u128) / (VEST_TRANCHES as u128)) as u64
+        earned
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,22 +233,16 @@ impl StakeLedger {
         }
     }
 
-    pub fn accrue(
-        &mut self,
-        id: &[u8; 32],
-        session: Session,
-        rate_micro_usd_per_qtov: u128,
-        now_day: u64,
-        mainnet_start_day: u64,
-    ) -> u64 {
+    pub fn accrue(&mut self, id: &[u8; 32], now_day: u64, mainnet_start_day: u64) -> u64 {
         if in_blackout(now_day, mainnet_start_day) {
             return 0;
         }
+        let total = self.total_staked();
         let stake = match self.bonds.get(id) {
             Some(bond) => bond.amount,
             None => return 0,
         };
-        let paid = session_reward(stake, session, rate_micro_usd_per_qtov).min(self.pool);
+        let paid = session_reward(stake, total).min(self.pool);
         self.pool -= paid;
         if paid > 0 {
             self.rewards.entry(*id).or_default().push(RewardTranche {
@@ -402,8 +387,6 @@ mod tests {
     use super::*;
 
     const QTOV: u64 = NATIVE_UNIT as u64;
-    const PRICE_70: u128 = 70 * NATIVE_UNIT;
-    const PRICE_2000: u128 = 2_000 * NATIVE_UNIT;
 
     #[test]
     fn eligibility_is_a_hard_floor() {
@@ -423,34 +406,22 @@ mod tests {
     }
 
     #[test]
-    fn reward_is_two_and_three_point_five_percent_a_year() {
+    fn the_reward_is_emergent_and_pro_rata_by_stake() {
+        // A sole staker earns the whole session emission, two equal stakers split it, and a larger share
+        // of the same total earns proportionally more. There is no cap.
         let stake = 2_000 * QTOV;
-        assert_eq!(session_reward(stake, Session::Low, PRICE_70), 20 * QTOV);
-        assert_eq!(session_reward(stake, Session::High, PRICE_70), 35 * QTOV);
+        assert_eq!(session_reward(stake, stake), SESSION_EMISSION);
+        assert_eq!(session_reward(stake, 2 * stake), SESSION_EMISSION / 2);
+        assert_eq!(session_reward(3 * stake, 4 * stake), SESSION_EMISSION * 3 / 4);
+        assert_eq!(session_reward(stake, 0), 0);
     }
 
     #[test]
-    fn reward_scales_with_stake_until_the_ceiling() {
-        assert_eq!(session_reward(3_000 * QTOV, Session::High, PRICE_70), 52_500_000);
-        let cap = (REWARD_CAP_MICRO_USD_PER_SESSION * NATIVE_UNIT / PRICE_70) as u64;
-        assert_eq!(session_reward(20_000 * QTOV, Session::High, PRICE_70), cap);
-        assert!(session_reward(20_000 * QTOV, Session::High, PRICE_70) < 350 * QTOV);
-    }
-
-    #[test]
-    fn the_dollar_ceiling_bites_when_price_climbs() {
+    fn the_yield_is_higher_when_little_is_staked_and_falls_as_the_set_grows() {
         let stake = 2_000 * QTOV;
-        let high = session_reward(stake, Session::High, PRICE_2000);
-        assert_eq!(high, 2 * QTOV);
-        let per_year = session_reward(stake, Session::High, PRICE_2000) * 2;
-        assert_eq!(per_year, 4 * QTOV);
-        assert_eq!((per_year as u128) * PRICE_2000 / NATIVE_UNIT, 8_000 * NATIVE_UNIT);
-    }
-
-    #[test]
-    fn no_rate_means_no_ceiling() {
-        let stake = 2_000 * QTOV;
-        assert_eq!(session_reward(stake, Session::High, 0), 35 * QTOV);
+        let thin = session_reward(stake, 10_000 * QTOV);
+        let deep = session_reward(stake, 1_000_000 * QTOV);
+        assert!(thin > deep, "the same stake earns more when less is staked");
     }
 
     #[test]
@@ -462,14 +433,11 @@ mod tests {
     }
 
     #[test]
-    fn vesting_releases_a_quarter_every_four_months_after_a_year() {
+    fn a_reward_is_locked_for_a_year_then_fully_transferable() {
         let earned = 100 * QTOV;
         assert_eq!(released(earned, 0), 0);
         assert_eq!(released(earned, 364), 0);
-        assert_eq!(released(earned, 365), 25 * QTOV);
-        assert_eq!(released(earned, 485), 50 * QTOV);
-        assert_eq!(released(earned, 605), 75 * QTOV);
-        assert_eq!(released(earned, 725), 100 * QTOV);
+        assert_eq!(released(earned, 365), 100 * QTOV);
         assert_eq!(released(earned, 5_000), 100 * QTOV);
     }
 
@@ -507,21 +475,29 @@ mod tests {
 
     #[test]
     fn rewards_come_from_the_pool_and_never_overdraw() {
+        // A small pool caps the emergent reward and the pool never goes negative.
         let mut l = StakeLedger::new(50 * QTOV);
         l.bond(id(1), 2_000 * QTOV, 0);
-        assert_eq!(l.accrue(&id(1), Session::High, PRICE_70, 400, 0), 35 * QTOV);
-        assert_eq!(l.pool(), 15 * QTOV);
-        assert_eq!(l.accrue(&id(1), Session::High, PRICE_70, 400, 0), 15 * QTOV);
+        assert_eq!(l.accrue(&id(1), 400, 0), 50 * QTOV);
         assert_eq!(l.pool(), 0);
+        assert_eq!(l.accrue(&id(1), 400, 0), 0);
+    }
+
+    #[test]
+    fn a_sole_staker_earns_the_whole_session_emission() {
+        let mut l = StakeLedger::new(100_000 * QTOV);
+        l.bond(id(1), 2_000 * QTOV, 0);
+        assert_eq!(l.accrue(&id(1), 400, 0), SESSION_EMISSION);
+        assert_eq!(l.pool(), 100_000 * QTOV - SESSION_EMISSION);
     }
 
     #[test]
     fn the_blackout_pays_nothing_in_the_first_year() {
         let mut l = StakeLedger::new(100_000 * QTOV);
         l.bond(id(1), 2_000 * QTOV, 0);
-        assert_eq!(l.accrue(&id(1), Session::High, PRICE_70, 364, 0), 0);
+        assert_eq!(l.accrue(&id(1), 364, 0), 0);
         assert_eq!(l.pool(), 100_000 * QTOV);
-        assert_eq!(l.accrue(&id(1), Session::High, PRICE_70, 365, 0), 35 * QTOV);
+        assert_eq!(l.accrue(&id(1), 365, 0), SESSION_EMISSION);
     }
 
     #[test]
@@ -590,15 +566,15 @@ mod tests {
     }
 
     #[test]
-    fn rewards_vest_then_claim_a_quarter_at_a_time() {
-        let mut l = StakeLedger::new(1_000 * QTOV);
+    fn a_reward_is_claimable_in_full_a_year_after_it_is_earned() {
+        let mut l = StakeLedger::new(100_000 * QTOV);
         l.bond(id(1), 2_000 * QTOV, 0);
-        assert_eq!(l.accrue(&id(1), Session::High, PRICE_70, 400, 0), 35 * QTOV);
+        let earned = l.accrue(&id(1), 400, 0);
+        assert_eq!(earned, SESSION_EMISSION);
         assert_eq!(l.claimable(&id(1), 400 + 364), 0);
-        assert_eq!(l.claimable(&id(1), 400 + 365), 35 * QTOV / 4);
-        assert_eq!(l.claim(&id(1), 400 + 365), 35 * QTOV / 4);
+        assert_eq!(l.claimable(&id(1), 400 + 365), earned);
+        assert_eq!(l.claim(&id(1), 400 + 365), earned);
         assert_eq!(l.claimable(&id(1), 400 + 365), 0);
-        assert_eq!(l.claim(&id(1), 400 + 725), 35 * QTOV - 35 * QTOV / 4);
         assert_eq!(l.claim(&id(1), 400 + 5_000), 0);
     }
 
