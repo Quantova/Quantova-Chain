@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Liveness bounds. The chain finalizes only while an honest supermajority is
 //! online: it stalls when the online set drops below a supermajority and resumes
 //! when it returns, and a node that was offline for the stall is never slashed.

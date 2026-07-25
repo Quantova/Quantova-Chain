@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! A node that missed a stretch of finalized heights catches up by verified sync
 //! and ends byte identical to the nodes that never left.
 

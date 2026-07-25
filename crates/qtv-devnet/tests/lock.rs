@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The lock and its justified unlock, driven directly over the node without the
 //! round loop. A validator that has attested a block locks on it. It refuses a
 //! conflicting later proposal that carries no justification, and it changes its

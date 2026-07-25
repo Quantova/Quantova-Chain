@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Safety under asynchronous timing, message reordering, and a view change. No
 //! two nodes finalize different blocks at one height: the finalized block and the
 //! certificate are byte identical across nodes at every height.

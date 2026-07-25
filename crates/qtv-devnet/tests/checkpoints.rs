@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The node build carries a recent finalised weak subjectivity checkpoint and refuses to
 //! sync across a block that conflicts with it, and it advances the checkpoint each epoch.
 

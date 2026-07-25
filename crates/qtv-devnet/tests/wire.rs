@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The three gossip messages round trip through the canonical codec, and a
 //! message that does not parse is refused at the edge.
 

@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! A transaction submitted to one node propagates over the wire and is finalized
 //! by the committee, even when the submitting node is not the leader.
 

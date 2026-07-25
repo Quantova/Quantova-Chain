@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! A fresh node with only genesis syncs the whole finalized chain from a peer and
 //! ends byte identical to it.
 

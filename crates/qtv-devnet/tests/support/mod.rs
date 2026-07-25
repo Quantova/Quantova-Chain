@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Shared setup for the devnet integration tests.
 
 #![allow(dead_code)]

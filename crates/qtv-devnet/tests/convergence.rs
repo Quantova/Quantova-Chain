@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Several nodes reach the same finalized block at each height, byte identical
 //! chains across nodes, over the qtv-net channels.
 

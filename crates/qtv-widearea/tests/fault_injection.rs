@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Fault injection over the real wide area validator processes.
 //!
 //! This is the test that proves the wide area number will be honest before any host is

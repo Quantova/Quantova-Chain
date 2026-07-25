@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The transaction index answers whether a transaction landed and where, and it
 //! survives a restart by rebuilding from the store.
 

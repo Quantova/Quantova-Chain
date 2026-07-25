@@ -1,3 +1,6 @@
+# Copyright 2026 Quantova Inc
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
 [workspace]
 resolver = "2"
 members = ["crates/qtv-idfmt", "crates/qtv-codec", "crates/qtv-account", "crates/qtv-tx", "crates/qtv-block", "crates/qtv-state", "crates/qtv-staking", "crates/qtv-governance", "crates/qtv-store", "crates/qtv-node", "crates/qtv-net", "crates/qtv-devnet", "crates/qtv-live", "crates/qtv-loopback", "crates/qtv-widearea", "crates/qtv-daemon", "crates/qtv-gateway"]

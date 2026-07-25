@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Execution throughput of the parallel executor against the sequential path.
 //!
 //! This measures the lever it exists to move: transactions executed per second

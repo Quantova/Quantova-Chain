@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Determinism over the logical clock. The same logical schedule, including a
 //! reordering delivery schedule and a timeout driven view change, gives the same
 //! finalized chain and the same state every run.

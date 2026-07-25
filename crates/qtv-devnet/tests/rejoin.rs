@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! A node behind by several heights catches up by sync and then finalizes new
 //! heights with the group, ending byte identical to the nodes that never left.
 

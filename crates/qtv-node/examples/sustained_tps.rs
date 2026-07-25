@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Sustained execution throughput. This answers one question, the maximum transactions a second the
 //! node can hold constantly, not for a single burst. It builds one workload of independent transfers,
 //! then executes it in a tight loop for a set duration, recording the throughput of every round. It

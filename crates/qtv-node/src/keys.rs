@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Per validator secret material for the node.
 //!
 //! Every private key a validator uses, its one time sortition tree, its ML-DSA-65

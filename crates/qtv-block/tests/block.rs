@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Coverage for the header round trip, the transaction root, and the block id.
 
 use qtv_block::{empty_transaction_root, header_from_bytes, transaction_root, Block, Header};

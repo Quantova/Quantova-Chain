@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 
 use qtv_crypto::chacha20poly1305::{KEY_BYTES, NONCE_BYTES};
 use qtv_crypto::sha3;

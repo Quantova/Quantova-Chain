@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The running node consults the persistent anti double sign watermark before every
 //! signature and the finality ledger on every certificate, and treats a refusal or a
 //! finality violation as a fatal halt.

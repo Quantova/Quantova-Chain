@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! A node that restarts within an epoch rebuilds the peers rotated one time sortition roots
 //! from the registration records carried in the chain, so it draws the committee at once
 //! rather than waiting for the next boundary to re gossip.

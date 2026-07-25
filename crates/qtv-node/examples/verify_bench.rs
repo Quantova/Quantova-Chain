@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Signature verification throughput. This is the piece that decides whether the block path is
 //! verify bound or state bound. It builds signed transfers, then verifies them across the cores and
 //! reports the verifies a second, sequential and parallel. Set beside the pure virtual machine figure

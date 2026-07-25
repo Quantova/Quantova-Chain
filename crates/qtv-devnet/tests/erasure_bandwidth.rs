@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The per node bandwidth an erasure coded block costs against downloading the
 //! whole block.
 //!

@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! A running node feeds the attestations it sees into an evidence pool and attributes an
 //! equivocation from two conflicting attestations, ready for a block to carry.
 

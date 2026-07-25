@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Trustless sync refuses a forged chain. A block whose certificate does not
 //! verify, whose parent link is wrong, or whose state root is wrong is rejected
 //! and does not advance the syncing node, while the genuine block is accepted.

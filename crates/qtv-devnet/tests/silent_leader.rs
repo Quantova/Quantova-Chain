@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Leader liveness: a silent first leader does not stall the chain. Its view
 //! times out, the next leader in rotation proposes, and the height finalizes.
 
