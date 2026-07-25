@@ -992,7 +992,7 @@ impl Node {
             .iter()
             .filter(|id| self.sim_online.get(id).copied().unwrap_or(false))
             .filter_map(|id| self.sim_attesters.get(id))
-            .map(|attester| attester.attest(height, slot, block, &self.beacon))
+            .map(|attester| attester.attest(height, slot, 0, block, &self.beacon))
             .collect();
 
         let mut evidence = attestations.clone();
@@ -1004,7 +1004,7 @@ impl Node {
                         header_value(&[0xEE; 32]),
                         self.parent_val,
                     );
-                    evidence.push(attester.attest(height, slot, conflicting, &self.beacon));
+                    evidence.push(attester.attest(height, slot, 0, conflicting, &self.beacon));
                 }
             }
         }
@@ -2483,8 +2483,8 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, block_a, &beacon);
-        let b = attester.attest(1, 1, block_b, &beacon);
+        let a = attester.attest(1, 1, 0, block_a, &beacon);
+        let b = attester.attest(1, 1, 0, block_b, &beacon);
         let evidence = crate::evidence::Equivocation {
             offender: offender.clone(),
             height: 1,
