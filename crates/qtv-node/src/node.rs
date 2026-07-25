@@ -534,26 +534,30 @@ fn execute_ordered_across(
             if vm_meter.saturating_add(meter) > VM_BLOCK_METER_BUDGET {
                 continue;
             }
-            if dispatch_vm(ledger, wrapper, verified[index], fee_params, now_seconds) {
+            if ledger
+                .apply_atomic(|l| dispatch_vm(l, wrapper, verified[index], fee_params, now_seconds))
+            {
                 vm_meter = vm_meter.saturating_add(meter);
                 included.push(wrapper.clone());
             }
             continue;
         }
         if wrapper.body().call().target() == gov_address {
-            if dispatch_governance(ledger, wrapper, verified[index], fee_params, now_seconds) {
+            if ledger.apply_atomic(|l| {
+                dispatch_governance(l, wrapper, verified[index], fee_params, now_seconds)
+            }) {
                 included.push(wrapper.clone());
             }
             continue;
         }
         if is_key_register(wrapper) {
-            if dispatch_key_register(ledger, wrapper, fee_params) {
+            if ledger.apply_atomic(|l| dispatch_key_register(l, wrapper, fee_params)) {
                 included.push(wrapper.clone());
             }
             continue;
         }
         if is_evidence(wrapper) {
-            if dispatch_evidence(ledger, wrapper) {
+            if ledger.apply_atomic(|l| dispatch_evidence(l, wrapper)) {
                 included.push(wrapper.clone());
             }
             continue;
@@ -566,38 +570,56 @@ fn execute_ordered_across(
             Ok(plan) => plan,
             Err(_) => continue,
         };
+        #[cfg(test)]
+        if plan.recipient == crate::ledger::fault_probe_address() {
+            // A test only injection: a transaction that mutates its sender and then faults
+            // partway. The apply_atomic firewall must roll the mutation and any recorded
+            // event back so the block carries no partial write from the faulted transaction.
+            let _ = ledger.apply_atomic(|l| {
+                let mut victim = l.account(&plan.sender);
+                victim.balance = victim.balance.wrapping_sub(plan.amount);
+                victim.nonce += 1;
+                l.set_account(&plan.sender, &victim);
+                l.record_transfer_event(&plan.sender, &plan.recipient, plan.amount, plan.fee);
+                panic!("injected native fault probe");
+            });
+            continue;
+        }
         if plan.recipient == stake_address {
-            if ledger.bond_with_fee(&plan.sender, plan.amount, plan.fee, day) {
+            if ledger.apply_atomic(|l| l.bond_with_fee(&plan.sender, plan.amount, plan.fee, day)) {
                 included.push(wrapper.clone());
             }
             continue;
         }
         if plan.recipient == claim_address {
-            if ledger.claim_with_fee(&plan.sender, plan.fee, day) {
+            if ledger.apply_atomic(|l| l.claim_with_fee(&plan.sender, plan.fee, day)) {
                 included.push(wrapper.clone());
             }
             continue;
         }
         if plan.recipient == exit_address {
-            if ledger.request_exit_with_fee(&plan.sender, plan.fee, day) {
+            if ledger.apply_atomic(|l| l.request_exit_with_fee(&plan.sender, plan.fee, day)) {
                 included.push(wrapper.clone());
             }
             continue;
         }
         if plan.recipient == withdraw_address {
-            if ledger.withdraw_with_fee(&plan.sender, plan.fee, day) {
+            if ledger.apply_atomic(|l| l.withdraw_with_fee(&plan.sender, plan.fee, day)) {
                 included.push(wrapper.clone());
             }
             continue;
         }
         if plan.recipient == bridge_freeze_address {
-            if ledger.bridge_freeze_with_fee(&plan.sender, plan.fee, now_seconds) {
+            if ledger.apply_atomic(|l| l.bridge_freeze_with_fee(&plan.sender, plan.fee, now_seconds))
+            {
                 included.push(wrapper.clone());
             }
             continue;
         }
         if plan.recipient == bridge_unfreeze_address {
-            if ledger.bridge_unfreeze_with_fee(&plan.sender, plan.fee, now_seconds) {
+            if ledger
+                .apply_atomic(|l| l.bridge_unfreeze_with_fee(&plan.sender, plan.fee, now_seconds))
+            {
                 included.push(wrapper.clone());
             }
             continue;
@@ -605,25 +627,31 @@ fn execute_ordered_across(
         if ledger.is_blacklisted(&plan.recipient) {
             continue;
         }
-        let mut sender = ledger.account(&plan.sender);
-        let mut recipient = ledger.account(&plan.recipient);
-        let transferred = match execute_transfer(
-            sender.balance,
-            recipient.balance,
-            plan.amount,
-            plan.fee,
-            wrapper.body().meter_limit(),
-        ) {
-            Ok(transferred) => transferred,
-            Err(_) => continue,
-        };
-        sender.balance = transferred.sender_balance;
-        sender.nonce += 1;
-        recipient.balance = transferred.recipient_balance;
-        ledger.set_account(&plan.sender, &sender);
-        ledger.set_account(&plan.recipient, &recipient);
-        ledger.collect_fee(plan.fee);
-        included.push(wrapper.clone());
+        let applied = ledger.apply_atomic(|l| {
+            let mut sender = l.account(&plan.sender);
+            let mut recipient = l.account(&plan.recipient);
+            let transferred = match execute_transfer(
+                sender.balance,
+                recipient.balance,
+                plan.amount,
+                plan.fee,
+                wrapper.body().meter_limit(),
+            ) {
+                Ok(transferred) => transferred,
+                Err(_) => return false,
+            };
+            sender.balance = transferred.sender_balance;
+            sender.nonce += 1;
+            recipient.balance = transferred.recipient_balance;
+            l.set_account(&plan.sender, &sender);
+            l.set_account(&plan.recipient, &recipient);
+            l.collect_fee(plan.fee);
+            l.record_transfer_event(&plan.sender, &plan.recipient, plan.amount, plan.fee);
+            true
+        });
+        if applied {
+            included.push(wrapper.clone());
+        }
     }
     ledger.settle_session(day, included.len() as u64);
     included
@@ -1832,6 +1860,82 @@ mod tests {
             qtv_block::event_root(&leaves),
             qtv_block::empty_transaction_root(),
             "a block that emitted an event has a nonempty event root"
+        );
+    }
+
+    #[test]
+    fn a_native_transfer_records_a_block_event_and_a_nonempty_event_root() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let alice = keypair(400);
+        let bob = keypair(401);
+        fund(&mut ledger, &alice, 10_000 * 1_000_000);
+
+        let tx = transfer(&alice, &bob.address(), 1_000, 0, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[tx], &fee, 0).len(), 1);
+
+        let events = ledger.block_events();
+        assert_eq!(events.len(), 1, "one native transfer event recorded");
+        assert_eq!(events[0].contract, crate::ledger::NATIVE_EVENT_SOURCE);
+        assert_eq!(events[0].selector, crate::ledger::EVENT_TRANSFER);
+        let mut decoder = qtv_codec::Decoder::new(&events[0].data);
+        assert_eq!(decoder.get_bytes().unwrap(), alice.address().as_bytes());
+        assert_eq!(decoder.get_bytes().unwrap(), bob.address().as_bytes());
+        assert_eq!(decoder.get_u64().unwrap(), 1_000);
+        assert_eq!(decoder.get_u64().unwrap(), u64::from(fee.transfer_fee()));
+
+        let leaves: Vec<Vec<u8>> = events.iter().map(crate::ledger::BlockEvent::encode).collect();
+        assert_ne!(
+            qtv_block::event_root(&leaves),
+            qtv_block::empty_transaction_root(),
+            "a block with a native transfer has a nonempty event root"
+        );
+    }
+
+    #[test]
+    fn a_faulted_transaction_rolls_back_and_leaves_the_rest_of_the_block_intact() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let alice = keypair(500);
+        let bob = keypair(501);
+        let carol = keypair(502);
+        let dave = keypair(503);
+        let erin = keypair(504);
+        fund(&mut ledger, &alice, 10_000 * 1_000_000);
+        fund(&mut ledger, &carol, 10_000 * 1_000_000);
+        fund(&mut ledger, &dave, 10_000 * 1_000_000);
+
+        let carol_before = ledger.account(&carol.address());
+        let root_before = ledger.state_root();
+
+        let good_first = transfer(&alice, &bob.address(), 1_000, 0, &fee);
+        let faulting = transfer(&carol, &crate::ledger::fault_probe_address(), 2_000, 0, &fee);
+        let good_second = transfer(&dave, &erin.address(), 3_000, 0, &fee);
+
+        // The fault probe panics on purpose. Silence the panic hook only for this block so the
+        // deliberate fault does not print a backtrace, then restore it.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let included = execute_ordered(&mut ledger, &[good_first, faulting, good_second], &fee, 0);
+        std::panic::set_hook(previous);
+
+        assert_eq!(included.len(), 2, "the faulted transaction is not included");
+        assert_eq!(ledger.balance(&bob.address()), 1_000, "the earlier transfer stands");
+        assert_eq!(ledger.balance(&erin.address()), 3_000, "the later transfer stands");
+        assert_eq!(
+            ledger.account(&carol.address()),
+            carol_before,
+            "no partial write from the faulted transaction survives"
+        );
+        assert_ne!(
+            ledger.state_root(),
+            root_before,
+            "the two good transfers still moved the state root"
+        );
+        assert_eq!(
+            ledger.block_events().len(),
+            2,
+            "only the two good transfers left events, the faulted one recorded none"
         );
     }
 
