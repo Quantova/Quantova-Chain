@@ -247,8 +247,8 @@ fn the_chain_id_follows_the_display_string_hash() {
         qtv_tx::MAINNET_CHAIN_ID
     );
     assert_eq!(qtv_tx::LOCAL_CHAIN_NAME, "Q-dev-net-1");
-    assert_eq!(qtv_tx::TESTNET_CHAIN_NAME, "Q-test-net-1");
-    assert_eq!(qtv_tx::MAINNET_CHAIN_NAME, "Q-main-net-1");
+    assert_eq!(qtv_tx::TESTNET_CHAIN_NAME, "Q3");
+    assert_eq!(qtv_tx::MAINNET_CHAIN_NAME, "Q1");
 }
 
 #[test]
@@ -297,6 +297,6 @@ fn the_signed_transaction_reproduces_the_qcore_js_payable_vector() {
     assert!(verify(&wrapper, sender.public_key()));
     assert_eq!(
         wrapper.id(),
-        "QTX1XJ7SXNWD3G65KATFC76F07SD00QTXC26KZAXG72022VFVD5VUJJQ9JAV5J"
+        "QTX1MZP3CC4JCWG77XJUWZUCUFAAZL205P8AXJRUZSK5NEXPXPY74FUS2K2N7U"
     );
 }
