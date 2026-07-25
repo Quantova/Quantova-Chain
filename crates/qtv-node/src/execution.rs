@@ -116,9 +116,17 @@ fn read_be_u64(bytes: &[u8], pos: &mut usize) -> Option<u64> {
     Some(u64::from_be_bytes(word.try_into().ok()?))
 }
 
+/// A hostile container could declare an enormous slot list to force unmetered work when the machine
+/// builds its manifest set at dispatch. A real contract declares at most its own state fields and map
+/// bases, far below this ceiling, so a list above it is refused at decode rather than allocated.
+const MAX_SLOTS_PER_LIST: usize = 1 << 16;
+
 fn read_slots(bytes: &[u8], pos: &mut usize) -> Option<Vec<u64>> {
-    let count = read_be_u32(bytes, pos)?;
-    let mut slots = Vec::new();
+    let count = read_be_u32(bytes, pos)? as usize;
+    if count > MAX_SLOTS_PER_LIST {
+        return None;
+    }
+    let mut slots = Vec::with_capacity(count);
     for _ in 0..count {
         slots.push(read_be_u64(bytes, pos)?);
     }
