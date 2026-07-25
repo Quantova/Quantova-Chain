@@ -1855,7 +1855,9 @@ mod stake_state_tests {
 
     #[test]
     fn a_contract_call_injects_the_trusted_caller_and_persists_storage() {
-        let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 0\nSSTORE r2, r0\nHALT")
+        // Store the injected caller word at scalar slot zero. Key pointer 1024 points into the zero
+        // region of memory, whose 32 zero bytes are the canonical key of scalar slot zero.
+        let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
             .expect("the program assembles");
         let selector = [1u8, 2, 3, 4];
         let container = qtv_vm::container::Container::new(
@@ -1881,7 +1883,10 @@ mod stake_state_tests {
         let caller = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
         assert!(l.call_contract(&caller, &contract, selector, &[], 0, 100_000, 0));
         let expected = u64::from_be_bytes([9u8; 8]);
-        assert_eq!(l.contract_storage(&contract_id).get(&[9u8; 32]), Some(&expected));
+        assert_eq!(
+            l.contract_storage(&contract_id).get(&qtv_vm::abi::scalar_key(0)),
+            Some(&expected)
+        );
 
         let empty = qtv_idfmt::render_address(&[71u8; 32]).unwrap();
         assert!(!l.call_contract(&caller, &empty, selector, &[], 0, 100_000, 0));
@@ -1889,9 +1894,14 @@ mod stake_state_tests {
 
     #[test]
     fn a_contract_sees_the_whole_caller_address_not_a_leading_word() {
+        // Store the caller's trailing word at scalar slot zero and the contract's leading word at
+        // scalar slot one. Key pointer 1024 is scalar_key(0), the 32 zero bytes of the zero region;
+        // pointer 1088 becomes scalar_key(1) once a one is written into its low word at 1112. Both are
+        // declared slots the manifest authorises.
         let code = qtv_vm::asm::assemble(
-            "LDI r1, 24\nMLOAD r0, r1\nLDI r2, 0\nSSTORE r2, r0\n\
-             LDI r3, 32\nMLOAD r4, r3\nLDI r5, 32\nSSTORE r5, r4\nHALT",
+            "LDI r1, 24\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\n\
+             LDI r3, 32\nMLOAD r4, r3\nLDI r6, 1112\nLDI r7, 1\nMSTORE r6, r7\n\
+             LDI r5, 1088\nSSTORE r5, r4\nHALT",
         )
         .expect("the program assembles");
         let selector = [1u8, 2, 3, 4];
@@ -1922,14 +1932,14 @@ mod stake_state_tests {
         let c2 = qtv_idfmt::render_address(&p2).unwrap();
 
         assert!(l.call_contract(&c1, &contract, selector, &[], 0, 100_000, 0));
-        let seen1 = *l.contract_storage(&contract_id).get(&p1).unwrap();
+        let seen1 = *l.contract_storage(&contract_id).get(&qtv_vm::abi::scalar_key(0)).unwrap();
         assert_eq!(
-            l.contract_storage(&contract_id).get(&contract_id),
+            l.contract_storage(&contract_id).get(&qtv_vm::abi::scalar_key(1)),
             Some(&u64::from_be_bytes([70u8; 8]))
         );
 
         assert!(l.call_contract(&c2, &contract, selector, &[], 0, 100_000, 0));
-        let seen2 = *l.contract_storage(&contract_id).get(&p2).unwrap();
+        let seen2 = *l.contract_storage(&contract_id).get(&qtv_vm::abi::scalar_key(0)).unwrap();
 
         assert_eq!(seen1, u64::from_be_bytes([0xA1u8; 8]));
         assert_eq!(seen2, u64::from_be_bytes([0xB2u8; 8]));

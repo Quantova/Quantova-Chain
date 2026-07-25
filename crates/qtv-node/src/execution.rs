@@ -178,15 +178,15 @@ pub fn execute_contract_call(
     meter_limit: u64,
 ) -> Result<ContractOutcome, ExecError> {
     let container = decode_container(container_bytes).ok_or(ExecError::BadContainer)?;
-    let offset = container
+    // Validate the selector exists, then dispatch every entry under its storage manifest, including the
+    // first entry at code offset zero. Routing offset zero through Interpreter::new would leave the
+    // manifest unset and silently drop the declared slot enforcement, the dispatch gas, and the
+    // instruction boundary jump checks for the first entry of every contract.
+    container
         .entry_offset(&selector)
         .ok_or(ExecError::BadContainer)?;
-    let interpreter = if offset == 0 {
-        Interpreter::new(&container.code, &container.consts, meter_limit)
-    } else {
-        Interpreter::for_entry(&container, selector, meter_limit)
-            .map_err(|_| ExecError::BadContainer)?
-    };
+    let interpreter = Interpreter::for_entry(&container, selector, meter_limit)
+        .map_err(|_| ExecError::BadContainer)?;
     let outcome = interpreter
         .with_storage(storage)
         .with_memory(memory)
