@@ -32,8 +32,8 @@ fn equivocation(offender_address: &str) -> Equivocation {
     let beacon = Beacon::genesis();
     let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
     let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-    let a = attester.attest(1, 1, block_a, &beacon);
-    let b = attester.attest(1, 1, block_b, &beacon);
+    let a = attester.attest(1, 1, 0, block_a, &beacon);
+    let b = attester.attest(1, 1, 0, block_b, &beacon);
     Equivocation {
         offender: offender_address.to_string(),
         height: 1,
@@ -55,8 +55,8 @@ fn cross_view_re_vote(offender_address: &str) -> Equivocation {
     let beacon = Beacon::genesis();
     let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
     let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-    let a = attester.attest(1, 1, block_a, &beacon);
-    let b = attester.attest(1, 1, block_b, &beacon);
+    let a = attester.attest(1, 1, 0, block_a, &beacon);
+    let b = attester.attest(1, 1, 1, block_b, &beacon);
     Equivocation {
         offender: offender_address.to_string(),
         height: 1,
