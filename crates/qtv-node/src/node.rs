@@ -1252,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn a_transfer_fee_splits_seventy_ten_twenty_and_burns_the_supply() {
+    fn a_transfer_fee_splits_twenty_sixty_twenty_and_burns_the_supply() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
         let alice = keypair(200);
@@ -1279,15 +1279,15 @@ mod tests {
             "the transfer is included"
         );
 
-        assert_eq!(ledger.balance(&proposer), 50, "the proposer takes a tenth");
+        assert_eq!(ledger.balance(&proposer), 300, "the proposer takes three fifths");
         assert_eq!(ledger.balance(&grants), 100, "grants takes a fifth");
         assert_eq!(ledger.balance(&marketing), 0, "marketing takes no fee cut");
         assert_eq!(ledger.balance(&market_maker), 0, "the market maker takes no fee cut");
 
         assert_eq!(
             supply_before - ledger.total_supply(),
-            350,
-            "the supply falls by the seven tenths that burn"
+            100,
+            "the supply falls by the fifth that burns"
         );
 
         let balances = ledger.balance(&alice.address())
@@ -1303,7 +1303,7 @@ mod tests {
         let dust = crate::ledger::FeeSplit::of(7);
         assert_eq!(
             (dust.burn, dust.proposer, dust.grants),
-            (4, 0, 3),
+            (1, 4, 2),
             "the rounding dust lands in the grants share"
         );
         assert_eq!(dust.total(), 7, "the split conserves the fee to the unit");
@@ -2328,7 +2328,7 @@ mod tests {
         ledger.seed_validator_bond(&validator.address(), 2_000 * 1_000_000);
         ledger.set_stake_mainnet_start(0);
         ledger.set_stake_price(70 * 1_000_000);
-        ledger.accrue_reward(&validator.address(), qtv_staking::Session::Low, 400);
+        ledger.accrue_reward(&validator.address(), 400);
 
         let claim_day = 400 + 365;
         assert!(ledger.claimable_reward(&validator.address(), claim_day) > 0);

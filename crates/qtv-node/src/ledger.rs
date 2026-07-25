@@ -74,8 +74,9 @@ const STAKE_POOL_TAG: &[u8] = b"qtv/stake/pool";
 const STAKE_TREASURY_TAG: &[u8] = b"qtv/stake/treasury";
 const SUPPLY_TAG: &[u8] = b"qtv/supply";
 
-pub const FEE_BURN_BPS: u64 = 7_000;
-pub const FEE_PROPOSER_BPS: u64 = 1_000;
+// Genesis fee split per the v0.4 tokenomics, 20 percent burned so supply falls with real use, 60
+pub const FEE_BURN_BPS: u64 = 2_000;
+pub const FEE_PROPOSER_BPS: u64 = 6_000;
 pub const FEE_GRANTS_BPS: u64 = 2_000;
 const _: () = assert!(FEE_BURN_BPS + FEE_PROPOSER_BPS + FEE_GRANTS_BPS == 10_000);
 
@@ -1024,26 +1025,22 @@ impl Ledger {
         self.write_leaf(stake_rewards_key(id), Vec::new());
     }
 
-    pub fn accrue_reward(&mut self, address: &str, session: Session, now_day: u64) -> u64 {
+    pub fn accrue_reward(&mut self, address: &str, now_day: u64) -> u64 {
         match address_id(address) {
-            Some(id) => self.accrue_reward_by_id(&id, session, now_day),
+            Some(id) => self.accrue_reward_by_id(&id, now_day),
             None => 0,
         }
     }
 
-    fn accrue_reward_by_id(&mut self, id: &[u8; 32], session: Session, now_day: u64) -> u64 {
+    fn accrue_reward_by_id(&mut self, id: &[u8; 32], now_day: u64) -> u64 {
         if qtv_staking::in_blackout(now_day, self.stake_mainnet_start()) {
-            return 0;
-        }
-        let rate = self.stake_price();
-        if rate == 0 {
             return 0;
         }
         let stake = match self.stake_bond(id) {
             Some(bond) => bond.amount,
             None => return 0,
         };
-        let paid = qtv_staking::session_reward(stake, session, rate).min(self.stake_pool());
+        let paid = qtv_staking::session_reward(stake, self.total_staked()).min(self.stake_pool());
         if paid == 0 {
             return 0;
         }
@@ -1332,9 +1329,11 @@ impl Ledger {
         if self.stake_mainnet_start() == u64::MAX {
             return;
         }
-        if let Some(session) = self.record_session(transactions, now_day) {
+        // record_session marks the session boundary; a completed session accrues the emergent reward to
+        // every validator, pro rata by stake, no longer scaled by the session activity level.
+        if self.record_session(transactions, now_day).is_some() {
             for id in self.validator_ids() {
-                self.accrue_reward_by_id(&id, session, now_day);
+                self.accrue_reward_by_id(&id, now_day);
             }
         }
     }
@@ -2393,32 +2392,29 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn rewards_accrue_vest_and_claim_only_after_the_blackout_and_a_set_rate() {
+    fn rewards_accrue_vest_and_claim_only_after_the_blackout() {
         let mut l = Ledger::new();
         let addr = qtv_idfmt::render_address(&[12u8; 32]).unwrap();
         l.seed_stake_pool(700_000 * 1_000_000);
         l.seed_validator_bond(&addr, 2_000 * 1_000_000);
 
-        assert_eq!(l.accrue_reward(&addr, qtv_staking::Session::Low, 400), 0);
+        // Nothing pays before mainnet starts; the whole first year is a blackout.
+        assert_eq!(l.accrue_reward(&addr, 400), 0);
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000);
 
         l.set_stake_mainnet_start(0);
-        assert_eq!(l.accrue_reward(&addr, qtv_staking::Session::Low, 400), 0);
+        // A sole staker past the blackout earns the whole emergent session emission, no rate needed.
+        let emission = qtv_staking::SESSION_EMISSION;
+        assert_eq!(l.accrue_reward(&addr, 400), emission);
+        assert_eq!(l.stake_pool(), 700_000 * 1_000_000 - emission);
 
-        l.set_stake_price(70 * 1_000_000);
-        let paid = l.accrue_reward(&addr, qtv_staking::Session::Low, 400);
-        assert_eq!(paid, 20 * 1_000_000);
-        assert_eq!(l.stake_pool(), 700_000 * 1_000_000 - 20 * 1_000_000);
-
+        // The reward is locked for twelve months, then fully claimable in one go.
         assert_eq!(l.claimable_reward(&addr, 400 + 364), 0);
-        assert_eq!(l.claimable_reward(&addr, 400 + 365), 5 * 1_000_000);
-        assert_eq!(l.claim_reward(&addr, 400 + 365), 5 * 1_000_000);
-        assert_eq!(l.balance(&addr), 5 * 1_000_000);
+        assert_eq!(l.claimable_reward(&addr, 400 + 365), emission);
+        assert_eq!(l.claim_reward(&addr, 400 + 365), emission);
+        assert_eq!(l.balance(&addr), emission);
         assert_eq!(l.claim_reward(&addr, 400 + 365), 0);
-        let full_day = 400 + 365 + 3 * 120;
-        assert_eq!(l.claim_reward(&addr, full_day), 15 * 1_000_000);
-        assert_eq!(l.balance(&addr), 20 * 1_000_000);
-        assert_eq!(l.claimable_reward(&addr, full_day + 1_000), 0);
+        assert_eq!(l.claimable_reward(&addr, 400 + 365 + 1_000), 0);
     }
 
     #[test]
@@ -2429,9 +2425,9 @@ mod stake_state_tests {
         l.seed_stake_pool(700_000 * 1_000_000);
         l.seed_validator_bond(&addr, 2_000 * 1_000_000);
         l.set_stake_mainnet_start(0);
-        l.set_stake_price(70 * 1_000_000);
-        assert_eq!(l.accrue_reward(&addr, qtv_staking::Session::Low, 400), 20 * 1_000_000);
-        assert_eq!(l.claimable_reward(&addr, 400 + 365), 5 * 1_000_000);
+        let emission = qtv_staking::SESSION_EMISSION;
+        assert_eq!(l.accrue_reward(&addr, 400), emission);
+        assert_eq!(l.claimable_reward(&addr, 400 + 365), emission);
         l.slash_stake(&addr, qtv_staking::Fault::Attributable);
         assert!(l.is_stake_banned(&id));
         assert_eq!(l.claimable_reward(&addr, 400 + 365), 0);
@@ -2447,27 +2443,12 @@ mod stake_state_tests {
         l.seed_stake_pool(700_000 * 1_000_000);
         l.seed_validator_bond(&addr, 2_000 * 1_000_000);
         l.set_stake_mainnet_start(0);
-        l.set_stake_price(70 * 1_000_000);
-        l.accrue_reward(&addr, qtv_staking::Session::Low, 400);
-        assert_eq!(l.claimable_reward(&addr, 400 + 365), 5 * 1_000_000);
+        l.accrue_reward(&addr, 400);
+        assert_eq!(l.claimable_reward(&addr, 400 + 365), qtv_staking::SESSION_EMISSION);
         l.set_gov_blacklisted(&id);
         assert_eq!(l.claimable_reward(&addr, 400 + 365), 0);
         assert_eq!(l.claim_reward(&addr, 400 + 365), 0);
         assert_eq!(l.balance(&addr), 0);
-    }
-
-    #[test]
-    fn the_reward_cap_binds_when_the_price_climbs() {
-        let mut l = Ledger::new();
-        let addr = qtv_idfmt::render_address(&[13u8; 32]).unwrap();
-        l.seed_stake_pool(700_000 * 1_000_000);
-        l.seed_validator_bond(&addr, 2_000 * 1_000_000);
-        l.set_stake_mainnet_start(0);
-        l.set_stake_price(2_000 * 1_000_000);
-        assert_eq!(
-            l.accrue_reward(&addr, qtv_staking::Session::Low, 400),
-            2 * 1_000_000
-        );
     }
 
     #[test]
@@ -2492,8 +2473,10 @@ mod stake_state_tests {
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000);
 
         l.settle_session(546, 5);
-        assert_eq!(l.stake_pool(), 700_000 * 1_000_000 - 20 * 1_000_000);
-        assert_eq!(l.claimable_reward(&v, 546 + 365), 5 * 1_000_000);
+        // Past the blackout the sole validator accrues the whole emergent session emission, which is
+        // then fully claimable twelve months later.
+        assert_eq!(l.stake_pool(), 700_000 * 1_000_000 - qtv_staking::SESSION_EMISSION);
+        assert_eq!(l.claimable_reward(&v, 546 + 365), qtv_staking::SESSION_EMISSION);
     }
 
     #[test]
@@ -2903,7 +2886,7 @@ mod stake_state_tests {
         l.set_stake_price(1);
         l.set_stake_pool(1_000_000 * 1_000_000);
         l.clear_block_events();
-        let paid = l.accrue_reward(&addr, qtv_staking::Session::Low, 400);
+        let paid = l.accrue_reward(&addr, 400);
         assert!(paid > 0);
         let events = l.block_events();
         assert_eq!(events.len(), 1);
@@ -3435,25 +3418,25 @@ mod tests {
     }
 
     #[test]
-    fn a_fee_split_is_seventy_ten_twenty_with_dust_to_grants() {
+    fn a_fee_split_is_twenty_sixty_twenty_with_dust_to_grants() {
         let split = FeeSplit::of(1_000);
-        assert_eq!(split.burn, 700, "seven tenths of the fee burn");
-        assert_eq!(split.proposer, 100, "a tenth to the proposer");
+        assert_eq!(split.burn, 200, "a fifth of the fee burns");
+        assert_eq!(split.proposer, 600, "three fifths to the validators");
         assert_eq!(split.grants, 200, "a fifth to grants");
         assert_eq!(split.total(), 1_000, "the shares sum to the fee");
 
         let odd = FeeSplit::of(7);
         assert_eq!(
             (odd.burn, odd.proposer),
-            (4, 0),
+            (1, 4),
             "the burn and proposer shares floor"
         );
-        assert_eq!(odd.grants, 3, "the rounding dust lands in the grants share");
+        assert_eq!(odd.grants, 2, "the rounding dust lands in the grants share");
         assert_eq!(odd.total(), 7, "the split conserves the fee to the unit");
     }
 
     #[test]
-    fn a_fee_burns_seventy_percent_of_the_supply_and_a_mint_raises_it() {
+    fn a_fee_burns_twenty_percent_of_the_supply_and_a_mint_raises_it() {
         let mut ledger = Ledger::new();
         ledger.seed_supply(1_000_000);
         assert_eq!(ledger.total_supply(), 1_000_000, "genesis fixes the supply");
@@ -3461,14 +3444,14 @@ mod tests {
         ledger.collect_fee(1_000);
         assert_eq!(
             ledger.total_supply(),
-            1_000_000 - 700,
-            "a fee burns seven tenths and lowers the supply by that much"
+            1_000_000 - 200,
+            "a fee burns a fifth and lowers the supply by that much"
         );
 
         ledger.credit_supply(500);
         assert_eq!(
             ledger.total_supply(),
-            1_000_000 - 700 + 500,
+            1_000_000 - 200 + 500,
             "a mint raises the supply"
         );
     }
