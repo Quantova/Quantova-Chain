@@ -137,10 +137,11 @@ pub fn genesis_beacon() -> Beacon {
     Beacon::genesis()
 }
 
-/// The ids of validators that signed two conflicting attestations at one height, each
-/// proven by verifying both signatures against the offender's registered attestation key.
-/// A forged pair naming a validator that never double signed does not authenticate and is
-/// never flagged.
+/// The ids of validators that signed two conflicting attestations at one height in one view,
+/// each proven by verifying both signatures against the offender's registered attestation key.
+/// The view rides inside each signed attestation, so a pair whose signed views differ is a
+/// justified cross view re vote and never flags, and a forged pair naming a validator that
+/// never double signed does not authenticate and is never flagged.
 pub fn equivocation_offenders(
     attestations: &[Attestation],
     roster: &[ValidatorRegistration],
@@ -150,6 +151,7 @@ pub fn equivocation_offenders(
         for second in &attestations[index + 1..] {
             if first.from == second.from
                 && first.height == second.height
+                && first.view == second.view
                 && first.block != second.block
                 && !flagged.contains(&first.from)
             {
@@ -379,10 +381,11 @@ impl Consensus {
         &self,
         height: u64,
         slot: u64,
+        view: u64,
         block: Block,
         beacon: &Beacon,
     ) -> Attestation {
-        self.own.attest(height, slot, block, beacon)
+        self.own.attest(height, slot, view, block, beacon)
     }
 
     /// Fold the collected attestations into a finality certificate.
@@ -487,7 +490,7 @@ mod tests {
                 .iter()
                 .filter(|id| self.online.get(id).copied().unwrap_or(false))
                 .filter_map(|id| self.attesters.get(id))
-                .map(|a| a.attest(height, slot, block, beacon))
+                .map(|a| a.attest(height, slot, 0, block, beacon))
                 .collect()
         }
     }
@@ -625,7 +628,7 @@ mod tests {
         let mk_a = || block_for(1);
         let mk_b = || Block::new(1, header_value(&[42u8; 32]), Parent::Genesis);
         let att =
-            |id: u64, block: Block| sim.attesters.get(&id).unwrap().attest(1, 1, block, &beacon);
+            |id: u64, block: Block| sim.attesters.get(&id).unwrap().attest(1, 1, 0, block, &beacon);
         let atts_a = vec![att(1, mk_a()), att(2, mk_a()), att(4, mk_a())];
         let atts_b = vec![att(3, mk_b()), att(4, mk_b())];
         let cert_a = consensus.finalize(&selection, 1, 1, mk_a(), &beacon, &atts_a);
@@ -673,13 +676,14 @@ mod tests {
 
         let honest: Vec<Attestation> = [1u64, 2, 3, 4]
             .iter()
-            .map(|id| sim.attesters[id].attest(1, 1, block_for(1), &beacon))
+            .map(|id| sim.attesters[id].attest(1, 1, 0, block_for(1), &beacon))
             .collect();
         assert!(equivocation_offenders(&honest, &roster).is_empty());
 
         let conflict = sim.attesters[&2].attest(
             1,
             1,
+            0,
             Block::new(1, header_value(&[9u8; 32]), Parent::Genesis),
             &beacon,
         );
@@ -687,10 +691,11 @@ mod tests {
         evidence.push(conflict);
         assert_eq!(equivocation_offenders(&evidence, &roster), vec![2]);
 
-        let mut forged_a = sim.attesters[&3].attest(1, 1, block_for(1), &beacon);
+        let mut forged_a = sim.attesters[&3].attest(1, 1, 0, block_for(1), &beacon);
         let mut forged_b = sim.attesters[&3].attest(
             1,
             1,
+            0,
             Block::new(1, header_value(&[7u8; 32]), Parent::Genesis),
             &beacon,
         );
@@ -772,7 +777,7 @@ mod tests {
             .iter()
             .filter(|(id, _)| selection.members.contains(id))
             .take(3)
-            .map(|(_, a)| a.attest(1, 1, block, &beacon))
+            .map(|(_, a)| a.attest(1, 1, 0, block, &beacon))
             .collect();
         let depth = atts[0].membership.path.siblings.len();
         atts[0].membership = Credential {
