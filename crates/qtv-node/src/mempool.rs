@@ -465,8 +465,8 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = AttBlock::new(1, [1u8; 32], Parent::Genesis);
         let block_b = AttBlock::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, block_a, &beacon);
-        let b = attester.attest(1, 1, block_b, &beacon);
+        let a = attester.attest(1, 1, 0, block_a, &beacon);
+        let b = attester.attest(1, 1, 0, block_b, &beacon);
         let evidence = crate::evidence::Equivocation {
             offender: offender.clone(),
             height: 1,
