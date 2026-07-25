@@ -115,7 +115,7 @@ fn an_attestation_message_round_trips_and_still_verifies() {
     let attester = Attester::from_secret(1, &[1u8; 32], 2_000);
     let beacon = Beacon::genesis();
     let block = Block::new(1, [5u8; 32], Parent::Genesis);
-    let attestation = attester.attest(1, 1, block, &beacon);
+    let attestation = attester.attest(1, 1, 0, block, &beacon);
 
     let bytes = Message::Attest(Box::new(attestation.clone())).encode();
     match Message::decode(&bytes).expect("decodes") {
@@ -123,6 +123,7 @@ fn an_attestation_message_round_trips_and_still_verifies() {
             assert_eq!(decoded.from, attestation.from);
             assert_eq!(decoded.height, attestation.height);
             assert_eq!(decoded.slot, attestation.slot);
+            assert_eq!(decoded.view, attestation.view);
             assert_eq!(decoded.block, attestation.block);
             assert_eq!(decoded.membership.position, attestation.membership.position);
             assert_eq!(decoded.membership.preimage, attestation.membership.preimage);
@@ -183,9 +184,9 @@ fn a_certificate_carrying_block_round_trips_and_still_verifies() {
     let block = Block::new(1, [9u8; 32], Parent::Genesis);
     let commitment = CommitteeCommitment::from_attesters_with_budget(0, &[&a, &b, &c, &d], 4);
     let atts = vec![
-        a.attest(1, 0, block, &beacon),
-        b.attest(1, 0, block, &beacon),
-        c.attest(1, 0, block, &beacon),
+        a.attest(1, 0, 0, block, &beacon),
+        b.attest(1, 0, 0, block, &beacon),
+        c.attest(1, 0, 0, block, &beacon),
     ];
     let cert = aggregate(1, 0, block, &commitment, &beacon, &atts, 3).expect("quorum");
 
