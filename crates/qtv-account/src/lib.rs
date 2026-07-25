@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 use qtv_crypto::{ml_dsa, sha3, slh_dsa};
+use zeroize::Zeroize;
 
 pub const SCHEME_LATTICE: u8 = 1;
 
@@ -70,6 +71,15 @@ impl std::fmt::Debug for Account {
             .field("seed", &"[redacted]")
             .field("public_key_len", &self.public_key.len())
             .finish()
+    }
+}
+
+impl Drop for Account {
+    fn drop(&mut self) {
+        // The per account seed is the one secret this type holds, so wipe it when the
+        // account goes out of scope rather than leave it in freed memory for a later read.
+        // The scheme, the index, and the public key are not secret and are left alone.
+        self.seed.zeroize();
     }
 }
 
