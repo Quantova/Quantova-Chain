@@ -1314,7 +1314,10 @@ mod tests {
         let deployer = keypair(130);
         fund(&mut ledger, &deployer, 10_000 * 1_000_000);
 
-        let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 0\nSSTORE r2, r0\nHALT")
+        // Store the injected caller word at scalar slot zero. The key pointer 1024 points into the zero
+        // region of memory, whose 32 zero bytes are the canonical key of scalar slot zero, so the write
+        // lands in a declared slot the manifest authorises.
+        let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
             .expect("the program assembles");
         let selector = [1u8, 2, 3, 4];
         let container = qtv_vm::container::Container::new(
@@ -1347,10 +1350,9 @@ mod tests {
         let call = system_tx(&deployer, &contract, selector.to_vec(), 1, 100_000, &fee);
         assert_eq!(execute_ordered(&mut ledger, &[call], &fee, 0).len(), 1);
         let stored = ledger.contract_storage(&address_bytes(&contract));
-        let deployer_key = address_bytes(&deployer.address());
         let expected = crate::ledger::address_word(&deployer.address()).unwrap();
         assert_eq!(
-            stored.get(&deployer_key),
+            stored.get(&qtv_vm::abi::scalar_key(0)),
             Some(&expected),
             "the injected caller was stored"
         );
@@ -1390,7 +1392,14 @@ mod tests {
             vec![qtv_vm::container::Entry {
                 selector: genesis_selector,
                 offset: 0,
-                access: qtv_vm::container::StateAccess::default(),
+                // The genesis constructor writes the deployer word to scalar slot zero, so it declares
+                // that slot as a write; the manifest is enforced for the offset zero entry too.
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![0],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
             }],
         );
 
@@ -1435,7 +1444,12 @@ mod tests {
             vec![qtv_vm::container::Entry {
                 selector: genesis,
                 offset: 0,
-                access: qtv_vm::container::StateAccess::default(),
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![0],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
             }],
         );
 
@@ -1726,7 +1740,14 @@ mod tests {
             vec![qtv_vm::container::Entry {
                 selector: genesis_selector,
                 offset: 0,
-                access: qtv_vm::container::StateAccess::default(),
+                // Genesis reads the deploy parameter and writes it to scalar slot zero, so it declares
+                // that slot; the manifest is enforced for the offset zero entry.
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![0],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
             }],
         );
         let cbytes = container.canonical_bytes();
@@ -1769,8 +1790,11 @@ mod tests {
         let fee = FeeParams::devnet();
         let deployer = keypair(131);
 
+        // The counter lives in scalar slot zero. Key pointer 1024 points into the zero region of
+        // memory, whose 32 zero bytes are the canonical key of scalar slot zero, so both the load and
+        // the store land in the declared slot.
         let code = qtv_vm::asm::assemble(
-            "LDI r0, 0\nSLOAD r1, r0\nLDI r2, 1\nADD r1, r1, r2\nSSTORE r0, r1\nHALT",
+            "LDI r0, 1024\nSLOAD r1, r0\nLDI r2, 1\nADD r1, r1, r2\nSSTORE r0, r1\nHALT",
         )
         .expect("the program assembles");
         let selector = [5u8, 6, 7, 8];
@@ -1791,7 +1815,6 @@ mod tests {
 
         let contract = crate::ledger::contract_address(&deployer.address(), 0).unwrap();
         let contract_id = address_bytes(&contract);
-        let caller_key = address_bytes(&deployer.address());
 
         let deploy = system_tx(
             &deployer,
@@ -1810,7 +1833,7 @@ mod tests {
         let included = crate::parallel::execute_parallel(&mut ledger, &block, &fee, 8, 0);
         assert_eq!(included.len(), 3, "the deploy and both calls are included");
         assert_eq!(
-            ledger.contract_storage(&contract_id).get(&caller_key),
+            ledger.contract_storage(&contract_id).get(&qtv_vm::abi::scalar_key(0)),
             Some(&2),
             "the two calls increment in order, so the counter is two not one"
         );
@@ -2635,7 +2658,10 @@ mod tests {
         fund(&mut ledger, &freezer, 2_000_000 * 1_000_000);
         fund(&mut ledger, &user, 10_000 * 1_000_000);
 
-        let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 0\nSSTORE r2, r0\nHALT")
+        // Store the injected caller word at scalar slot zero. The key pointer 1024 points into the zero
+        // region of memory, whose 32 zero bytes are the canonical key of scalar slot zero, so the write
+        // lands in a declared slot the manifest authorises.
+        let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
             .expect("the program assembles");
         let selector = [1u8, 2, 3, 4];
         let container = qtv_vm::container::Container::new(
