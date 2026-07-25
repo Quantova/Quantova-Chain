@@ -150,10 +150,21 @@ pub fn decode_container(bytes: &[u8]) -> Option<qtv_vm::container::Container> {
         let offset = read_be_u32(bytes, &mut pos)?;
         let reads = read_slots(bytes, &mut pos)?;
         let writes = read_slots(bytes, &mut pos)?;
+        // The canonical container carries the keyed manifest, the map bases an entry may read and
+        // write, right after the scalar reads and writes. Decoding them in the same order the VM
+        // encodes them keeps this decoder in step with the format, so a deployed container carries its
+        // keyed authorisation on chain and map writes are not rejected as undeclared.
+        let keyed_reads = read_slots(bytes, &mut pos)?;
+        let keyed_writes = read_slots(bytes, &mut pos)?;
         entries.push(Entry {
             selector,
             offset,
-            access: StateAccess { reads, writes },
+            access: StateAccess {
+                reads,
+                writes,
+                keyed_reads,
+                keyed_writes,
+            },
         });
     }
     Some(Container::new(code, consts, entries))
@@ -226,6 +237,8 @@ mod tests {
                 access: StateAccess {
                     reads: vec![],
                     writes: vec![7],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
                 },
             }],
         );
