@@ -193,60 +193,70 @@ pub fn empty_transaction_root() -> [u8; ROOT_LEN] {
     sha3::sha3_256(&[])
 }
 
+const MERKLE_LEAF_DOMAIN: u8 = 0x00;
+const MERKLE_NODE_DOMAIN: u8 = 0x01;
+
 pub fn event_root(events: &[Vec<u8>]) -> [u8; ROOT_LEN] {
     if events.is_empty() {
         return empty_transaction_root();
     }
-    let mut level: Vec<[u8; ROOT_LEN]> = events.iter().map(|event| sha3::sha3_256(event)).collect();
-    while level.len() > 1 {
-        let mut next = Vec::with_capacity((level.len() + 1) / 2);
-        let mut index = 0;
-        while index < level.len() {
-            let left = level[index];
-            let right = if index + 1 < level.len() {
-                level[index + 1]
-            } else {
-                left
-            };
-            next.push(pair_hash(&left, &right));
-            index += 2;
-        }
-        level = next;
-    }
-    level[0]
-}
-
-fn pair_hash(left: &[u8; ROOT_LEN], right: &[u8; ROOT_LEN]) -> [u8; ROOT_LEN] {
-    let mut input = [0u8; ROOT_LEN * 2];
-    input[..ROOT_LEN].copy_from_slice(left);
-    input[ROOT_LEN..].copy_from_slice(right);
-    sha3::sha3_256(&input)
+    let leaves: Vec<[u8; ROOT_LEN]> = events.iter().map(|event| leaf_hash(event)).collect();
+    merkle_root(&leaves)
 }
 
 pub fn transaction_root(transactions: &[Wrapper]) -> [u8; ROOT_LEN] {
     if transactions.is_empty() {
         return empty_transaction_root();
     }
-    let mut level: Vec<[u8; ROOT_LEN]> = transactions
+    let leaves: Vec<[u8; ROOT_LEN]> = transactions
         .iter()
-        .map(|transaction| sha3::sha3_256(&to_bytes(transaction)))
+        .map(|transaction| leaf_hash(&to_bytes(transaction)))
         .collect();
-    while level.len() > 1 {
-        let mut next = Vec::with_capacity((level.len() + 1) / 2);
-        let mut index = 0;
-        while index < level.len() {
-            let left = level[index];
-            let right = if index + 1 < level.len() {
-                level[index + 1]
-            } else {
-                left
-            };
-            next.push(pair_hash(&left, &right));
-            index += 2;
+    merkle_root(&leaves)
+}
+
+// A leaf hash carries a leading leaf domain byte and an internal node a leading
+// node domain byte, so no leaf hash can ever equal an internal node hash and a
+// crafted transaction can never be reinterpreted as a subtree of two children.
+fn leaf_hash(data: &[u8]) -> [u8; ROOT_LEN] {
+    let mut input = Vec::with_capacity(1 + data.len());
+    input.push(MERKLE_LEAF_DOMAIN);
+    input.extend_from_slice(data);
+    sha3::sha3_256(&input)
+}
+
+fn pair_hash(left: &[u8; ROOT_LEN], right: &[u8; ROOT_LEN]) -> [u8; ROOT_LEN] {
+    let mut input = [0u8; 1 + ROOT_LEN * 2];
+    input[0] = MERKLE_NODE_DOMAIN;
+    input[1..1 + ROOT_LEN].copy_from_slice(left);
+    input[1 + ROOT_LEN..].copy_from_slice(right);
+    sha3::sha3_256(&input)
+}
+
+// The tree splits at the largest power of two below the leaf count, the RFC 6962
+// rule, so its shape is fixed by the count alone. A leaf left without a sibling is
+// carried up as a subtree of its own rather than paired with a copy of itself, so
+// repeating the final leaf can no longer forge a second body with the same root.
+fn merkle_root(leaves: &[[u8; ROOT_LEN]]) -> [u8; ROOT_LEN] {
+    match leaves.len() {
+        0 => empty_transaction_root(),
+        1 => leaves[0],
+        n => {
+            let split = largest_power_of_two_below(n);
+            let left = merkle_root(&leaves[..split]);
+            let right = merkle_root(&leaves[split..]);
+            pair_hash(&left, &right)
         }
-        level = next;
     }
-    level[0]
+}
+
+fn largest_power_of_two_below(n: usize) -> usize {
+    debug_assert!(n >= 2, "the split rule is only called on two or more leaves");
+    let mut split = 1;
+    while split << 1 < n {
+        split <<= 1;
+    }
+    split
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,5 +305,63 @@ impl Encode for Block {
         for transaction in &self.body {
             transaction.encode(encoder);
         }
+    }
+}
+
+#[cfg(test)]
+mod merkle_tests {
+    use super::*;
+
+    fn event(byte: u8) -> Vec<u8> {
+        vec![byte; 8]
+    }
+
+    #[test]
+    fn duplicating_the_final_event_no_longer_reproduces_the_root() {
+        let three = vec![event(1), event(2), event(3)];
+        let with_repeat = vec![event(1), event(2), event(3), event(3)];
+        assert_ne!(event_root(&three), event_root(&with_repeat));
+    }
+
+    #[test]
+    fn a_leaf_preimage_can_never_equal_an_internal_node() {
+        let left = leaf_hash(&event(1));
+        let right = leaf_hash(&event(2));
+        let node = pair_hash(&left, &right);
+        let mut forged = Vec::new();
+        forged.extend_from_slice(&left);
+        forged.extend_from_slice(&right);
+        assert_ne!(leaf_hash(&forged), node);
+    }
+
+    #[test]
+    fn reordering_the_events_changes_the_root() {
+        let forward = vec![event(1), event(2), event(3)];
+        let reversed = vec![event(3), event(2), event(1)];
+        assert_ne!(event_root(&forward), event_root(&reversed));
+    }
+
+    #[test]
+    fn the_root_is_deterministic_for_a_fixed_ordered_set() {
+        let events = vec![event(9), event(8), event(7), event(6), event(5)];
+        assert_eq!(event_root(&events), event_root(&events));
+    }
+
+    #[test]
+    fn the_empty_root_differs_from_every_leaf_and_every_node() {
+        let empty = empty_transaction_root();
+        let left = leaf_hash(&event(1));
+        let right = leaf_hash(&event(2));
+        assert_ne!(empty, left);
+        assert_ne!(empty, pair_hash(&left, &right));
+    }
+
+    #[test]
+    fn the_split_falls_on_the_largest_power_of_two_below_the_count() {
+        assert_eq!(largest_power_of_two_below(2), 1);
+        assert_eq!(largest_power_of_two_below(3), 2);
+        assert_eq!(largest_power_of_two_below(4), 2);
+        assert_eq!(largest_power_of_two_below(5), 4);
+        assert_eq!(largest_power_of_two_below(9), 8);
     }
 }
