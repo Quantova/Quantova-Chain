@@ -798,7 +798,7 @@ impl DevNode {
         let staged = self.staged.as_ref().ok_or(RoundError::NotStaged)?;
         Ok(self
             .consensus
-            .own_attestation(self.height, self.slot(), staged.block, &self.beacon))
+            .own_attestation(self.height, self.slot(), self.view, staged.block, &self.beacon))
     }
 
     /// The node's attestation over the staged block, guarded by the anti double sign
@@ -992,7 +992,7 @@ impl DevNode {
             view_change_subject(self.height, target_view, lock_view, locked_value, has_lock);
         let att = self
             .consensus
-            .own_attestation(self.height, self.slot(), subject, &self.beacon);
+            .own_attestation(self.height, self.slot(), self.view, subject, &self.beacon);
         ViewChange {
             height: self.height,
             target_view,
@@ -1221,10 +1221,10 @@ impl DevNode {
     }
 
     /// Feed an observed attestation to the evidence pool, keyed by the signer's bond
-    /// address and tagged with the view this node holds for the height. A second attestation
-    /// from the same signer at the same height in the same view for a different block is
-    /// turned into attributable evidence a block can carry. A conflicting attestation in a
-    /// higher view is a justified vote change and is never attributed.
+    /// address and tagged with the view the offender signed into the attestation. A second
+    /// attestation from the same signer at the same height in the same signed view for a
+    /// different block is turned into attributable evidence a block can carry. A conflicting
+    /// attestation in a higher signed view is a justified vote change and is never attributed.
     fn watch_for_equivocation(&mut self, attestation: &Attestation) {
         let Some(offender) = self
             .base_roster
@@ -1234,7 +1234,7 @@ impl DevNode {
         else {
             return;
         };
-        let view = self.view;
+        let view = attestation.view;
         self.evidence_pool.observe(
             &offender,
             attestation.height,
