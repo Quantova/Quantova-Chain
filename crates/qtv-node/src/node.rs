@@ -1326,6 +1326,8 @@ mod tests {
                 access: qtv_vm::container::StateAccess {
                     reads: vec![],
                     writes: vec![0],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
                 },
             }],
         );
@@ -1781,6 +1783,8 @@ mod tests {
                 access: qtv_vm::container::StateAccess {
                     reads: vec![0],
                     writes: vec![0],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
                 },
             }],
         );
@@ -1833,6 +1837,8 @@ mod tests {
                 access: qtv_vm::container::StateAccess {
                     reads: vec![],
                     writes: vec![],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
                 },
             }],
         );
@@ -2641,6 +2647,8 @@ mod tests {
                 access: qtv_vm::container::StateAccess {
                     reads: vec![],
                     writes: vec![0],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
                 },
             }],
         );

@@ -1867,6 +1867,8 @@ mod stake_state_tests {
                 access: qtv_vm::container::StateAccess {
                     reads: vec![],
                     writes: vec![0],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
                 },
             }],
         );
@@ -1902,6 +1904,8 @@ mod stake_state_tests {
                 access: qtv_vm::container::StateAccess {
                     reads: vec![],
                     writes: vec![0, 1],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
                 },
             }],
         );
