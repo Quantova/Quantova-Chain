@@ -1,5 +1,7 @@
-# Cross repo pins. One git dependency per line, repository then tag.
+# Cross repo pins. One git dependency per line, repository then tag or the exact commit it pins.
+# qtv-crypto is the signing edge, so it is anchored to an immutable commit rather than the movable
+# v0.3.0 tag, which is the commit that tag resolved to and the same rev the SDKs pin.
 QRC-CONSENSUS  v0.5.0
 q-prover       v0.8.0
-Q-Crypto       v0.3.0
+Q-Crypto       4c0bdcb7dce9d2de6f9f510b0695377321076fef
 QVM            v0.3.0
