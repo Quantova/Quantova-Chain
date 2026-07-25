@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! An over bound block finalizes end to end over the coded dissemination path.
 //!
 //! An over bound block is one whose body exceeds the one mebibyte qtv-net record

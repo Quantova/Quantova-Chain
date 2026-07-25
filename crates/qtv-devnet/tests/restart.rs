@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! A node restarted from its store reloads its finalized chain and rejoins.
 
 mod support;

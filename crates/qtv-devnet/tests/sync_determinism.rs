@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Determinism of catch up sync: the same schedule gives the same synced chain,
 //! byte for byte, across independent runs.
 

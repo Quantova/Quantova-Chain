@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Equivocation evidence carried in a block slashes the offender as a deterministic in
 //! block state transition, verified against the attestation key held in state, so every
 //! node that executes the block reaches the same slash.

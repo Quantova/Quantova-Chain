@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Quantova Inc
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
 #
 # Deploy and run the Quantova wide area finality harness across real hosts.
 #

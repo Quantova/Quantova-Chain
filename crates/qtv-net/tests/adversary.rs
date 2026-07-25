@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The handshake rejects a tampered transcript, a wrong identity signature, and
 //! a man in the middle, and the channel tears down on a tampered record.
 

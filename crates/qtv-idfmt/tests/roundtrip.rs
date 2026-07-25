@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Round trip and rejection coverage for every identifier family.
 
 use qtv_idfmt::{

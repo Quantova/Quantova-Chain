@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Consensus reaches finality over a bounded gossip overlay, not a full mesh, and
 //! the finalized chain is byte identical to the one the same script produces over a
 //! full mesh. A bounded neighbor count is enough: every proposal and attestation

@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The block leader carries the equivocation it attributed into the block it produces, so
 //! every node that executes the block slashes the offender from the block alone.
 

@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The view change is deterministic over the logical clock. A round that routes
 //! around a silent first leader, and so finalizes through a view change and its
 //! justification rather than at view zero, replays to the identical finalized

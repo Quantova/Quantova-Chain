@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 
 use qtv_attest::{Attestation, Block, Certificate, Envelope, Parent};
 use qtv_block::{Block as ChainBlock, Header};

@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! A running multi node devnet rotates its one time sortition keys at each epoch
 //! boundary and finalises on past the point a single fixed tree would have run out.
 

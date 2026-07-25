@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 
 use std::io::{BufRead, BufReader, Read, Result as IoResult, Write};
 use std::net::{TcpListener, TcpStream};

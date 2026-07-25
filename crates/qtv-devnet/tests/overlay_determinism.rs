@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Determinism over the overlay. The same logical schedule over the same bounded
 //! overlay gives the same finalized chain and the same state every run, so a run
 //! replays identically rather than racing.

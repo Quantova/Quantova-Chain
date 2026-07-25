@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Peer discovery from bootstrap. A node that starts from a single bootstrap peer
 //! discovers the whole network over authenticated qtv-net channels, learning peers
 //! it never bootstrapped from through the exchange.

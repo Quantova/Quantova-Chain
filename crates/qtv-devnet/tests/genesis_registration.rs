@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Genesis assembled from independently generated registrations. Each node draws its
 //! own secret into its own keystore, publishes only its public registration, and the
 //! committee forms and finalises from those published registrations. No node holds or

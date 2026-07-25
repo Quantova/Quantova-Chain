@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! A measurement of the state root update cost.
 //!
 //! It times a full recompute over the whole trie at several sizes, then times an

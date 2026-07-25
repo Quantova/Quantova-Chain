@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 
 #[cfg(any(test, feature = "test-fixtures"))]
 use std::collections::BTreeMap;

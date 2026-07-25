@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Integration tests for the node state transition and finalization loop. They
 //! exercise execution, multi height finalization, rejection, an offline
 //! validator, and determinism end to end over the composed stack.

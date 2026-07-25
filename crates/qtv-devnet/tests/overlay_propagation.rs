@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! A transaction, a proposal, and an attestation each propagate from one origin to
 //! every node through the bounded overlay, reaching nodes that are not direct
 //! neighbors of the origin, rather than over a direct link to each.

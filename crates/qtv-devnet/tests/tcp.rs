@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The devnet runs over real localhost TCP channels, not only the in memory
 //! duplex, and still reaches the same finalized block on every node.
 

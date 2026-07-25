@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! De duplication and loop freedom over the overlay. In a ring a message reaches a
 //! far node by two paths, one from each side; the seen record counts it once and
 //! never relays it back, so no attestation is double counted and no relay loop

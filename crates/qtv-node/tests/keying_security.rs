@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Acceptance for the fourth validator key, the ledger bond and reward account, and
 //! for the keystore custody the whole set rests on. The bond account is derived from
 //! the one operator secret by domain separated SHAKE, not from the validator id, so a

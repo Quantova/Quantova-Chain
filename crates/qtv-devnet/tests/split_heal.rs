@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! A network split into two groups, neither a supermajority, finalizes nothing.
 //! When the split heals the nodes converge on one branch and resume finalizing,
 //! and no two nodes ever hold a different finalized block at one height.

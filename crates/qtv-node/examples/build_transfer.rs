@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Build and sign a native transfer and print everything needed to fund the sender at
 //! genesis and submit the transaction over the RPC. It is the same account derivation,
 //! transaction assembly, and module lattice signing the Rust SDK core will do, used

@@ -1,3 +1,6 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Progress under reordered and delayed messages between honest nodes. Records
 //! from different peers arrive at a receiver in a scrambled order, each edge still
 //! in send order, and the nodes still finalize the same chain.

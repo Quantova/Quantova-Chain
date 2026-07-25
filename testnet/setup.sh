@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Quantova Inc
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
 #
 # Bring up a Quantova public testnet node. This generates the faucet wallet, writes the genesis file
 # and the node config, and prints the next steps. The operator holds the faucet seed. It is printed
