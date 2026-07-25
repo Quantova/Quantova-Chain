@@ -207,6 +207,15 @@ pub fn stake_system_address() -> String {
         .expect("a full hash reaches the address floor")
 }
 
+/// A reserved recipient the apply path treats as a fault injection, present only in test
+/// builds. A transfer to it drives a native transition that mutates state and then faults, so
+/// a test can prove the atomic firewall rolls the partial write back.
+#[cfg(test)]
+pub(crate) fn fault_probe_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/native/fault-probe"))
+        .expect("a full hash reaches the address floor")
+}
+
 pub fn stake_claim_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/stake/claim"))
         .expect("a full hash reaches the address floor")
@@ -462,11 +471,11 @@ impl Ledger {
     }
 
     pub fn set_stake_bond(&mut self, id: &[u8; 32], bond: &Bond) {
-        self.trie.insert(stake_bond_key(id), to_bytes(bond));
+        self.write_leaf(stake_bond_key(id), to_bytes(bond));
     }
 
     pub fn clear_stake_bond(&mut self, id: &[u8; 32]) {
-        self.trie.insert(stake_bond_key(id), Vec::new());
+        self.write_leaf(stake_bond_key(id), Vec::new());
     }
 
     pub fn staked_weight(&self, address: &str) -> u64 {
@@ -507,8 +516,7 @@ impl Ledger {
     }
 
     pub fn set_stake_pool(&mut self, amount: u64) {
-        self.trie
-            .insert(stake_singleton_key(STAKE_POOL_TAG), to_bytes(&amount));
+        self.write_leaf(stake_singleton_key(STAKE_POOL_TAG), to_bytes(&amount));
     }
 
     pub fn seed_stake_pool(&mut self, amount: u64) -> (Key, Vec<u8>) {
@@ -524,8 +532,7 @@ impl Ledger {
     }
 
     pub fn set_stake_treasury(&mut self, amount: u64) {
-        self.trie
-            .insert(stake_singleton_key(STAKE_TREASURY_TAG), to_bytes(&amount));
+        self.write_leaf(stake_singleton_key(STAKE_TREASURY_TAG), to_bytes(&amount));
     }
 
     pub fn total_staked(&self) -> u64 {
@@ -536,8 +543,7 @@ impl Ledger {
     }
 
     fn set_total_staked(&mut self, amount: u64) {
-        self.trie
-            .insert(stake_singleton_key(STAKE_TOTAL_TAG), to_bytes(&amount));
+        self.write_leaf(stake_singleton_key(STAKE_TOTAL_TAG), to_bytes(&amount));
     }
 
     fn credit_staked(&mut self, amount: u64) {
@@ -564,8 +570,7 @@ impl Ledger {
     }
 
     fn set_total_supply(&mut self, amount: u64) {
-        self.trie
-            .insert(stake_singleton_key(SUPPLY_TAG), to_bytes(&amount));
+        self.write_leaf(stake_singleton_key(SUPPLY_TAG), to_bytes(&amount));
     }
 
     pub fn credit_supply(&mut self, amount: u64) {
@@ -668,7 +673,7 @@ impl Ledger {
     }
 
     pub fn set_stake_banned(&mut self, id: &[u8; 32]) {
-        self.trie.insert(stake_banned_key(id), vec![1]);
+        self.write_leaf(stake_banned_key(id), vec![1]);
     }
 
     pub fn is_validator_banned(&self, address: &str) -> bool {
@@ -691,7 +696,7 @@ impl Ledger {
 
     pub fn set_validator_attest_key(&mut self, address: &str, attest_pk: &[u8]) {
         if let Some(id) = address_id(address) {
-            self.trie.insert(stake_attest_key(&id), attest_pk.to_vec());
+            self.write_leaf(stake_attest_key(&id), attest_pk.to_vec());
         }
     }
 
@@ -702,7 +707,7 @@ impl Ledger {
     ) -> Option<(Key, Vec<u8>)> {
         let id = address_id(address)?;
         let key = stake_attest_key(&id);
-        self.trie.insert(key, attest_pk.to_vec());
+        self.write_leaf(key, attest_pk.to_vec());
         Some((key, attest_pk.to_vec()))
     }
 
@@ -719,6 +724,7 @@ impl Ledger {
             self.debit_supply(bond.amount);
             self.debit_staked(bond.amount);
             self.clear_stake_bond(&id);
+            self.record_slash_event(address, bond.amount);
         }
         self.clear_stake_rewards(&id);
         true
@@ -729,7 +735,7 @@ impl Ledger {
     }
 
     fn set_gov_blacklisted(&mut self, id: &[u8; 32]) {
-        self.trie.insert(gov_blacklist_key(id), vec![1]);
+        self.write_leaf(gov_blacklist_key(id), vec![1]);
     }
 
     pub fn is_blacklisted(&self, address: &str) -> bool {
@@ -744,11 +750,11 @@ impl Ledger {
     }
 
     fn set_frozen(&mut self, id: &[u8; 32]) {
-        self.trie.insert(gov_freeze_key(id), vec![1]);
+        self.write_leaf(gov_freeze_key(id), vec![1]);
     }
 
     fn clear_frozen(&mut self, id: &[u8; 32]) {
-        self.trie.insert(gov_freeze_key(id), Vec::new());
+        self.write_leaf(gov_freeze_key(id), Vec::new());
     }
 
     pub fn is_frozen(&self, address: &str) -> bool {
@@ -767,8 +773,7 @@ impl Ledger {
     }
 
     pub fn set_guardian_set(&mut self, caucus: &qtv_governance::GuardianSet) {
-        self.trie
-            .insert(stake_singleton_key(GOV_GUARDIAN_TAG), to_bytes(caucus));
+        self.write_leaf(stake_singleton_key(GOV_GUARDIAN_TAG), to_bytes(caucus));
     }
 
     pub fn seed_guardian_set(&mut self, caucus: &qtv_governance::GuardianSet) -> (Key, Vec<u8>) {
@@ -797,13 +802,11 @@ impl Ledger {
     }
 
     fn set_bridge_freeze(&mut self, record: &BridgeFreeze) {
-        self.trie
-            .insert(stake_singleton_key(BRIDGE_FREEZE_TAG), to_bytes(record));
+        self.write_leaf(stake_singleton_key(BRIDGE_FREEZE_TAG), to_bytes(record));
     }
 
     fn clear_bridge_freeze(&mut self) {
-        self.trie
-            .insert(stake_singleton_key(BRIDGE_FREEZE_TAG), Vec::new());
+        self.write_leaf(stake_singleton_key(BRIDGE_FREEZE_TAG), Vec::new());
     }
 
     pub fn bridge_is_frozen(&self) -> bool {
@@ -818,8 +821,7 @@ impl Ledger {
     }
 
     fn set_bridge_last_lift(&mut self, now: u64) {
-        self.trie
-            .insert(stake_singleton_key(BRIDGE_LAST_LIFT_TAG), to_bytes(&now));
+        self.write_leaf(stake_singleton_key(BRIDGE_LAST_LIFT_TAG), to_bytes(&now));
     }
 
     pub fn bridge_pool_vault(&self) -> Option<[u8; 32]> {
@@ -834,8 +836,7 @@ impl Ledger {
     }
 
     fn set_bridge_pool_vault(&mut self, vault: &[u8; 32]) {
-        self.trie
-            .insert(stake_singleton_key(BRIDGE_VAULT_TAG), vault.to_vec());
+        self.write_leaf(stake_singleton_key(BRIDGE_VAULT_TAG), vault.to_vec());
     }
 
     pub fn bridge_gateway(&self) -> Option<[u8; 32]> {
@@ -850,8 +851,7 @@ impl Ledger {
     }
 
     fn set_bridge_gateway(&mut self, gateway: &[u8; 32]) {
-        self.trie
-            .insert(stake_singleton_key(BRIDGE_GATEWAY_TAG), gateway.to_vec());
+        self.write_leaf(stake_singleton_key(BRIDGE_GATEWAY_TAG), gateway.to_vec());
     }
 
     pub fn seed_bridge_gateway(&mut self, gateway: &[u8; 32]) -> (Key, Vec<u8>) {
@@ -977,7 +977,7 @@ impl Ledger {
     }
 
     pub fn set_stake_price(&mut self, rate_micro_usd_per_qtov: u128) {
-        self.trie.insert(
+        self.write_leaf(
             stake_singleton_key(STAKE_PRICE_TAG),
             to_bytes(&rate_micro_usd_per_qtov),
         );
@@ -991,8 +991,7 @@ impl Ledger {
     }
 
     pub fn set_stake_mainnet_start(&mut self, day: u64) {
-        self.trie
-            .insert(stake_singleton_key(STAKE_MAINNET_TAG), to_bytes(&day));
+        self.write_leaf(stake_singleton_key(STAKE_MAINNET_TAG), to_bytes(&day));
     }
 
     pub fn session_meter(&self) -> SessionMeter {
@@ -1003,8 +1002,7 @@ impl Ledger {
     }
 
     pub fn set_session_meter(&mut self, meter: &SessionMeter) {
-        self.trie
-            .insert(stake_singleton_key(STAKE_METER_TAG), to_bytes(meter));
+        self.write_leaf(stake_singleton_key(STAKE_METER_TAG), to_bytes(meter));
     }
 
     fn stake_rewards(&self, id: &[u8; 32]) -> RewardBook {
@@ -1016,11 +1014,11 @@ impl Ledger {
     }
 
     fn set_stake_rewards(&mut self, id: &[u8; 32], book: &RewardBook) {
-        self.trie.insert(stake_rewards_key(id), to_bytes(book));
+        self.write_leaf(stake_rewards_key(id), to_bytes(book));
     }
 
     fn clear_stake_rewards(&mut self, id: &[u8; 32]) {
-        self.trie.insert(stake_rewards_key(id), Vec::new());
+        self.write_leaf(stake_rewards_key(id), Vec::new());
     }
 
     pub fn accrue_reward(&mut self, address: &str, session: Session, now_day: u64) -> u64 {
@@ -1054,6 +1052,9 @@ impl Ledger {
             claimed: 0,
         });
         self.set_stake_rewards(id, &book);
+        if let Some(address) = id_bytes_to_address(id) {
+            self.record_reward_event(&address, paid);
+        }
         paid
     }
 
@@ -1192,7 +1193,7 @@ impl Ledger {
     }
 
     pub fn set_contract_code(&mut self, id: &[u8; 32], code: &[u8]) {
-        self.trie.insert(contract_code_key(id), code.to_vec());
+        self.write_leaf(contract_code_key(id), code.to_vec());
     }
 
     pub fn deploy_contract(&mut self, deployer: &str, nonce: u64, code: &[u8]) -> Option<String> {
@@ -1216,8 +1217,7 @@ impl Ledger {
         id: &[u8; 32],
         storage: &std::collections::BTreeMap<StorageKey, u64>,
     ) {
-        self.trie
-            .insert(contract_store_key(id), encode_storage(storage));
+        self.write_leaf(contract_store_key(id), encode_storage(storage));
     }
 
     pub fn call_contract(
@@ -1316,7 +1316,7 @@ impl Ledger {
             bytes.extend_from_slice(id);
         }
         let key = stake_singleton_key(STAKE_VALIDATORS_TAG);
-        self.trie.insert(key, bytes.clone());
+        self.write_leaf(key, bytes.clone());
         (key, bytes)
     }
 
@@ -1339,8 +1339,7 @@ impl Ledger {
     }
 
     fn set_gov_next_id(&mut self, id: u64) {
-        self.trie
-            .insert(stake_singleton_key(GOV_NEXT_TAG), to_bytes(&id));
+        self.write_leaf(stake_singleton_key(GOV_NEXT_TAG), to_bytes(&id));
     }
 
     pub fn gov_total_locked(&self) -> u128 {
@@ -1351,8 +1350,7 @@ impl Ledger {
     }
 
     fn set_gov_total_locked(&mut self, amount: u128) {
-        self.trie
-            .insert(stake_singleton_key(GOV_LOCKED_TAG), to_bytes(&amount));
+        self.write_leaf(stake_singleton_key(GOV_LOCKED_TAG), to_bytes(&amount));
     }
 
     pub fn gov_referendum(&self, id: u64) -> Option<Referendum> {
@@ -1363,8 +1361,7 @@ impl Ledger {
     }
 
     fn set_gov_referendum(&mut self, id: u64, referendum: &Referendum) {
-        self.trie
-            .insert(gov_referendum_key(id), to_bytes(referendum));
+        self.write_leaf(gov_referendum_key(id), to_bytes(referendum));
     }
 
     fn gov_action(&self, id: u64) -> Option<Action> {
@@ -1375,11 +1372,11 @@ impl Ledger {
     }
 
     fn set_gov_action(&mut self, id: u64, action: &Action) {
-        self.trie.insert(gov_action_key(id), to_bytes(action));
+        self.write_leaf(gov_action_key(id), to_bytes(action));
     }
 
     fn clear_gov_action(&mut self, id: u64) {
-        self.trie.insert(gov_action_key(id), Vec::new());
+        self.write_leaf(gov_action_key(id), Vec::new());
     }
 
     pub fn gov_receipt(&self, id: u64) -> Option<EnactmentReceipt> {
@@ -1390,7 +1387,7 @@ impl Ledger {
     }
 
     fn set_gov_receipt(&mut self, id: u64, receipt: &EnactmentReceipt) {
-        self.trie.insert(gov_receipt_key(id), to_bytes(receipt));
+        self.write_leaf(gov_receipt_key(id), to_bytes(receipt));
     }
 
     pub fn gov_ballot(&self, referendum: u64, voter: &[u8; 32]) -> Option<Ballot> {
@@ -1401,8 +1398,7 @@ impl Ledger {
     }
 
     fn set_gov_ballot(&mut self, referendum: u64, voter: &[u8; 32], ballot: &Ballot) {
-        self.trie
-            .insert(gov_ballot_key(referendum, voter), to_bytes(ballot));
+        self.write_leaf(gov_ballot_key(referendum, voter), to_bytes(ballot));
     }
 
     pub fn gov_lock(&self, voter: &[u8; 32]) -> Option<Lock> {
@@ -1413,11 +1409,11 @@ impl Ledger {
     }
 
     fn set_gov_lock(&mut self, voter: &[u8; 32], lock: &Lock) {
-        self.trie.insert(gov_lock_key(voter), to_bytes(lock));
+        self.write_leaf(gov_lock_key(voter), to_bytes(lock));
     }
 
     fn clear_gov_lock(&mut self, voter: &[u8; 32]) {
-        self.trie.insert(gov_lock_key(voter), Vec::new());
+        self.write_leaf(gov_lock_key(voter), Vec::new());
     }
 
     fn is_protected_account(&self, addr: &[u8]) -> bool {
@@ -1578,6 +1574,7 @@ impl Ledger {
                 account.balance = account.balance.saturating_add(*amount);
                 self.set_account(&addr, &account);
                 self.credit_supply(*amount);
+                self.record_mint_event(&addr, *amount);
                 Ok(())
             }
             Action::Parameter { key, value } => self.apply_parameter(key, value),
@@ -1769,6 +1766,7 @@ impl Ledger {
             },
         );
         self.credit_staked(amount);
+        self.record_bond_event(address, amount, fee);
         true
     }
 
@@ -1785,6 +1783,9 @@ impl Ledger {
         let treasury = self.stake_treasury() + taken;
         self.set_stake_treasury(treasury);
         self.debit_staked(taken);
+        if taken > 0 {
+            self.record_slash_event(address, taken);
+        }
         if let qtv_staking::Fault::Attributable = fault {
             self.clear_stake_bond(&id);
             self.set_stake_banned(&id);
@@ -1832,6 +1833,7 @@ impl Ledger {
         let mut account = self.account(address);
         account.balance += bond.amount;
         self.set_account(address, &account);
+        self.record_unbond_event(address, bond.amount);
         true
     }
 }
@@ -2802,7 +2804,155 @@ mod stake_state_tests {
         assert!(l.is_bridge_gateway(&gateway));
         assert!(!l.is_bridge_gateway(&gov_addr(90)));
     }
+
+    #[test]
+    fn a_bond_records_a_native_bond_event() {
+        let mut l = Ledger::new();
+        let addr = gov_addr(60);
+        fund(&mut l, &addr, 10_000 * 1_000_000);
+        assert!(l.bond_with_fee(&addr, 2_000 * 1_000_000, 500, 0));
+        let events = l.block_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].contract, NATIVE_EVENT_SOURCE);
+        assert_eq!(events[0].selector, EVENT_BOND);
+        let mut decoder = Decoder::new(&events[0].data);
+        assert_eq!(decoder.get_bytes().unwrap(), addr.as_bytes());
+        assert_eq!(decoder.get_u64().unwrap(), 2_000 * 1_000_000);
+        assert_eq!(decoder.get_u64().unwrap(), 500);
+    }
+
+    #[test]
+    fn an_unbond_records_a_native_unbond_event() {
+        let mut l = Ledger::new();
+        let addr = gov_addr(61);
+        fund(&mut l, &addr, 10_000 * 1_000_000);
+        assert!(l.bond_with_fee(&addr, 2_000 * 1_000_000, 0, 0));
+        l.clear_block_events();
+        assert!(l.request_stake_exit(&addr, qtv_staking::BOND_LOCK_DAYS));
+        assert!(l.withdraw_stake(&addr, qtv_staking::EARLIEST_EXIT_DAYS));
+        let events = l.block_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].selector, EVENT_UNBOND);
+        let mut decoder = Decoder::new(&events[0].data);
+        assert_eq!(decoder.get_bytes().unwrap(), addr.as_bytes());
+        assert_eq!(decoder.get_u64().unwrap(), 2_000 * 1_000_000);
+    }
+
+    #[test]
+    fn a_slash_records_a_native_slash_event() {
+        let mut l = Ledger::new();
+        let addr = gov_addr(62);
+        fund(&mut l, &addr, 10_000 * 1_000_000);
+        assert!(l.bond_with_fee(&addr, 2_000 * 1_000_000, 0, 0));
+        l.clear_block_events();
+        assert!(l.slash_validator(&addr));
+        let events = l.block_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].selector, EVENT_SLASH);
+        let mut decoder = Decoder::new(&events[0].data);
+        assert_eq!(decoder.get_bytes().unwrap(), addr.as_bytes());
+        assert_eq!(decoder.get_u64().unwrap(), 2_000 * 1_000_000);
+    }
+
+    #[test]
+    fn a_mint_records_a_native_mint_event() {
+        let mut l = Ledger::new();
+        let target = gov_addr(63);
+        l.execute_action(&Action::Mint {
+            to: [63u8; 32].to_vec(),
+            amount: 5_000,
+        })
+        .unwrap();
+        let events = l.block_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].selector, EVENT_MINT);
+        let mut decoder = Decoder::new(&events[0].data);
+        assert_eq!(decoder.get_bytes().unwrap(), target.as_bytes());
+        assert_eq!(decoder.get_u64().unwrap(), 5_000);
+    }
+
+    #[test]
+    fn a_reward_accrual_records_a_native_reward_event() {
+        let mut l = Ledger::new();
+        let addr = gov_addr(64);
+        fund(&mut l, &addr, 10_000 * 1_000_000);
+        assert!(l.bond_with_fee(&addr, 2_000 * 1_000_000, 0, 0));
+        l.set_stake_mainnet_start(0);
+        l.set_stake_price(1);
+        l.set_stake_pool(1_000_000 * 1_000_000);
+        l.clear_block_events();
+        let paid = l.accrue_reward(&addr, qtv_staking::Session::Low, 400);
+        assert!(paid > 0);
+        let events = l.block_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].selector, EVENT_REWARD);
+        let mut decoder = Decoder::new(&events[0].data);
+        assert_eq!(decoder.get_bytes().unwrap(), addr.as_bytes());
+        assert_eq!(decoder.get_u64().unwrap(), paid);
+    }
+
+    #[test]
+    fn apply_atomic_rolls_back_every_write_and_event_when_a_transition_faults() {
+        let mut l = Ledger::new();
+        let addr = gov_addr(70);
+        fund(&mut l, &addr, 1_000);
+        let root_before = l.state_root();
+
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let applied = l.apply_atomic(|l| {
+            let mut account = l.account(&addr);
+            account.balance = 42;
+            l.set_account(&addr, &account);
+            l.record_transfer_event(&addr, &addr, 1, 0);
+            panic!("a fault partway through the transition");
+        });
+        std::panic::set_hook(previous);
+
+        assert!(!applied, "a faulted transition does not apply");
+        assert_eq!(l.balance(&addr), 1_000, "the balance is exactly as it began");
+        assert_eq!(l.state_root(), root_before, "the state root is unmoved");
+        assert!(l.block_events().is_empty(), "the faulted transition left no event");
+    }
+
+    #[test]
+    fn apply_atomic_keeps_the_writes_of_a_transition_that_completes() {
+        let mut l = Ledger::new();
+        let addr = gov_addr(71);
+        fund(&mut l, &addr, 1_000);
+        let applied = l.apply_atomic(|l| {
+            let mut account = l.account(&addr);
+            account.balance = 42;
+            l.set_account(&addr, &account);
+            l.record_transfer_event(&addr, &addr, 5, 0);
+            true
+        });
+        assert!(applied, "a completed transition applies");
+        assert_eq!(l.balance(&addr), 42, "the write stands");
+        assert_eq!(l.block_events().len(), 1, "the event stands");
+    }
 }
+
+/// The source marker a native economic event carries in the block event log. Contract
+/// effects carry their contract address in this field, so a native transition carries this
+/// reserved marker instead and an indexer separates the native economy from contract
+/// effects by it, then reads the kind from the selector. Native events record into the same
+/// log the contract effects use, so the header event root covers the native economy with no
+/// change to the event root function.
+pub const NATIVE_EVENT_SOURCE: &str = "qtv/native";
+
+/// A plain value send that moved an amount and paid a fee.
+pub const EVENT_TRANSFER: [u8; 4] = *b"QXFR";
+/// A stake bond that locked an amount into a validator bond.
+pub const EVENT_BOND: [u8; 4] = *b"QBND";
+/// A stake unbond that returned a withdrawn bond to a spendable balance.
+pub const EVENT_UNBOND: [u8; 4] = *b"QUBD";
+/// A slash that removed an amount from a validator bond.
+pub const EVENT_SLASH: [u8; 4] = *b"QSLH";
+/// A mint that raised the supply and credited a target.
+pub const EVENT_MINT: [u8; 4] = *b"QMNT";
+/// A staking reward the pool paid out to a validator.
+pub const EVENT_REWARD: [u8; 4] = *b"QRWD";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockEvent {
@@ -2819,6 +2969,18 @@ impl BlockEvent {
         encoder.put_bytes(&self.data);
         encoder.into_bytes()
     }
+
+    /// A native economic event, shaped exactly like a contract effect event so the existing
+    /// event root function covers it unchanged. The reserved native source stands in for the
+    /// contract address, the kind selector names the transition, and the data holds the
+    /// parties and amount.
+    pub fn native(kind: [u8; 4], data: Vec<u8>) -> Self {
+        BlockEvent {
+            contract: NATIVE_EVENT_SOURCE.to_string(),
+            selector: kind,
+            data,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2826,6 +2988,11 @@ pub struct Ledger {
     trie: Trie,
     block_events: Vec<BlockEvent>,
     round_proposer: Option<String>,
+    // An undo log of prior leaf images, present only while a transition applies under
+    // apply_atomic. Every leaf write records its prior value here so a fault partway through
+    // a transition rolls the leaves back to the pre transition image. It is an internal
+    // mechanism only and never enters the state root, the block encoding, or the wire.
+    journal: Option<Vec<(Key, Option<Vec<u8>>)>>,
 }
 
 impl Ledger {
@@ -2834,6 +3001,7 @@ impl Ledger {
             trie: Trie::new(),
             block_events: Vec::new(),
             round_proposer: None,
+            journal: None,
         }
     }
 
@@ -2843,6 +3011,64 @@ impl Ledger {
             trie,
             block_events: Vec::new(),
             round_proposer: None,
+            journal: None,
+        }
+    }
+
+    /// Write a leaf, recording its prior image in the undo log when a transition is applying
+    /// under apply_atomic. Every leaf mutation in the native path funnels through here so a
+    /// faulted transition can be rolled back to exactly the state it began in.
+    fn write_leaf(&mut self, key: Key, value: Vec<u8>) {
+        if self.journal.is_some() {
+            let prior = self.trie.get(&key).map(|bytes| bytes.to_vec());
+            self.journal.as_mut().expect("the journal is present").push((key, prior));
+        }
+        let trie = &mut self.trie;
+        trie.insert(key, value);
+    }
+
+    /// Erase a leaf, recording its prior image in the undo log when a transition is applying
+    /// under apply_atomic. Returns whether a leaf was present, matching the trie.
+    fn erase_leaf(&mut self, key: &Key) -> bool {
+        if self.journal.is_some() {
+            let prior = self.trie.get(key).map(|bytes| bytes.to_vec());
+            self.journal.as_mut().expect("the journal is present").push((*key, prior));
+        }
+        let trie = &mut self.trie;
+        trie.remove(key)
+    }
+
+    /// Apply a native transition as an all or nothing unit. A panic partway through leaves no
+    /// partial write: the undo log restores every touched leaf to its pre transition image and
+    /// any events the transition recorded are dropped, matching the atomic rollback the VM
+    /// path already has for a faulted call. A clean rejection returns false with no writes,
+    /// exactly as the hand ordered check before write path already intends. This is an
+    /// internal firewall only and moves neither the state root nor the block encoding.
+    pub(crate) fn apply_atomic<F>(&mut self, f: F) -> bool
+    where
+        F: FnOnce(&mut Ledger) -> bool,
+    {
+        let events_mark = self.block_events.len();
+        let restore = self.journal.take();
+        self.journal = Some(Vec::new());
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        let unwound = self.journal.take().unwrap_or_default();
+        self.journal = restore;
+        match outcome {
+            Ok(applied) => applied,
+            Err(_) => {
+                let trie = &mut self.trie;
+                for (key, prior) in unwound.into_iter().rev() {
+                    match prior {
+                        Some(bytes) => trie.insert(key, bytes),
+                        None => {
+                            trie.remove(&key);
+                        }
+                    }
+                }
+                self.block_events.truncate(events_mark);
+                false
+            }
         }
     }
 
@@ -2854,6 +3080,57 @@ impl Ledger {
         &self.block_events
     }
 
+    fn record_native_event(&mut self, kind: [u8; 4], data: Vec<u8>) {
+        self.block_events.push(BlockEvent::native(kind, data));
+    }
+
+    /// Record a plain value send into the block event log. The apply path drives this at the
+    /// point a transfer moves an amount, so the header event root follows every native send.
+    pub(crate) fn record_transfer_event(&mut self, from: &str, to: &str, amount: u64, fee: u64) {
+        let mut encoder = Encoder::new();
+        encoder.put_bytes(from.as_bytes());
+        encoder.put_bytes(to.as_bytes());
+        encoder.put_u64(amount);
+        encoder.put_u64(fee);
+        self.record_native_event(EVENT_TRANSFER, encoder.into_bytes());
+    }
+
+    fn record_bond_event(&mut self, address: &str, amount: u64, fee: u64) {
+        let mut encoder = Encoder::new();
+        encoder.put_bytes(address.as_bytes());
+        encoder.put_u64(amount);
+        encoder.put_u64(fee);
+        self.record_native_event(EVENT_BOND, encoder.into_bytes());
+    }
+
+    fn record_unbond_event(&mut self, address: &str, amount: u64) {
+        let mut encoder = Encoder::new();
+        encoder.put_bytes(address.as_bytes());
+        encoder.put_u64(amount);
+        self.record_native_event(EVENT_UNBOND, encoder.into_bytes());
+    }
+
+    fn record_slash_event(&mut self, address: &str, amount: u64) {
+        let mut encoder = Encoder::new();
+        encoder.put_bytes(address.as_bytes());
+        encoder.put_u64(amount);
+        self.record_native_event(EVENT_SLASH, encoder.into_bytes());
+    }
+
+    fn record_mint_event(&mut self, to: &str, amount: u64) {
+        let mut encoder = Encoder::new();
+        encoder.put_bytes(to.as_bytes());
+        encoder.put_u64(amount);
+        self.record_native_event(EVENT_MINT, encoder.into_bytes());
+    }
+
+    fn record_reward_event(&mut self, address: &str, amount: u64) {
+        let mut encoder = Encoder::new();
+        encoder.put_bytes(address.as_bytes());
+        encoder.put_u64(amount);
+        self.record_native_event(EVENT_REWARD, encoder.into_bytes());
+    }
+
     pub fn account(&self, address: &str) -> Account {
         match self.trie.get(&state_key(address)) {
             Some(bytes) => from_bytes(bytes).unwrap_or_default(),
@@ -2862,7 +3139,7 @@ impl Ledger {
     }
 
     pub fn set_account(&mut self, address: &str, account: &Account) {
-        self.trie.insert(state_key(address), to_bytes(account));
+        self.write_leaf(state_key(address), to_bytes(account));
     }
 
     pub(crate) fn leaves(&self) -> &std::collections::BTreeMap<Key, Vec<u8>> {
@@ -2870,7 +3147,7 @@ impl Ledger {
     }
 
     pub(crate) fn insert_raw(&mut self, key: Key, bytes: Vec<u8>) {
-        self.trie.insert(key, bytes);
+        self.write_leaf(key, bytes);
     }
 
     pub fn balance(&self, address: &str) -> u64 {
@@ -2957,11 +3234,11 @@ impl Ledger {
                 return false;
             }
         }
-        let mut freed = self.trie.remove(&state_key(address));
+        let mut freed = self.erase_leaf(&state_key(address));
         if let Some(id) = address_id(address) {
             if self.contract_code(&id).is_some() {
-                freed |= self.trie.remove(&contract_code_key(&id));
-                freed |= self.trie.remove(&contract_store_key(&id));
+                freed |= self.erase_leaf(&contract_code_key(&id));
+                freed |= self.erase_leaf(&contract_store_key(&id));
             }
         }
         freed
