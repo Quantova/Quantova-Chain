@@ -50,8 +50,8 @@ fn the_leader_carries_attributed_evidence_into_the_block_it_produces() {
     let height = leader.height();
     let block_a = Block::new(height, [1u8; 32], Parent::Genesis);
     let block_b = Block::new(height, [2u8; 32], Parent::Genesis);
-    leader.on_attestation(attester.attest(height, 1, block_a, &beacon));
-    leader.on_attestation(attester.attest(height, 1, block_b, &beacon));
+    leader.on_attestation(attester.attest(height, 1, 0, block_a, &beacon));
+    leader.on_attestation(attester.attest(height, 1, 0, block_b, &beacon));
 
     let selection = leader.select().expect("a committee forms from the reveals");
     let proposal = leader.build_proposal(&selection);
