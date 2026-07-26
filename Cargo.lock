@@ -203,6 +203,7 @@ dependencies = [
  "qtv-codec",
  "qtv-crypto",
  "qtv-idfmt",
+ "zeroize",
 ]
 
 [[package]]
