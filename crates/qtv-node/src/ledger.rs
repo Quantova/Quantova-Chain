@@ -1849,7 +1849,7 @@ impl Ledger {
         self.write_leaf(gov_lock_key(voter), Vec::new());
     }
 
-    fn is_protected_account(&self, addr: &[u8]) -> bool {
+    pub(crate) fn is_protected_account(&self, addr: &[u8]) -> bool {
         let id = match id_from_slice(addr) {
             Some(id) => id,
             None => return false,

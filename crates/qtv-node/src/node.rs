@@ -563,6 +563,9 @@ pub(crate) fn guardian_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_id: 
             if act.bound != ledger.guardian_freeze_epoch() {
                 return false;
             }
+            if act.targets.iter().any(|target| ledger.is_protected_account(target)) {
+                return false;
+            }
         }
         GUARDIAN_UNFREEZE => match ledger.bridge_freeze() {
             Some(freeze) if freeze.until == act.bound => {}
@@ -3220,6 +3223,50 @@ mod tests {
         let calls = GUARDIAN_VERIFY_CALLS.with(|c| c.get());
         assert!(approvers.is_empty(), "garbage signatures authorize no member");
         assert!(calls <= 1, "ran {calls} verifies for a single repeated member id");
+    }
+
+    #[test]
+    fn the_mempool_gate_refuses_a_freeze_aimed_at_a_protected_account() {
+        let fee = FeeParams::devnet();
+        let chain = fee.chain_id;
+        let mut ledger = Ledger::new();
+        let g1 = keypair(270);
+        let g2 = keypair(271);
+        let relayer = keypair(272);
+        ledger.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![address_bytes(&g1.address()), address_bytes(&g2.address()), [9u8; 32]],
+            2,
+        ));
+
+        let bonded = keypair(273);
+        ledger.seed_validator_bond(&bonded.address(), 5_000 * 1_000_000);
+        let protected_id = address_bytes(&bonded.address());
+
+        let barred = system_tx(
+            &relayer,
+            &crate::ledger::bridge_guardian_address(),
+            guardian_act_bytes(GUARDIAN_FREEZE, 0, vec![protected_id], &[&g1, &g2], chain),
+            0,
+            TRANSFER_METER,
+            &fee,
+        );
+        assert!(
+            !guardian_admissible(&ledger, &barred, chain),
+            "a freeze aimed at a protected account is refused at admission"
+        );
+
+        let plain = system_tx(
+            &relayer,
+            &crate::ledger::bridge_guardian_address(),
+            guardian_act_bytes(GUARDIAN_FREEZE, 0, vec![[0x4Du8; 32]], &[&g1, &g2], chain),
+            0,
+            TRANSFER_METER,
+            &fee,
+        );
+        assert!(
+            guardian_admissible(&ledger, &plain, chain),
+            "a freeze aimed at an ordinary account is still admitted"
+        );
     }
 
     #[test]
