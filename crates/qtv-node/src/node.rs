@@ -88,6 +88,7 @@ pub struct Genesis {
     pub validators: Vec<ValidatorSpec>,
     pub genesis_time: u64,
     pub guardians: qtv_governance::GuardianSet,
+    pub bridge_dest_chain: Option<u32>,
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -1182,6 +1183,9 @@ impl Node {
         ledger.seed_grants_account();
         if !genesis.guardians.members.is_empty() {
             ledger.seed_guardian_set(&genesis.guardians);
+        }
+        if let Some(dest_chain) = genesis.bridge_dest_chain {
+            ledger.seed_bridge_dest_chain(dest_chain);
         }
 
         let validators: Vec<ConsensusValidator> = genesis
@@ -3600,6 +3604,46 @@ mod tests {
         assert_eq!(ledger.bridged_supply(&asset), 0, "no supply was minted over the cap");
         assert_eq!(ledger.bridged_balance(&asset, &recipient_id), 0);
         assert!(!ledger.bridge_reference_seen(&[0x33; 32]), "a refused mint leaves the reference unseen");
+    }
+
+    #[test]
+    fn an_unset_bridge_dest_chain_refuses_a_mint_until_it_is_bound() {
+        let fee = FeeParams::devnet();
+        let relayer = keypair(450);
+        let recipient_id = address_bytes(&keypair(451).address());
+        let asset = [7u8; 16];
+
+        let (pk0, sk0) = bridge_operator(1);
+        let (pk1, sk1) = bridge_operator(2);
+        let mut unset = Ledger::new();
+        unset.seed_bridge_operator_set(&crate::bridge::OperatorSet::new(
+            vec![(0, pk0.to_vec()), (1, pk1.to_vec())],
+            2,
+        ));
+        unset.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+        let fact = deposit_fact(recipient_id, asset, 100_000, [0x71; 32]);
+        let artifact = crate::bridge::MintArtifact {
+            attestation: crate::bridge::Attestation {
+                fact: fact.clone(),
+                signatures: vec![
+                    crate::bridge::SignerSig { operator_id: 0, signature: attest(&sk0, &fact) },
+                    crate::bridge::SignerSig { operator_id: 1, signature: attest(&sk1, &fact) },
+                ],
+            },
+            stark: None,
+        };
+
+        assert!(unset.bridge_dest_chain().is_none());
+        assert!(!bridge_mint_admissible(&unset, &mint_tx(&relayer, &artifact, &fee), BRIDGE_CHAIN_ID));
+        assert!(execute_ordered(&mut unset, &[mint_tx(&relayer, &artifact, &fee)], &fee, 0).is_empty());
+        assert_eq!(unset.bridged_supply(&asset), 0, "an unbound destination chain mints nothing");
+
+        let mut bound = unset.clone();
+        bound.seed_bridge_dest_chain(BRIDGE_DEST);
+        assert_eq!(bound.bridge_dest_chain(), Some(BRIDGE_DEST));
+        assert!(bridge_mint_admissible(&bound, &mint_tx(&relayer, &artifact, &fee), BRIDGE_CHAIN_ID));
+        assert_eq!(execute_ordered(&mut bound, &[mint_tx(&relayer, &artifact, &fee)], &fee, 0).len(), 1);
+        assert_eq!(bound.bridged_balance(&asset, &recipient_id), 100_000, "the bound destination chain binds the mint");
     }
 
     #[test]
