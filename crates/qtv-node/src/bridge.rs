@@ -309,10 +309,32 @@ impl MintArtifact {
     }
 }
 
+pub const POP_DOMAIN: &[u8] = b"QUANTOVA/Q-ORACLE/OPERATOR-POP/v1";
+
+pub fn operator_pop_challenge(operator_id: u32, public_key: &[u8]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(4 + public_key.len());
+    message.extend_from_slice(&operator_id.to_le_bytes());
+    message.extend_from_slice(public_key);
+    message
+}
+
+pub fn operator_pop_ok(operator_id: u32, public_key: &[u8], pop: &[u8]) -> bool {
+    let pk: &[u8; PUBLIC_KEY_BYTES] = match public_key.try_into() {
+        Ok(pk) => pk,
+        Err(_) => return false,
+    };
+    let sig: &[u8; SIGNATURE_BYTES] = match pop.try_into() {
+        Ok(sig) => sig,
+        Err(_) => return false,
+    };
+    ml_dsa::verify(pk, &operator_pop_challenge(operator_id, public_key), sig, POP_DOMAIN)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OperatorSet {
     pub operators: Vec<(u32, Vec<u8>)>,
     pub threshold: u32,
+    pub revoked: Vec<u32>,
 }
 
 impl OperatorSet {
@@ -320,10 +342,27 @@ impl OperatorSet {
         OperatorSet {
             operators,
             threshold,
+            revoked: Vec::new(),
         }
     }
 
+    pub fn is_revoked(&self, operator_id: u32) -> bool {
+        self.revoked.contains(&operator_id)
+    }
+
+    pub fn revoke(&mut self, operator_id: u32) -> bool {
+        let known = self.operators.iter().any(|(id, _)| *id == operator_id);
+        if !known || self.is_revoked(operator_id) {
+            return false;
+        }
+        self.revoked.push(operator_id);
+        true
+    }
+
     fn public_key(&self, operator_id: u32) -> Option<&[u8]> {
+        if self.is_revoked(operator_id) {
+            return None;
+        }
         self.operators
             .iter()
             .find(|(id, _)| *id == operator_id)
@@ -339,6 +378,10 @@ impl Encode for OperatorSet {
             key.encode(encoder);
         }
         self.threshold.encode(encoder);
+        (self.revoked.len() as u32).encode(encoder);
+        for id in &self.revoked {
+            id.encode(encoder);
+        }
     }
 }
 
@@ -352,9 +395,15 @@ impl Decode for OperatorSet {
             operators.push((id, key));
         }
         let threshold = u32::decode(decoder)?;
+        let revoked_count = u32::decode(decoder)? as usize;
+        let mut revoked = Vec::with_capacity(revoked_count.min(4096));
+        for _ in 0..revoked_count {
+            revoked.push(u32::decode(decoder)?);
+        }
         Ok(OperatorSet {
             operators,
             threshold,
+            revoked,
         })
     }
 }
@@ -746,6 +795,64 @@ mod tests {
         let set = OperatorSet::new(vec![(0, vec![1, 2, 3]), (5, vec![9, 9])], 2);
         let bytes = qtv_codec::to_bytes(&set);
         assert_eq!(qtv_codec::from_bytes::<OperatorSet>(&bytes).unwrap(), set);
+
+        let mut revoked = OperatorSet::new(vec![(0, vec![1, 2, 3]), (5, vec![9, 9])], 2);
+        assert!(revoked.revoke(5));
+        assert!(!revoked.revoke(5), "a second revocation of the same id is a no op");
+        assert!(!revoked.revoke(7), "an unknown id cannot be revoked");
+        let bytes = qtv_codec::to_bytes(&revoked);
+        assert_eq!(qtv_codec::from_bytes::<OperatorSet>(&bytes).unwrap(), revoked);
+    }
+
+    #[test]
+    fn an_operator_pop_binds_the_key_to_its_id() {
+        let (pk, sk) = operator(30);
+        let pop = ml_dsa::sign(&sk, &operator_pop_challenge(4, &pk), POP_DOMAIN, &[0u8; 32])
+            .expect("the pop challenge stays within the length bound")
+            .to_vec();
+        assert!(operator_pop_ok(4, &pk, &pop));
+        assert!(!operator_pop_ok(5, &pk, &pop), "the pop is bound to the operator id it signed");
+        let (other_pk, _other_sk) = operator(31);
+        assert!(!operator_pop_ok(4, &other_pk, &pop), "the pop is bound to its own public key");
+        assert!(!operator_pop_ok(4, &pk, &[0u8; SIGNATURE_BYTES]), "a forged pop never verifies");
+    }
+
+    #[test]
+    fn a_revoked_operator_no_longer_counts_toward_quorum() {
+        let fact = sample_fact();
+        let (pk0, sk0) = operator(40);
+        let (pk1, sk1) = operator(41);
+        let (pk2, sk2) = operator(42);
+        let mut set = OperatorSet::new(
+            vec![(0, pk0.to_vec()), (1, pk1.to_vec()), (2, pk2.to_vec())],
+            2,
+        );
+        let attestation = Attestation {
+            fact: fact.clone(),
+            signatures: vec![
+                SignerSig { operator_id: 0, signature: sign_fact(&sk0, &fact) },
+                SignerSig { operator_id: 1, signature: sign_fact(&sk1, &fact) },
+            ],
+        };
+        assert!(quorum_attests(&set, &attestation, fact.dest_chain));
+
+        assert!(set.revoke(1));
+        assert!(
+            !quorum_attests(&set, &attestation, fact.dest_chain),
+            "a revoked key drops below the threshold"
+        );
+
+        let healed = Attestation {
+            fact: fact.clone(),
+            signatures: vec![
+                SignerSig { operator_id: 0, signature: sign_fact(&sk0, &fact) },
+                SignerSig { operator_id: 2, signature: sign_fact(&sk2, &fact) },
+            ],
+        };
+        assert!(
+            quorum_attests(&set, &healed, fact.dest_chain),
+            "the remaining live keys still reach the threshold"
+        );
     }
 
     #[test]
