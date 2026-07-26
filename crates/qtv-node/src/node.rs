@@ -548,6 +548,9 @@ pub(crate) fn guardian_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_id: 
             if act.targets.is_empty() {
                 return false;
             }
+            if act.bound != ledger.guardian_freeze_epoch() {
+                return false;
+            }
         }
         GUARDIAN_UNFREEZE => match ledger.bridge_freeze() {
             Some(freeze) if freeze.until == act.bound => {}
@@ -574,7 +577,7 @@ fn dispatch_bridge_guardian(
     };
     let approvers = guardian_approvers(&set, &act, chain_id);
     match act.op {
-        GUARDIAN_FREEZE => ledger.guardian_freeze(&act.targets, &approvers),
+        GUARDIAN_FREEZE => ledger.guardian_freeze(act.bound, &act.targets, &approvers),
         GUARDIAN_UNFREEZE => match ledger.bridge_freeze() {
             Some(freeze) if freeze.until == act.bound => {
                 ledger.guardian_bridge_unfreeze(&approvers, now)
