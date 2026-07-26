@@ -352,6 +352,7 @@ const GOV_LOCK_TAG: &[u8] = b"qtv/gov/lock/";
 const GOV_BLACKLIST_TAG: &[u8] = b"qtv/gov/blacklist/";
 const GOV_FREEZE_TAG: &[u8] = b"qtv/gov/freeze/";
 const GOV_GUARDIAN_TAG: &[u8] = b"qtv/gov/guardians";
+const GOV_GUARDIAN_EPOCH_TAG: &[u8] = b"qtv/gov/guardian/epoch";
 const GOV_RECEIPT_TAG: &[u8] = b"qtv/gov/receipt/";
 
 const BRIDGE_FREEZE_TAG: &[u8] = b"qtv/bridge/freeze";
@@ -906,8 +907,23 @@ impl Ledger {
         (stake_singleton_key(GOV_GUARDIAN_TAG), to_bytes(caucus))
     }
 
-    pub fn guardian_freeze(&mut self, targets: &[[u8; 32]], approvers: &[[u8; 32]]) -> bool {
+    pub fn guardian_freeze_epoch(&self) -> u64 {
+        self.trie
+            .get(&stake_singleton_key(GOV_GUARDIAN_EPOCH_TAG))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical guardian freeze epoch"))
+            .unwrap_or(0)
+    }
+
+    fn set_guardian_freeze_epoch(&mut self, epoch: u64) {
+        self.write_leaf(stake_singleton_key(GOV_GUARDIAN_EPOCH_TAG), to_bytes(&epoch));
+    }
+
+    pub fn guardian_freeze(&mut self, bound: u64, targets: &[[u8; 32]], approvers: &[[u8; 32]]) -> bool {
         if targets.is_empty() || !self.guardian_set().authorizes(approvers) {
+            return false;
+        }
+        if bound != self.guardian_freeze_epoch() {
             return false;
         }
         if targets.iter().any(|target| self.is_protected_account(target)) {
@@ -916,6 +932,7 @@ impl Ledger {
         for target in targets {
             self.set_frozen(target);
         }
+        self.set_guardian_freeze_epoch(bound.saturating_add(1));
         true
     }
 
@@ -2673,14 +2690,14 @@ mod stake_state_tests {
         let target_id = [60u8; 32];
         let target = qtv_idfmt::render_address(&target_id).unwrap();
 
-        assert!(!l.guardian_freeze(&[target_id], &[[201u8; 32]]));
+        assert!(!l.guardian_freeze(0, &[target_id], &[[201u8; 32]]));
         assert!(!l.is_frozen(&target));
 
-        assert!(l.guardian_freeze(&[target_id], &[[201u8; 32], [202u8; 32]]));
+        assert!(l.guardian_freeze(0, &[target_id], &[[201u8; 32], [202u8; 32]]));
         assert!(l.is_frozen(&target));
 
         let treasury_id = sha3::sha3_256(STAKE_TREASURY_TAG);
-        assert!(!l.guardian_freeze(&[treasury_id], &[[201u8; 32], [202u8; 32]]));
+        assert!(!l.guardian_freeze(1, &[treasury_id], &[[201u8; 32], [202u8; 32]]));
         assert!(!l.is_frozen(&stake_treasury_address()));
 
         let proposer = gov_addr(61);
@@ -2698,6 +2715,53 @@ mod stake_state_tests {
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         l.gov_enact(id, 2 * 86_400 + 1).unwrap();
         assert!(!l.is_frozen(&target), "the full vote reversed the emergency freeze");
+    }
+
+    #[test]
+    fn a_consumed_guardian_freeze_act_cannot_be_replayed_past_a_vote() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![[201u8; 32], [202u8; 32], [203u8; 32]],
+            2,
+        ));
+
+        let target_id = [0x71u8; 32];
+        let target = qtv_idfmt::render_address(&target_id).unwrap();
+
+        assert_eq!(l.guardian_freeze_epoch(), 0);
+        assert!(l.guardian_freeze(0, &[target_id], &[[201u8; 32], [202u8; 32]]));
+        assert!(l.is_frozen(&target));
+        assert_eq!(l.guardian_freeze_epoch(), 1, "the freeze consumes its epoch");
+
+        let proposer = gov_addr(71);
+        fund(&mut l, &proposer, 400_000 * 1_000_000);
+        let voter = gov_addr(72);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+        let id = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BlacklistKill,
+                qtv_governance::Action::Unfreeze { targets: vec![target_id.to_vec()] },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        l.gov_enact(id, 2 * 86_400 + 1).unwrap();
+        assert!(!l.is_frozen(&target), "a vote clears the account freeze");
+
+        assert!(
+            !l.guardian_freeze(0, &[target_id], &[[201u8; 32], [202u8; 32]]),
+            "the consumed act replayed at the old epoch is refused"
+        );
+        assert!(!l.is_frozen(&target), "the replayed act never re-freezes the account");
+
+        assert!(
+            l.guardian_freeze(1, &[target_id], &[[201u8; 32], [202u8; 32]]),
+            "a fresh quorum signing the current epoch can still freeze"
+        );
+        assert!(l.is_frozen(&target));
+        assert_eq!(l.guardian_freeze_epoch(), 2);
     }
 
     #[test]
