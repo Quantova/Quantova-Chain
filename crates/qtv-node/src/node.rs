@@ -3130,6 +3130,49 @@ mod tests {
     }
 
     #[test]
+    fn the_mempool_gate_admits_a_signed_quorum_and_rejects_an_unsigned_act() {
+        let fee = FeeParams::devnet();
+        let chain = fee.chain_id;
+        let mut ledger = Ledger::new();
+        let g1 = keypair(250);
+        let g2 = keypair(251);
+        let relayer = keypair(252);
+        let target_id = [0x6Bu8; 32];
+
+        let signed = system_tx(
+            &relayer,
+            &crate::ledger::bridge_guardian_address(),
+            guardian_act_bytes(GUARDIAN_FREEZE, 0, vec![target_id], &[&g1, &g2], chain),
+            0,
+            TRANSFER_METER,
+            &fee,
+        );
+        assert!(
+            !guardian_admissible(&ledger, &signed, chain),
+            "an unseeded caucus admits nothing"
+        );
+
+        ledger.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![address_bytes(&g1.address()), address_bytes(&g2.address()), [9u8; 32]],
+            2,
+        ));
+        assert!(guardian_admissible(&ledger, &signed, chain));
+
+        let unsigned = system_tx(
+            &relayer,
+            &crate::ledger::bridge_guardian_address(),
+            guardian_act_bytes(GUARDIAN_FREEZE, 0, vec![target_id], &[], chain),
+            0,
+            TRANSFER_METER,
+            &fee,
+        );
+        assert!(
+            !guardian_admissible(&ledger, &unsigned, chain),
+            "an act carrying no approvals never reaches the threshold"
+        );
+    }
+
+    #[test]
     fn a_bridge_freeze_auto_expires_across_blocks_and_refunds_the_bond() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
