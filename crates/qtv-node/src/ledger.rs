@@ -2637,7 +2637,7 @@ mod stake_state_tests {
         }
         assert_eq!(
             qtv_governance::BRIDGE_FREEZE_BOND,
-            1_500_000 * qtv_governance::NATIVE_UNIT
+            390_000 * qtv_governance::NATIVE_UNIT
         );
     }
 
@@ -3226,7 +3226,7 @@ mod stake_state_tests {
             l.bridge_is_frozen(),
             "the freeze halts the bridge in the block it lands"
         );
-        assert_eq!(l.balance(&freezer), 500_000 * 1_000_000, "the bond leaves the caller");
+        assert_eq!(l.balance(&freezer), 1_610_000 * 1_000_000, "the bond leaves the caller");
         assert_eq!(l.balance(&bridge_bond_address()), bond, "the bond rests in the keyless pot");
         let record = l.bridge_freeze().unwrap();
         assert_eq!(record.who, [70u8; 32]);
@@ -3310,7 +3310,7 @@ mod stake_state_tests {
         let mut l = Ledger::new();
         let freezer = gov_addr(75);
         let bond = qtv_governance::BRIDGE_FREEZE_BOND;
-        fund(&mut l, &freezer, 1_500_000 * 1_000_000);
+        fund(&mut l, &freezer, 390_000 * 1_000_000);
         l.set_guardian_set(&qtv_governance::GuardianSet::new(
             vec![[1u8; 32], [2u8; 32], [3u8; 32]],
             2,
@@ -3346,7 +3346,7 @@ mod stake_state_tests {
         l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
         let bond = qtv_governance::BRIDGE_FREEZE_BOND;
         let freezer = gov_addr(83);
-        fund(&mut l, &freezer, 1_500_000 * 1_000_000);
+        fund(&mut l, &freezer, 390_000 * 1_000_000);
         assert!(l.bridge_freeze_with_fee(&freezer, 0, 100));
 
         let proposer = gov_addr(84);
@@ -3357,7 +3357,7 @@ mod stake_state_tests {
         let unseen = l
             .gov_propose(
                 &proposer,
-                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Track::BlacklistKill,
                 qtv_governance::Action::BridgeUnfreeze,
                 0,
             )
@@ -3387,7 +3387,7 @@ mod stake_state_tests {
         let open = l
             .gov_propose(
                 &proposer,
-                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Track::BlacklistKill,
                 qtv_governance::Action::BridgeUnfreeze,
                 0,
             )
