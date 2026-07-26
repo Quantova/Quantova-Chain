@@ -340,7 +340,7 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_evidence(&wrapper) {
-            if !crate::node::evidence_admissible(&wrapper, ledger) {
+            if !crate::node::evidence_admissible(fee_params.chain_id, &wrapper, ledger) {
                 return Err(Reject::BadCall);
             }
         } else {
@@ -395,7 +395,7 @@ impl Mempool {
                 crate::node::governance_admissible(&wrapper, &account, fee_params, verified[index])
                     .is_some()
             } else if crate::node::is_evidence(&wrapper) {
-                crate::node::evidence_admissible(&wrapper, ledger)
+                crate::node::evidence_admissible(fee_params.chain_id, &wrapper, ledger)
             } else {
                 validate_verified(&wrapper, ledger, fee_params, verified[index]).is_ok()
             };
@@ -468,8 +468,8 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = AttBlock::new(1, [1u8; 32], Parent::Genesis);
         let block_b = AttBlock::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, 0, block_a, &beacon);
-        let b = attester.attest(1, 1, 0, block_b, &beacon);
+        let a = attester.attest(params.chain_id, 1, 1, 0, block_a, &beacon);
+        let b = attester.attest(params.chain_id, 1, 1, 0, block_b, &beacon);
         let evidence = crate::evidence::Equivocation {
             offender: offender.clone(),
             height: 1,

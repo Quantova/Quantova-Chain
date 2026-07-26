@@ -50,11 +50,14 @@ fn the_leader_carries_attributed_evidence_into_the_block_it_produces() {
     let attester =
         Attester::from_secret_with_slots(offender_id, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
     let beacon = genesis_beacon();
+    // Sign under the chain the leader runs on, the id the executor rebuilds the preimage with
+    // when it slashes from the carried evidence.
+    let chain_id = cfg.fee_params.chain_id;
     let height = leader.height();
     let block_a = Block::new(height, [1u8; 32], Parent::Genesis);
     let block_b = Block::new(height, [2u8; 32], Parent::Genesis);
-    leader.on_attestation(attester.attest(height, 1, 0, block_a, &beacon));
-    leader.on_attestation(attester.attest(height, 1, 0, block_b, &beacon));
+    leader.on_attestation(attester.attest(chain_id, height, 1, 0, block_a, &beacon));
+    leader.on_attestation(attester.attest(chain_id, height, 1, 0, block_b, &beacon));
 
     let selection = leader.select().expect("a committee forms from the reveals");
     let proposal = leader.build_proposal(&selection);

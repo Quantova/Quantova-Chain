@@ -18,6 +18,11 @@ use qtv_devnet::wire::{certificate_from_bytes, certificate_to_bytes, Message, Pr
 
 use support::{transfer, user};
 
+// A fixed chain id for the self contained round trips. The sign, aggregate and verify sides
+// all rebuild the preimage under the same id, so the certificate that is signed here is the
+// one that verifies here.
+const CHAIN_ID: u64 = 1;
+
 #[test]
 fn a_transaction_message_round_trips() {
     let params = FeeParams::devnet();
@@ -118,7 +123,7 @@ fn an_attestation_message_round_trips_and_still_verifies() {
     let attester = Attester::from_secret(1, &[1u8; 32], 2_000);
     let beacon = Beacon::genesis();
     let block = Block::new(1, [5u8; 32], Parent::Genesis);
-    let attestation = attester.attest(1, 1, 0, block, &beacon);
+    let attestation = attester.attest(CHAIN_ID, 1, 1, 0, block, &beacon);
 
     let bytes = Message::Attest(Box::new(attestation.clone())).encode();
     match Message::decode(&bytes).expect("decodes") {
@@ -133,7 +138,7 @@ fn an_attestation_message_round_trips_and_still_verifies() {
             assert_eq!(decoded.membership.path, attestation.membership.path);
             assert_eq!(decoded.sig, attestation.sig);
             // The signature survives the wire and still verifies under the key.
-            assert!(decoded.signature_verifies(attester.attest_public_key()));
+            assert!(decoded.signature_verifies(CHAIN_ID, attester.attest_public_key()));
         }
         _ => panic!("decoded a different message"),
     }
@@ -187,18 +192,18 @@ fn a_certificate_carrying_block_round_trips_and_still_verifies() {
     let block = Block::new(1, [9u8; 32], Parent::Genesis);
     let commitment = CommitteeCommitment::from_attesters_with_budget(0, &[&a, &b, &c, &d], 4);
     let atts = vec![
-        a.attest(1, 0, 0, block, &beacon),
-        b.attest(1, 0, 0, block, &beacon),
-        c.attest(1, 0, 0, block, &beacon),
+        a.attest(CHAIN_ID, 1, 0, 0, block, &beacon),
+        b.attest(CHAIN_ID, 1, 0, 0, block, &beacon),
+        c.attest(CHAIN_ID, 1, 0, 0, block, &beacon),
     ];
-    let cert = aggregate(1, 0, block, &commitment, &beacon, &atts, 3).expect("quorum");
+    let cert = aggregate(CHAIN_ID, 1, 0, block, &commitment, &beacon, &atts, 3).expect("quorum");
 
     // The certificate slot round trips to the same certificate, and it still
     // verifies from public inputs alone, the check a syncing node runs.
     let cert_bytes = certificate_to_bytes(&cert);
     let decoded = certificate_from_bytes(&cert_bytes).expect("cert decodes");
     assert_eq!(decoded.digest(), cert.digest());
-    assert!(decoded.verify(&commitment, &beacon, 3).is_verified());
+    assert!(decoded.verify(CHAIN_ID, &commitment, &beacon, 3).is_verified());
 
     // A finalized block carrying the certificate round trips through the sync
     // response, header, slot, and body preserved.

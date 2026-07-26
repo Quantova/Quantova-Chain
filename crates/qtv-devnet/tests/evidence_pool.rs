@@ -28,11 +28,14 @@ fn a_running_node_attributes_an_equivocation_from_conflicting_attestations() {
     let secret = qtv_node::keys::fixture_secret(offender_id);
     let offender =
         Attester::from_secret_with_slots(offender_id, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+    // Sign under the chain the node runs on, the same id the on chain verifier rebuilds the
+    // attestation preimage with, so a genuine double vote authenticates.
+    let chain_id = cfg.fee_params.chain_id;
     let beacon = genesis_beacon();
     let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
     let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-    let att_a = offender.attest(1, 1, 0, block_a, &beacon);
-    let att_b = offender.attest(1, 1, 0, block_b, &beacon);
+    let att_a = offender.attest(chain_id, 1, 1, 0, block_a, &beacon);
+    let att_b = offender.attest(chain_id, 1, 1, 0, block_b, &beacon);
 
     node.on_attestation(att_a);
     let evidence = node.pending_evidence();
@@ -42,7 +45,7 @@ fn a_running_node_attributes_an_equivocation_from_conflicting_attestations() {
     let evidence = node.pending_evidence();
     assert_eq!(evidence.len(), 1, "the second conflicting attestation is attributed");
     assert!(
-        evidence[0].attributes(offender.attest_public_key()),
+        evidence[0].attributes(chain_id, offender.attest_public_key()),
         "the attributed evidence authenticates to the offender's key"
     );
 
@@ -60,11 +63,12 @@ fn a_running_node_does_not_attribute_an_honest_cross_view_re_vote() {
     let secret = qtv_node::keys::fixture_secret(offender_id);
     let offender =
         Attester::from_secret_with_slots(offender_id, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+    let chain_id = cfg.fee_params.chain_id;
     let beacon = genesis_beacon();
     let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
     let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-    let att_a = offender.attest(1, 1, 0, block_a, &beacon);
-    let att_b = offender.attest(1, 1, 1, block_b, &beacon);
+    let att_a = offender.attest(chain_id, 1, 1, 0, block_a, &beacon);
+    let att_b = offender.attest(chain_id, 1, 1, 1, block_b, &beacon);
 
     node.on_attestation(att_a);
     assert!(node.pending_evidence().is_empty());
