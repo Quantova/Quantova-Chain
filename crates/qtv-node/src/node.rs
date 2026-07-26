@@ -306,7 +306,7 @@ fn dispatch_governance(
             ledger.gov_vote(&sender, referendum, aye, conviction, stake, now);
         }
         GovOp::Enact(referendum) => {
-            let _ = ledger.gov_enact(referendum, now);
+            let _ = ledger.gov_enact(referendum, now, fee_params.chain_id);
         }
         GovOp::Conclude(referendum) => {
             ledger.gov_conclude(referendum, now);

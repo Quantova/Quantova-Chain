@@ -311,14 +311,15 @@ impl MintArtifact {
 
 pub const POP_DOMAIN: &[u8] = b"QUANTOVA/Q-ORACLE/OPERATOR-POP/v1";
 
-pub fn operator_pop_challenge(operator_id: u32, public_key: &[u8]) -> Vec<u8> {
-    let mut message = Vec::with_capacity(4 + public_key.len());
+pub fn operator_pop_challenge(operator_id: u32, public_key: &[u8], chain_id: u64) -> Vec<u8> {
+    let mut message = Vec::with_capacity(8 + 4 + public_key.len());
+    message.extend_from_slice(&chain_id.to_le_bytes());
     message.extend_from_slice(&operator_id.to_le_bytes());
     message.extend_from_slice(public_key);
     message
 }
 
-pub fn operator_pop_ok(operator_id: u32, public_key: &[u8], pop: &[u8]) -> bool {
+pub fn operator_pop_ok(operator_id: u32, public_key: &[u8], pop: &[u8], chain_id: u64) -> bool {
     let pk: &[u8; PUBLIC_KEY_BYTES] = match public_key.try_into() {
         Ok(pk) => pk,
         Err(_) => return false,
@@ -327,7 +328,7 @@ pub fn operator_pop_ok(operator_id: u32, public_key: &[u8], pop: &[u8]) -> bool 
         Ok(sig) => sig,
         Err(_) => return false,
     };
-    ml_dsa::verify(pk, &operator_pop_challenge(operator_id, public_key), sig, POP_DOMAIN)
+    ml_dsa::verify(pk, &operator_pop_challenge(operator_id, public_key, chain_id), sig, POP_DOMAIN)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -807,14 +808,27 @@ mod tests {
     #[test]
     fn an_operator_pop_binds_the_key_to_its_id() {
         let (pk, sk) = operator(30);
-        let pop = ml_dsa::sign(&sk, &operator_pop_challenge(4, &pk), POP_DOMAIN, &[0u8; 32])
+        let pop = ml_dsa::sign(&sk, &operator_pop_challenge(4, &pk, 7), POP_DOMAIN, &[0u8; 32])
             .expect("the pop challenge stays within the length bound")
             .to_vec();
-        assert!(operator_pop_ok(4, &pk, &pop));
-        assert!(!operator_pop_ok(5, &pk, &pop), "the pop is bound to the operator id it signed");
+        assert!(operator_pop_ok(4, &pk, &pop, 7));
+        assert!(!operator_pop_ok(5, &pk, &pop, 7), "the pop is bound to the operator id it signed");
         let (other_pk, _other_sk) = operator(31);
-        assert!(!operator_pop_ok(4, &other_pk, &pop), "the pop is bound to its own public key");
-        assert!(!operator_pop_ok(4, &pk, &[0u8; SIGNATURE_BYTES]), "a forged pop never verifies");
+        assert!(!operator_pop_ok(4, &other_pk, &pop, 7), "the pop is bound to its own public key");
+        assert!(!operator_pop_ok(4, &pk, &[0u8; SIGNATURE_BYTES], 7), "a forged pop never verifies");
+    }
+
+    #[test]
+    fn an_operator_pop_binds_the_chain_it_was_signed_under() {
+        let (pk, sk) = operator(32);
+        let pop = ml_dsa::sign(&sk, &operator_pop_challenge(4, &pk, 100), POP_DOMAIN, &[0u8; 32])
+            .expect("the pop challenge stays within the length bound")
+            .to_vec();
+        assert!(operator_pop_ok(4, &pk, &pop, 100));
+        assert!(
+            !operator_pop_ok(4, &pk, &pop, 101),
+            "a pop signed for one chain id never verifies under another"
+        );
     }
 
     #[test]
