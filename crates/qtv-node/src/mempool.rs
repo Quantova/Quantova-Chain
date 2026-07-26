@@ -354,6 +354,10 @@ impl Mempool {
             if !crate::node::evidence_admissible(fee_params.chain_id, &wrapper, ledger) {
                 return Err(Reject::BadCall);
             }
+        } else if crate::node::is_bridge_guardian(&wrapper) {
+            if !crate::node::guardian_admissible(ledger, &wrapper, fee_params.chain_id) {
+                return Err(Reject::BadCall);
+            }
         } else if crate::node::is_bridge_mint(&wrapper) {
             if !crate::node::bridge_mint_admissible(ledger, &wrapper) {
                 return Err(Reject::BadCall);
@@ -422,6 +426,8 @@ impl Mempool {
                     .is_some()
             } else if crate::node::is_evidence(&wrapper) {
                 crate::node::evidence_admissible(fee_params.chain_id, &wrapper, ledger)
+            } else if crate::node::is_bridge_guardian(&wrapper) {
+                crate::node::guardian_admissible(ledger, &wrapper, fee_params.chain_id)
             } else if crate::node::is_bridge_mint(&wrapper) {
                 crate::node::bridge_mint_admissible(ledger, &wrapper)
             } else if crate::node::is_bridge_exit(&wrapper) {
