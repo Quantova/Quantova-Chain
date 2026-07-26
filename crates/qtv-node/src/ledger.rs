@@ -203,6 +203,7 @@ const BRIDGE_EPOCHMINT_TAG: &[u8] = b"qtv/bridge/epochmint/";
 const BRIDGE_OPERATORS_TAG: &[u8] = b"qtv/bridge/operators";
 const BRIDGE_DESTCHAIN_TAG: &[u8] = b"qtv/bridge/destchain";
 const BRIDGE_EPOCH_TAG: &[u8] = b"qtv/bridge/epoch";
+const BRIDGE_BURN_REF_DOMAIN: &[u8] = b"qtv/bridge/burn-ref/v1";
 
 fn bridge_asset_key(asset_id: &[u8; 16]) -> Key {
     let mut input = Vec::with_capacity(BRIDGE_ASSET_TAG.len() + asset_id.len());
@@ -232,6 +233,27 @@ fn bridge_epochmint_key(asset_id: &[u8; 16], epoch: u64) -> Key {
     input.extend_from_slice(asset_id);
     input.extend_from_slice(&epoch.to_le_bytes());
     sha3::sha3_256(&input)
+}
+
+pub fn bridge_burn_ref(
+    chain_id: u64,
+    asset_id: &[u8; 16],
+    holder: &[u8; 32],
+    amount: u128,
+    destination: &[u8; 32],
+    sender_nonce: u64,
+    event_index: u64,
+) -> [u8; 32] {
+    let mut encoder = Encoder::new();
+    encoder.put_bytes(BRIDGE_BURN_REF_DOMAIN);
+    encoder.put_u64(chain_id);
+    encoder.put_bytes(asset_id);
+    encoder.put_bytes(holder);
+    encoder.put_u128(amount);
+    encoder.put_bytes(destination);
+    encoder.put_u64(sender_nonce);
+    encoder.put_u64(event_index);
+    sha3::sha3_256(&encoder.into_bytes())
 }
 
 const STAKE_BANNED_TAG: &[u8] = b"qtv/stake/banned/";
@@ -1204,6 +1226,8 @@ impl Ledger {
         holder: &[u8; 32],
         amount: u128,
         destination: &[u8; 32],
+        chain_id: u64,
+        sender_nonce: u64,
     ) -> bool {
         if amount == 0 {
             return false;
@@ -1228,7 +1252,14 @@ impl Ledger {
                 ..asset
             },
         );
-        self.record_bridge_burn_event(asset_id, holder, amount, destination);
+        self.record_bridge_burn_event(
+            asset_id,
+            holder,
+            amount,
+            destination,
+            chain_id,
+            sender_nonce,
+        );
         true
     }
 
@@ -3195,6 +3226,70 @@ mod stake_state_tests {
         assert_eq!(l.balance(&addr), 42, "the write stands");
         assert_eq!(l.block_events().len(), 1, "the event stands");
     }
+
+    type BurnLeaf = ([u8; 16], [u8; 32], u128, [u8; 32], u64, u64, u64, [u8; 32]);
+
+    fn decode_burn_leaf(data: &[u8]) -> BurnLeaf {
+        let mut d = Decoder::new(data);
+        let asset = <[u8; 16]>::try_from(d.get_bytes().unwrap()).unwrap();
+        let holder = <[u8; 32]>::try_from(d.get_bytes().unwrap()).unwrap();
+        let amount = d.get_u128().unwrap();
+        let destination = <[u8; 32]>::try_from(d.get_bytes().unwrap()).unwrap();
+        let chain_id = d.get_u64().unwrap();
+        let sender_nonce = d.get_u64().unwrap();
+        let event_index = d.get_u64().unwrap();
+        let burn_ref = <[u8; 32]>::try_from(d.get_bytes().unwrap()).unwrap();
+        d.finish().unwrap();
+        (asset, holder, amount, destination, chain_id, sender_nonce, event_index, burn_ref)
+    }
+
+    fn seed_burnable(l: &mut Ledger, asset: &[u8; 16], holder: &[u8; 32], supply: u128) {
+        l.set_bridged_asset(
+            asset,
+            &QAsset { supply, cap: supply, epoch_cap: supply, requires_stark: false },
+        );
+        l.set_bridged_balance(asset, holder, supply);
+    }
+
+    #[test]
+    fn two_identical_burns_get_distinct_recomputable_refs() {
+        let mut l = Ledger::new();
+        let asset = [7u8; 16];
+        let holder = [9u8; 32];
+        let destination = [0xEE; 32];
+        let chain_id = 42u64;
+        seed_burnable(&mut l, &asset, &holder, 1_000_000);
+
+        assert!(l.bridge_burn(&asset, &holder, 100_000, &destination, chain_id, 0));
+        assert!(l.bridge_burn(&asset, &holder, 100_000, &destination, chain_id, 0));
+        let first = decode_burn_leaf(&l.block_events()[0].data);
+        let second = decode_burn_leaf(&l.block_events()[1].data);
+
+        assert_eq!(first.6, 0, "the first burn sits at event index zero");
+        assert_eq!(second.6, 1, "the second burn sits at the next event index");
+        assert_ne!(first.7, second.7, "two identical burns in one block get distinct refs");
+        assert_eq!(
+            first.7,
+            bridge_burn_ref(first.4, &first.0, &first.1, first.2, &first.3, first.5, first.6),
+            "the first ref recomputes from its leaf fields"
+        );
+        assert_eq!(
+            second.7,
+            bridge_burn_ref(second.4, &second.0, &second.1, second.2, &second.3, second.5, second.6),
+            "the second ref recomputes from its leaf fields"
+        );
+
+        l.clear_block_events();
+        assert!(l.bridge_burn(&asset, &holder, 100_000, &destination, chain_id, 1));
+        let third = decode_burn_leaf(&l.block_events()[0].data);
+        assert_eq!(third.6, 0, "a fresh block restarts the event index");
+        assert_ne!(third.7, first.7, "an identical burn in a later block differs by the sender nonce");
+        assert_eq!(
+            third.7,
+            bridge_burn_ref(third.4, &third.0, &third.1, third.2, &third.3, third.5, third.6),
+            "the later ref recomputes from its leaf fields"
+        );
+    }
 }
 
 /// The source marker a native economic event carries in the block event log. Contract
@@ -3409,12 +3504,28 @@ impl Ledger {
         holder: &[u8; 32],
         amount: u128,
         destination: &[u8; 32],
+        chain_id: u64,
+        sender_nonce: u64,
     ) {
+        let event_index = self.block_events.len() as u64;
+        let burn_ref = bridge_burn_ref(
+            chain_id,
+            asset_id,
+            holder,
+            amount,
+            destination,
+            sender_nonce,
+            event_index,
+        );
         let mut encoder = Encoder::new();
         encoder.put_bytes(asset_id);
         encoder.put_bytes(holder);
         encoder.put_u128(amount);
         encoder.put_bytes(destination);
+        encoder.put_u64(chain_id);
+        encoder.put_u64(sender_nonce);
+        encoder.put_u64(event_index);
+        encoder.put_bytes(&burn_ref);
         self.record_native_event(EVENT_BRIDGE_BURN, encoder.into_bytes());
     }
 
