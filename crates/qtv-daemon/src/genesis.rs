@@ -248,7 +248,7 @@ fn parse_account(field: &Field) -> Result<GenesisAccount, String> {
 
 fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) -> [u8; 32] {
     let mut buf: Vec<u8> = Vec::new();
-    buf.extend_from_slice(b"QTV-GENESIS-V5");
+    buf.extend_from_slice(b"QTV-GENESIS-V4");
     put_bytes(&mut buf, chain_id.as_bytes());
     put_bytes(&mut buf, message.as_bytes());
     buf.extend_from_slice(&genesis.genesis_time.to_le_bytes());
@@ -257,12 +257,12 @@ fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) ->
     buf.extend_from_slice(&genesis.fee_params.rate_micro_usd_per_qtov.to_le_bytes());
     buf.extend_from_slice(&genesis.fee_params.native_unit.to_le_bytes());
     buf.extend_from_slice(&genesis.fee_params.max_fee_native.to_le_bytes());
-    match genesis.bridge_dest_chain {
-        Some(dest_chain) => {
-            buf.push(1);
-            buf.extend_from_slice(&dest_chain.to_le_bytes());
-        }
-        None => buf.push(0),
+    // Fold the bridge destination only when it is set. An unset destination adds nothing, so
+    // a genesis without the field hashes to the exact pre-field V4 preimage the live testnet
+    // was launched on and its genesis hash does not move. A set destination binds into the
+    // hash so a chain that fixes its bridge target commits to that target at genesis.
+    if let Some(dest_chain) = genesis.bridge_dest_chain {
+        buf.extend_from_slice(&dest_chain.to_le_bytes());
     }
 
     let mut validators = genesis.validators.clone();
@@ -312,6 +312,88 @@ mod tests {
             scheme: 0,
             public_key: vec![tag],
         }
+    }
+
+    fn sample_genesis(bridge_dest_chain: Option<u32>) -> Genesis {
+        Genesis {
+            fee_params: FeeParams {
+                transfer_micro_usd: 1_000,
+                rate_micro_usd_per_qtov: 500,
+                native_unit: 1_000_000,
+                max_fee_native: 10_000,
+                chain_id: 42,
+            },
+            accounts: vec![account(1, 100), account(2, 100)],
+            validators: vec![validator(1, 2_000), validator(2, 2_000)],
+            genesis_time: 1_700_000_000,
+            guardians: Default::default(),
+            bridge_dest_chain,
+        }
+    }
+
+    // An independent reconstruction of the preimage the daemon hashed before the bridge
+    // destination field existed: the V4 tag, the fee band, then validators and accounts, and no
+    // bridge bytes at all. It is the oracle for the hash the live testnet was launched on.
+    fn legacy_v4_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) -> [u8; 32] {
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"QTV-GENESIS-V4");
+        put_bytes(&mut buf, chain_id.as_bytes());
+        put_bytes(&mut buf, message.as_bytes());
+        buf.extend_from_slice(&genesis.genesis_time.to_le_bytes());
+        buf.extend_from_slice(&slots.to_le_bytes());
+        buf.extend_from_slice(&genesis.fee_params.transfer_micro_usd.to_le_bytes());
+        buf.extend_from_slice(&genesis.fee_params.rate_micro_usd_per_qtov.to_le_bytes());
+        buf.extend_from_slice(&genesis.fee_params.native_unit.to_le_bytes());
+        buf.extend_from_slice(&genesis.fee_params.max_fee_native.to_le_bytes());
+
+        let mut validators = genesis.validators.clone();
+        validators.sort_by_key(|v| v.id);
+        buf.extend_from_slice(&(validators.len() as u64).to_le_bytes());
+        for v in &validators {
+            buf.extend_from_slice(&v.id.to_le_bytes());
+            buf.extend_from_slice(&v.stake.to_le_bytes());
+            buf.push(v.online as u8);
+            put_bytes(&mut buf, v.bond_address.as_bytes());
+            buf.extend_from_slice(&v.root.digest);
+            buf.extend_from_slice(&v.root.slots.to_le_bytes());
+            put_bytes(&mut buf, &v.attest_pk);
+            put_bytes(&mut buf, &v.p2p_public);
+        }
+
+        let mut accounts = genesis.accounts.clone();
+        accounts.sort_by(|a, b| a.address.cmp(&b.address));
+        buf.extend_from_slice(&(accounts.len() as u64).to_le_bytes());
+        for a in &accounts {
+            put_bytes(&mut buf, a.address.as_bytes());
+            buf.push(a.scheme);
+            put_bytes(&mut buf, &a.public_key);
+            buf.extend_from_slice(&a.balance.to_le_bytes());
+        }
+
+        sha3::sha3_256(&buf)
+    }
+
+    #[test]
+    fn an_unset_bridge_dest_chain_reproduces_the_v4_genesis_hash() {
+        let genesis = sample_genesis(None);
+        let produced = genesis_hash("Q-test-net-1", "genesis", 64, &genesis);
+        let legacy = legacy_v4_hash("Q-test-net-1", "genesis", 64, &genesis);
+        assert_eq!(
+            produced, legacy,
+            "an unset bridge destination must hash to the exact pre-field V4 preimage, so a node \
+             carrying the field reproduces the genesis hash the live testnet was launched on"
+        );
+    }
+
+    #[test]
+    fn a_set_bridge_dest_chain_moves_the_genesis_hash() {
+        let unset = genesis_hash("Q-test-net-1", "genesis", 64, &sample_genesis(None));
+        let set = genesis_hash("Q-test-net-1", "genesis", 64, &sample_genesis(Some(7)));
+        assert_ne!(
+            unset, set,
+            "a set bridge destination must bind into the genesis hash, so a chain that fixes its \
+             bridge target commits to that target at genesis"
+        );
     }
 
     #[test]
