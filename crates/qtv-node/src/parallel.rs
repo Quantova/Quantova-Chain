@@ -231,12 +231,12 @@ pub fn execute_parallel(
     }
     ledger.apply_fee_split(fees);
 
-    // Record one transfer event per applied send in block position order, the same order the
-    // ordered path records them, so both execution paths yield the identical event root.
     transfer_events.sort_by_key(|row| row.0);
     for (_, from, to, amount, fee) in transfer_events {
         ledger.record_transfer_event(&from, &to, amount, fee);
     }
+
+    ledger.settle_session(day, included.len() as u64);
 
     included.sort_unstable();
     included
@@ -478,6 +478,46 @@ mod tests {
                 qtv_block::event_root(&leaves),
                 ordered_root,
                 "event root differs at {threads} threads"
+            );
+        }
+    }
+
+    #[test]
+    fn the_parallel_and_ordered_paths_settle_the_armed_session_identically() {
+        let fee = FeeParams::devnet();
+        let (mut base, keys) = population(24, 50_000_000);
+
+        let validator = qtv_idfmt::render_address(&[60u8; 32]).unwrap();
+        base.seed_stake_pool(700_000 * 1_000_000);
+        base.seed_validator_bond(&validator, 2_000 * 1_000_000);
+        base.seed_validator_set(&[[60u8; 32]]);
+        base.set_stake_mainnet_start(0);
+        base.set_stake_price(70 * 1_000_000);
+
+        let block: Vec<Wrapper> = (0..12)
+            .map(|i| transfer(&keys[i], &keys[12 + i].address(), 1_000, 0, &fee))
+            .collect();
+
+        let day = 546;
+        let mut ordered = base.clone();
+        let ordered_included = execute_ordered(&mut ordered, &block, &fee, day);
+        assert!(
+            ordered.stake_pool() < 700_000 * 1_000_000,
+            "the armed session must pay so the settle call is under test"
+        );
+
+        for threads in [2usize, 4, 8, 16] {
+            let mut parallel = base.clone();
+            let parallel_included = execute_parallel(&mut parallel, &block, &fee, threads, day);
+            assert_eq!(
+                ordered.state_root(),
+                parallel.state_root(),
+                "armed session state root differs at {threads} threads"
+            );
+            assert_eq!(
+                included_ids(&ordered_included),
+                included_ids(&parallel_included),
+                "included set differs at {threads} threads"
             );
         }
     }
