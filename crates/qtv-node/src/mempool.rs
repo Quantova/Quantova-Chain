@@ -359,7 +359,7 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_bridge_mint(&wrapper) {
-            if !crate::node::bridge_mint_admissible(ledger, &wrapper) {
+            if !crate::node::bridge_mint_admissible(ledger, &wrapper, fee_params.chain_id) {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_bridge_exit(&wrapper) {
@@ -429,7 +429,7 @@ impl Mempool {
             } else if crate::node::is_bridge_guardian(&wrapper) {
                 crate::node::guardian_admissible(ledger, &wrapper, fee_params.chain_id)
             } else if crate::node::is_bridge_mint(&wrapper) {
-                crate::node::bridge_mint_admissible(ledger, &wrapper)
+                crate::node::bridge_mint_admissible(ledger, &wrapper, fee_params.chain_id)
             } else if crate::node::is_bridge_exit(&wrapper) {
                 let account = ledger.account(wrapper.body().sender());
                 crate::node::bridge_exit_admissible(ledger, &wrapper, &account, fee_params, verified[index])
