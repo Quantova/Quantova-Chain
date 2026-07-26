@@ -537,6 +537,7 @@ pub enum EnactError {
     UnknownParameter,
     BadValue,
     BridgeNotFrozen,
+    NoCommittee,
     NotImplemented,
 }
 
@@ -2001,6 +2002,58 @@ impl Ledger {
                 self.set_guardian_set(set);
                 Ok(())
             }
+            Action::CommitteeRotate { rotation } => {
+                if rotation.threshold == 0 {
+                    return Err(EnactError::BadValue);
+                }
+                let mut operators: Vec<(u32, Vec<u8>)> = Vec::with_capacity(rotation.operators.len());
+                for claim in &rotation.operators {
+                    if operators.iter().any(|(id, _)| *id == claim.operator_id) {
+                        return Err(EnactError::BadValue);
+                    }
+                    if !crate::bridge::operator_pop_ok(
+                        claim.operator_id,
+                        &claim.public_key,
+                        &claim.pop,
+                    ) {
+                        return Err(EnactError::BadValue);
+                    }
+                    operators.push((claim.operator_id, claim.public_key.clone()));
+                }
+                if (rotation.threshold as usize) > operators.len() {
+                    return Err(EnactError::BadValue);
+                }
+                self.seed_bridge_operator_set(&crate::bridge::OperatorSet::new(
+                    operators,
+                    rotation.threshold,
+                ));
+                Ok(())
+            }
+            Action::OperatorRevoke { operator_id } => {
+                let mut set = self.bridge_operator_set().ok_or(EnactError::NoCommittee)?;
+                if !set.revoke(*operator_id) {
+                    return Err(EnactError::BadValue);
+                }
+                self.seed_bridge_operator_set(&set);
+                Ok(())
+            }
+            Action::AssetRegister {
+                asset_id,
+                cap,
+                epoch_cap,
+                requires_stark,
+            } => {
+                if *cap == 0 || *epoch_cap == 0 {
+                    return Err(EnactError::BadValue);
+                }
+                self.register_bridged_asset(asset_id, *cap, *epoch_cap, *requires_stark);
+                Ok(())
+            }
+            Action::EpochAdvance => {
+                let next = self.bridge_epoch().checked_add(1).ok_or(EnactError::BadValue)?;
+                self.set_bridge_epoch(next);
+                Ok(())
+            }
             Action::Upgrade { .. } => Err(EnactError::NotImplemented),
         }
     }
@@ -2206,6 +2259,25 @@ mod stake_state_tests {
 
     fn fund(l: &mut Ledger, address: &str, amount: u64) {
         l.set_account(address, &Account::funded(amount, 1, vec![]));
+    }
+
+    fn operator_claim(index: u64, operator_id: u32) -> qtv_governance::OperatorClaim {
+        let mut seed = [0u8; 32];
+        seed[..8].copy_from_slice(&index.to_le_bytes());
+        let (pk, sk) = qtv_crypto::ml_dsa::keygen(&seed);
+        let pop = qtv_crypto::ml_dsa::sign(
+            &sk,
+            &crate::bridge::operator_pop_challenge(operator_id, &pk),
+            crate::bridge::POP_DOMAIN,
+            &[0u8; 32],
+        )
+        .expect("the pop challenge stays within the length bound")
+        .to_vec();
+        qtv_governance::OperatorClaim {
+            operator_id,
+            public_key: pk.to_vec(),
+            pop,
+        }
     }
 
     #[test]
@@ -3219,6 +3291,122 @@ mod stake_state_tests {
         l.gov_enact(rotate, 28 * 86_400 + 3).unwrap();
         assert_eq!(l.guardian_set().threshold, 3);
         assert_eq!(l.guardian_set().members, vec![[10u8; 32], [11u8; 32], [12u8; 32]]);
+    }
+
+    #[test]
+    fn only_a_vote_rotates_the_committee_and_a_key_without_a_pop_is_refused() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        let proposer = gov_addr(90);
+        fund(&mut l, &proposer, 4_000_000 * 1_000_000);
+        let voter = gov_addr(91);
+        fund(&mut l, &voter, 30_000 * 1_000_000);
+
+        assert!(
+            l.bridge_operator_set().is_none(),
+            "the bridge starts with no committee and is inert"
+        );
+
+        let mut forged = qtv_governance::CommitteeRotation {
+            operators: vec![operator_claim(1, 0), operator_claim(2, 1)],
+            threshold: 2,
+        };
+        let pop_len = forged.operators[1].pop.len();
+        forged.operators[1].pop = vec![0u8; pop_len];
+        let bad = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::CommitteeRotate { rotation: forged },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, bad, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        assert_eq!(
+            l.gov_enact(bad, 5 * 86_400 + 1),
+            Err(EnactError::BadValue),
+            "a key that cannot prove possession sinks the whole rotation"
+        );
+        assert!(l.bridge_operator_set().is_none(), "the failed rotation left the bridge inert");
+
+        let good = qtv_governance::CommitteeRotation {
+            operators: vec![operator_claim(1, 0), operator_claim(2, 1), operator_claim(3, 2)],
+            threshold: 2,
+        };
+        let rotate = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::CommitteeRotate { rotation: good },
+                5 * 86_400 + 2,
+            )
+            .unwrap();
+        l.gov_vote(&voter, rotate, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 5 * 86_400 + 2);
+        l.gov_enact(rotate, 10 * 86_400 + 3).unwrap();
+        let set = l.bridge_operator_set().unwrap();
+        assert_eq!(set.operators.len(), 3);
+        assert_eq!(set.threshold, 2);
+        assert!(set.revoked.is_empty());
+
+        let revoke = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::OperatorRevoke { operator_id: 1 },
+                10 * 86_400 + 4,
+            )
+            .unwrap();
+        l.gov_vote(&voter, revoke, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 10 * 86_400 + 4);
+        l.gov_enact(revoke, 15 * 86_400 + 5).unwrap();
+        assert!(
+            l.bridge_operator_set().unwrap().is_revoked(1),
+            "a vote strikes a single operator from the seated committee"
+        );
+    }
+
+    #[test]
+    fn a_vote_advances_the_bridge_epoch_and_registers_an_asset() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        let proposer = gov_addr(92);
+        fund(&mut l, &proposer, 3_000_000 * 1_000_000);
+        let voter = gov_addr(93);
+        fund(&mut l, &voter, 20_000 * 1_000_000);
+
+        assert_eq!(l.bridge_epoch(), 0);
+        let advance = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::EpochAdvance,
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, advance, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        l.gov_enact(advance, 5 * 86_400 + 1).unwrap();
+        assert_eq!(l.bridge_epoch(), 1, "only a vote advances the epoch");
+
+        let asset = [0xA1u8; 16];
+        assert!(l.bridged_asset(&asset).is_none());
+        let register = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::AssetRegister {
+                    asset_id: asset,
+                    cap: 1_000_000,
+                    epoch_cap: 250_000,
+                    requires_stark: true,
+                },
+                5 * 86_400 + 2,
+            )
+            .unwrap();
+        l.gov_vote(&voter, register, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 5 * 86_400 + 2);
+        l.gov_enact(register, 10 * 86_400 + 3).unwrap();
+        let registered = l.bridged_asset(&asset).unwrap();
+        assert_eq!(registered.cap, 1_000_000);
+        assert_eq!(registered.epoch_cap, 250_000);
+        assert!(registered.requires_stark);
     }
 
     #[test]
