@@ -87,6 +87,7 @@ pub struct Genesis {
     pub accounts: Vec<GenesisAccount>,
     pub validators: Vec<ValidatorSpec>,
     pub genesis_time: u64,
+    pub guardians: qtv_governance::GuardianSet,
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -1156,6 +1157,9 @@ impl Node {
             );
         }
         ledger.seed_grants_account();
+        if !genesis.guardians.members.is_empty() {
+            ledger.seed_guardian_set(&genesis.guardians);
+        }
 
         let validators: Vec<ConsensusValidator> = genesis
             .validators
