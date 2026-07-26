@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Result as IoResult, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -22,22 +22,86 @@ const IO_TIMEOUT: Duration = Duration::from_secs(15);
 
 const MAX_CONNECTIONS: usize = 512;
 
+const MAX_CONNECTIONS_PER_IP: usize = 32;
+
+enum Admit {
+    Ok,
+    TotalFull,
+    IpFull,
+}
+
+// A global connection count bounds total load; a per address count keeps one
+// source from claiming every slot and starving the rest of the internet.
+#[derive(Default)]
+struct Limiter {
+    inner: Mutex<LimiterInner>,
+}
+
+#[derive(Default)]
+struct LimiterInner {
+    total: usize,
+    per_ip: HashMap<IpAddr, usize>,
+}
+
+impl Limiter {
+    fn try_admit(&self, ip: IpAddr, total_cap: usize, per_ip_cap: usize) -> Admit {
+        let mut inner = self.inner.lock().expect("the gateway limiter lock is not poisoned");
+        if inner.total >= total_cap {
+            return Admit::TotalFull;
+        }
+        let count = inner.per_ip.entry(ip).or_insert(0);
+        if *count >= per_ip_cap {
+            return Admit::IpFull;
+        }
+        *count += 1;
+        inner.total += 1;
+        Admit::Ok
+    }
+
+    fn release(&self, ip: IpAddr) {
+        let mut inner = self.inner.lock().expect("the gateway limiter lock is not poisoned");
+        if let Some(count) = inner.per_ip.get_mut(&ip) {
+            *count -= 1;
+            if *count == 0 {
+                inner.per_ip.remove(&ip);
+            }
+        }
+        inner.total = inner.total.saturating_sub(1);
+    }
+}
+
 pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>) {
     thread::spawn(move || {
-        let active = Arc::new(AtomicUsize::new(0));
+        let limiter = Arc::new(Limiter::default());
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
-                active.fetch_sub(1, Ordering::SeqCst);
-                stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
-                let _ = write_error(&mut stream, 503, "busy", "the gateway is at its connection limit");
-                continue;
+            let ip = stream
+                .peer_addr()
+                .map(|addr| addr.ip())
+                .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+            match limiter.try_admit(ip, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP) {
+                Admit::Ok => {}
+                Admit::TotalFull => {
+                    stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
+                    let _ = write_error(&mut stream, 503, "busy", "the gateway is at its connection limit");
+                    continue;
+                }
+                Admit::IpFull => {
+                    stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
+                    let _ = write_error(
+                        &mut stream,
+                        429,
+                        "too_many",
+                        "too many open connections from this address",
+                    );
+                    continue;
+                }
             }
             let requests = requests.clone();
-            let active = active.clone();
+            let limiter = limiter.clone();
             thread::spawn(move || {
                 let _ = handle_connection(stream, requests);
-                active.fetch_sub(1, Ordering::SeqCst);
+                limiter.release(ip);
             });
         }
     });
@@ -197,6 +261,7 @@ fn reason(code: u16) -> &'static str {
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
+        429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
         503 => "Service Unavailable",
         _ => "OK",
@@ -207,6 +272,41 @@ fn reason(code: u16) -> &'static str {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    fn ip(last: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, last))
+    }
+
+    #[test]
+    fn the_limiter_caps_connections_per_address_and_frees_them_on_release() {
+        let limiter = Limiter::default();
+        let peer = ip(7);
+        for _ in 0..3 {
+            assert!(matches!(limiter.try_admit(peer, 100, 3), Admit::Ok));
+        }
+        assert!(
+            matches!(limiter.try_admit(peer, 100, 3), Admit::IpFull),
+            "the fourth connection from one address is refused"
+        );
+        limiter.release(peer);
+        assert!(
+            matches!(limiter.try_admit(peer, 100, 3), Admit::Ok),
+            "a released slot is reusable"
+        );
+    }
+
+    #[test]
+    fn the_limiter_caps_the_total_across_addresses() {
+        let limiter = Limiter::default();
+        assert!(matches!(limiter.try_admit(ip(1), 2, 10), Admit::Ok));
+        assert!(matches!(limiter.try_admit(ip(2), 2, 10), Admit::Ok));
+        assert!(
+            matches!(limiter.try_admit(ip(3), 2, 10), Admit::TotalFull),
+            "the global cap holds even with per address room left"
+        );
+        limiter.release(ip(1));
+        assert!(matches!(limiter.try_admit(ip(3), 2, 10), Admit::Ok));
+    }
 
     #[test]
     fn a_capped_line_reads_a_normal_line_and_draws_down_the_budget() {
