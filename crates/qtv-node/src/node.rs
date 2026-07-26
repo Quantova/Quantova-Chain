@@ -517,7 +517,14 @@ fn dispatch_bridge_exit(
     charged_account.nonce += 1;
     ledger.set_account(&sender, &charged_account);
     ledger.collect_fee(charged);
-    ledger.bridge_burn(&request.asset_id, &holder, request.amount, &request.destination)
+    ledger.bridge_burn(
+        &request.asset_id,
+        &holder,
+        request.amount,
+        &request.destination,
+        fee_params.chain_id,
+        wrapper.body().nonce(),
+    )
 }
 
 const VM_BLOCK_METER_BUDGET: u64 = 50_000_000;
