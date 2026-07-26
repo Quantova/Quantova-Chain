@@ -168,9 +168,6 @@ fn stake_singleton_key(tag: &[u8]) -> Key {
     sha3::sha3_256(tag)
 }
 
-/// A bridged token on the ledger, identified by its BridgeFact asset id and holding its own
-/// supply. A verified mint raises the supply and an exit burn lowers it, each within a total cap
-/// and a per epoch cap. The caps and the proof requirement are set when the asset is registered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct QAsset {
     pub supply: u128,
@@ -1063,8 +1060,6 @@ impl Ledger {
         self.write_leaf(bridge_asset_key(asset_id), to_bytes(asset));
     }
 
-    /// Register a bridged asset with its total and per epoch caps, keeping any supply already
-    /// outstanding. Genesis and governance seed the corridor's assets through this.
     pub fn register_bridged_asset(
         &mut self,
         asset_id: &[u8; 16],
@@ -1159,12 +1154,6 @@ impl Ledger {
         self.write_leaf(bridge_epochmint_key(asset_id, epoch), to_bytes(&amount));
     }
 
-    /// Mint a bridged asset from a verified deposit fact. Every fund check lives here so no caller
-    /// path can skip one: the asset must be registered, the deposit reference must be unseen, and
-    /// the amount must keep both the total cap and the current epoch cap. On success it credits
-    /// the recipient the exact proven amount, raises the supply, marks the reference against
-    /// replay, and records the mint event. A failed check returns false with no write, which the
-    /// executor's atomic firewall rolls back.
     pub fn bridge_mint(&mut self, fact: &crate::bridge::Fact) -> bool {
         if fact.amount == 0 {
             return false;
@@ -1209,9 +1198,6 @@ impl Ledger {
         true
     }
 
-    /// Burn a holder's bridged amount on exit so the oracle releases it on the far side. The
-    /// holder must own the amount and the supply must cover it. On success it debits the holder,
-    /// lowers the supply, and records the burn event carrying the far side destination.
     pub fn bridge_burn(
         &mut self,
         asset_id: &[u8; 16],
@@ -3231,9 +3217,7 @@ pub const EVENT_SLASH: [u8; 4] = *b"QSLH";
 pub const EVENT_MINT: [u8; 4] = *b"QMNT";
 /// A staking reward the pool paid out to a validator.
 pub const EVENT_REWARD: [u8; 4] = *b"QRWD";
-/// A bridge mint that raised a bridged asset supply and credited a recipient.
 pub const EVENT_BRIDGE_MINT: [u8; 4] = *b"QBMT";
-/// A bridge exit burn that lowered a bridged asset supply for release on the far side.
 pub const EVENT_BRIDGE_BURN: [u8; 4] = *b"QBBN";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

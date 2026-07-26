@@ -266,10 +266,6 @@ impl StarkEnvelope {
     }
 }
 
-/// The airlock artifact a bridge mint carries in its call payload: the ML-DSA attestation
-/// envelope always, and the hash STARK envelope when the corridor is proof backed. The two
-/// framed lengths let the chain read both without the oracle's parser and reject any trailing
-/// byte, so the same artifact the oracle emits across the airlock is the one the chain reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MintArtifact {
     pub attestation: Attestation,
@@ -292,21 +288,27 @@ impl MintArtifact {
         let mut reader = Reader::new(bytes);
         let attestation_len = reader.u32()? as usize;
         let attestation_bytes = reader.take(attestation_len)?;
-        let attestation = Attestation::read(&mut Reader::new(attestation_bytes))?;
+        let mut attestation_reader = Reader::new(attestation_bytes);
+        let attestation = Attestation::read(&mut attestation_reader)?;
+        if !attestation_reader.done() {
+            return None;
+        }
         let stark_len = reader.u32()? as usize;
         let stark = if stark_len == 0 {
             None
         } else {
             let stark_bytes = reader.take(stark_len)?;
-            Some(StarkEnvelope::read(&mut Reader::new(stark_bytes))?)
+            let mut stark_reader = Reader::new(stark_bytes);
+            let envelope = StarkEnvelope::read(&mut stark_reader)?;
+            if !stark_reader.done() {
+                return None;
+            }
+            Some(envelope)
         };
         reader.done().then_some(MintArtifact { attestation, stark })
     }
 }
 
-/// The M of N operator committee the chain holds in state. The envelope names each signer by
-/// index only, so the chain resolves the public key here and never trusts a key that rides in
-/// with the artifact. The threshold is chain side config, not on the wire.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OperatorSet {
     pub operators: Vec<(u32, Vec<u8>)>,
@@ -368,11 +370,6 @@ fn verify_signature(pk: &[u8; PUBLIC_KEY_BYTES], message: &[u8], sig: &[u8; SIGN
     ml_dsa::verify(pk, message, sig, ATTEST_DOMAIN)
 }
 
-/// Whether a quorum of the committee attested this deposit fact to this chain. Verifies each
-/// carried signature against the registered operator key at its index over the exact bytes the
-/// operators sign, counts only distinct valid signers, and holds when the count reaches the
-/// threshold. This is the mint authority: no signer key rides in with the artifact, so a mint
-/// stands only on keys the chain already holds.
 pub fn quorum_attests(set: &OperatorSet, attestation: &Attestation, dest_chain: u32) -> bool {
     if set.threshold == 0 {
         return false;
@@ -414,25 +411,13 @@ pub fn quorum_attests(set: &OperatorSet, attestation: &Attestation, dest_chain: 
     counted_keys.len() as u32 >= set.threshold
 }
 
-/// The outcome of looking at the hash STARK envelope that rides beside the attestation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StarkCheck {
-    /// No STARK envelope rode with the artifact.
     Absent,
-    /// The envelope binds to the fact by its statement digest, but the FRI proof itself is not
-    /// yet verified on chain. SEAM: the corridor statement AIR that a full verification needs
-    /// lives in the oracle's q-prover-bridge, an oracle crate the chain must not link, and a
-    /// chain side corridor verifier is a founder gated bridge decision. The mint does not rest on
-    /// this result today, the ML-DSA operator quorum is the authority.
     BoundUnverified,
-    /// The envelope does not bind to the fact.
     Unbound,
 }
 
-/// Check the STARK envelope against the fact by its statement digest. This is a real hash
-/// binding over qtv-crypto SHAKE, not a proof verification: it confirms the envelope commits to
-/// this exact fact, and marks that the FRI proof is not verified on chain. It never fakes a
-/// proof check and the mint never treats a bound envelope as a proof.
 pub fn check_stark(fact: &Fact, stark: Option<&StarkEnvelope>, operator: u32) -> StarkCheck {
     match stark {
         None => StarkCheck::Absent,
@@ -446,7 +431,6 @@ pub fn check_stark(fact: &Fact, stark: Option<&StarkEnvelope>, operator: u32) ->
     }
 }
 
-/// A holder driven exit that burns a bridged amount so the oracle releases it on the far side.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExitRequest {
     pub asset_id: [u8; 16],
@@ -553,6 +537,42 @@ mod tests {
             }),
         };
         assert_eq!(MintArtifact::decode(&proved.encode()), Some(proved));
+    }
+
+    #[test]
+    fn a_sub_frame_with_trailing_bytes_is_rejected() {
+        let (_pk, sk) = operator(1);
+        let fact = sample_fact();
+        let attestation = Attestation {
+            fact: fact.clone(),
+            signatures: vec![SignerSig { operator_id: 0, signature: sign_fact(&sk, &fact) }],
+        };
+        assert!(MintArtifact::decode(&MintArtifact { attestation: attestation.clone(), stark: None }.encode()).is_some());
+
+        let mut padded_attestation = attestation.encode();
+        padded_attestation.push(0u8);
+        let mut out = Vec::new();
+        out.extend_from_slice(&(padded_attestation.len() as u32).to_le_bytes());
+        out.extend_from_slice(&padded_attestation);
+        out.extend_from_slice(&0u32.to_le_bytes());
+        assert!(
+            MintArtifact::decode(&out).is_none(),
+            "a trailing byte inside the attestation sub-frame is rejected"
+        );
+
+        let stark = StarkEnvelope { statement_digest: fact.statement_digest(0), proof: vec![1, 2, 3] };
+        let mut padded_stark = stark.encode();
+        padded_stark.push(0u8);
+        let attestation_bytes = attestation.encode();
+        let mut out2 = Vec::new();
+        out2.extend_from_slice(&(attestation_bytes.len() as u32).to_le_bytes());
+        out2.extend_from_slice(&attestation_bytes);
+        out2.extend_from_slice(&(padded_stark.len() as u32).to_le_bytes());
+        out2.extend_from_slice(&padded_stark);
+        assert!(
+            MintArtifact::decode(&out2).is_none(),
+            "a trailing byte inside the stark sub-frame is rejected"
+        );
     }
 
     #[test]

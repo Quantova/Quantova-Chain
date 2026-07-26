@@ -1,10 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The node crate holds the bridge, so the whole resolved dependency graph must link no classical
-//! cryptography and no oracle side crate. This guard scans the committed workspace lockfile, the
-//! transitive graph deny.toml also guards, and fails if any banned crate or oracle source appears.
-
 const LOCKFILE: &str = include_str!("../../../Cargo.lock");
 
 const BANNED_CRATES: &[&str] = &[

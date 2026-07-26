@@ -398,12 +398,6 @@ pub(crate) fn is_bridge_exit(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::bridge_exit_address()
 }
 
-/// The deposit fact a bridge mint artifact carries, returned only when the artifact parses with
-/// the chain's own parser and a quorum of the registered committee attested it to this chain. The
-/// ML-DSA operator quorum is the mint authority, so a mint stands on no unauthenticated caller.
-/// A proof backed asset must also carry its STARK envelope, whose on chain FRI verification is a
-/// founder gated seam, so the envelope is required to be present and well formed but its proof is
-/// not yet checked here.
 fn bridge_mint_fact(ledger: &Ledger, wrapper: &Wrapper) -> Option<crate::bridge::Fact> {
     let artifact = crate::bridge::MintArtifact::decode(wrapper.body().call().args())?;
     let dest_chain = ledger.bridge_dest_chain()?;
@@ -414,10 +408,6 @@ fn bridge_mint_fact(ledger: &Ledger, wrapper: &Wrapper) -> Option<crate::bridge:
     let fact = artifact.attestation.fact;
     if let Some(asset) = ledger.bridged_asset(&fact.asset_id) {
         if asset.requires_stark {
-            // SEAM: the on chain FRI verifier is founder gated and lives in the oracle's
-            // q-prover-bridge the chain must not link, so a proof backed corridor is quorum trust
-            // today. Until the verifier lands we require the STARK envelope to at least bind to
-            // this fact by its statement digest, refusing an absent or unbound envelope.
             let prover = operators.operators.first().map(|(id, _)| *id)?;
             if crate::bridge::check_stark(&fact, artifact.stark.as_ref(), prover)
                 != crate::bridge::StarkCheck::BoundUnverified
@@ -444,9 +434,6 @@ pub(crate) fn bridge_mint_source_ref(wrapper: &Wrapper) -> Option<[u8; 32]> {
         .map(|artifact| artifact.attestation.fact.source_ref)
 }
 
-/// Whether a bridge mint would land, so the mempool admits it with no fee and no caller
-/// signature. It holds only when the bridge is open, the artifact parses and carries a committee
-/// quorum for this chain, and the deposit reference is unseen.
 pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper) -> bool {
     if ledger.bridge_is_frozen() {
         return false;
@@ -460,11 +447,6 @@ pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper) -> bool
     }
 }
 
-/// Apply a bridge mint as a deterministic in block transition. The mint authority is the verified
-/// artifact, so any sender may carry it and no caller balance or signature gates it. It refuses
-/// entirely while the bridge is frozen, and it mints only when the committee quorum attests the
-/// fact to this chain and the ledger's replay, cap, and epoch checks pass, so every node reaches
-/// the same mint from the committee keys held in state.
 fn dispatch_bridge_mint(ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
     if ledger.bridge_is_frozen() {
         return false;
@@ -503,10 +485,6 @@ pub(crate) fn bridge_exit_admissible(
     crate::bridge::ExitRequest::decode(body.call().args())
 }
 
-/// Apply a holder driven bridge exit. The holder signs it and pays the fee, and it refuses
-/// entirely while the bridge is frozen. On success it burns the holder's bridged amount and
-/// records the burn the oracle reads to release on the far side. A burn that the holder cannot
-/// cover fails the whole transition, so the atomic firewall returns the fee.
 fn dispatch_bridge_exit(
     ledger: &mut Ledger,
     wrapper: &Wrapper,
