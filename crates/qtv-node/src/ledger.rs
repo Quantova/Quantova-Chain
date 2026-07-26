@@ -168,6 +168,75 @@ fn stake_singleton_key(tag: &[u8]) -> Key {
     sha3::sha3_256(tag)
 }
 
+/// A bridged token on the ledger, identified by its BridgeFact asset id and holding its own
+/// supply. A verified mint raises the supply and an exit burn lowers it, each within a total cap
+/// and a per epoch cap. The caps and the proof requirement are set when the asset is registered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QAsset {
+    pub supply: u128,
+    pub cap: u128,
+    pub epoch_cap: u128,
+    pub requires_stark: bool,
+}
+
+impl Encode for QAsset {
+    fn encode(&self, encoder: &mut Encoder) {
+        self.supply.encode(encoder);
+        self.cap.encode(encoder);
+        self.epoch_cap.encode(encoder);
+        encoder.put_u8(self.requires_stark as u8);
+    }
+}
+
+impl Decode for QAsset {
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
+        Ok(QAsset {
+            supply: u128::decode(decoder)?,
+            cap: u128::decode(decoder)?,
+            epoch_cap: u128::decode(decoder)?,
+            requires_stark: decoder.get_u8()? != 0,
+        })
+    }
+}
+
+const BRIDGE_ASSET_TAG: &[u8] = b"qtv/bridge/asset/";
+const BRIDGE_BALANCE_TAG: &[u8] = b"qtv/bridge/bal/";
+const BRIDGE_SEEN_TAG: &[u8] = b"qtv/bridge/seen/";
+const BRIDGE_EPOCHMINT_TAG: &[u8] = b"qtv/bridge/epochmint/";
+const BRIDGE_OPERATORS_TAG: &[u8] = b"qtv/bridge/operators";
+const BRIDGE_DESTCHAIN_TAG: &[u8] = b"qtv/bridge/destchain";
+const BRIDGE_EPOCH_TAG: &[u8] = b"qtv/bridge/epoch";
+
+fn bridge_asset_key(asset_id: &[u8; 16]) -> Key {
+    let mut input = Vec::with_capacity(BRIDGE_ASSET_TAG.len() + asset_id.len());
+    input.extend_from_slice(BRIDGE_ASSET_TAG);
+    input.extend_from_slice(asset_id);
+    sha3::sha3_256(&input)
+}
+
+fn bridge_balance_key(asset_id: &[u8; 16], holder: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(BRIDGE_BALANCE_TAG.len() + asset_id.len() + holder.len());
+    input.extend_from_slice(BRIDGE_BALANCE_TAG);
+    input.extend_from_slice(asset_id);
+    input.extend_from_slice(holder);
+    sha3::sha3_256(&input)
+}
+
+fn bridge_seen_key(source_ref: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(BRIDGE_SEEN_TAG.len() + source_ref.len());
+    input.extend_from_slice(BRIDGE_SEEN_TAG);
+    input.extend_from_slice(source_ref);
+    sha3::sha3_256(&input)
+}
+
+fn bridge_epochmint_key(asset_id: &[u8; 16], epoch: u64) -> Key {
+    let mut input = Vec::with_capacity(BRIDGE_EPOCHMINT_TAG.len() + asset_id.len() + 8);
+    input.extend_from_slice(BRIDGE_EPOCHMINT_TAG);
+    input.extend_from_slice(asset_id);
+    input.extend_from_slice(&epoch.to_le_bytes());
+    sha3::sha3_256(&input)
+}
+
 const STAKE_BANNED_TAG: &[u8] = b"qtv/stake/banned/";
 
 fn stake_banned_key(id: &[u8; 32]) -> Key {
@@ -348,6 +417,16 @@ pub fn bridge_unfreeze_address() -> String {
 
 pub fn bridge_bond_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/bond"))
+        .expect("a full hash reaches the address floor")
+}
+
+pub fn bridge_mint_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/mint/system"))
+        .expect("a full hash reaches the address floor")
+}
+
+pub fn bridge_exit_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/exit/system"))
         .expect("a full hash reaches the address floor")
 }
 
@@ -971,6 +1050,200 @@ impl Ledger {
         }
         self.clear_bridge_freeze();
         self.set_bridge_last_lift(now);
+    }
+
+    pub fn bridged_asset(&self, asset_id: &[u8; 16]) -> Option<QAsset> {
+        self.trie
+            .get(&bridge_asset_key(asset_id))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical bridged asset"))
+    }
+
+    fn set_bridged_asset(&mut self, asset_id: &[u8; 16], asset: &QAsset) {
+        self.write_leaf(bridge_asset_key(asset_id), to_bytes(asset));
+    }
+
+    /// Register a bridged asset with its total and per epoch caps, keeping any supply already
+    /// outstanding. Genesis and governance seed the corridor's assets through this.
+    pub fn register_bridged_asset(
+        &mut self,
+        asset_id: &[u8; 16],
+        cap: u128,
+        epoch_cap: u128,
+        requires_stark: bool,
+    ) -> (Key, Vec<u8>) {
+        let supply = self.bridged_asset(asset_id).map(|a| a.supply).unwrap_or(0);
+        let asset = QAsset {
+            supply,
+            cap,
+            epoch_cap,
+            requires_stark,
+        };
+        self.set_bridged_asset(asset_id, &asset);
+        (bridge_asset_key(asset_id), to_bytes(&asset))
+    }
+
+    pub fn bridged_supply(&self, asset_id: &[u8; 16]) -> u128 {
+        self.bridged_asset(asset_id).map(|a| a.supply).unwrap_or(0)
+    }
+
+    pub fn bridged_balance(&self, asset_id: &[u8; 16], holder: &[u8; 32]) -> u128 {
+        self.trie
+            .get(&bridge_balance_key(asset_id, holder))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical bridged balance"))
+            .unwrap_or(0)
+    }
+
+    fn set_bridged_balance(&mut self, asset_id: &[u8; 16], holder: &[u8; 32], amount: u128) {
+        self.write_leaf(bridge_balance_key(asset_id, holder), to_bytes(&amount));
+    }
+
+    pub fn bridge_operator_set(&self) -> Option<crate::bridge::OperatorSet> {
+        self.trie
+            .get(&stake_singleton_key(BRIDGE_OPERATORS_TAG))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical operator set"))
+    }
+
+    pub fn seed_bridge_operator_set(&mut self, set: &crate::bridge::OperatorSet) -> (Key, Vec<u8>) {
+        let key = stake_singleton_key(BRIDGE_OPERATORS_TAG);
+        let bytes = to_bytes(set);
+        self.write_leaf(key, bytes.clone());
+        (key, bytes)
+    }
+
+    pub fn bridge_dest_chain(&self) -> Option<u32> {
+        self.trie
+            .get(&stake_singleton_key(BRIDGE_DESTCHAIN_TAG))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical bridge dest chain"))
+    }
+
+    pub fn seed_bridge_dest_chain(&mut self, dest_chain: u32) -> (Key, Vec<u8>) {
+        let key = stake_singleton_key(BRIDGE_DESTCHAIN_TAG);
+        let bytes = to_bytes(&dest_chain);
+        self.write_leaf(key, bytes.clone());
+        (key, bytes)
+    }
+
+    pub fn bridge_epoch(&self) -> u64 {
+        self.trie
+            .get(&stake_singleton_key(BRIDGE_EPOCH_TAG))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical bridge epoch"))
+            .unwrap_or(0)
+    }
+
+    pub fn set_bridge_epoch(&mut self, epoch: u64) {
+        self.write_leaf(stake_singleton_key(BRIDGE_EPOCH_TAG), to_bytes(&epoch));
+    }
+
+    pub fn bridge_reference_seen(&self, source_ref: &[u8; 32]) -> bool {
+        matches!(self.trie.get(&bridge_seen_key(source_ref)), Some(bytes) if !bytes.is_empty())
+    }
+
+    fn mark_bridge_reference(&mut self, source_ref: &[u8; 32]) {
+        self.write_leaf(bridge_seen_key(source_ref), vec![1]);
+    }
+
+    pub fn bridge_epoch_minted(&self, asset_id: &[u8; 16], epoch: u64) -> u128 {
+        self.trie
+            .get(&bridge_epochmint_key(asset_id, epoch))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical epoch mint total"))
+            .unwrap_or(0)
+    }
+
+    fn set_bridge_epoch_minted(&mut self, asset_id: &[u8; 16], epoch: u64, amount: u128) {
+        self.write_leaf(bridge_epochmint_key(asset_id, epoch), to_bytes(&amount));
+    }
+
+    /// Mint a bridged asset from a verified deposit fact. Every fund check lives here so no caller
+    /// path can skip one: the asset must be registered, the deposit reference must be unseen, and
+    /// the amount must keep both the total cap and the current epoch cap. On success it credits
+    /// the recipient the exact proven amount, raises the supply, marks the reference against
+    /// replay, and records the mint event. A failed check returns false with no write, which the
+    /// executor's atomic firewall rolls back.
+    pub fn bridge_mint(&mut self, fact: &crate::bridge::Fact) -> bool {
+        if fact.amount == 0 {
+            return false;
+        }
+        let asset = match self.bridged_asset(&fact.asset_id) {
+            Some(asset) => asset,
+            None => return false,
+        };
+        if self.bridge_reference_seen(&fact.source_ref) {
+            return false;
+        }
+        let new_supply = match asset.supply.checked_add(fact.amount) {
+            Some(supply) => supply,
+            None => return false,
+        };
+        if new_supply > asset.cap {
+            return false;
+        }
+        let epoch = self.bridge_epoch();
+        let minted = self.bridge_epoch_minted(&fact.asset_id, epoch);
+        let new_minted = match minted.checked_add(fact.amount) {
+            Some(minted) => minted,
+            None => return false,
+        };
+        if new_minted > asset.epoch_cap {
+            return false;
+        }
+        let credited = self
+            .bridged_balance(&fact.asset_id, &fact.recipient)
+            .saturating_add(fact.amount);
+        self.set_bridged_balance(&fact.asset_id, &fact.recipient, credited);
+        self.set_bridged_asset(
+            &fact.asset_id,
+            &QAsset {
+                supply: new_supply,
+                ..asset
+            },
+        );
+        self.mark_bridge_reference(&fact.source_ref);
+        self.set_bridge_epoch_minted(&fact.asset_id, epoch, new_minted);
+        self.record_bridge_mint_event(&fact.asset_id, &fact.recipient, fact.amount);
+        true
+    }
+
+    /// Burn a holder's bridged amount on exit so the oracle releases it on the far side. The
+    /// holder must own the amount and the supply must cover it. On success it debits the holder,
+    /// lowers the supply, and records the burn event carrying the far side destination.
+    pub fn bridge_burn(
+        &mut self,
+        asset_id: &[u8; 16],
+        holder: &[u8; 32],
+        amount: u128,
+        destination: &[u8; 32],
+    ) -> bool {
+        if amount == 0 {
+            return false;
+        }
+        let asset = match self.bridged_asset(asset_id) {
+            Some(asset) => asset,
+            None => return false,
+        };
+        let balance = self.bridged_balance(asset_id, holder);
+        if balance < amount {
+            return false;
+        }
+        let new_supply = match asset.supply.checked_sub(amount) {
+            Some(supply) => supply,
+            None => return false,
+        };
+        self.set_bridged_balance(asset_id, holder, balance - amount);
+        self.set_bridged_asset(
+            asset_id,
+            &QAsset {
+                supply: new_supply,
+                ..asset
+            },
+        );
+        self.record_bridge_burn_event(asset_id, holder, amount, destination);
+        true
     }
 
     pub fn stake_price(&self) -> u128 {
@@ -2958,6 +3231,10 @@ pub const EVENT_SLASH: [u8; 4] = *b"QSLH";
 pub const EVENT_MINT: [u8; 4] = *b"QMNT";
 /// A staking reward the pool paid out to a validator.
 pub const EVENT_REWARD: [u8; 4] = *b"QRWD";
+/// A bridge mint that raised a bridged asset supply and credited a recipient.
+pub const EVENT_BRIDGE_MINT: [u8; 4] = *b"QBMT";
+/// A bridge exit burn that lowered a bridged asset supply for release on the far side.
+pub const EVENT_BRIDGE_BURN: [u8; 4] = *b"QBBN";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockEvent {
@@ -3134,6 +3411,29 @@ impl Ledger {
         encoder.put_bytes(address.as_bytes());
         encoder.put_u64(amount);
         self.record_native_event(EVENT_REWARD, encoder.into_bytes());
+    }
+
+    fn record_bridge_mint_event(&mut self, asset_id: &[u8; 16], recipient: &[u8; 32], amount: u128) {
+        let mut encoder = Encoder::new();
+        encoder.put_bytes(asset_id);
+        encoder.put_bytes(recipient);
+        encoder.put_u128(amount);
+        self.record_native_event(EVENT_BRIDGE_MINT, encoder.into_bytes());
+    }
+
+    fn record_bridge_burn_event(
+        &mut self,
+        asset_id: &[u8; 16],
+        holder: &[u8; 32],
+        amount: u128,
+        destination: &[u8; 32],
+    ) {
+        let mut encoder = Encoder::new();
+        encoder.put_bytes(asset_id);
+        encoder.put_bytes(holder);
+        encoder.put_u128(amount);
+        encoder.put_bytes(destination);
+        self.record_native_event(EVENT_BRIDGE_BURN, encoder.into_bytes());
     }
 
     pub fn account(&self, address: &str) -> Account {
