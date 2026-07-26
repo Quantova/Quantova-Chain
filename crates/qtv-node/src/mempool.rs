@@ -207,7 +207,7 @@ pub fn is_priority(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::gov_system_address()
 }
 
-pub const DEFAULT_FEELESS_ATTEMPTS_PER_SENDER: usize = 64;
+pub const DEFAULT_FEELESS_ADMITS_PER_WINDOW: usize = 128;
 
 fn is_feeless(wrapper: &Wrapper) -> bool {
     crate::node::is_bridge_mint(wrapper)
@@ -222,7 +222,7 @@ pub struct Mempool {
     per_sender: usize,
     reserve: usize,
     feeless_cap: usize,
-    feeless_attempts: std::collections::HashMap<String, usize>,
+    feeless_admits: usize,
 }
 
 impl Default for Mempool {
@@ -246,8 +246,8 @@ impl Mempool {
             cap: cap.max(1),
             per_sender: per_sender.max(1),
             reserve: reserve.min(cap.saturating_sub(1)),
-            feeless_cap: DEFAULT_FEELESS_ATTEMPTS_PER_SENDER,
-            feeless_attempts: std::collections::HashMap::new(),
+            feeless_cap: DEFAULT_FEELESS_ADMITS_PER_WINDOW,
+            feeless_admits: 0,
         }
     }
 
@@ -297,12 +297,11 @@ impl Mempool {
         normal < self.cap.saturating_sub(self.reserve) && self.pending.len() < self.cap
     }
 
-    fn charge_feeless(&mut self, sender: &str) -> bool {
-        let count = self.feeless_attempts.entry(sender.to_string()).or_insert(0);
-        if *count >= self.feeless_cap {
+    fn charge_feeless(&mut self) -> bool {
+        if self.feeless_admits >= self.feeless_cap {
             return false;
         }
-        *count += 1;
+        self.feeless_admits += 1;
         true
     }
 
@@ -371,14 +370,21 @@ impl Mempool {
         if self.pending.iter().any(|w| w.id() == id) {
             return Ok(Admitted::Known);
         }
-        if crate::node::is_bridge_mint(&wrapper) && self.duplicate_mint(&wrapper) {
-            return Ok(Admitted::Known);
+        if crate::node::is_bridge_mint(&wrapper) {
+            if self.duplicate_mint(&wrapper) {
+                return Ok(Admitted::Known);
+            }
+            let fresh = crate::node::bridge_mint_source_ref(&wrapper)
+                .is_some_and(|source_ref| !ledger.bridge_reference_seen(&source_ref));
+            if !fresh {
+                return Err(Reject::BadCall);
+            }
         }
         if is_feeless(&wrapper) {
             if !self.has_capacity(&wrapper) {
                 return Err(Reject::PoolFull);
             }
-            if !self.charge_feeless(wrapper.body().sender()) {
+            if !self.charge_feeless() {
                 return Err(Reject::RateLimited);
             }
         }
@@ -461,14 +467,21 @@ impl Mempool {
             if self.pending.iter().any(|w| w.id() == id) {
                 continue;
             }
-            if crate::node::is_bridge_mint(&wrapper) && self.duplicate_mint(&wrapper) {
-                continue;
+            if crate::node::is_bridge_mint(&wrapper) {
+                if self.duplicate_mint(&wrapper) {
+                    continue;
+                }
+                let fresh = crate::node::bridge_mint_source_ref(&wrapper)
+                    .is_some_and(|source_ref| !ledger.bridge_reference_seen(&source_ref));
+                if !fresh {
+                    continue;
+                }
             }
             if is_feeless(&wrapper) {
                 if !self.has_capacity(&wrapper) {
                     continue;
                 }
-                if !self.charge_feeless(wrapper.body().sender()) {
+                if !self.charge_feeless() {
                     continue;
                 }
             }
@@ -525,7 +538,7 @@ impl Mempool {
 
     pub fn remove_included(&mut self, ids: &[String]) {
         self.pending.retain(|w| !ids.contains(&w.id()));
-        self.feeless_attempts.clear();
+        self.feeless_admits = 0;
     }
 }
 
