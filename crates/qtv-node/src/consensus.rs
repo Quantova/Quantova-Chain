@@ -146,6 +146,7 @@ pub fn genesis_beacon() -> Beacon {
 /// justified cross view re vote and never flags, and a forged pair naming a validator that
 /// never double signed does not authenticate and is never flagged.
 pub fn equivocation_offenders(
+    chain_id: u64,
     attestations: &[Attestation],
     roster: &[ValidatorRegistration],
 ) -> Vec<u64> {
@@ -159,8 +160,8 @@ pub fn equivocation_offenders(
                 && !flagged.contains(&first.from)
             {
                 if let Some(registration) = roster.iter().find(|r| r.id == first.from) {
-                    if first.signature_verifies(&registration.attest_pk)
-                        && second.signature_verifies(&registration.attest_pk)
+                    if first.signature_verifies(chain_id, &registration.attest_pk)
+                        && second.signature_verifies(chain_id, &registration.attest_pk)
                     {
                         flagged.push(first.from);
                     }
@@ -223,6 +224,7 @@ impl FinalityLedger {
 /// computes its own reveal and assembles the committee from published reveals verified
 /// against the roster.
 pub struct Consensus {
+    chain_id: u64,
     own: Attester,
     own_id: u64,
     roster: Vec<ValidatorRegistration>,
@@ -233,11 +235,17 @@ pub struct Consensus {
 }
 
 impl Consensus {
-    pub fn new(own_id: u64, own_secret: &[u8; 32], roster: Vec<ValidatorRegistration>) -> Self {
-        Self::with_slots(own_id, own_secret, roster, DEFAULT_SLOTS)
+    pub fn new(
+        chain_id: u64,
+        own_id: u64,
+        own_secret: &[u8; 32],
+        roster: Vec<ValidatorRegistration>,
+    ) -> Self {
+        Self::with_slots(chain_id, own_id, own_secret, roster, DEFAULT_SLOTS)
     }
 
     pub fn with_slots(
+        chain_id: u64,
         own_id: u64,
         own_secret: &[u8; 32],
         mut roster: Vec<ValidatorRegistration>,
@@ -251,6 +259,7 @@ impl Consensus {
             .unwrap_or(0);
         let own = Attester::from_secret_with_slots(own_id, own_secret, own_stake, slots);
         Consensus {
+            chain_id,
             own,
             own_id,
             roster,
@@ -259,6 +268,12 @@ impl Consensus {
             epoch: 0,
             epoch_len: slots,
         }
+    }
+
+    /// The chain id this consensus is bound to. Every attestation and certificate is signed and
+    /// verified under it, so nothing from another chain can be lifted onto this one.
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
     }
 
     /// Replace the roster with a reweighted one.
@@ -388,7 +403,7 @@ impl Consensus {
         block: Block,
         beacon: &Beacon,
     ) -> Attestation {
-        self.own.attest(height, slot, view, block, beacon)
+        self.own.attest(self.chain_id, height, slot, view, block, beacon)
     }
 
     /// Fold the collected attestations into a finality certificate.
@@ -402,6 +417,7 @@ impl Consensus {
         attestations: &[Attestation],
     ) -> Option<Certificate> {
         aggregate(
+            self.chain_id,
             height,
             slot,
             block,
@@ -419,7 +435,7 @@ impl Consensus {
         beacon: &Beacon,
     ) -> bool {
         certificate
-            .verify(&selection.commitment, beacon, selection.tau)
+            .verify(self.chain_id, &selection.commitment, beacon, selection.tau)
             .is_verified()
     }
 }
@@ -430,6 +446,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     const SLOTS: u64 = DEFAULT_SLOTS;
+    const CHAIN_ID: u64 = 1;
 
     fn secrets(online: &[bool]) -> Vec<ConsensusValidator> {
         online
@@ -493,13 +510,14 @@ mod tests {
                 .iter()
                 .filter(|id| self.online.get(id).copied().unwrap_or(false))
                 .filter_map(|id| self.attesters.get(id))
-                .map(|a| a.attest(height, slot, 0, block, beacon))
+                .map(|a| a.attest(CHAIN_ID, height, slot, 0, block, beacon))
                 .collect()
         }
     }
 
     fn consensus_for(validators: &[ConsensusValidator]) -> Consensus {
         Consensus::with_slots(
+            CHAIN_ID,
             validators[0].id,
             &validators[0].secret,
             roster_of(validators, SLOTS),
@@ -631,7 +649,7 @@ mod tests {
         let mk_a = || block_for(1);
         let mk_b = || Block::new(1, header_value(&[42u8; 32]), Parent::Genesis);
         let att =
-            |id: u64, block: Block| sim.attesters.get(&id).unwrap().attest(1, 1, 0, block, &beacon);
+            |id: u64, block: Block| sim.attesters.get(&id).unwrap().attest(CHAIN_ID, 1, 1, 0, block, &beacon);
         let atts_a = vec![att(1, mk_a()), att(2, mk_a()), att(4, mk_a())];
         let atts_b = vec![att(3, mk_b()), att(4, mk_b())];
         let cert_a = consensus.finalize(&selection, 1, 1, mk_a(), &beacon, &atts_a);
@@ -679,11 +697,12 @@ mod tests {
 
         let honest: Vec<Attestation> = [1u64, 2, 3, 4]
             .iter()
-            .map(|id| sim.attesters[id].attest(1, 1, 0, block_for(1), &beacon))
+            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, block_for(1), &beacon))
             .collect();
-        assert!(equivocation_offenders(&honest, &roster).is_empty());
+        assert!(equivocation_offenders(CHAIN_ID, &honest, &roster).is_empty());
 
         let conflict = sim.attesters[&2].attest(
+            CHAIN_ID,
             1,
             1,
             0,
@@ -692,10 +711,11 @@ mod tests {
         );
         let mut evidence = honest.clone();
         evidence.push(conflict);
-        assert_eq!(equivocation_offenders(&evidence, &roster), vec![2]);
+        assert_eq!(equivocation_offenders(CHAIN_ID, &evidence, &roster), vec![2]);
 
-        let mut forged_a = sim.attesters[&3].attest(1, 1, 0, block_for(1), &beacon);
+        let mut forged_a = sim.attesters[&3].attest(CHAIN_ID, 1, 1, 0, block_for(1), &beacon);
         let mut forged_b = sim.attesters[&3].attest(
+            CHAIN_ID,
             1,
             1,
             0,
@@ -705,7 +725,7 @@ mod tests {
         forged_a.from = 1;
         forged_b.from = 1;
         assert!(
-            equivocation_offenders(&[forged_a, forged_b], &roster).is_empty(),
+            equivocation_offenders(CHAIN_ID, &[forged_a, forged_b], &roster).is_empty(),
             "a relabelled pair never slashes the named validator"
         );
     }
@@ -715,7 +735,7 @@ mod tests {
         let validators = secrets(&[true, true, true, true]);
         let own = &validators[0];
         let roster = roster_of(&validators, SLOTS);
-        let consensus = Consensus::with_slots(own.id, &own.secret, roster.clone(), SLOTS);
+        let consensus = Consensus::with_slots(CHAIN_ID, own.id, &own.secret, roster.clone(), SLOTS);
         let beacon = genesis_beacon();
         let slot = 1;
 
@@ -780,7 +800,7 @@ mod tests {
             .iter()
             .filter(|(id, _)| selection.members.contains(id))
             .take(3)
-            .map(|(_, a)| a.attest(1, 1, 0, block, &beacon))
+            .map(|(_, a)| a.attest(CHAIN_ID, 1, 1, 0, block, &beacon))
             .collect();
         let depth = atts[0].membership.path.siblings.len();
         atts[0].membership = Credential {
@@ -794,7 +814,7 @@ mod tests {
 
         assert!(!consensus.verify(&forged, &selection, &beacon));
         assert_eq!(
-            forged.verify(&selection.commitment, &beacon, selection.tau),
+            forged.verify(CHAIN_ID, &selection.commitment, &beacon, selection.tau),
             Verdict::Rejected(RejectReason::NotEntitled)
         );
     }
@@ -810,6 +830,7 @@ mod tests {
         let mut reweighted = consensus_for(&validators);
         reweighted.reweight(zeroed_roster.clone());
         let fresh = Consensus::with_slots(
+            CHAIN_ID,
             zeroed[0].id,
             &zeroed[0].secret,
             zeroed_roster.clone(),

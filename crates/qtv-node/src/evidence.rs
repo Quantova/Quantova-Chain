@@ -8,8 +8,20 @@ use qtv_crypto::ml_dsa::{self, PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
 
 use qtv_attest::params::ATTEST_CONTEXT;
 
-fn attestation_message(height: u64, slot: u64, view: u64, block_bytes: &[u8]) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(24 + block_bytes.len());
+fn attestation_message(
+    chain_id: u64,
+    height: u64,
+    slot: u64,
+    view: u64,
+    block_bytes: &[u8],
+) -> Vec<u8> {
+    // The chain id leads the preimage, byte for byte the layout an attester signs in
+    // qtv-attest, so this on chain verifier rebuilds the exact message a real validator
+    // signed. Without it a genuine equivocation would fail to authenticate here and the
+    // offender would escape the slash, and evidence minted on one chain would slash the same
+    // key on another. A verifier rebuilds with its own chain id, so neither carries across.
+    let mut msg = Vec::with_capacity(8 + 24 + block_bytes.len());
+    msg.extend_from_slice(&chain_id.to_le_bytes());
     msg.extend_from_slice(&height.to_le_bytes());
     msg.extend_from_slice(&slot.to_le_bytes());
     msg.extend_from_slice(&view.to_le_bytes());
@@ -47,7 +59,7 @@ pub struct Equivocation {
 }
 
 impl Equivocation {
-    pub fn attributes(&self, attest_pk: &[u8]) -> bool {
+    pub fn attributes(&self, chain_id: u64, attest_pk: &[u8]) -> bool {
         if self.block_a == self.block_b {
             return false;
         }
@@ -66,8 +78,8 @@ impl Equivocation {
             Ok(sig) => sig,
             Err(_) => return false,
         };
-        let msg_a = attestation_message(self.height, self.slot, self.view_a, &self.block_a);
-        let msg_b = attestation_message(self.height, self.slot, self.view_b, &self.block_b);
+        let msg_a = attestation_message(chain_id, self.height, self.slot, self.view_a, &self.block_a);
+        let msg_b = attestation_message(chain_id, self.height, self.slot, self.view_b, &self.block_b);
         ml_dsa::verify(&pk, &msg_a, &sig_a, ATTEST_CONTEXT)
             && ml_dsa::verify(&pk, &msg_b, &sig_b, ATTEST_CONTEXT)
     }
@@ -192,6 +204,8 @@ mod tests {
     use super::*;
     use qtv_attest::{Attester, Beacon, Block, Parent};
 
+    const CHAIN_ID: u64 = 1;
+
     fn attester() -> (Attester, String) {
         let secret = [5u8; 32];
         let attester = Attester::from_secret(1, &secret, 2_000);
@@ -203,8 +217,8 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, 0, block_a, &beacon);
-        let b = attester.attest(1, 1, 0, block_b, &beacon);
+        let a = attester.attest(CHAIN_ID, 1, 1, 0, block_a, &beacon);
+        let b = attester.attest(CHAIN_ID, 1, 1, 0, block_b, &beacon);
         let evidence = Equivocation {
             offender: address.to_string(),
             height: 1,
@@ -223,7 +237,7 @@ mod tests {
     fn a_genuine_pair_of_conflicting_signatures_attributes_to_the_key() {
         let (attester, address) = attester();
         let (evidence, pk) = equivocation(&attester, &address);
-        assert!(evidence.attributes(&pk));
+        assert!(evidence.attributes(CHAIN_ID, &pk));
         assert_eq!(Equivocation::decode(&evidence.encode()), Some(evidence));
     }
 
@@ -232,7 +246,7 @@ mod tests {
         let (attester, address) = attester();
         let beacon = Beacon::genesis();
         let block = Block::new(1, [1u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, 0, block, &beacon);
+        let a = attester.attest(CHAIN_ID, 1, 1, 0, block, &beacon);
         let evidence = Equivocation {
             offender: address,
             height: 1,
@@ -244,7 +258,7 @@ mod tests {
             block_b: block.to_bytes(),
             sig_b: a.sig.to_vec(),
         };
-        assert!(!evidence.attributes(attester.attest_public_key()));
+        assert!(!evidence.attributes(CHAIN_ID, attester.attest_public_key()));
     }
 
     #[test]
@@ -252,7 +266,7 @@ mod tests {
         let (attester, address) = attester();
         let (evidence, _) = equivocation(&attester, &address);
         let stranger = Attester::from_secret(2, &[6u8; 32], 2_000);
-        assert!(!evidence.attributes(stranger.attest_public_key()));
+        assert!(!evidence.attributes(CHAIN_ID, stranger.attest_public_key()));
     }
 
     #[test]
@@ -261,8 +275,8 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, 0, block_a, &beacon);
-        let b = attester.attest(1, 1, 0, block_b, &beacon);
+        let a = attester.attest(CHAIN_ID, 1, 1, 0, block_a, &beacon);
+        let b = attester.attest(CHAIN_ID, 1, 1, 0, block_b, &beacon);
 
         let mut pool = EvidencePool::new();
         assert!(pool
@@ -273,7 +287,7 @@ mod tests {
             .expect("a conflicting block in the same view is a genuine double vote");
         assert_eq!((flagged.view_a, flagged.view_b), (0, 0));
         assert!(
-            flagged.attributes(attester.attest_public_key()),
+            flagged.attributes(CHAIN_ID, attester.attest_public_key()),
             "the same view double vote authenticates and slashes"
         );
     }
@@ -284,8 +298,8 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, 0, block_a, &beacon);
-        let b = attester.attest(1, 1, 1, block_b, &beacon);
+        let a = attester.attest(CHAIN_ID, 1, 1, 0, block_a, &beacon);
+        let b = attester.attest(CHAIN_ID, 1, 1, 1, block_b, &beacon);
 
         let mut pool = EvidencePool::new();
         assert!(pool
@@ -310,7 +324,7 @@ mod tests {
             sig_b: b.sig.to_vec(),
         };
         assert!(
-            !hand_built.attributes(attester.attest_public_key()),
+            !hand_built.attributes(CHAIN_ID, attester.attest_public_key()),
             "the deterministic gate refuses a cross view pair even with valid signatures"
         );
     }
@@ -321,8 +335,8 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, 0, block_a, &beacon);
-        let b = attester.attest(1, 1, 2, block_b, &beacon);
+        let a = attester.attest(CHAIN_ID, 1, 1, 0, block_a, &beacon);
+        let b = attester.attest(CHAIN_ID, 1, 1, 2, block_b, &beacon);
 
         let mut pool = EvidencePool::new();
         assert!(pool
@@ -342,8 +356,8 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, 0, block_a, &beacon);
-        let b = attester.attest(1, 1, 0, block_b, &beacon);
+        let a = attester.attest(CHAIN_ID, 1, 1, 0, block_a, &beacon);
+        let b = attester.attest(CHAIN_ID, 1, 1, 0, block_b, &beacon);
 
         let mut pool = EvidencePool::new();
         assert!(pool
@@ -352,7 +366,7 @@ mod tests {
         let flagged = pool
             .observe(&address, 1, 1, 0, block_b.to_bytes(), b.sig.to_vec())
             .expect("the conflicting attestation is flagged");
-        assert!(flagged.attributes(attester.attest_public_key()));
+        assert!(flagged.attributes(CHAIN_ID, attester.attest_public_key()));
         assert!(pool
             .observe(&address, 1, 1, 0, block_b.to_bytes(), b.sig.to_vec())
             .is_none(), "a validator is flagged only once");
@@ -369,8 +383,8 @@ mod tests {
         // An honest validator legitimately re votes across a view change, block_a in view 0
         // and block_b in view 1. A malicious reporter pairs the two and asserts an equal view
         // to frame the honest signer as a same view double vote.
-        let honest_a = attester.attest(1, 1, 0, block_a, &beacon);
-        let honest_b = attester.attest(1, 1, 1, block_b, &beacon);
+        let honest_a = attester.attest(CHAIN_ID, 1, 1, 0, block_a, &beacon);
+        let honest_b = attester.attest(CHAIN_ID, 1, 1, 1, block_b, &beacon);
         let framed = Equivocation {
             offender: address.clone(),
             height: 1,
@@ -383,14 +397,14 @@ mod tests {
             sig_b: honest_b.sig.to_vec(),
         };
         assert!(
-            !framed.attributes(attester.attest_public_key()),
+            !framed.attributes(CHAIN_ID, attester.attest_public_key()),
             "a forged equal view over a genuine cross view re vote no longer authenticates"
         );
 
         // Two conflicting blocks the offender actually signed in one and the same view are a
         // genuine double vote that attributes and slashes.
-        let double_a = attester.attest(1, 1, 0, block_a, &beacon);
-        let double_b = attester.attest(1, 1, 0, block_b, &beacon);
+        let double_a = attester.attest(CHAIN_ID, 1, 1, 0, block_a, &beacon);
+        let double_b = attester.attest(CHAIN_ID, 1, 1, 0, block_b, &beacon);
         let genuine = Equivocation {
             offender: address,
             height: 1,
@@ -403,7 +417,7 @@ mod tests {
             sig_b: double_b.sig.to_vec(),
         };
         assert!(
-            genuine.attributes(attester.attest_public_key()),
+            genuine.attributes(CHAIN_ID, attester.attest_public_key()),
             "a genuine same signed view double vote attributes and is slashable"
         );
     }

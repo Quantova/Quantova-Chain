@@ -241,7 +241,13 @@ impl DevNode {
             identity: p2p_identity(&secret),
             ledger: Ledger::new(),
             mempool: Mempool::new(),
-            consensus: Consensus::with_slots(node.id, &secret, roster.clone(), devnet.slots),
+            consensus: Consensus::with_slots(
+                devnet.fee_params.chain_id,
+                node.id,
+                &secret,
+                roster.clone(),
+                devnet.slots,
+            ),
             base_roster: roster,
             reveals: Vec::new(),
             fee_params: devnet.fee_params,
@@ -1039,7 +1045,7 @@ impl DevNode {
         {
             return false;
         }
-        if !record.att.signature_verifies(&member.attest_pk) {
+        if !record.att.signature_verifies(self.consensus.chain_id(), &member.attest_pk) {
             return false;
         }
         record.att.is_entitled(
@@ -1460,7 +1466,7 @@ impl DevNode {
             .committee_for_certificate(self.height, &certificate)
             .ok_or(SyncError::NoCommittee)?;
         if !certificate
-            .verify(&selection.commitment, &self.beacon, selection.tau)
+            .verify(self.consensus.chain_id(), &selection.commitment, &self.beacon, selection.tau)
             .is_verified()
         {
             return Err(SyncError::UnverifiedCertificate);

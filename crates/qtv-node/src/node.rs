@@ -355,7 +355,7 @@ pub(crate) fn is_registration(wrapper: &Wrapper) -> bool {
 /// with no fee and no signature. It holds only when the evidence decodes, the named
 /// offender has an attestation key in state, the evidence authenticates against that key,
 /// and the offender is not already banned.
-pub(crate) fn evidence_admissible(wrapper: &Wrapper, ledger: &Ledger) -> bool {
+pub(crate) fn evidence_admissible(chain_id: u64, wrapper: &Wrapper, ledger: &Ledger) -> bool {
     let evidence = match crate::evidence::Equivocation::decode(wrapper.body().call().args()) {
         Some(evidence) => evidence,
         None => return false,
@@ -364,7 +364,7 @@ pub(crate) fn evidence_admissible(wrapper: &Wrapper, ledger: &Ledger) -> bool {
         return false;
     }
     match ledger.validator_attest_key(&evidence.offender) {
-        Some(attest_pk) => evidence.attributes(&attest_pk),
+        Some(attest_pk) => evidence.attributes(chain_id, &attest_pk),
         None => false,
     }
 }
@@ -375,7 +375,7 @@ pub(crate) fn evidence_admissible(wrapper: &Wrapper, ledger: &Ledger) -> bool {
 /// evidence authenticates against the offender's attestation key held in state and the
 /// offender is not already banned, so every node executing the same block reaches the same
 /// slash with no access to the live roster.
-fn dispatch_evidence(ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
+fn dispatch_evidence(chain_id: u64, ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
     let evidence = match crate::evidence::Equivocation::decode(wrapper.body().call().args()) {
         Some(evidence) => evidence,
         None => return false,
@@ -384,7 +384,7 @@ fn dispatch_evidence(ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
         Some(attest_pk) => attest_pk,
         None => return false,
     };
-    if !evidence.attributes(&attest_pk) {
+    if !evidence.attributes(chain_id, &attest_pk) {
         return false;
     }
     ledger.slash_validator(&evidence.offender)
@@ -562,7 +562,7 @@ fn execute_ordered_across(
             continue;
         }
         if is_evidence(wrapper) {
-            if ledger.apply_atomic(|l| dispatch_evidence(l, wrapper)) {
+            if ledger.apply_atomic(|l| dispatch_evidence(fee_params.chain_id, l, wrapper)) {
                 included.push(wrapper.clone());
             }
             continue;
@@ -838,6 +838,7 @@ impl Node {
             .collect();
         let sim_online = validators.iter().map(|v| (v.id, v.online)).collect();
         let consensus = Consensus::with_slots(
+            genesis.fee_params.chain_id,
             validators[0].id,
             &validators[0].secret,
             crate::consensus::roster_of(&validators, slots),
@@ -992,12 +993,13 @@ impl Node {
         let value = header_value(&header_hash);
         let block = crate::consensus::Block::new(height, value, self.parent_val);
 
+        let chain_id = self.consensus.chain_id();
         let attestations: Vec<qtv_attest::Attestation> = selection
             .members
             .iter()
             .filter(|id| self.sim_online.get(id).copied().unwrap_or(false))
             .filter_map(|id| self.sim_attesters.get(id))
-            .map(|attester| attester.attest(height, slot, 0, block, &self.beacon))
+            .map(|attester| attester.attest(chain_id, height, slot, 0, block, &self.beacon))
             .collect();
 
         let mut evidence = attestations.clone();
@@ -1009,11 +1011,11 @@ impl Node {
                         header_value(&[0xEE; 32]),
                         self.parent_val,
                     );
-                    evidence.push(attester.attest(height, slot, 0, conflicting, &self.beacon));
+                    evidence.push(attester.attest(chain_id, height, slot, 0, conflicting, &self.beacon));
                 }
             }
         }
-        let offenders = crate::consensus::equivocation_offenders(&evidence, &roster);
+        let offenders = crate::consensus::equivocation_offenders(chain_id, &evidence, &roster);
 
         let certificate = self
             .consensus
@@ -2517,8 +2519,8 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(1, 1, 0, block_a, &beacon);
-        let b = attester.attest(1, 1, 0, block_b, &beacon);
+        let a = attester.attest(fee.chain_id, 1, 1, 0, block_a, &beacon);
+        let b = attester.attest(fee.chain_id, 1, 1, 0, block_b, &beacon);
         let evidence = crate::evidence::Equivocation {
             offender: offender.clone(),
             height: 1,
