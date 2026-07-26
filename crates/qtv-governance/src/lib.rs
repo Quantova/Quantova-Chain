@@ -288,6 +288,7 @@ pub enum Action {
     Upgrade { blob: Vec<u8> },
     Mint { to: Vec<u8>, amount: u64 },
     BridgeMigration { vault: Vec<u8> },
+    BridgeUnfreeze,
     FreezeRecovery {
         scope: [u8; 32],
         victim: Vec<u8>,
@@ -306,6 +307,7 @@ impl Action {
             Action::Upgrade { .. } => Track::ChainUpgrade,
             Action::Mint { .. } => Track::Mint,
             Action::BridgeMigration { .. } => Track::BridgeMigration,
+            Action::BridgeUnfreeze => Track::BridgeMigration,
             Action::FreezeRecovery { .. } => Track::FreezeRecovery,
             Action::Blacklist { .. } => Track::BlacklistKill,
             Action::Freeze { .. } => Track::BlacklistKill,
@@ -341,6 +343,9 @@ impl Encode for Action {
             Action::BridgeMigration { vault } => {
                 encoder.put_u8(3);
                 vault.encode(encoder);
+            }
+            Action::BridgeUnfreeze => {
+                encoder.put_u8(11);
             }
             Action::FreezeRecovery {
                 scope,
@@ -402,6 +407,7 @@ impl Decode for Action {
             3 => Ok(Action::BridgeMigration {
                 vault: Vec::<u8>::decode(decoder)?,
             }),
+            11 => Ok(Action::BridgeUnfreeze),
             4 => {
                 let scope_bytes = decoder.get_bytes()?;
                 let scope: [u8; 32] = scope_bytes.try_into().map_err(|_| Error::UnknownTag { tag })?;
@@ -999,6 +1005,7 @@ mod tests {
                 amount: 12_345,
             },
             Action::BridgeMigration { vault: vec![4; 32] },
+            Action::BridgeUnfreeze,
             Action::FreezeRecovery {
                 scope: [7u8; 32],
                 victim: vec![2; 32],
@@ -1063,6 +1070,19 @@ mod tests {
         let caucus = GuardianSet::new(vec![[4u8; 32], [5u8; 32], [6u8; 32]], 2);
         let back: GuardianSet = from_bytes(&to_bytes(&caucus)).unwrap();
         assert_eq!(caucus, back);
+    }
+
+    #[test]
+    fn an_early_bridge_unfreeze_rides_the_bridge_migration_track() {
+        assert_eq!(Action::BridgeUnfreeze.track(), Track::BridgeMigration);
+        assert_eq!(
+            check_enactment(Track::BridgeMigration, &Action::BridgeUnfreeze, true, |_| false),
+            Ok(())
+        );
+        assert_eq!(
+            check_enactment(Track::FreezeRecovery, &Action::BridgeUnfreeze, true, |_| false),
+            Err(Violation::WrongTrack)
+        );
     }
 
     #[test]

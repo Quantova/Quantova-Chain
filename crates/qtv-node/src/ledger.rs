@@ -536,6 +536,12 @@ pub enum EnactError {
     NotImplemented,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FreezeLift {
+    Refund,
+    Slash,
+}
+
 fn id_bytes_to_address(id: &[u8]) -> Option<String> {
     if id.len() != KEY_LEN {
         return None;
@@ -1049,7 +1055,7 @@ impl Ledger {
         account.nonce += 1;
         self.set_account(caller, &account);
         self.collect_fee(fee);
-        self.lift_bridge_freeze(now);
+        self.lift_bridge_freeze(now, FreezeLift::Refund);
         true
     }
 
@@ -1060,19 +1066,27 @@ impl Ledger {
         if !self.guardian_set().authorizes(approvers) {
             return false;
         }
-        self.lift_bridge_freeze(now);
+        self.lift_bridge_freeze(now, FreezeLift::Slash);
         true
+    }
+
+    pub fn gov_unfreeze_bridge(&mut self, now: u64) -> Result<(), EnactError> {
+        if self.bridge_freeze().is_none() {
+            return Err(EnactError::BridgeNotFrozen);
+        }
+        self.lift_bridge_freeze(now, FreezeLift::Slash);
+        Ok(())
     }
 
     pub fn bridge_expire(&mut self, now: u64) {
         if let Some(record) = self.bridge_freeze() {
             if now >= record.until {
-                self.lift_bridge_freeze(now);
+                self.lift_bridge_freeze(now, FreezeLift::Refund);
             }
         }
     }
 
-    fn lift_bridge_freeze(&mut self, now: u64) {
+    fn lift_bridge_freeze(&mut self, now: u64, outcome: FreezeLift) {
         let record = match self.bridge_freeze() {
             Some(record) => record,
             None => return,
@@ -1081,10 +1095,17 @@ impl Ledger {
         let mut pot = self.account(&pot_address);
         pot.balance = pot.balance.saturating_sub(record.bond);
         self.set_account(&pot_address, &pot);
-        if let Some(depositor) = id_bytes_to_address(&record.who) {
-            let mut account = self.account(&depositor);
-            account.balance = account.balance.saturating_add(record.bond);
-            self.set_account(&depositor, &account);
+        match outcome {
+            FreezeLift::Refund => {
+                if let Some(depositor) = id_bytes_to_address(&record.who) {
+                    let mut account = self.account(&depositor);
+                    account.balance = account.balance.saturating_add(record.bond);
+                    self.set_account(&depositor, &account);
+                }
+            }
+            FreezeLift::Slash => {
+                self.set_stake_treasury(self.stake_treasury().saturating_add(record.bond));
+            }
         }
         self.clear_bridge_freeze();
         self.set_bridge_last_lift(now);
@@ -1865,7 +1886,7 @@ impl Ledger {
             self.is_protected_account(addr)
         })
         .map_err(EnactError::Constitution)?;
-        self.execute_action(&action)?;
+        self.execute_action(&action, now)?;
         let scope = match &action {
             Action::FreezeRecovery { scope, .. } => *scope,
             _ => [0u8; 32],
@@ -1882,7 +1903,7 @@ impl Ledger {
         Ok(())
     }
 
-    fn execute_action(&mut self, action: &Action) -> Result<(), EnactError> {
+    fn execute_action(&mut self, action: &Action, now: u64) -> Result<(), EnactError> {
         match action {
             Action::Mint { to, amount } => {
                 let addr = id_bytes_to_address(to).ok_or(EnactError::BadAddress)?;
@@ -1968,6 +1989,7 @@ impl Ledger {
                 self.set_bridge_pool_vault(&vault_id);
                 Ok(())
             }
+            Action::BridgeUnfreeze => self.gov_unfreeze_bridge(now),
             Action::Upgrade { .. } => Err(EnactError::NotImplemented),
         }
     }
@@ -3043,15 +3065,17 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn a_guardian_caucus_lifts_the_bridge_freeze_and_returns_the_bond() {
+    fn a_guardian_caucus_lifts_the_bridge_freeze_and_slashes_the_bond() {
         let mut l = Ledger::new();
         let freezer = gov_addr(75);
+        let bond = qtv_governance::BRIDGE_FREEZE_BOND;
         fund(&mut l, &freezer, 1_500_000 * 1_000_000);
         l.set_guardian_set(&qtv_governance::GuardianSet::new(
             vec![[1u8; 32], [2u8; 32], [3u8; 32]],
             2,
         ));
         assert!(l.bridge_freeze_with_fee(&freezer, 0, 500));
+        assert_eq!(l.balance(&freezer), 0, "the bond leaves the freezer");
 
         assert!(
             !l.guardian_bridge_unfreeze(&[[1u8; 32]], 600),
@@ -3063,10 +3087,76 @@ mod stake_state_tests {
         assert!(!l.bridge_is_frozen());
         assert_eq!(
             l.balance(&freezer),
-            1_500_000 * 1_000_000,
-            "governance lifting the freeze returns the bond to the original depositor"
+            0,
+            "a guardian override treats the freeze as malicious and never refunds the bond"
         );
+        assert_eq!(
+            l.stake_treasury(),
+            bond,
+            "the slashed bond lands in the treasury"
+        );
+        assert_eq!(l.balance(&bridge_bond_address()), 0);
         assert_eq!(l.bridge_last_lift(), Some(600));
+    }
+
+    #[test]
+    fn a_governance_early_unfreeze_slashes_the_bond_to_the_treasury() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        let bond = qtv_governance::BRIDGE_FREEZE_BOND;
+        let freezer = gov_addr(83);
+        fund(&mut l, &freezer, 1_500_000 * 1_000_000);
+        assert!(l.bridge_freeze_with_fee(&freezer, 0, 100));
+
+        let proposer = gov_addr(84);
+        fund(&mut l, &proposer, 1_500_000 * 1_000_000);
+        let voter = gov_addr(85);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+
+        let unseen = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::BridgeUnfreeze,
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, unseen, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        l.gov_enact(unseen, 5 * 86_400 + 1).unwrap();
+
+        assert!(!l.bridge_is_frozen(), "the vote lifts the freeze ahead of its horizon");
+        assert_eq!(
+            l.balance(&freezer),
+            0,
+            "a governance lift never refunds the freezer"
+        );
+        assert_eq!(l.stake_treasury(), bond, "the slashed bond lands in the treasury");
+        assert_eq!(l.bridge_last_lift(), Some(5 * 86_400 + 1));
+    }
+
+    #[test]
+    fn a_governance_early_unfreeze_needs_a_frozen_bridge() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        let proposer = gov_addr(86);
+        fund(&mut l, &proposer, 1_500_000 * 1_000_000);
+        let voter = gov_addr(87);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+
+        let open = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::BridgeUnfreeze,
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, open, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        assert_eq!(
+            l.gov_enact(open, 5 * 86_400 + 1),
+            Err(EnactError::BridgeNotFrozen),
+            "an early unfreeze is refused when no freeze is active"
+        );
     }
 
     #[test]
@@ -3181,10 +3271,13 @@ mod stake_state_tests {
     fn a_mint_records_a_native_mint_event() {
         let mut l = Ledger::new();
         let target = gov_addr(63);
-        l.execute_action(&Action::Mint {
-            to: [63u8; 32].to_vec(),
-            amount: 5_000,
-        })
+        l.execute_action(
+            &Action::Mint {
+                to: [63u8; 32].to_vec(),
+                amount: 5_000,
+            },
+            0,
+        )
         .unwrap();
         let events = l.block_events();
         assert_eq!(events.len(), 1);
