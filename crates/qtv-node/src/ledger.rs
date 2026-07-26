@@ -4115,6 +4115,66 @@ mod stake_state_tests {
             "the later ref recomputes from its leaf fields"
         );
     }
+
+    #[test]
+    fn a_burn_inclusion_proof_verifies_under_the_block_event_root() {
+        let mut l = Ledger::new();
+        let asset = [7u8; 16];
+        let holder = [9u8; 32];
+        let destination = [0xEE; 32];
+        let chain_id = 42u64;
+        seed_burnable(&mut l, &asset, &holder, 1_000_000);
+
+        l.record_transfer_event("qtv1payer", "qtv1payee", 10, 1);
+        assert!(l.bridge_burn(&asset, &holder, 100_000, &destination, chain_id, 0));
+        l.record_transfer_event("qtv1other", "qtv1sink", 5, 1);
+
+        let leaf = decode_burn_leaf(&l.block_events()[1].data);
+        let burn_ref = leaf.7;
+        let inclusion = l.prove_bridge_burn(&burn_ref).expect("the burn is present");
+        assert_eq!(inclusion.event_index, 1);
+        assert_eq!(bridge_burn_leaf_ref(&l.block_events()[1].data), Some(burn_ref));
+
+        let leaves: Vec<Vec<u8>> = l.block_events().iter().map(BlockEvent::encode).collect();
+        let root = qtv_block::event_root(&leaves);
+        assert!(qtv_block::verify_inclusion(&root, &inclusion.leaf, &inclusion.proof));
+    }
+
+    #[test]
+    fn a_tampered_burn_leaf_or_branch_does_not_verify() {
+        let mut l = Ledger::new();
+        let asset = [7u8; 16];
+        let holder = [9u8; 32];
+        seed_burnable(&mut l, &asset, &holder, 1_000_000);
+        l.record_transfer_event("qtv1a", "qtv1b", 10, 1);
+        assert!(l.bridge_burn(&asset, &holder, 100_000, &[0xEE; 32], 42, 0));
+        l.record_transfer_event("qtv1c", "qtv1d", 5, 1);
+        l.record_transfer_event("qtv1e", "qtv1f", 5, 1);
+
+        let burn_ref = decode_burn_leaf(&l.block_events()[1].data).7;
+        let inclusion = l.prove_bridge_burn(&burn_ref).unwrap();
+        let leaves: Vec<Vec<u8>> = l.block_events().iter().map(BlockEvent::encode).collect();
+        let root = qtv_block::event_root(&leaves);
+
+        let mut tampered_leaf = inclusion.leaf.clone();
+        let last = tampered_leaf.len() - 1;
+        tampered_leaf[last] ^= 0xff;
+        assert!(!qtv_block::verify_inclusion(&root, &tampered_leaf, &inclusion.proof));
+
+        let mut wrong_branch = inclusion.proof.clone();
+        wrong_branch.steps[0].sibling[0] ^= 0xff;
+        assert!(!qtv_block::verify_inclusion(&root, &inclusion.leaf, &wrong_branch));
+    }
+
+    #[test]
+    fn an_unknown_burn_ref_has_no_inclusion_proof() {
+        let mut l = Ledger::new();
+        let asset = [7u8; 16];
+        let holder = [9u8; 32];
+        seed_burnable(&mut l, &asset, &holder, 1_000_000);
+        assert!(l.bridge_burn(&asset, &holder, 100_000, &[0xEE; 32], 42, 0));
+        assert!(l.prove_bridge_burn(&[0x00; 32]).is_none());
+    }
 }
 
 /// The source marker a native economic event carries in the block event log. Contract
@@ -4167,6 +4227,26 @@ impl BlockEvent {
             data,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BurnInclusion {
+    pub event_index: u64,
+    pub leaf: Vec<u8>,
+    pub proof: qtv_block::MerkleProof,
+}
+
+pub fn bridge_burn_leaf_ref(data: &[u8]) -> Option<[u8; 32]> {
+    let mut decoder = qtv_codec::Decoder::new(data);
+    let _asset_id = decoder.get_bytes().ok()?;
+    let _holder = decoder.get_bytes().ok()?;
+    let _amount = decoder.get_u128().ok()?;
+    let _destination = decoder.get_bytes().ok()?;
+    let _chain_id = decoder.get_u64().ok()?;
+    let _sender_nonce = decoder.get_u64().ok()?;
+    let _event_index = decoder.get_u64().ok()?;
+    let burn_ref = decoder.get_bytes().ok()?;
+    <[u8; 32]>::try_from(burn_ref).ok()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4262,6 +4342,24 @@ impl Ledger {
 
     pub fn block_events(&self) -> &[BlockEvent] {
         &self.block_events
+    }
+
+    pub fn prove_bridge_burn(&self, burn_ref: &[u8; 32]) -> Option<BurnInclusion> {
+        let leaves: Vec<Vec<u8>> = self.block_events.iter().map(BlockEvent::encode).collect();
+        for (index, event) in self.block_events.iter().enumerate() {
+            if event.selector != EVENT_BRIDGE_BURN || event.contract != NATIVE_EVENT_SOURCE {
+                continue;
+            }
+            if bridge_burn_leaf_ref(&event.data) == Some(*burn_ref) {
+                let proof = qtv_block::prove_inclusion(&leaves, index)?;
+                return Some(BurnInclusion {
+                    event_index: index as u64,
+                    leaf: leaves[index].clone(),
+                    proof,
+                });
+            }
+        }
+        None
     }
 
     fn record_native_event(&mut self, kind: [u8; 4], data: Vec<u8>) {
