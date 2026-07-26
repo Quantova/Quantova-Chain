@@ -3120,6 +3120,36 @@ mod tests {
     }
 
     #[test]
+    fn an_over_balance_exit_charges_no_fee_and_bumps_no_nonce() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(430);
+        let holder = keypair(431);
+        let holder_id = address_bytes(&holder.address());
+        let start = 10_000 * 1_000_000;
+        fund(&mut ledger, &holder, start);
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+
+        let fact = deposit_fact(holder_id, asset, 500_000, [0xB1; 32]);
+        assert_eq!(
+            execute_ordered(&mut ledger, &[mint_tx(&relayer, &signed_artifact(&fact, &sk0, &sk1), &fee)], &fee, 0).len(),
+            1
+        );
+        assert_eq!(ledger.bridged_balance(&asset, &holder_id), 500_000);
+
+        let request = crate::bridge::ExitRequest { asset_id: asset, amount: 600_000, destination: [0xEE; 32] };
+        let exit = system_tx(&holder, &crate::ledger::bridge_exit_address(), request.encode(), 0, TRANSFER_METER, &fee);
+        let included = execute_ordered(&mut ledger, &[exit], &fee, 0);
+
+        assert!(included.is_empty(), "an exit over the holder's bridged balance is not included");
+        assert_eq!(ledger.balance(&holder.address()), start, "the failed exit charged no fee");
+        assert_eq!(ledger.account(&holder.address()).nonce, 0, "the failed exit bumped no nonce");
+        assert_eq!(ledger.bridged_balance(&asset, &holder_id), 500_000, "the failed exit burned nothing");
+    }
+
+    #[test]
     fn parallel_and_ordered_agree_on_a_bridge_block_across_a_freeze_horizon() {
         let fee = FeeParams::devnet();
         let mut base = Ledger::new();
