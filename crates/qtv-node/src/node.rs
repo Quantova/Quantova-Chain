@@ -459,6 +459,7 @@ fn dispatch_bridge_mint(ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
 }
 
 pub(crate) fn bridge_exit_admissible(
+    ledger: &Ledger,
     wrapper: &Wrapper,
     account: &Account,
     fee_params: &FeeParams,
@@ -466,6 +467,9 @@ pub(crate) fn bridge_exit_admissible(
 ) -> Option<crate::bridge::ExitRequest> {
     let body = wrapper.body();
     if body.call().target() != crate::ledger::bridge_exit_address() {
+        return None;
+    }
+    if !ledger.bridge_exits_enabled() {
         return None;
     }
     if !account.has_key() || !qtv_tx::scheme_supported(wrapper.scheme()) || !signature_ok {
@@ -495,11 +499,14 @@ fn dispatch_bridge_exit(
     if ledger.is_blacklisted(&sender) {
         return false;
     }
+    if !ledger.bridge_exits_enabled() {
+        return false;
+    }
     if ledger.bridge_is_frozen() {
         return false;
     }
     let account = ledger.account(&sender);
-    let request = match bridge_exit_admissible(wrapper, &account, fee_params, signature_ok) {
+    let request = match bridge_exit_admissible(ledger, wrapper, &account, fee_params, signature_ok) {
         Some(request) => request,
         None => return false,
     };
@@ -3075,6 +3082,7 @@ mod tests {
         fund(&mut ledger, &holder, start);
         let asset = [7u8; 16];
         ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+        ledger.seed_bridge_exits_enabled(true);
 
         let fact = deposit_fact(holder_id, asset, 500_000, [0x66; 32]);
         assert_eq!(
@@ -3094,6 +3102,47 @@ mod tests {
     }
 
     #[test]
+    fn an_exit_is_refused_until_exits_are_enabled() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(460);
+        let holder = keypair(461);
+        let holder_id = address_bytes(&holder.address());
+        let start = 10_000 * 1_000_000;
+        fund(&mut ledger, &holder, start);
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+
+        let fact = deposit_fact(holder_id, asset, 500_000, [0x99; 32]);
+        assert_eq!(
+            execute_ordered(&mut ledger, &[mint_tx(&relayer, &signed_artifact(&fact, &sk0, &sk1), &fee)], &fee, 0).len(),
+            1
+        );
+        assert!(!ledger.bridge_exits_enabled(), "exits are closed by default");
+
+        let request = crate::bridge::ExitRequest { asset_id: asset, amount: 200_000, destination: [0xEE; 32] };
+        let exit = system_tx(&holder, &crate::ledger::bridge_exit_address(), request.encode(), 0, TRANSFER_METER, &fee);
+
+        let mut pool = crate::mempool::Mempool::new();
+        assert!(pool.admit(exit.clone(), &ledger, &fee).is_err(), "a disabled exit is refused at admission");
+
+        let refused = execute_ordered(&mut ledger, &[exit.clone()], &fee, 0);
+        assert!(refused.is_empty(), "a disabled exit is not included");
+        assert_eq!(ledger.bridged_balance(&asset, &holder_id), 500_000, "the disabled exit burned nothing");
+        assert_eq!(ledger.bridged_supply(&asset), 500_000, "the disabled exit moved no supply");
+        assert_eq!(ledger.balance(&holder.address()), start, "the disabled exit charged no fee");
+        assert_eq!(ledger.account(&holder.address()).nonce, 0, "the disabled exit bumped no nonce");
+
+        ledger.seed_bridge_exits_enabled(true);
+        let included = execute_ordered(&mut ledger, &[exit], &fee, 0);
+        assert_eq!(included.len(), 1, "the exit rides once exits are enabled");
+        assert_eq!(ledger.bridged_balance(&asset, &holder_id), 300_000, "the enabled exit debited the amount");
+        assert_eq!(ledger.balance(&holder.address()), start - fee.transfer_fee(), "the enabled exit charged one fee");
+        assert_eq!(ledger.account(&holder.address()).nonce, 1, "the enabled exit bumped the nonce");
+    }
+
+    #[test]
     fn a_frozen_bridge_refuses_mint_and_exit() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
@@ -3107,6 +3156,7 @@ mod tests {
         fund(&mut ledger, &freezer, 2_000_000 * 1_000_000);
         let asset = [7u8; 16];
         ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+        ledger.seed_bridge_exits_enabled(true);
 
         let seeded = deposit_fact(holder_id, asset, 500_000, [0x77; 32]);
         assert_eq!(
@@ -3238,6 +3288,7 @@ mod tests {
         fund(&mut ledger, &holder, start);
         let asset = [7u8; 16];
         ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+        ledger.seed_bridge_exits_enabled(true);
 
         let fact = deposit_fact(holder_id, asset, 500_000, [0xB1; 32]);
         assert_eq!(
@@ -3272,6 +3323,7 @@ mod tests {
         fund(&mut base, &other, start);
         let asset = [7u8; 16];
         base.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
+        base.seed_bridge_exits_enabled(true);
 
         let seed = deposit_fact(holder_id, asset, 1_000_000, [0xA1; 32]);
         assert_eq!(
