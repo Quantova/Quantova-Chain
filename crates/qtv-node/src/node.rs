@@ -472,6 +472,9 @@ pub(crate) fn bridge_exit_admissible(
     if !ledger.bridge_exits_enabled() {
         return None;
     }
+    if ledger.bridge_is_frozen() {
+        return None;
+    }
     if !account.has_key() || !qtv_tx::scheme_supported(wrapper.scheme()) || !signature_ok {
         return None;
     }
@@ -3179,6 +3182,42 @@ mod tests {
         assert!(frozen_exit.is_empty(), "a frozen bridge refuses an exit");
         assert_eq!(ledger.bridged_balance(&asset, &holder_id), 500_000, "the frozen exit burned nothing");
         assert_eq!(ledger.balance(&holder.address()), start, "the frozen exit charged no fee");
+    }
+
+    #[test]
+    fn a_frozen_bridge_refuses_an_exit_at_admission() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(470);
+        let holder = keypair(471);
+        let holder_id = address_bytes(&holder.address());
+        let freezer = keypair(472);
+        let start = 10_000 * 1_000_000;
+        fund(&mut ledger, &holder, start);
+        fund(&mut ledger, &freezer, 2_000_000 * 1_000_000);
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+        ledger.seed_bridge_exits_enabled(true);
+
+        let fact = deposit_fact(holder_id, asset, 500_000, [0xAB; 32]);
+        assert_eq!(
+            execute_ordered(&mut ledger, &[mint_tx(&relayer, &signed_artifact(&fact, &sk0, &sk1), &fee)], &fee, 0).len(),
+            1
+        );
+
+        let request = crate::bridge::ExitRequest { asset_id: asset, amount: 200_000, destination: [0xEE; 32] };
+        let exit = system_tx(&holder, &crate::ledger::bridge_exit_address(), request.encode(), 0, TRANSFER_METER, &fee);
+
+        let mut open_pool = crate::mempool::Mempool::new();
+        assert!(open_pool.admit(exit.clone(), &ledger, &fee).is_ok(), "an unfrozen exit is admitted");
+
+        let freeze = transfer(&freezer, &crate::ledger::bridge_freeze_address(), 0, 0, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[freeze], &fee, 0).len(), 1);
+        assert!(ledger.bridge_is_frozen());
+
+        let mut frozen_pool = crate::mempool::Mempool::new();
+        assert!(frozen_pool.admit(exit, &ledger, &fee).is_err(), "a frozen exit is refused at admission");
     }
 
     #[test]
