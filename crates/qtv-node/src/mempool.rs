@@ -343,6 +343,18 @@ impl Mempool {
             if !crate::node::evidence_admissible(fee_params.chain_id, &wrapper, ledger) {
                 return Err(Reject::BadCall);
             }
+        } else if crate::node::is_bridge_mint(&wrapper) {
+            if !crate::node::bridge_mint_admissible(ledger, &wrapper) {
+                return Err(Reject::BadCall);
+            }
+        } else if crate::node::is_bridge_exit(&wrapper) {
+            let account = ledger.account(wrapper.body().sender());
+            let signature_ok = qtv_tx::verify(&wrapper, &account.public_key);
+            if crate::node::bridge_exit_admissible(&wrapper, &account, fee_params, signature_ok)
+                .is_none()
+            {
+                return Err(Reject::BadCall);
+            }
         } else {
             validate(&wrapper, ledger, fee_params)?;
         }
@@ -396,6 +408,12 @@ impl Mempool {
                     .is_some()
             } else if crate::node::is_evidence(&wrapper) {
                 crate::node::evidence_admissible(fee_params.chain_id, &wrapper, ledger)
+            } else if crate::node::is_bridge_mint(&wrapper) {
+                crate::node::bridge_mint_admissible(ledger, &wrapper)
+            } else if crate::node::is_bridge_exit(&wrapper) {
+                let account = ledger.account(wrapper.body().sender());
+                crate::node::bridge_exit_admissible(&wrapper, &account, fee_params, verified[index])
+                    .is_some()
             } else {
                 validate_verified(&wrapper, ledger, fee_params, verified[index]).is_ok()
             };
