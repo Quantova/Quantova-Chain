@@ -655,10 +655,14 @@ pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_i
     if wrapper.body().call().args().len() > max_mint_artifact_bytes(ledger) {
         return false;
     }
-    match bridge_mint_fact(ledger, wrapper, chain_id) {
-        Some(fact) => !ledger.bridge_reference_seen(&fact.source_ref),
-        None => false,
+    let source_ref = match bridge_mint_source_ref(wrapper) {
+        Some(source_ref) => source_ref,
+        None => return false,
+    };
+    if ledger.bridge_reference_seen(&source_ref) {
+        return false;
     }
+    bridge_mint_fact(ledger, wrapper, chain_id).is_some()
 }
 
 fn dispatch_bridge_mint(ledger: &mut Ledger, wrapper: &Wrapper, chain_id: u64) -> bool {
@@ -3495,6 +3499,87 @@ mod tests {
         assert!(replay.is_empty(), "the same deposit reference never mints twice");
         assert_eq!(ledger.bridged_supply(&asset), 400_000, "the replay moved no supply");
         assert_eq!(ledger.bridged_balance(&asset, &recipient_id), 400_000);
+    }
+
+    #[test]
+    fn a_flood_of_replayed_or_duplicate_mints_runs_no_quorum_verify() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let recipient_id = address_bytes(&keypair(431).address());
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+
+        let resident_fact = deposit_fact(recipient_id, asset, 100_000, [0x61; 32]);
+        let resident = signed_artifact(&resident_fact, &sk0, &sk1);
+        let mut pool = crate::mempool::Mempool::new();
+        assert_eq!(
+            pool.admit(mint_tx(&keypair(430), &resident, &fee), &ledger, &fee),
+            Ok(crate::mempool::Admitted::Fresh)
+        );
+
+        crate::bridge::VERIFY_CALLS.with(|c| c.set(0));
+        for i in 0..128u64 {
+            let dup = mint_tx(&keypair(600 + i), &resident, &fee);
+            assert_eq!(
+                pool.admit(dup, &ledger, &fee),
+                Ok(crate::mempool::Admitted::Known)
+            );
+        }
+        assert_eq!(
+            crate::bridge::VERIFY_CALLS.with(|c| c.get()),
+            0,
+            "a duplicate mint runs no quorum verify"
+        );
+
+        let seen_fact = deposit_fact(recipient_id, asset, 100_000, [0x62; 32]);
+        assert!(ledger.bridge_mint(&seen_fact));
+        let replayed = signed_artifact(&seen_fact, &sk0, &sk1);
+        crate::bridge::VERIFY_CALLS.with(|c| c.set(0));
+        for i in 0..128u64 {
+            let tx = mint_tx(&keypair(800 + i), &replayed, &fee);
+            assert_eq!(
+                pool.admit(tx, &ledger, &fee),
+                Err(crate::mempool::Reject::BadCall)
+            );
+        }
+        assert_eq!(
+            crate::bridge::VERIFY_CALLS.with(|c| c.get()),
+            0,
+            "a replayed mint runs no quorum verify"
+        );
+    }
+
+    #[test]
+    fn a_single_sender_mint_flood_is_rate_limited_before_the_quorum() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let recipient_id = address_bytes(&keypair(441).address());
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, u128::MAX, u128::MAX, false);
+
+        let relayer = keypair(440);
+        let mut pool = crate::mempool::Mempool::new();
+        crate::bridge::VERIFY_CALLS.with(|c| c.set(0));
+        let mut rate_limited = 0usize;
+        for i in 0..256u64 {
+            let mut source_ref = [0u8; 32];
+            source_ref[..8].copy_from_slice(&i.to_le_bytes());
+            let fact = deposit_fact(recipient_id, asset, 1, source_ref);
+            let artifact = signed_artifact(&fact, &sk0, &sk1);
+            if pool.admit(mint_tx(&relayer, &artifact, &fee), &ledger, &fee)
+                == Err(crate::mempool::Reject::RateLimited)
+            {
+                rate_limited += 1;
+            }
+        }
+        assert!(rate_limited > 0, "a single sender flood is eventually rate limited");
+        let verifies = crate::bridge::VERIFY_CALLS.with(|c| c.get());
+        assert!(
+            verifies <= crate::mempool::DEFAULT_FEELESS_ATTEMPTS_PER_SENDER * 2,
+            "a single sender drives at most the capped number of quorum verifies, ran {verifies}"
+        );
     }
 
     #[test]
