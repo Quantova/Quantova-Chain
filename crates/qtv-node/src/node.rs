@@ -413,6 +413,7 @@ struct GuardianAct {
 }
 
 impl GuardianAct {
+    #[cfg(test)]
     fn encode(&self) -> Vec<u8> {
         let mut encoder = qtv_codec::Encoder::new();
         encoder.put_u8(self.op);
