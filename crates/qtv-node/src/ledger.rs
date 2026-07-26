@@ -348,6 +348,7 @@ const BRIDGE_FREEZE_TAG: &[u8] = b"qtv/bridge/freeze";
 const BRIDGE_LAST_LIFT_TAG: &[u8] = b"qtv/bridge/lastlift";
 const BRIDGE_VAULT_TAG: &[u8] = b"qtv/bridge/vault";
 const BRIDGE_GATEWAY_TAG: &[u8] = b"qtv/bridge/gateway";
+const BRIDGE_EXITS_TAG: &[u8] = b"qtv/bridge/exits";
 
 fn is_reserved_pot(id: &[u8; 32]) -> bool {
     const POTS: &[&[u8]] = &[
@@ -966,6 +967,23 @@ impl Ledger {
             (Some(gateway), Some(id)) => gateway == id,
             _ => false,
         }
+    }
+
+    pub fn bridge_exits_enabled(&self) -> bool {
+        matches!(
+            self.trie.get(&stake_singleton_key(BRIDGE_EXITS_TAG)),
+            Some(bytes) if bytes.first() == Some(&1)
+        )
+    }
+
+    fn set_bridge_exits_enabled(&mut self, enabled: bool) {
+        self.write_leaf(stake_singleton_key(BRIDGE_EXITS_TAG), vec![enabled as u8]);
+    }
+
+    pub fn seed_bridge_exits_enabled(&mut self, enabled: bool) -> (Key, Vec<u8>) {
+        let bytes = vec![enabled as u8];
+        self.write_leaf(stake_singleton_key(BRIDGE_EXITS_TAG), bytes.clone());
+        (stake_singleton_key(BRIDGE_EXITS_TAG), bytes)
     }
 
     pub fn bridge_freeze_with_fee(&mut self, caller: &str, fee: u64, now: u64) -> bool {
@@ -1968,6 +1986,15 @@ impl Ledger {
             b"bridge_gateway" => {
                 let gateway = id_from_slice(value).ok_or(EnactError::BadValue)?;
                 self.set_bridge_gateway(&gateway);
+                Ok(())
+            }
+            b"bridge_exits" => {
+                let enabled = match value {
+                    [0] => false,
+                    [1] => true,
+                    _ => return Err(EnactError::BadValue),
+                };
+                self.set_bridge_exits_enabled(enabled);
                 Ok(())
             }
             _ => Err(EnactError::UnknownParameter),
