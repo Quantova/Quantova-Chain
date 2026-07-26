@@ -39,6 +39,7 @@ impl GenesisFile {
         let mut rate_micro_usd_per_qtov: Option<u128> = None;
         let mut native_unit: Option<u128> = None;
         let mut max_fee_native: Option<u64> = None;
+        let mut bridge_dest_chain: Option<u32> = None;
         let mut validators: Vec<ValidatorSpec> = Vec::new();
         let mut accounts: Vec<GenesisAccount> = Vec::new();
 
@@ -57,6 +58,7 @@ impl GenesisFile {
                 }
                 "fee_native_unit" => native_unit = Some(field.u128("fee_native_unit")?),
                 "fee_max_native" => max_fee_native = Some(field.u64("fee_max_native")?),
+                "bridge_dest_chain" => bridge_dest_chain = Some(field.u32("bridge_dest_chain")?),
                 "validator" => {}
                 "account" => accounts.push(parse_account(field)?),
                 other => {
@@ -123,6 +125,7 @@ impl GenesisFile {
             validators,
             genesis_time,
             guardians: Default::default(),
+            bridge_dest_chain,
         };
         let hash = genesis_hash(&chain_id, &message, slots, &genesis);
         Ok(GenesisFile {
@@ -245,7 +248,7 @@ fn parse_account(field: &Field) -> Result<GenesisAccount, String> {
 
 fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) -> [u8; 32] {
     let mut buf: Vec<u8> = Vec::new();
-    buf.extend_from_slice(b"QTV-GENESIS-V4");
+    buf.extend_from_slice(b"QTV-GENESIS-V5");
     put_bytes(&mut buf, chain_id.as_bytes());
     put_bytes(&mut buf, message.as_bytes());
     buf.extend_from_slice(&genesis.genesis_time.to_le_bytes());
@@ -254,6 +257,13 @@ fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) ->
     buf.extend_from_slice(&genesis.fee_params.rate_micro_usd_per_qtov.to_le_bytes());
     buf.extend_from_slice(&genesis.fee_params.native_unit.to_le_bytes());
     buf.extend_from_slice(&genesis.fee_params.max_fee_native.to_le_bytes());
+    match genesis.bridge_dest_chain {
+        Some(dest_chain) => {
+            buf.push(1);
+            buf.extend_from_slice(&dest_chain.to_le_bytes());
+        }
+        None => buf.push(0),
+    }
 
     let mut validators = genesis.validators.clone();
     validators.sort_by_key(|v| v.id);

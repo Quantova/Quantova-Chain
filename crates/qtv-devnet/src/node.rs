@@ -326,6 +326,10 @@ impl DevNode {
         }
         let (validators_key, validators_value) = self.ledger.seed_validator_set(&validator_ids);
         self.state_store.put_account(validators_key, validators_value)?;
+        if let Some(dest_chain) = genesis.bridge_dest_chain {
+            let (dest_key, dest_value) = self.ledger.seed_bridge_dest_chain(dest_chain);
+            self.state_store.put_account(dest_key, dest_value)?;
+        }
         let (supply_key, supply_value) = self.ledger.seed_supply(supply);
         self.state_store.put_account(supply_key, supply_value)?;
         for (key, value) in self.ledger.take_dirty_entries() {
