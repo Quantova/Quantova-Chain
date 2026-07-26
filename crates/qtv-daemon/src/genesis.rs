@@ -122,6 +122,7 @@ impl GenesisFile {
             accounts,
             validators,
             genesis_time,
+            guardians: Default::default(),
         };
         let hash = genesis_hash(&chain_id, &message, slots, &genesis);
         Ok(GenesisFile {
