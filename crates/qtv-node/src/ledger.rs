@@ -1926,7 +1926,7 @@ impl Ledger {
         Some(status)
     }
 
-    pub fn gov_enact(&mut self, referendum_id: u64, now: u64) -> Result<(), EnactError> {
+    pub fn gov_enact(&mut self, referendum_id: u64, now: u64, chain_id: u64) -> Result<(), EnactError> {
         let status = self.gov_conclude(referendum_id, now).ok_or(EnactError::Unknown)?;
         if status != Status::Approved {
             return Err(EnactError::NotApproved);
@@ -1945,7 +1945,7 @@ impl Ledger {
             self.is_protected_account(addr)
         })
         .map_err(EnactError::Constitution)?;
-        self.execute_action(&action, now)?;
+        self.execute_action(&action, now, chain_id)?;
         let scope = match &action {
             Action::FreezeRecovery { scope, .. } => *scope,
             _ => [0u8; 32],
@@ -1962,7 +1962,7 @@ impl Ledger {
         Ok(())
     }
 
-    fn execute_action(&mut self, action: &Action, now: u64) -> Result<(), EnactError> {
+    fn execute_action(&mut self, action: &Action, now: u64, chain_id: u64) -> Result<(), EnactError> {
         match action {
             Action::Mint { to, amount } => {
                 let addr = id_bytes_to_address(to).ok_or(EnactError::BadAddress)?;
@@ -2072,6 +2072,7 @@ impl Ledger {
                         claim.operator_id,
                         &claim.public_key,
                         &claim.pop,
+                        chain_id,
                     ) {
                         return Err(EnactError::BadValue);
                     }
@@ -2310,6 +2311,8 @@ impl Ledger {
 mod stake_state_tests {
     use super::*;
 
+    const TEST_CHAIN: u64 = qtv_tx::LOCAL_CHAIN_ID;
+
     fn gov_addr(tag: u8) -> String {
         qtv_idfmt::render_address(&[tag; 32]).unwrap()
     }
@@ -2324,7 +2327,7 @@ mod stake_state_tests {
         let (pk, sk) = qtv_crypto::ml_dsa::keygen(&seed);
         let pop = qtv_crypto::ml_dsa::sign(
             &sk,
-            &crate::bridge::operator_pop_challenge(operator_id, &pk),
+            &crate::bridge::operator_pop_challenge(operator_id, &pk, TEST_CHAIN),
             crate::bridge::POP_DOMAIN,
             &[0u8; 32],
         )
@@ -2507,9 +2510,9 @@ mod stake_state_tests {
             key: b"price".to_vec(),
             value: 70_000_000u128.to_le_bytes().to_vec(),
         };
-        l.gov_enact(id, 14 * 86_400 + 1).unwrap();
+        l.gov_enact(id, 14 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert_eq!(l.stake_price(), 70_000_000);
-        assert!(l.gov_enact(id, 14 * 86_400 + 1).is_err());
+        assert!(l.gov_enact(id, 14 * 86_400 + 1, TEST_CHAIN).is_err());
         let receipt = l.gov_receipt(id).unwrap();
         assert_eq!(receipt.referendum, id);
         assert_eq!(
@@ -2565,7 +2568,7 @@ mod stake_state_tests {
         let voter = gov_addr(32);
         fund(&mut l, &voter, 10_000 * 1_000_000);
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
-        l.gov_enact(id, 14 * 86_400 + 1).unwrap();
+        l.gov_enact(id, 14 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert_eq!(l.stake_price(), 70_000_000);
     }
 
@@ -2606,7 +2609,7 @@ mod stake_state_tests {
         fund(&mut l, &voter, 10_000 * 1_000_000);
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         assert!(!l.is_frozen(&target));
-        l.gov_enact(id, 2 * 86_400 + 1).unwrap();
+        l.gov_enact(id, 2 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert!(l.is_frozen(&target));
 
         let bonded = l
@@ -2619,7 +2622,7 @@ mod stake_state_tests {
             .unwrap();
         l.gov_vote(&voter, bonded, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         assert_eq!(
-            l.gov_enact(bonded, 2 * 86_400 + 1),
+            l.gov_enact(bonded, 2 * 86_400 + 1, TEST_CHAIN),
             Err(EnactError::Constitution(
                 qtv_governance::Violation::FreezeTouchesProtected
             ))
@@ -2643,7 +2646,7 @@ mod stake_state_tests {
         let voter = gov_addr(25);
         fund(&mut l, &voter, 10_000 * 1_000_000);
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
-        l.gov_enact(id, 3 * 86_400 + 1).unwrap();
+        l.gov_enact(id, 3 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert_eq!(l.balance(&target), 1_000_000 * 1_000_000);
     }
 
@@ -2715,7 +2718,7 @@ mod stake_state_tests {
             )
             .unwrap();
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
-        l.gov_enact(id, 2 * 86_400 + 1).unwrap();
+        l.gov_enact(id, 2 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert!(!l.is_frozen(&target), "the full vote reversed the emergency freeze");
     }
 
@@ -2749,7 +2752,7 @@ mod stake_state_tests {
             )
             .unwrap();
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
-        l.gov_enact(id, 2 * 86_400 + 1).unwrap();
+        l.gov_enact(id, 2 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert!(!l.is_frozen(&target), "a vote clears the account freeze");
 
         assert!(
@@ -2801,7 +2804,7 @@ mod stake_state_tests {
                 amount: 12_000 * 1_000_000,
             },
         );
-        l.gov_enact(from_grants, 3 * 86_400 + 1).unwrap();
+        l.gov_enact(from_grants, 3 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert_eq!(l.balance(&recipient), 12_000 * 1_000_000);
         assert_eq!(l.balance(&grants), 28_000 * 1_000_000);
 
@@ -2813,7 +2816,7 @@ mod stake_state_tests {
                 amount: 5_000 * 1_000_000,
             },
         );
-        l.gov_enact(from_treasury, 3 * 86_400 + 1).unwrap();
+        l.gov_enact(from_treasury, 3 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert_eq!(l.balance(&recipient), 17_000 * 1_000_000);
         assert_eq!(l.stake_treasury(), 0);
 
@@ -2827,7 +2830,7 @@ mod stake_state_tests {
                 amount: 9_000 * 1_000_000,
             },
         );
-        assert_eq!(l.gov_enact(steal, 3 * 86_400 + 1), Err(EnactError::BadAddress));
+        assert_eq!(l.gov_enact(steal, 3 * 86_400 + 1, TEST_CHAIN), Err(EnactError::BadAddress));
         assert_eq!(l.balance(&user), 9_000 * 1_000_000);
     }
 
@@ -2859,7 +2862,7 @@ mod stake_state_tests {
         fund(&mut l, &voter, 10_000 * 1_000_000);
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         assert_eq!(
-            l.gov_enact(id, 6 * 3_600 + 1),
+            l.gov_enact(id, 6 * 3_600 + 1, TEST_CHAIN),
             Err(EnactError::Constitution(
                 qtv_governance::Violation::RecoveryTouchesProtected
             ))
@@ -3309,7 +3312,7 @@ mod stake_state_tests {
             )
             .unwrap();
         l.gov_vote(&voter, unseen, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
-        l.gov_enact(unseen, 5 * 86_400 + 1).unwrap();
+        l.gov_enact(unseen, 5 * 86_400 + 1, TEST_CHAIN).unwrap();
 
         assert!(!l.bridge_is_frozen(), "the vote lifts the freeze ahead of its horizon");
         assert_eq!(
@@ -3340,7 +3343,7 @@ mod stake_state_tests {
             .unwrap();
         l.gov_vote(&voter, open, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         assert_eq!(
-            l.gov_enact(open, 5 * 86_400 + 1),
+            l.gov_enact(open, 5 * 86_400 + 1, TEST_CHAIN),
             Err(EnactError::BridgeNotFrozen),
             "an early unfreeze is refused when no freeze is active"
         );
@@ -3371,7 +3374,7 @@ mod stake_state_tests {
             .unwrap();
         l.gov_vote(&voter, thin, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         assert_eq!(
-            l.gov_enact(thin, 14 * 86_400 + 1),
+            l.gov_enact(thin, 14 * 86_400 + 1, TEST_CHAIN),
             Err(EnactError::BadValue),
             "a set whose threshold outruns its membership never lands"
         );
@@ -3392,7 +3395,7 @@ mod stake_state_tests {
             )
             .unwrap();
         l.gov_vote(&voter, rotate, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 14 * 86_400 + 2);
-        l.gov_enact(rotate, 28 * 86_400 + 3).unwrap();
+        l.gov_enact(rotate, 28 * 86_400 + 3, TEST_CHAIN).unwrap();
         assert_eq!(l.guardian_set().threshold, 3);
         assert_eq!(l.guardian_set().members, vec![[10u8; 32], [11u8; 32], [12u8; 32]]);
     }
@@ -3427,7 +3430,7 @@ mod stake_state_tests {
             .unwrap();
         l.gov_vote(&voter, bad, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         assert_eq!(
-            l.gov_enact(bad, 5 * 86_400 + 1),
+            l.gov_enact(bad, 5 * 86_400 + 1, TEST_CHAIN),
             Err(EnactError::BadValue),
             "a key that cannot prove possession sinks the whole rotation"
         );
@@ -3446,7 +3449,7 @@ mod stake_state_tests {
             )
             .unwrap();
         l.gov_vote(&voter, rotate, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 5 * 86_400 + 2);
-        l.gov_enact(rotate, 10 * 86_400 + 3).unwrap();
+        l.gov_enact(rotate, 10 * 86_400 + 3, TEST_CHAIN).unwrap();
         let set = l.bridge_operator_set().unwrap();
         assert_eq!(set.operators.len(), 3);
         assert_eq!(set.threshold, 2);
@@ -3461,7 +3464,7 @@ mod stake_state_tests {
             )
             .unwrap();
         l.gov_vote(&voter, revoke, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 10 * 86_400 + 4);
-        l.gov_enact(revoke, 15 * 86_400 + 5).unwrap();
+        l.gov_enact(revoke, 15 * 86_400 + 5, TEST_CHAIN).unwrap();
         assert!(
             l.bridge_operator_set().unwrap().is_revoked(1),
             "a vote strikes a single operator from the seated committee"
@@ -3491,7 +3494,7 @@ mod stake_state_tests {
             .unwrap();
         l.gov_vote(&voter, dup, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         assert_eq!(
-            l.gov_enact(dup, 5 * 86_400 + 1),
+            l.gov_enact(dup, 5 * 86_400 + 1, TEST_CHAIN),
             Err(EnactError::BadValue),
             "two operator ids may not share one public key"
         );
@@ -3511,7 +3514,7 @@ mod stake_state_tests {
             .unwrap();
         l.gov_vote(&voter, single, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 5 * 86_400 + 2);
         assert_eq!(
-            l.gov_enact(single, 10 * 86_400 + 3),
+            l.gov_enact(single, 10 * 86_400 + 3, TEST_CHAIN),
             Err(EnactError::BadValue),
             "a committee needs a threshold of at least two"
         );
@@ -3537,7 +3540,7 @@ mod stake_state_tests {
             )
             .unwrap();
         l.gov_vote(&voter, advance, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
-        l.gov_enact(advance, 5 * 86_400 + 1).unwrap();
+        l.gov_enact(advance, 5 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert_eq!(l.bridge_epoch(), 1, "only a vote advances the epoch");
 
         let asset = [0xA1u8; 16];
@@ -3556,7 +3559,7 @@ mod stake_state_tests {
             )
             .unwrap();
         l.gov_vote(&voter, register, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 5 * 86_400 + 2);
-        l.gov_enact(register, 10 * 86_400 + 3).unwrap();
+        l.gov_enact(register, 10 * 86_400 + 3, TEST_CHAIN).unwrap();
         let registered = l.bridged_asset(&asset).unwrap();
         assert_eq!(registered.cap, 1_000_000);
         assert_eq!(registered.epoch_cap, 250_000);
@@ -3583,7 +3586,7 @@ mod stake_state_tests {
             .unwrap();
         l.gov_vote(&voter, open, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         assert_eq!(
-            l.gov_enact(open, 5 * 86_400 + 1),
+            l.gov_enact(open, 5 * 86_400 + 1, TEST_CHAIN),
             Err(EnactError::BridgeNotFrozen),
             "a migration is rejected while the bridge is open"
         );
@@ -3602,7 +3605,7 @@ mod stake_state_tests {
             )
             .unwrap();
         l.gov_vote(&voter, migrate, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
-        l.gov_enact(migrate, 5 * 86_400 + 1).unwrap();
+        l.gov_enact(migrate, 5 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert_eq!(
             l.bridge_pool_vault(),
             Some([0x0Cu8; 32]),
@@ -3623,7 +3626,7 @@ mod stake_state_tests {
                 )
                 .unwrap();
             l.gov_vote(voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, at);
-            l.gov_enact(id, at + 5 * 86_400 + 1).unwrap();
+            l.gov_enact(id, at + 5 * 86_400 + 1, TEST_CHAIN).unwrap();
         }
 
         let mut l = Ledger::new();
@@ -3774,6 +3777,7 @@ mod stake_state_tests {
                 amount: 5_000,
             },
             0,
+            TEST_CHAIN,
         )
         .unwrap();
         let events = l.block_events();
