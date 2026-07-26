@@ -15,6 +15,8 @@ const HELLO_TAG: &[u8; 8] = b"QTVGEN01";
 
 const HELLO_LEN: usize = 8 + 32;
 
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct Mesh {
     pub send: Vec<Option<Channel<TcpStream>>>,
     pub inbound: Receiver<(usize, Vec<u8>)>,
@@ -48,7 +50,8 @@ pub fn build_mesh(
     let acceptor = thread::spawn(move || {
         for _ in 0..up_peers {
             let (stream, _) = listener.accept().expect("accept an inbound peer connection");
-            let channel = match Channel::accept(stream, &identity_acc) {
+            let channel = match Channel::accept_with_timeout(stream, &identity_acc, HANDSHAKE_TIMEOUT)
+            {
                 Ok(channel) => channel,
                 Err(_) => continue,
             };
@@ -82,7 +85,8 @@ pub fn build_mesh(
             }
         };
         let mut channel =
-            Channel::connect_pinned(stream, identity, &peer).expect("initiator handshake");
+            Channel::connect_pinned_with_timeout(stream, identity, &peer, HANDSHAKE_TIMEOUT)
+                .expect("initiator handshake");
         if channel.send(&hello).is_err() {
             log(&format!("could not greet peer {}, dropping it", q + 1));
             continue;

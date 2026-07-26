@@ -3,6 +3,8 @@
 
 
 use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::time::Duration;
 
 use qtv_crypto::{ml_dsa, ml_kem};
 
@@ -31,6 +33,49 @@ impl<S: Read + Write> Channel<S> {
 
     pub fn accept_pinned(stream: S, identity: &Identity, peer: &PeerId) -> Result<Self> {
         respond(stream, identity, Some(peer))
+    }
+}
+
+// A handshake over a raw socket must not block forever on a peer that opens the
+// connection and then stalls. These constructors hold a read and write deadline
+// over the handshake, so a slow or silent peer is dropped instead of pinning the
+// acceptor, then lift the deadline so the settled channel keeps its blocking reads.
+impl Channel<TcpStream> {
+    pub fn accept_with_timeout(
+        stream: TcpStream,
+        identity: &Identity,
+        timeout: Duration,
+    ) -> Result<Self> {
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        let channel = respond(stream, identity, None)?;
+        channel.set_deadline(None)?;
+        Ok(channel)
+    }
+
+    pub fn connect_with_timeout(
+        stream: TcpStream,
+        identity: &Identity,
+        timeout: Duration,
+    ) -> Result<Self> {
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        let channel = initiate(stream, identity, None)?;
+        channel.set_deadline(None)?;
+        Ok(channel)
+    }
+
+    pub fn connect_pinned_with_timeout(
+        stream: TcpStream,
+        identity: &Identity,
+        peer: &PeerId,
+        timeout: Duration,
+    ) -> Result<Self> {
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        let channel = initiate(stream, identity, Some(peer))?;
+        channel.set_deadline(None)?;
+        Ok(channel)
     }
 }
 
@@ -165,7 +210,9 @@ fn respond<S: Read + Write>(
 mod tests {
     use super::*;
     use crate::duplex;
+    use std::net::{TcpListener, TcpStream};
     use std::thread;
+    use std::time::Instant;
 
     #[test]
     fn peers_complete_the_handshake_and_agree() {
@@ -182,5 +229,53 @@ mod tests {
         assert_eq!(client.channel_binding(), server.channel_binding());
         assert_eq!(client.peer_id(), &responder.peer_id());
         assert_eq!(server.peer_id(), &initiator.peer_id());
+    }
+
+    #[test]
+    fn a_silent_peer_does_not_wedge_the_bounded_accept() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let responder = Identity::from_seed(&[7u8; 32]);
+        let server = thread::spawn(move || {
+            let (stream, _peer) = listener.accept().unwrap();
+            let start = Instant::now();
+            let outcome =
+                Channel::accept_with_timeout(stream, &responder, Duration::from_millis(200));
+            (outcome.is_err(), start.elapsed())
+        });
+
+        // Connect and then send nothing, the classic slow loris.
+        let _idle = TcpStream::connect(address).unwrap();
+        let (errored, elapsed) = server.join().unwrap();
+        assert!(errored, "a silent peer must be dropped, not admitted");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the bounded accept must return near its timeout, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_bounded_handshake_settles_and_keeps_carrying_messages() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let responder = Identity::from_seed(&[9u8; 32]);
+        let responder_id = responder.peer_id();
+        let server = thread::spawn(move || {
+            let (stream, _peer) = listener.accept().unwrap();
+            let mut channel =
+                Channel::accept_with_timeout(stream, &responder, Duration::from_secs(5)).unwrap();
+            let seen = channel.recv().unwrap();
+            channel.send(b"ack").unwrap();
+            seen
+        });
+
+        let initiator = Identity::from_seed(&[8u8; 32]);
+        let stream = TcpStream::connect(address).unwrap();
+        let mut client =
+            Channel::connect_with_timeout(stream, &initiator, Duration::from_secs(5)).unwrap();
+        assert_eq!(client.peer_id(), &responder_id);
+        client.send(b"bounded hello").unwrap();
+        assert_eq!(client.recv().unwrap(), b"ack");
+        assert_eq!(server.join().unwrap(), b"bounded hello");
     }
 }
