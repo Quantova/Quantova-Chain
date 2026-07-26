@@ -484,7 +484,14 @@ fn guardian_member_id(scheme: u8, public_key: &[u8]) -> Option<[u8; 32]> {
     <[u8; 32]>::try_from(payload.as_slice()).ok()
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static GUARDIAN_VERIFY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn guardian_signature_ok(scheme: u8, public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    #[cfg(test)]
+    GUARDIAN_VERIFY_CALLS.with(|c| c.set(c.get() + 1));
     match scheme {
         qtv_account::SCHEME_LATTICE => {
             let pk: &[u8; qtv_crypto::ml_dsa::PUBLIC_KEY_BYTES] = match public_key.try_into() {
@@ -514,13 +521,18 @@ fn guardian_approvers(
     chain_id: u64,
 ) -> Vec<[u8; 32]> {
     let message = guardian_challenge(chain_id, act);
+    let mut attempted: Vec<[u8; 32]> = Vec::new();
     let mut verified: Vec<[u8; 32]> = Vec::new();
     for approval in &act.approvals {
         let id = match guardian_member_id(approval.scheme, &approval.public_key) {
             Some(id) => id,
             None => continue,
         };
-        if !set.is_member(&id) || verified.contains(&id) {
+        if attempted.contains(&id) {
+            continue;
+        }
+        attempted.push(id);
+        if !set.is_member(&id) {
             continue;
         }
         if guardian_signature_ok(approval.scheme, &approval.public_key, &message, &approval.signature) {
@@ -3177,6 +3189,37 @@ mod tests {
             !guardian_admissible(&ledger, &unsigned, chain),
             "an act carrying no approvals never reaches the threshold"
         );
+    }
+
+    #[test]
+    fn a_flood_of_approvals_for_one_member_runs_at_most_one_verify() {
+        let fee = FeeParams::devnet();
+        let chain = fee.chain_id;
+        let g1 = keypair(260);
+        let set = qtv_governance::GuardianSet::new(
+            vec![address_bytes(&g1.address()), [9u8; 32], [8u8; 32]],
+            2,
+        );
+
+        let approvals = (0..MAX_GUARDIAN_APPROVALS)
+            .map(|_| GuardianApproval {
+                scheme: g1.scheme(),
+                public_key: g1.public_key().to_vec(),
+                signature: vec![0u8; qtv_crypto::ml_dsa::SIGNATURE_BYTES],
+            })
+            .collect();
+        let act = GuardianAct {
+            op: GUARDIAN_FREEZE,
+            bound: 0,
+            targets: vec![[0x4Cu8; 32]],
+            approvals,
+        };
+
+        GUARDIAN_VERIFY_CALLS.with(|c| c.set(0));
+        let approvers = guardian_approvers(&set, &act, chain);
+        let calls = GUARDIAN_VERIFY_CALLS.with(|c| c.get());
+        assert!(approvers.is_empty(), "garbage signatures authorize no member");
+        assert!(calls <= 1, "ran {calls} verifies for a single repeated member id");
     }
 
     #[test]
