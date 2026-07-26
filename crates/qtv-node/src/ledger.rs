@@ -1335,9 +1335,13 @@ impl Ledger {
         if new_minted > asset.epoch_cap {
             return false;
         }
-        let credited = self
+        let credited = match self
             .bridged_balance(&fact.asset_id, &fact.recipient)
-            .saturating_add(fact.amount);
+            .checked_add(fact.amount)
+        {
+            Some(credited) => credited,
+            None => return false,
+        };
         self.set_bridged_balance(&fact.asset_id, &fact.recipient, credited);
         self.set_bridged_asset(
             &fact.asset_id,
@@ -3825,6 +3829,41 @@ mod stake_state_tests {
         );
         assert_eq!(l.bridge_vault_custody(&vault, &asset), 0);
         assert_eq!(l.bridged_supply(&asset), 1_000, "the refused burn moves no supply");
+    }
+
+    #[test]
+    fn a_mint_credit_that_would_overflow_the_holder_balance_is_refused_not_saturated() {
+        let mut l = Ledger::new();
+        let asset = [0xC4u8; 16];
+        let holder = [0xEFu8; 32];
+        l.register_bridged_asset(&asset, u128::MAX, u128::MAX, false);
+        l.set_bridged_balance(&asset, &holder, u128::MAX - 10);
+
+        let refused = l.bridge_mint(&crate::bridge::Fact {
+            version: crate::bridge::FACT_VERSION,
+            source_chain: 1,
+            dest_chain: 9_000,
+            route_id: 7,
+            direction: crate::bridge::Direction::Deposit,
+            nonce: 1,
+            source_ref: [0x44u8; 32],
+            asset_id: asset,
+            amount: 100,
+            recipient: holder,
+            finality_depth: 6,
+            observed_height: 10,
+            expiry_height: 100,
+        });
+        assert!(!refused, "a credit that would overflow the holder balance is refused");
+        assert_eq!(
+            l.bridged_balance(&asset, &holder),
+            u128::MAX - 10,
+            "the refused mint leaves the balance unsaturated"
+        );
+        assert!(
+            !l.bridge_reference_seen(&[0x44u8; 32]),
+            "the refused mint leaves the reference unseen"
+        );
     }
 
     #[test]
