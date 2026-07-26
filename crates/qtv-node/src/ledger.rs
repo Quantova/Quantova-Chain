@@ -1989,6 +1989,13 @@ impl Ledger {
                 Ok(())
             }
             Action::BridgeUnfreeze => self.gov_unfreeze_bridge(now),
+            Action::GuardianRotate { set } => {
+                if !set.well_formed() {
+                    return Err(EnactError::BadValue);
+                }
+                self.set_guardian_set(set);
+                Ok(())
+            }
             Action::Upgrade { .. } => Err(EnactError::NotImplemented),
         }
     }
@@ -3156,6 +3163,57 @@ mod stake_state_tests {
             Err(EnactError::BridgeNotFrozen),
             "an early unfreeze is refused when no freeze is active"
         );
+    }
+
+    #[test]
+    fn only_a_vote_rotates_the_guardian_set_and_a_malformed_set_is_refused() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![[1u8; 32], [2u8; 32], [3u8; 32]],
+            2,
+        ));
+        let proposer = gov_addr(88);
+        fund(&mut l, &proposer, 2_250_000 * 1_000_000);
+        let voter = gov_addr(89);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+
+        let thin = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::ChainUpgrade,
+                qtv_governance::Action::GuardianRotate {
+                    set: qtv_governance::GuardianSet::new(vec![[5u8; 32]], 2),
+                },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, thin, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        assert_eq!(
+            l.gov_enact(thin, 14 * 86_400 + 1),
+            Err(EnactError::BadValue),
+            "a set whose threshold outruns its membership never lands"
+        );
+        assert_eq!(
+            l.guardian_set().members,
+            vec![[1u8; 32], [2u8; 32], [3u8; 32]],
+            "the malformed rotation left the seeded caucus untouched"
+        );
+
+        let rotate = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::ChainUpgrade,
+                qtv_governance::Action::GuardianRotate {
+                    set: qtv_governance::GuardianSet::new(vec![[10u8; 32], [11u8; 32], [12u8; 32]], 3),
+                },
+                14 * 86_400 + 2,
+            )
+            .unwrap();
+        l.gov_vote(&voter, rotate, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 14 * 86_400 + 2);
+        l.gov_enact(rotate, 28 * 86_400 + 3).unwrap();
+        assert_eq!(l.guardian_set().threshold, 3);
+        assert_eq!(l.guardian_set().members, vec![[10u8; 32], [11u8; 32], [12u8; 32]]);
     }
 
     #[test]
