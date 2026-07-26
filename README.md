@@ -31,6 +31,7 @@ Nothing here is borrowed. The addresses are Q1 Bech32m, never a twenty byte hex 
 - `ledger` holds all chain state in the sparse Merkle trie, accounts keyed by their address hash, with staking, governance, supply, and the fee split held under domain tagged keys.
 - `parallel` executes an ordered block deterministically across threads. It layers transactions by their declared sender and recipient conflict sets and proves bit identical results against serial execution.
 - `mempool` admits a transaction only on a verified signature, a strict nonce, the fee and meter floors, and sufficient funds, with a closed set of rejection reasons.
+- `bridge` admits a bridged deposit only on an M of N operator quorum, each operator attesting the deposit fact under a domain tagged ML-DSA signature bound to the chain id, so the operator quorum is the mint authority. A deposit may carry a STARK envelope, and the chain binds that envelope to the fact by its statement digest without verifying the proof on chain, so the envelope commits the operators to a statement and does not move the trust off the quorum. Nothing that secures this path is exposed to Shor, the quorum signatures and the on chain checks stand on the post quantum schemes.
 
 The dependency wiring is explicit. The in repository crates are path dependencies, and qtv-crypto, qtv-vm, and the qtv-bft, qtv-sampler, and qtv-attest crates come from Q-Crypto, QVM, and QRC-CONSENSUS by git tag.
 
