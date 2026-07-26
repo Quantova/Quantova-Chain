@@ -462,6 +462,7 @@ fn reason_code(reject: &Reject) -> &'static str {
         Reject::WrongChain => "wrong_chain",
         Reject::PoolFull => "pool_full",
         Reject::SenderQueueFull => "sender_queue_full",
+        Reject::RateLimited => "rate_limited",
     }
 }
 

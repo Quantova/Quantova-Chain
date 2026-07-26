@@ -24,6 +24,7 @@ pub enum Reject {
     WrongChain,
     PoolFull,
     SenderQueueFull,
+    RateLimited,
 }
 
 pub fn chain_ok(wrapper: &Wrapper, fee_params: &FeeParams) -> bool {
@@ -206,12 +207,22 @@ pub fn is_priority(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::gov_system_address()
 }
 
+pub const DEFAULT_FEELESS_ATTEMPTS_PER_SENDER: usize = 64;
+
+fn is_feeless(wrapper: &Wrapper) -> bool {
+    crate::node::is_bridge_mint(wrapper)
+        || crate::node::is_evidence(wrapper)
+        || crate::node::is_bridge_guardian(wrapper)
+}
+
 #[derive(Debug, Clone)]
 pub struct Mempool {
     pending: Vec<Wrapper>,
     cap: usize,
     per_sender: usize,
     reserve: usize,
+    feeless_cap: usize,
+    feeless_attempts: std::collections::HashMap<String, usize>,
 }
 
 impl Default for Mempool {
@@ -235,6 +246,8 @@ impl Mempool {
             cap: cap.max(1),
             per_sender: per_sender.max(1),
             reserve: reserve.min(cap.saturating_sub(1)),
+            feeless_cap: DEFAULT_FEELESS_ATTEMPTS_PER_SENDER,
+            feeless_attempts: std::collections::HashMap::new(),
         }
     }
 
@@ -265,6 +278,32 @@ impl Mempool {
             crate::node::is_bridge_mint(w)
                 && crate::node::bridge_mint_source_ref(w) == Some(source_ref)
         })
+    }
+
+    fn has_capacity(&self, incoming: &Wrapper) -> bool {
+        let sender = incoming.body().sender();
+        let sender_count = self
+            .pending
+            .iter()
+            .filter(|w| w.body().sender() == sender)
+            .count();
+        if sender_count >= self.per_sender {
+            return false;
+        }
+        if is_priority(incoming) {
+            return true;
+        }
+        let normal = self.pending.iter().filter(|w| !is_priority(w)).count();
+        normal < self.cap.saturating_sub(self.reserve) && self.pending.len() < self.cap
+    }
+
+    fn charge_feeless(&mut self, sender: &str) -> bool {
+        let count = self.feeless_attempts.entry(sender.to_string()).or_insert(0);
+        if *count >= self.feeless_cap {
+            return false;
+        }
+        *count += 1;
+        true
     }
 
     fn make_room(&mut self, incoming: &Wrapper) -> Result<(), Reject> {
@@ -328,6 +367,21 @@ impl Mempool {
         if !chain_ok(&wrapper, fee_params) {
             return Err(Reject::WrongChain);
         }
+        let id = wrapper.id();
+        if self.pending.iter().any(|w| w.id() == id) {
+            return Ok(Admitted::Known);
+        }
+        if crate::node::is_bridge_mint(&wrapper) && self.duplicate_mint(&wrapper) {
+            return Ok(Admitted::Known);
+        }
+        if is_feeless(&wrapper) {
+            if !self.has_capacity(&wrapper) {
+                return Err(Reject::PoolFull);
+            }
+            if !self.charge_feeless(wrapper.body().sender()) {
+                return Err(Reject::RateLimited);
+            }
+        }
         if crate::node::is_vm_op(ledger, &wrapper) {
             if !CONTRACTS_ENABLED {
                 return Err(Reject::BadCall);
@@ -373,13 +427,6 @@ impl Mempool {
         } else {
             validate(&wrapper, ledger, fee_params)?;
         }
-        let id = wrapper.id();
-        if self.pending.iter().any(|w| w.id() == id) {
-            return Ok(Admitted::Known);
-        }
-        if crate::node::is_bridge_mint(&wrapper) && self.duplicate_mint(&wrapper) {
-            return Ok(Admitted::Known);
-        }
         self.make_room(&wrapper)?;
         self.pending.push(wrapper);
         Ok(Admitted::Fresh)
@@ -409,6 +456,21 @@ impl Mempool {
         for (index, wrapper) in batch.into_iter().enumerate() {
             if !chain_ok(&wrapper, fee_params) {
                 continue;
+            }
+            let id = wrapper.id();
+            if self.pending.iter().any(|w| w.id() == id) {
+                continue;
+            }
+            if crate::node::is_bridge_mint(&wrapper) && self.duplicate_mint(&wrapper) {
+                continue;
+            }
+            if is_feeless(&wrapper) {
+                if !self.has_capacity(&wrapper) {
+                    continue;
+                }
+                if !self.charge_feeless(wrapper.body().sender()) {
+                    continue;
+                }
             }
             let admissible = if crate::node::is_vm_op(ledger, &wrapper) {
                 if !CONTRACTS_ENABLED {
@@ -440,13 +502,6 @@ impl Mempool {
             if !admissible {
                 continue;
             }
-            let id = wrapper.id();
-            if self.pending.iter().any(|w| w.id() == id) {
-                continue;
-            }
-            if crate::node::is_bridge_mint(&wrapper) && self.duplicate_mint(&wrapper) {
-                continue;
-            }
             if self.make_room(&wrapper).is_err() {
                 continue;
             }
@@ -470,6 +525,7 @@ impl Mempool {
 
     pub fn remove_included(&mut self, ids: &[String]) {
         self.pending.retain(|w| !ids.contains(&w.id()));
+        self.feeless_attempts.clear();
     }
 }
 
