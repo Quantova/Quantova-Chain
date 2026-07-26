@@ -3342,8 +3342,8 @@ mod tests {
         let included = execute_ordered(&mut ledger, &[mint_tx(&relayer, &artifact, &fee)], &fee, 0);
 
         assert_eq!(included.len(), 1, "the verified mint rides in the block");
-        assert_eq!(ledger.bridged_balance(&asset, &recipient_id), 500_000, "the recipient holds the proven amount");
-        assert_eq!(ledger.bridged_supply(&asset), 500_000, "the bridged supply rose by the proven amount");
+        assert_eq!(ledger.bridged_balance(&asset, &recipient_id), 500_000, "the recipient holds the attested amount");
+        assert_eq!(ledger.bridged_supply(&asset), 500_000, "the bridged supply rose by the attested amount");
         assert!(ledger.bridge_reference_seen(&[0x11; 32]), "the deposit reference is marked against replay");
     }
 
@@ -3611,7 +3611,7 @@ mod tests {
     }
 
     #[test]
-    fn a_proof_backed_mint_requires_a_bound_stark_envelope() {
+    fn a_stark_bound_mint_admits_only_a_bound_envelope() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
         let (sk0, sk1) = seed_committee(&mut ledger);
@@ -3625,7 +3625,7 @@ mod tests {
         a.stark = None;
         assert!(
             execute_ordered(&mut ledger, &[mint_tx(&relayer, &a, &fee)], &fee, 0).is_empty(),
-            "a proof backed asset refuses a mint with no STARK envelope"
+            "a stark-bound asset refuses a mint with no STARK envelope"
         );
 
         let unbound = deposit_fact(recipient_id, asset, 100_000, [0xD2; 32]);
@@ -3633,7 +3633,7 @@ mod tests {
         u.stark = Some(crate::bridge::StarkEnvelope { statement_digest: [0u8; 32], proof: vec![] });
         assert!(
             execute_ordered(&mut ledger, &[mint_tx(&relayer, &u, &fee)], &fee, 0).is_empty(),
-            "a proof backed asset refuses an unbound STARK envelope"
+            "a stark-bound asset refuses an unbound STARK envelope"
         );
         assert_eq!(ledger.bridged_supply(&asset), 0, "no unbound mint moved supply");
 
@@ -3646,7 +3646,7 @@ mod tests {
         assert_eq!(
             execute_ordered(&mut ledger, &[mint_tx(&relayer, &b, &fee)], &fee, 0).len(),
             1,
-            "a proof backed asset mints on a correctly bound STARK envelope"
+            "a stark-bound asset mints on a correctly bound STARK envelope"
         );
         assert_eq!(ledger.bridged_balance(&asset, &recipient_id), 100_000);
     }
