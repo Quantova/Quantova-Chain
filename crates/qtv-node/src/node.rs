@@ -3581,8 +3581,68 @@ mod tests {
         assert!(rate_limited > 0, "a single sender flood is eventually rate limited");
         let verifies = crate::bridge::VERIFY_CALLS.with(|c| c.get());
         assert!(
-            verifies <= crate::mempool::DEFAULT_FEELESS_ATTEMPTS_PER_SENDER * 2,
+            verifies <= crate::mempool::DEFAULT_FEELESS_ADMITS_PER_WINDOW * 2,
             "a single sender drives at most the capped number of quorum verifies, ran {verifies}"
+        );
+    }
+
+    fn corrupt_artifact(fact: &crate::bridge::Fact, sk0: &OperatorSecret, sk1: &OperatorSecret) -> crate::bridge::MintArtifact {
+        let mut artifact = signed_artifact(fact, sk0, sk1);
+        artifact.attestation.signatures[0].signature[0] ^= 0xFF;
+        artifact.attestation.signatures[1].signature[0] ^= 0xFF;
+        artifact
+    }
+
+    #[test]
+    fn a_spoofed_feeless_flood_cannot_starve_a_relayers_own_mints() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(460);
+        let recipient_id = address_bytes(&keypair(461).address());
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, u128::MAX, u128::MAX, false);
+
+        let seen_fact = deposit_fact(recipient_id, asset, 1, [0xA1; 32]);
+        assert!(ledger.bridge_mint(&seen_fact));
+        let replayed = signed_artifact(&seen_fact, &sk0, &sk1);
+
+        let mut seen_pool = crate::mempool::Mempool::new();
+        crate::bridge::VERIFY_CALLS.with(|c| c.set(0));
+        for _ in 0..(crate::mempool::DEFAULT_FEELESS_ADMITS_PER_WINDOW + 8) {
+            assert_eq!(
+                seen_pool.admit(mint_tx(&relayer, &replayed, &fee), &ledger, &fee),
+                Err(crate::mempool::Reject::BadCall)
+            );
+        }
+        assert_eq!(
+            crate::bridge::VERIFY_CALLS.with(|c| c.get()),
+            0,
+            "a flood of already-seen replays runs no quorum verify and spends no feeless budget"
+        );
+
+        let genuine = signed_artifact(&deposit_fact(recipient_id, asset, 1, [0xA2; 32]), &sk0, &sk1);
+        assert_eq!(
+            seen_pool.admit(mint_tx(&relayer, &genuine, &fee), &ledger, &fee),
+            Ok(crate::mempool::Admitted::Fresh),
+            "a genuine mint still admits after a seen replay flood that spent no budget"
+        );
+
+        let mut spoof_pool = crate::mempool::Mempool::new();
+        for i in 0..(crate::mempool::DEFAULT_FEELESS_ADMITS_PER_WINDOW / 2) as u64 {
+            let mut source_ref = [0u8; 32];
+            source_ref[..8].copy_from_slice(&i.to_le_bytes());
+            let junk = corrupt_artifact(&deposit_fact(recipient_id, asset, 1, source_ref), &sk0, &sk1);
+            assert_eq!(
+                spoof_pool.admit(mint_tx(&relayer, &junk, &fee), &ledger, &fee),
+                Err(crate::mempool::Reject::BadCall)
+            );
+        }
+        let own = signed_artifact(&deposit_fact(recipient_id, asset, 1, [0xB9; 32]), &sk0, &sk1);
+        assert_eq!(
+            spoof_pool.admit(mint_tx(&relayer, &own, &fee), &ledger, &fee),
+            Ok(crate::mempool::Admitted::Fresh),
+            "junk spoofing the relayer's address cannot starve the relayer within the global window"
         );
     }
 
