@@ -390,6 +390,131 @@ fn dispatch_evidence(chain_id: u64, ledger: &mut Ledger, wrapper: &Wrapper) -> b
     ledger.slash_validator(&evidence.offender)
 }
 
+pub(crate) fn is_bridge_mint(wrapper: &Wrapper) -> bool {
+    wrapper.body().call().target() == crate::ledger::bridge_mint_address()
+}
+
+pub(crate) fn is_bridge_exit(wrapper: &Wrapper) -> bool {
+    wrapper.body().call().target() == crate::ledger::bridge_exit_address()
+}
+
+/// The deposit fact a bridge mint artifact carries, returned only when the artifact parses with
+/// the chain's own parser and a quorum of the registered committee attested it to this chain. The
+/// ML-DSA operator quorum is the mint authority, so a mint stands on no unauthenticated caller.
+/// A proof backed asset must also carry its STARK envelope, whose on chain FRI verification is a
+/// founder gated seam, so the envelope is required to be present and well formed but its proof is
+/// not yet checked here.
+fn bridge_mint_fact(ledger: &Ledger, wrapper: &Wrapper) -> Option<crate::bridge::Fact> {
+    let artifact = crate::bridge::MintArtifact::decode(wrapper.body().call().args())?;
+    let dest_chain = ledger.bridge_dest_chain()?;
+    let operators = ledger.bridge_operator_set()?;
+    if !crate::bridge::quorum_attests(&operators, &artifact.attestation, dest_chain) {
+        return None;
+    }
+    let fact = artifact.attestation.fact;
+    if let Some(asset) = ledger.bridged_asset(&fact.asset_id) {
+        if asset.requires_stark && artifact.stark.is_none() {
+            return None;
+        }
+    }
+    Some(fact)
+}
+
+/// Whether a bridge mint would land, so the mempool admits it with no fee and no caller
+/// signature. It holds only when the bridge is open, the artifact parses and carries a committee
+/// quorum for this chain, and the deposit reference is unseen.
+pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper) -> bool {
+    if ledger.bridge_is_frozen() {
+        return false;
+    }
+    match bridge_mint_fact(ledger, wrapper) {
+        Some(fact) => !ledger.bridge_reference_seen(&fact.source_ref),
+        None => false,
+    }
+}
+
+/// Apply a bridge mint as a deterministic in block transition. The mint authority is the verified
+/// artifact, so any sender may carry it and no caller balance or signature gates it. It refuses
+/// entirely while the bridge is frozen, and it mints only when the committee quorum attests the
+/// fact to this chain and the ledger's replay, cap, and epoch checks pass, so every node reaches
+/// the same mint from the committee keys held in state.
+fn dispatch_bridge_mint(ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
+    if ledger.bridge_is_frozen() {
+        return false;
+    }
+    let fact = match bridge_mint_fact(ledger, wrapper) {
+        Some(fact) => fact,
+        None => return false,
+    };
+    ledger.bridge_mint(&fact)
+}
+
+pub(crate) fn bridge_exit_admissible(
+    wrapper: &Wrapper,
+    account: &Account,
+    fee_params: &FeeParams,
+    signature_ok: bool,
+) -> Option<crate::bridge::ExitRequest> {
+    let body = wrapper.body();
+    if body.call().target() != crate::ledger::bridge_exit_address() {
+        return None;
+    }
+    if !account.has_key() || !qtv_tx::scheme_supported(wrapper.scheme()) || !signature_ok {
+        return None;
+    }
+    if body.nonce() != account.nonce || body.meter_limit() < crate::execution::TRANSFER_METER {
+        return None;
+    }
+    if body.fee() < u128::from(fee_params.transfer_fee()) {
+        return None;
+    }
+    let charged = u64::try_from(body.fee().min(u128::from(fee_params.ceiling_fee())))
+        .unwrap_or_else(|_| fee_params.ceiling_fee());
+    if account.balance < charged {
+        return None;
+    }
+    crate::bridge::ExitRequest::decode(body.call().args())
+}
+
+/// Apply a holder driven bridge exit. The holder signs it and pays the fee, and it refuses
+/// entirely while the bridge is frozen. On success it burns the holder's bridged amount and
+/// records the burn the oracle reads to release on the far side. A burn that the holder cannot
+/// cover fails the whole transition, so the atomic firewall returns the fee.
+fn dispatch_bridge_exit(
+    ledger: &mut Ledger,
+    wrapper: &Wrapper,
+    signature_ok: bool,
+    fee_params: &FeeParams,
+) -> bool {
+    let sender = wrapper.body().sender().to_string();
+    if ledger.is_blacklisted(&sender) {
+        return false;
+    }
+    if ledger.bridge_is_frozen() {
+        return false;
+    }
+    let account = ledger.account(&sender);
+    let request = match bridge_exit_admissible(wrapper, &account, fee_params, signature_ok) {
+        Some(request) => request,
+        None => return false,
+    };
+    let holder = match qtv_idfmt::parse_address(&sender)
+        .ok()
+        .and_then(|payload| <[u8; 32]>::try_from(payload.as_slice()).ok())
+    {
+        Some(id) => id,
+        None => return false,
+    };
+    let charged = u64::try_from(wrapper.body().fee().min(u128::from(fee_params.ceiling_fee())))
+        .unwrap_or_else(|_| fee_params.ceiling_fee());
+    let mut charged_account = account;
+    charged_account.balance -= charged;
+    charged_account.nonce += 1;
+    ledger.set_account(&sender, &charged_account);
+    ledger.collect_fee(charged);
+    ledger.bridge_burn(&request.asset_id, &holder, request.amount, &request.destination)
+}
+
 const VM_BLOCK_METER_BUDGET: u64 = 50_000_000;
 
 pub(crate) fn is_vm_op(ledger: &Ledger, wrapper: &Wrapper) -> bool {
@@ -563,6 +688,20 @@ fn execute_ordered_across(
         }
         if is_evidence(wrapper) {
             if ledger.apply_atomic(|l| dispatch_evidence(fee_params.chain_id, l, wrapper)) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
+        if is_bridge_mint(wrapper) {
+            if ledger.apply_atomic(|l| dispatch_bridge_mint(l, wrapper)) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
+        if is_bridge_exit(wrapper) {
+            if ledger
+                .apply_atomic(|l| dispatch_bridge_exit(l, wrapper, verified[index], fee_params))
+            {
                 included.push(wrapper.clone());
             }
             continue;
@@ -2711,5 +2850,272 @@ mod tests {
         );
         assert!(ledger.bridge_is_frozen());
         assert_eq!(ledger.account(&user.address()).nonce, 1, "the halted call never advanced the caller");
+    }
+
+    const BRIDGE_DEST: u32 = 9000;
+    type OperatorSecret = [u8; qtv_crypto::ml_dsa::SECRET_KEY_BYTES];
+
+    fn bridge_operator(index: u64) -> ([u8; qtv_crypto::ml_dsa::PUBLIC_KEY_BYTES], OperatorSecret) {
+        let mut seed = [0u8; 32];
+        seed[..8].copy_from_slice(&index.to_le_bytes());
+        qtv_crypto::ml_dsa::keygen(&seed)
+    }
+
+    fn attest(sk: &OperatorSecret, fact: &crate::bridge::Fact) -> Vec<u8> {
+        qtv_crypto::ml_dsa::sign(sk, &fact.attest_preimage(), crate::bridge::ATTEST_DOMAIN, &[0u8; 32])
+            .expect("the fact preimage stays within the length bound")
+            .to_vec()
+    }
+
+    fn seed_committee(ledger: &mut Ledger) -> (OperatorSecret, OperatorSecret) {
+        let (pk0, sk0) = bridge_operator(1);
+        let (pk1, sk1) = bridge_operator(2);
+        let (pk2, _sk2) = bridge_operator(3);
+        ledger.seed_bridge_dest_chain(BRIDGE_DEST);
+        ledger.seed_bridge_operator_set(&crate::bridge::OperatorSet::new(
+            vec![(0, pk0.to_vec()), (1, pk1.to_vec()), (2, pk2.to_vec())],
+            2,
+        ));
+        (sk0, sk1)
+    }
+
+    fn deposit_fact(recipient: [u8; 32], asset_id: [u8; 16], amount: u128, source_ref: [u8; 32]) -> crate::bridge::Fact {
+        crate::bridge::Fact {
+            version: crate::bridge::FACT_VERSION,
+            source_chain: 1,
+            dest_chain: BRIDGE_DEST,
+            route_id: 7,
+            direction: crate::bridge::Direction::Deposit,
+            nonce: 1,
+            source_ref,
+            asset_id,
+            amount,
+            recipient,
+            finality_depth: 6,
+            observed_height: 10,
+            expiry_height: 100,
+        }
+    }
+
+    fn signed_artifact(fact: &crate::bridge::Fact, sk0: &OperatorSecret, sk1: &OperatorSecret) -> crate::bridge::MintArtifact {
+        crate::bridge::MintArtifact {
+            attestation: crate::bridge::Attestation {
+                fact: fact.clone(),
+                signatures: vec![
+                    crate::bridge::SignerSig { operator_id: 0, signature: attest(sk0, fact) },
+                    crate::bridge::SignerSig { operator_id: 1, signature: attest(sk1, fact) },
+                ],
+            },
+            stark: None,
+        }
+    }
+
+    fn mint_tx(relayer: &KeyAccount, artifact: &crate::bridge::MintArtifact, fee: &FeeParams) -> Wrapper {
+        system_tx(relayer, &crate::ledger::bridge_mint_address(), artifact.encode(), 0, TRANSFER_METER, fee)
+    }
+
+    #[test]
+    fn a_verified_attestation_mints_the_exact_amount_to_the_recipient() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(400);
+        let recipient = keypair(401);
+        let recipient_id = address_bytes(&recipient.address());
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+
+        let fact = deposit_fact(recipient_id, asset, 500_000, [0x11; 32]);
+        let artifact = signed_artifact(&fact, &sk0, &sk1);
+        let included = execute_ordered(&mut ledger, &[mint_tx(&relayer, &artifact, &fee)], &fee, 0);
+
+        assert_eq!(included.len(), 1, "the verified mint rides in the block");
+        assert_eq!(ledger.bridged_balance(&asset, &recipient_id), 500_000, "the recipient holds the proven amount");
+        assert_eq!(ledger.bridged_supply(&asset), 500_000, "the bridged supply rose by the proven amount");
+        assert!(ledger.bridge_reference_seen(&[0x11; 32]), "the deposit reference is marked against replay");
+    }
+
+    #[test]
+    fn a_replayed_deposit_reference_is_refused() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(402);
+        let recipient_id = address_bytes(&keypair(403).address());
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+
+        let fact = deposit_fact(recipient_id, asset, 400_000, [0x22; 32]);
+        let artifact = signed_artifact(&fact, &sk0, &sk1);
+        assert_eq!(execute_ordered(&mut ledger, &[mint_tx(&relayer, &artifact, &fee)], &fee, 0).len(), 1);
+        assert_eq!(ledger.bridged_supply(&asset), 400_000);
+
+        let replay = execute_ordered(&mut ledger, &[mint_tx(&relayer, &artifact, &fee)], &fee, 0);
+        assert!(replay.is_empty(), "the same deposit reference never mints twice");
+        assert_eq!(ledger.bridged_supply(&asset), 400_000, "the replay moved no supply");
+        assert_eq!(ledger.bridged_balance(&asset, &recipient_id), 400_000);
+    }
+
+    #[test]
+    fn an_over_asset_cap_mint_is_refused() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(404);
+        let recipient_id = address_bytes(&keypair(405).address());
+        let asset = [8u8; 16];
+        ledger.register_bridged_asset(&asset, 400_000, 1_000_000, false);
+
+        let fact = deposit_fact(recipient_id, asset, 500_000, [0x33; 32]);
+        let artifact = signed_artifact(&fact, &sk0, &sk1);
+        let included = execute_ordered(&mut ledger, &[mint_tx(&relayer, &artifact, &fee)], &fee, 0);
+
+        assert!(included.is_empty(), "a mint over the total cap is refused");
+        assert_eq!(ledger.bridged_supply(&asset), 0, "no supply was minted over the cap");
+        assert_eq!(ledger.bridged_balance(&asset, &recipient_id), 0);
+        assert!(!ledger.bridge_reference_seen(&[0x33; 32]), "a refused mint leaves the reference unseen");
+    }
+
+    #[test]
+    fn an_over_epoch_cap_mint_is_refused_across_two_deposits() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(406);
+        let recipient_id = address_bytes(&keypair(407).address());
+        let asset = [9u8; 16];
+        ledger.register_bridged_asset(&asset, 10_000_000, 500_000, false);
+
+        let first = deposit_fact(recipient_id, asset, 300_000, [0x44; 32]);
+        assert_eq!(
+            execute_ordered(&mut ledger, &[mint_tx(&relayer, &signed_artifact(&first, &sk0, &sk1), &fee)], &fee, 0).len(),
+            1
+        );
+
+        let second = deposit_fact(recipient_id, asset, 300_000, [0x45; 32]);
+        let included = execute_ordered(&mut ledger, &[mint_tx(&relayer, &signed_artifact(&second, &sk0, &sk1), &fee)], &fee, 0);
+        assert!(included.is_empty(), "the second deposit crosses the epoch cap and is refused");
+        assert_eq!(ledger.bridged_supply(&asset), 300_000, "only the first deposit minted this epoch");
+
+        ledger.set_bridge_epoch(1);
+        let third = execute_ordered(&mut ledger, &[mint_tx(&relayer, &signed_artifact(&second, &sk0, &sk1), &fee)], &fee, 0);
+        assert_eq!(third.len(), 1, "the next epoch admits the deposit again");
+        assert_eq!(ledger.bridged_supply(&asset), 600_000);
+    }
+
+    #[test]
+    fn a_tampered_attestation_does_not_mint() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(408);
+        let recipient_id = address_bytes(&keypair(409).address());
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+
+        let fact = deposit_fact(recipient_id, asset, 500_000, [0x55; 32]);
+        let mut artifact = signed_artifact(&fact, &sk0, &sk1);
+        artifact.attestation.fact.amount = 900_000;
+        let included = execute_ordered(&mut ledger, &[mint_tx(&relayer, &artifact, &fee)], &fee, 0);
+
+        assert!(included.is_empty(), "a fact changed after signing does not attest and does not mint");
+        assert_eq!(ledger.bridged_supply(&asset), 0);
+    }
+
+    #[test]
+    fn a_wrong_key_quorum_does_not_mint() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (_sk0, _sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(410);
+        let recipient_id = address_bytes(&keypair(411).address());
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+
+        let (_pkx, skx) = bridge_operator(90);
+        let (_pky, sky) = bridge_operator(91);
+        let fact = deposit_fact(recipient_id, asset, 500_000, [0x56; 32]);
+        let artifact = crate::bridge::MintArtifact {
+            attestation: crate::bridge::Attestation {
+                fact: fact.clone(),
+                signatures: vec![
+                    crate::bridge::SignerSig { operator_id: 0, signature: attest(&skx, &fact) },
+                    crate::bridge::SignerSig { operator_id: 1, signature: attest(&sky, &fact) },
+                ],
+            },
+            stark: None,
+        };
+        let included = execute_ordered(&mut ledger, &[mint_tx(&relayer, &artifact, &fee)], &fee, 0);
+
+        assert!(included.is_empty(), "signatures from keys off the committee never mint");
+        assert_eq!(ledger.bridged_supply(&asset), 0);
+    }
+
+    #[test]
+    fn a_holder_exit_burns_the_bridged_amount() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(412);
+        let holder = keypair(413);
+        let holder_id = address_bytes(&holder.address());
+        let start = 10_000 * 1_000_000;
+        fund(&mut ledger, &holder, start);
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+
+        let fact = deposit_fact(holder_id, asset, 500_000, [0x66; 32]);
+        assert_eq!(
+            execute_ordered(&mut ledger, &[mint_tx(&relayer, &signed_artifact(&fact, &sk0, &sk1), &fee)], &fee, 0).len(),
+            1
+        );
+        assert_eq!(ledger.bridged_balance(&asset, &holder_id), 500_000);
+
+        let request = crate::bridge::ExitRequest { asset_id: asset, amount: 200_000, destination: [0xEE; 32] };
+        let exit = system_tx(&holder, &crate::ledger::bridge_exit_address(), request.encode(), 0, TRANSFER_METER, &fee);
+        let included = execute_ordered(&mut ledger, &[exit], &fee, 0);
+
+        assert_eq!(included.len(), 1, "the holder's exit rides in the block");
+        assert_eq!(ledger.bridged_balance(&asset, &holder_id), 300_000, "the burn debited the exit amount");
+        assert_eq!(ledger.bridged_supply(&asset), 300_000, "the exit lowered the bridged supply");
+        assert_eq!(ledger.balance(&holder.address()), start - fee.transfer_fee(), "the holder paid one fee");
+    }
+
+    #[test]
+    fn a_frozen_bridge_refuses_mint_and_exit() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(414);
+        let holder = keypair(415);
+        let holder_id = address_bytes(&holder.address());
+        let start = 10_000 * 1_000_000;
+        fund(&mut ledger, &holder, start);
+        let freezer = keypair(416);
+        fund(&mut ledger, &freezer, 2_000_000 * 1_000_000);
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+
+        let seeded = deposit_fact(holder_id, asset, 500_000, [0x77; 32]);
+        assert_eq!(
+            execute_ordered(&mut ledger, &[mint_tx(&relayer, &signed_artifact(&seeded, &sk0, &sk1), &fee)], &fee, 0).len(),
+            1
+        );
+
+        let freeze = transfer(&freezer, &crate::ledger::bridge_freeze_address(), 0, 0, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[freeze], &fee, 0).len(), 1);
+        assert!(ledger.bridge_is_frozen());
+
+        let fresh = deposit_fact(holder_id, asset, 100_000, [0x78; 32]);
+        let frozen_mint = execute_ordered(&mut ledger, &[mint_tx(&relayer, &signed_artifact(&fresh, &sk0, &sk1), &fee)], &fee, 0);
+        assert!(frozen_mint.is_empty(), "a frozen bridge refuses a mint");
+        assert_eq!(ledger.bridged_supply(&asset), 500_000, "the frozen mint moved no supply");
+
+        let request = crate::bridge::ExitRequest { asset_id: asset, amount: 100_000, destination: [0xEE; 32] };
+        let exit = system_tx(&holder, &crate::ledger::bridge_exit_address(), request.encode(), 0, TRANSFER_METER, &fee);
+        let frozen_exit = execute_ordered(&mut ledger, &[exit], &fee, 0);
+        assert!(frozen_exit.is_empty(), "a frozen bridge refuses an exit");
+        assert_eq!(ledger.bridged_balance(&asset, &holder_id), 500_000, "the frozen exit burned nothing");
+        assert_eq!(ledger.balance(&holder.address()), start, "the frozen exit charged no fee");
     }
 }
