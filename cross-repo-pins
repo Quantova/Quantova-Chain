@@ -1,6 +1,10 @@
-# Cross repo pins. One git dependency per line, repository then tag or the exact commit it pins.
-# qtv-crypto is the signing edge, so it is anchored to an immutable commit rather than the movable
-# v0.3.0 tag, which is the commit that tag resolved to and the same rev the SDKs pin.
-QRC-CONSENSUS  v0.7.0
-Q-Crypto       4c0bdcb7dce9d2de6f9f510b0695377321076fef
-QVM            v0.5.0
+# Cross repo pins. One git dependency per line, the repository then the tag it pins. The gate
+# checks a movable tag against the remote and the lockfile, so only tag pinned dependencies are
+# declared here.
+#
+# The signing edge qtv-crypto is anchored to an immutable commit, not a tag, so it has no tag to
+# drift and is out of this gate's scope. It is pinned by rev in every crate manifest, recorded in
+# the committed lockfile, and its source org is gated in deny.toml. For the record it is
+# Q-Crypto at 4c0bdcb7dce9d2de6f9f510b0695377321076fef, the same rev the SDKs pin.
+QRC-CONSENSUS  v0.9.0
+QVM            v0.5.3
