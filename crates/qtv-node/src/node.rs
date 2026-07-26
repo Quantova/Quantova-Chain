@@ -3118,4 +3118,57 @@ mod tests {
         assert_eq!(ledger.bridged_balance(&asset, &holder_id), 500_000, "the frozen exit burned nothing");
         assert_eq!(ledger.balance(&holder.address()), start, "the frozen exit charged no fee");
     }
+
+    #[test]
+    fn parallel_and_ordered_agree_on_a_bridge_block_across_a_freeze_horizon() {
+        let fee = FeeParams::devnet();
+        let mut base = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut base);
+        let relayer = keypair(420);
+        let holder = keypair(421);
+        let holder_id = address_bytes(&holder.address());
+        let freezer = keypair(422);
+        let other = keypair(423);
+        let start = 10_000 * 1_000_000;
+        fund(&mut base, &holder, start);
+        fund(&mut base, &freezer, 2_000_000 * 1_000_000);
+        fund(&mut base, &other, start);
+        let asset = [7u8; 16];
+        base.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
+
+        let seed = deposit_fact(holder_id, asset, 1_000_000, [0xA1; 32]);
+        assert_eq!(
+            execute_ordered(&mut base, &[mint_tx(&relayer, &signed_artifact(&seed, &sk0, &sk1), &fee)], &fee, 0).len(),
+            1
+        );
+        let freeze = transfer(&freezer, &crate::ledger::bridge_freeze_address(), 0, 0, &fee);
+        assert_eq!(execute_ordered(&mut base, &[freeze], &fee, 0).len(), 1);
+        assert!(base.bridge_is_frozen());
+
+        let horizon_day = qtv_governance::BRIDGE_FREEZE_DURATION / 86_400;
+        let fresh = deposit_fact(holder_id, asset, 500_000, [0xA2; 32]);
+        let mint = mint_tx(&relayer, &signed_artifact(&fresh, &sk0, &sk1), &fee);
+        let request = crate::bridge::ExitRequest { asset_id: asset, amount: 400_000, destination: [0xEE; 32] };
+        let exit = system_tx(&holder, &crate::ledger::bridge_exit_address(), request.encode(), 0, TRANSFER_METER, &fee);
+        let payment = transfer(&other, &keypair(424).address(), 1_000, 0, &fee);
+        let block = vec![mint, exit, payment];
+
+        let mut ordered = base.clone();
+        execute_ordered(&mut ordered, &block, &fee, horizon_day);
+
+        let mut parallel = base.clone();
+        crate::parallel::execute_parallel(&mut parallel, &block, &fee, 4, horizon_day);
+
+        assert_eq!(
+            ordered.state_root(),
+            parallel.state_root(),
+            "the parallel and ordered paths diverge on a bridge mint/exit block crossing a freeze horizon"
+        );
+        assert!(!parallel.bridge_is_frozen(), "the freeze auto expired on the parallel path");
+        assert_eq!(
+            parallel.bridged_supply(&asset),
+            1_100_000,
+            "the mint and exit both applied on the parallel path"
+        );
+    }
 }

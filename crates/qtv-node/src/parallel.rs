@@ -162,6 +162,9 @@ pub fn execute_parallel(
     let key_register_address = crate::ledger::key_register_address();
     let bridge_freeze_address = crate::ledger::bridge_freeze_address();
     let bridge_unfreeze_address = crate::ledger::bridge_unfreeze_address();
+    let bridge_mint_address = crate::ledger::bridge_mint_address();
+    let bridge_exit_address = crate::ledger::bridge_exit_address();
+    ledger.bridge_expire(day.saturating_mul(86_400));
     if candidates.iter().any(|wrapper| {
         let (sender, target) = access(wrapper);
         target == stake_address.as_str()
@@ -172,6 +175,8 @@ pub fn execute_parallel(
             || target == key_register_address.as_str()
             || target == bridge_freeze_address.as_str()
             || target == bridge_unfreeze_address.as_str()
+            || target == bridge_mint_address.as_str()
+            || target == bridge_exit_address.as_str()
             || ledger.is_blacklisted(sender)
             || ledger.is_blacklisted(target)
             || ledger.is_frozen(sender)
