@@ -420,11 +420,29 @@ fn bridge_mint_fact(ledger: &Ledger, wrapper: &Wrapper) -> Option<crate::bridge:
     Some(fact)
 }
 
+const MAX_BRIDGE_STARK_BYTES: usize = 1 << 20;
+
+fn max_mint_artifact_bytes(ledger: &Ledger) -> usize {
+    let operators = ledger.bridge_operator_set().map(|s| s.operators.len()).unwrap_or(0);
+    let sig_frame = 4 + 2 + qtv_crypto::ml_dsa::SIGNATURE_BYTES;
+    let attestation = 2 + crate::bridge::FACT_ENCODED_LEN + 4 + operators.saturating_mul(sig_frame);
+    let stark = 1 + 32 + 4 + MAX_BRIDGE_STARK_BYTES;
+    4 + attestation + 4 + stark
+}
+
+pub(crate) fn bridge_mint_source_ref(wrapper: &Wrapper) -> Option<[u8; 32]> {
+    crate::bridge::MintArtifact::decode(wrapper.body().call().args())
+        .map(|artifact| artifact.attestation.fact.source_ref)
+}
+
 /// Whether a bridge mint would land, so the mempool admits it with no fee and no caller
 /// signature. It holds only when the bridge is open, the artifact parses and carries a committee
 /// quorum for this chain, and the deposit reference is unseen.
 pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper) -> bool {
     if ledger.bridge_is_frozen() {
+        return false;
+    }
+    if wrapper.body().call().args().len() > max_mint_artifact_bytes(ledger) {
         return false;
     }
     match bridge_mint_fact(ledger, wrapper) {
@@ -3117,6 +3135,60 @@ mod tests {
         assert!(frozen_exit.is_empty(), "a frozen bridge refuses an exit");
         assert_eq!(ledger.bridged_balance(&asset, &holder_id), 500_000, "the frozen exit burned nothing");
         assert_eq!(ledger.balance(&holder.address()), start, "the frozen exit charged no fee");
+    }
+
+    #[test]
+    fn two_mints_of_one_deposit_from_different_senders_take_one_slot() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer_a = keypair(440);
+        let relayer_b = keypair(441);
+        let recipient_id = address_bytes(&keypair(442).address());
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+        let fact = deposit_fact(recipient_id, asset, 500_000, [0xC1; 32]);
+        let artifact = signed_artifact(&fact, &sk0, &sk1);
+
+        let mut pool = crate::mempool::Mempool::new();
+        assert!(pool.admit(mint_tx(&relayer_a, &artifact, &fee), &ledger, &fee).is_ok());
+        assert!(pool.admit(mint_tx(&relayer_b, &artifact, &fee), &ledger, &fee).is_ok());
+        assert_eq!(pool.len(), 1, "one deposit reference occupies at most one mempool slot");
+    }
+
+    #[test]
+    fn an_oversized_mint_artifact_is_refused_at_admission() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+        let relayer = keypair(443);
+        let recipient_id = address_bytes(&keypair(444).address());
+
+        let small = deposit_fact(recipient_id, asset, 500_000, [0xC2; 32]);
+        let mut small_artifact = signed_artifact(&small, &sk0, &sk1);
+        small_artifact.stark = Some(crate::bridge::StarkEnvelope {
+            statement_digest: small.statement_digest(0),
+            proof: vec![0u8; 1024],
+        });
+        let mut pool = crate::mempool::Mempool::new();
+        assert!(
+            pool.admit(mint_tx(&relayer, &small_artifact, &fee), &ledger, &fee).is_ok(),
+            "a normally sized artifact is admitted"
+        );
+
+        let big = deposit_fact(recipient_id, asset, 500_000, [0xC3; 32]);
+        let mut big_artifact = signed_artifact(&big, &sk0, &sk1);
+        big_artifact.stark = Some(crate::bridge::StarkEnvelope {
+            statement_digest: big.statement_digest(0),
+            proof: vec![0u8; 2 * 1024 * 1024],
+        });
+        assert!(
+            pool.admit(mint_tx(&relayer, &big_artifact, &fee), &ledger, &fee).is_err(),
+            "an oversized mint artifact is refused"
+        );
+        assert_eq!(pool.len(), 1, "only the normally sized artifact took a slot");
     }
 
     #[test]

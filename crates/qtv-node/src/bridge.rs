@@ -357,6 +357,17 @@ impl Decode for OperatorSet {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static VERIFY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn verify_signature(pk: &[u8; PUBLIC_KEY_BYTES], message: &[u8], sig: &[u8; SIGNATURE_BYTES]) -> bool {
+    #[cfg(test)]
+    VERIFY_CALLS.with(|c| c.set(c.get() + 1));
+    ml_dsa::verify(pk, message, sig, ATTEST_DOMAIN)
+}
+
 /// Whether a quorum of the committee attested this deposit fact to this chain. Verifies each
 /// carried signature against the registered operator key at its index over the exact bytes the
 /// operators sign, counts only distinct valid signers, and holds when the count reaches the
@@ -374,11 +385,13 @@ pub fn quorum_attests(set: &OperatorSet, attestation: &Attestation, dest_chain: 
         return false;
     }
     let message = fact.attest_preimage();
+    let mut attempted: Vec<u32> = Vec::new();
     let mut counted: Vec<u32> = Vec::new();
     for signer in &attestation.signatures {
-        if counted.contains(&signer.operator_id) {
+        if attempted.contains(&signer.operator_id) {
             continue;
         }
+        attempted.push(signer.operator_id);
         let public_key = match set.public_key(signer.operator_id) {
             Some(key) => key,
             None => continue,
@@ -391,7 +404,7 @@ pub fn quorum_attests(set: &OperatorSet, attestation: &Attestation, dest_chain: 
             Ok(sig) => sig,
             Err(_) => continue,
         };
-        if ml_dsa::verify(pk, &message, sig, ATTEST_DOMAIN) {
+        if verify_signature(pk, &message, sig) {
             counted.push(signer.operator_id);
         }
     }
@@ -583,6 +596,30 @@ mod tests {
             }],
         };
         assert!(!quorum_attests(&set, &attestation, fact.dest_chain));
+    }
+
+    #[test]
+    fn a_padded_artifact_runs_at_most_one_verify_per_operator() {
+        let fact = sample_fact();
+        let (pk0, sk0) = operator(10);
+        let (pk1, _sk1) = operator(11);
+        let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 2);
+        let mut signatures = Vec::new();
+        for _ in 0..500 {
+            signatures.push(SignerSig { operator_id: 0, signature: vec![0u8; SIGNATURE_BYTES] });
+            signatures.push(SignerSig { operator_id: 1, signature: vec![7u8; SIGNATURE_BYTES] });
+            signatures.push(SignerSig { operator_id: 9, signature: vec![3u8; SIGNATURE_BYTES] });
+        }
+        signatures.push(SignerSig { operator_id: 0, signature: sign_fact(&sk0, &fact) });
+        let attestation = Attestation { fact: fact.clone(), signatures };
+        VERIFY_CALLS.with(|c| c.set(0));
+        let _ = quorum_attests(&set, &attestation, fact.dest_chain);
+        let calls = VERIFY_CALLS.with(|c| c.get());
+        assert!(
+            calls <= set.operators.len(),
+            "ran {calls} verifies for a committee of {} operators",
+            set.operators.len()
+        );
     }
 
     #[test]
