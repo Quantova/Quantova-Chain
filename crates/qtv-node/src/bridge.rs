@@ -292,13 +292,22 @@ impl MintArtifact {
         let mut reader = Reader::new(bytes);
         let attestation_len = reader.u32()? as usize;
         let attestation_bytes = reader.take(attestation_len)?;
-        let attestation = Attestation::read(&mut Reader::new(attestation_bytes))?;
+        let mut attestation_reader = Reader::new(attestation_bytes);
+        let attestation = Attestation::read(&mut attestation_reader)?;
+        if !attestation_reader.done() {
+            return None;
+        }
         let stark_len = reader.u32()? as usize;
         let stark = if stark_len == 0 {
             None
         } else {
             let stark_bytes = reader.take(stark_len)?;
-            Some(StarkEnvelope::read(&mut Reader::new(stark_bytes))?)
+            let mut stark_reader = Reader::new(stark_bytes);
+            let envelope = StarkEnvelope::read(&mut stark_reader)?;
+            if !stark_reader.done() {
+                return None;
+            }
+            Some(envelope)
         };
         reader.done().then_some(MintArtifact { attestation, stark })
     }
@@ -553,6 +562,42 @@ mod tests {
             }),
         };
         assert_eq!(MintArtifact::decode(&proved.encode()), Some(proved));
+    }
+
+    #[test]
+    fn a_sub_frame_with_trailing_bytes_is_rejected() {
+        let (_pk, sk) = operator(1);
+        let fact = sample_fact();
+        let attestation = Attestation {
+            fact: fact.clone(),
+            signatures: vec![SignerSig { operator_id: 0, signature: sign_fact(&sk, &fact) }],
+        };
+        assert!(MintArtifact::decode(&MintArtifact { attestation: attestation.clone(), stark: None }.encode()).is_some());
+
+        let mut padded_attestation = attestation.encode();
+        padded_attestation.push(0u8);
+        let mut out = Vec::new();
+        out.extend_from_slice(&(padded_attestation.len() as u32).to_le_bytes());
+        out.extend_from_slice(&padded_attestation);
+        out.extend_from_slice(&0u32.to_le_bytes());
+        assert!(
+            MintArtifact::decode(&out).is_none(),
+            "a trailing byte inside the attestation sub-frame is rejected"
+        );
+
+        let stark = StarkEnvelope { statement_digest: fact.statement_digest(0), proof: vec![1, 2, 3] };
+        let mut padded_stark = stark.encode();
+        padded_stark.push(0u8);
+        let attestation_bytes = attestation.encode();
+        let mut out2 = Vec::new();
+        out2.extend_from_slice(&(attestation_bytes.len() as u32).to_le_bytes());
+        out2.extend_from_slice(&attestation_bytes);
+        out2.extend_from_slice(&(padded_stark.len() as u32).to_le_bytes());
+        out2.extend_from_slice(&padded_stark);
+        assert!(
+            MintArtifact::decode(&out2).is_none(),
+            "a trailing byte inside the stark sub-frame is rejected"
+        );
     }
 
     #[test]
