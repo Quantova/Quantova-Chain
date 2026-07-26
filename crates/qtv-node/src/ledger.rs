@@ -1228,11 +1228,15 @@ impl Ledger {
         self.write_leaf(bridge_vault_custody_key(vault, asset_id), to_bytes(&amount));
     }
 
-    fn credit_vault_custody(&mut self, asset_id: &[u8; 16], amount: u128) {
+    fn credit_vault_custody(&mut self, asset_id: &[u8; 16], amount: u128) -> bool {
         if let Some(vault) = self.bridge_pool_vault() {
-            let held = self.bridge_vault_custody(&vault, asset_id).saturating_add(amount);
+            let held = match self.bridge_vault_custody(&vault, asset_id).checked_add(amount) {
+                Some(held) => held,
+                None => return false,
+            };
             self.set_bridge_vault_custody(&vault, asset_id, held);
         }
+        true
     }
 
     fn debit_vault_custody(&mut self, asset_id: &[u8; 16], amount: u128) -> bool {
@@ -1342,6 +1346,9 @@ impl Ledger {
             Some(credited) => credited,
             None => return false,
         };
+        if !self.credit_vault_custody(&fact.asset_id, fact.amount) {
+            return false;
+        }
         self.set_bridged_balance(&fact.asset_id, &fact.recipient, credited);
         self.set_bridged_asset(
             &fact.asset_id,
@@ -1352,7 +1359,6 @@ impl Ledger {
         );
         self.mark_bridge_reference(&fact.source_ref);
         self.set_bridge_epoch_minted(&fact.asset_id, epoch, new_minted);
-        self.credit_vault_custody(&fact.asset_id, fact.amount);
         self.record_bridge_mint_event(&fact.asset_id, &fact.recipient, fact.amount);
         true
     }
@@ -3862,6 +3868,45 @@ mod stake_state_tests {
         );
         assert!(
             !l.bridge_reference_seen(&[0x44u8; 32]),
+            "the refused mint leaves the reference unseen"
+        );
+    }
+
+    #[test]
+    fn a_mint_credit_that_would_overflow_the_vault_custody_is_refused_not_saturated() {
+        let mut l = Ledger::new();
+        let asset = [0xC5u8; 16];
+        let holder = [0xF0u8; 32];
+        let vault = [0x0Du8; 32];
+        l.register_bridged_asset(&asset, u128::MAX, u128::MAX, false);
+        l.set_bridge_pool_vault(&vault);
+        l.set_bridge_vault_custody(&vault, &asset, u128::MAX - 10);
+
+        let refused = l.bridge_mint(&crate::bridge::Fact {
+            version: crate::bridge::FACT_VERSION,
+            source_chain: 1,
+            dest_chain: 9_000,
+            route_id: 7,
+            direction: crate::bridge::Direction::Deposit,
+            nonce: 1,
+            source_ref: [0x55u8; 32],
+            asset_id: asset,
+            amount: 100,
+            recipient: holder,
+            finality_depth: 6,
+            observed_height: 10,
+            expiry_height: 100,
+        });
+        assert!(!refused, "a credit that would overflow the vault custody is refused");
+        assert_eq!(
+            l.bridge_vault_custody(&vault, &asset),
+            u128::MAX - 10,
+            "the refused mint leaves the custody unsaturated"
+        );
+        assert_eq!(l.bridged_balance(&asset, &holder), 0, "the refused mint credits no balance");
+        assert_eq!(l.bridged_supply(&asset), 0, "the refused mint moves no supply");
+        assert!(
+            !l.bridge_reference_seen(&[0x55u8; 32]),
             "the refused mint leaves the reference unseen"
         );
     }
