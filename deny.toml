@@ -25,18 +25,23 @@ multiple-versions = "deny"
 wildcards = "allow"
 deny = [
     "k256",
+    "ed25519",
     "ed25519-dalek",
+    "ed25519-compact",
     "curve25519-dalek",
     "p256",
     "secp256k1",
     "rsa",
     "bls12_381",
+    "blst",
     "ark-ec",
     "ark-bls12-381",
     "ark-groth16",
     "pairing",
     "openssl",
     "openssl-sys",
+    "ring",
+    "rustls",
 ]
 
 [advisories]
