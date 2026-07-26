@@ -256,6 +256,17 @@ impl Mempool {
             .map(|(index, w)| (index, w.body().fee()))
     }
 
+    fn duplicate_mint(&self, incoming: &Wrapper) -> bool {
+        let source_ref = match crate::node::bridge_mint_source_ref(incoming) {
+            Some(source_ref) => source_ref,
+            None => return false,
+        };
+        self.pending.iter().any(|w| {
+            crate::node::is_bridge_mint(w)
+                && crate::node::bridge_mint_source_ref(w) == Some(source_ref)
+        })
+    }
+
     fn make_room(&mut self, incoming: &Wrapper) -> Result<(), Reject> {
         let sender = incoming.body().sender();
         let sender_count = self
@@ -362,6 +373,9 @@ impl Mempool {
         if self.pending.iter().any(|w| w.id() == id) {
             return Ok(Admitted::Known);
         }
+        if crate::node::is_bridge_mint(&wrapper) && self.duplicate_mint(&wrapper) {
+            return Ok(Admitted::Known);
+        }
         self.make_room(&wrapper)?;
         self.pending.push(wrapper);
         Ok(Admitted::Fresh)
@@ -422,6 +436,9 @@ impl Mempool {
             }
             let id = wrapper.id();
             if self.pending.iter().any(|w| w.id() == id) {
+                continue;
+            }
+            if crate::node::is_bridge_mint(&wrapper) && self.duplicate_mint(&wrapper) {
                 continue;
             }
             if self.make_room(&wrapper).is_err() {
