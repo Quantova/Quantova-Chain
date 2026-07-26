@@ -386,7 +386,7 @@ pub fn quorum_attests(set: &OperatorSet, attestation: &Attestation, dest_chain: 
     }
     let message = fact.attest_preimage();
     let mut attempted: Vec<u32> = Vec::new();
-    let mut counted: Vec<u32> = Vec::new();
+    let mut counted_keys: Vec<&[u8]> = Vec::new();
     for signer in &attestation.signatures {
         if attempted.contains(&signer.operator_id) {
             continue;
@@ -396,6 +396,9 @@ pub fn quorum_attests(set: &OperatorSet, attestation: &Attestation, dest_chain: 
             Some(key) => key,
             None => continue,
         };
+        if counted_keys.contains(&public_key) {
+            continue;
+        }
         let pk: &[u8; PUBLIC_KEY_BYTES] = match public_key.try_into() {
             Ok(pk) => pk,
             Err(_) => continue,
@@ -405,10 +408,10 @@ pub fn quorum_attests(set: &OperatorSet, attestation: &Attestation, dest_chain: 
             Err(_) => continue,
         };
         if verify_signature(pk, &message, sig) {
-            counted.push(signer.operator_id);
+            counted_keys.push(public_key);
         }
     }
-    counted.len() as u32 >= set.threshold
+    counted_keys.len() as u32 >= set.threshold
 }
 
 /// The outcome of looking at the hash STARK envelope that rides beside the attestation.
@@ -643,6 +646,25 @@ mod tests {
             ],
         };
         assert!(!quorum_attests(&set, &attestation, fact.dest_chain));
+    }
+
+    #[test]
+    fn a_duplicate_public_key_fills_only_one_slot() {
+        let fact = sample_fact();
+        let (pk0, sk0) = operator(10);
+        let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk0.to_vec())], 2);
+        let signature = sign_fact(&sk0, &fact);
+        let attestation = Attestation {
+            fact: fact.clone(),
+            signatures: vec![
+                SignerSig { operator_id: 0, signature: signature.clone() },
+                SignerSig { operator_id: 1, signature },
+            ],
+        };
+        assert!(
+            !quorum_attests(&set, &attestation, fact.dest_chain),
+            "one public key under two ids fills only one slot"
+        );
     }
 
     #[test]
