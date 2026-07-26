@@ -27,7 +27,7 @@ pub const HOUR_SECONDS: u64 = 3_600;
 pub const MONTH_SECONDS: u64 = 30 * DAY_SECONDS;
 pub const YEAR_SECONDS: u64 = 365 * DAY_SECONDS;
 
-pub const BRIDGE_FREEZE_BOND: u64 = 1_500_000 * NATIVE_UNIT;
+pub const BRIDGE_FREEZE_BOND: u64 = 390_000 * NATIVE_UNIT;
 pub const BRIDGE_FREEZE_DURATION: u64 = 7 * DAY_SECONDS;
 pub const BRIDGE_FREEZE_COOLDOWN: u64 = DAY_SECONDS;
 
@@ -377,7 +377,7 @@ impl Action {
             Action::Upgrade { .. } => Track::ChainUpgrade,
             Action::Mint { .. } => Track::Mint,
             Action::BridgeMigration { .. } => Track::BridgeMigration,
-            Action::BridgeUnfreeze => Track::BridgeMigration,
+            Action::BridgeUnfreeze => Track::BlacklistKill,
             Action::GuardianRotate { .. } => Track::ChainUpgrade,
             Action::CommitteeRotate { .. } => Track::BridgeMigration,
             Action::AssetRegister { .. } => Track::BridgeMigration,
@@ -1228,16 +1228,21 @@ mod tests {
     }
 
     #[test]
-    fn an_early_bridge_unfreeze_rides_the_bridge_migration_track() {
-        assert_eq!(Action::BridgeUnfreeze.track(), Track::BridgeMigration);
+    fn an_early_bridge_unfreeze_rides_the_blacklist_kill_track() {
+        assert_eq!(Action::BridgeUnfreeze.track(), Track::BlacklistKill);
         assert_eq!(
-            check_enactment(Track::BridgeMigration, &Action::BridgeUnfreeze, true, |_| false),
+            check_enactment(Track::BlacklistKill, &Action::BridgeUnfreeze, true, |_| false),
             Ok(())
         );
         assert_eq!(
-            check_enactment(Track::FreezeRecovery, &Action::BridgeUnfreeze, true, |_| false),
+            check_enactment(Track::BridgeMigration, &Action::BridgeUnfreeze, true, |_| false),
             Err(Violation::WrongTrack)
         );
+    }
+
+    #[test]
+    fn the_bridge_freeze_bond_matches_the_account_freeze_deposit() {
+        assert_eq!(BRIDGE_FREEZE_BOND, Track::BlacklistKill.deposit());
     }
 
     #[test]
@@ -1349,7 +1354,7 @@ mod tests {
 
     #[test]
     fn the_bridge_freeze_bond_holds_for_longer_than_a_migration_runs() {
-        assert_eq!(BRIDGE_FREEZE_BOND, 1_500_000 * NATIVE_UNIT);
+        assert_eq!(BRIDGE_FREEZE_BOND, 390_000 * NATIVE_UNIT);
         assert_eq!(BRIDGE_FREEZE_DURATION, 7 * DAY_SECONDS);
         assert_eq!(BRIDGE_FREEZE_COOLDOWN, DAY_SECONDS);
         assert!(BRIDGE_FREEZE_DURATION > Track::BridgeMigration.period_seconds());
