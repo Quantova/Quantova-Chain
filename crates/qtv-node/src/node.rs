@@ -612,11 +612,11 @@ pub(crate) fn is_bridge_exit(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::bridge_exit_address()
 }
 
-fn bridge_mint_fact(ledger: &Ledger, wrapper: &Wrapper) -> Option<crate::bridge::Fact> {
+fn bridge_mint_fact(ledger: &Ledger, wrapper: &Wrapper, chain_id: u64) -> Option<crate::bridge::Fact> {
     let artifact = crate::bridge::MintArtifact::decode(wrapper.body().call().args())?;
     let dest_chain = ledger.bridge_dest_chain()?;
     let operators = ledger.bridge_operator_set()?;
-    if !crate::bridge::quorum_attests(&operators, &artifact.attestation, dest_chain) {
+    if !crate::bridge::quorum_attests(&operators, &artifact.attestation, dest_chain, chain_id) {
         return None;
     }
     let fact = artifact.attestation.fact;
@@ -648,24 +648,24 @@ pub(crate) fn bridge_mint_source_ref(wrapper: &Wrapper) -> Option<[u8; 32]> {
         .map(|artifact| artifact.attestation.fact.source_ref)
 }
 
-pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper) -> bool {
+pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_id: u64) -> bool {
     if ledger.bridge_is_frozen() {
         return false;
     }
     if wrapper.body().call().args().len() > max_mint_artifact_bytes(ledger) {
         return false;
     }
-    match bridge_mint_fact(ledger, wrapper) {
+    match bridge_mint_fact(ledger, wrapper, chain_id) {
         Some(fact) => !ledger.bridge_reference_seen(&fact.source_ref),
         None => false,
     }
 }
 
-fn dispatch_bridge_mint(ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
+fn dispatch_bridge_mint(ledger: &mut Ledger, wrapper: &Wrapper, chain_id: u64) -> bool {
     if ledger.bridge_is_frozen() {
         return false;
     }
-    let fact = match bridge_mint_fact(ledger, wrapper) {
+    let fact = match bridge_mint_fact(ledger, wrapper, chain_id) {
         Some(fact) => fact,
         None => return false,
     };
@@ -937,7 +937,7 @@ fn execute_ordered_across(
             continue;
         }
         if is_bridge_mint(wrapper) {
-            if ledger.apply_atomic(|l| dispatch_bridge_mint(l, wrapper)) {
+            if ledger.apply_atomic(|l| dispatch_bridge_mint(l, wrapper, fee_params.chain_id)) {
                 included.push(wrapper.clone());
             }
             continue;
@@ -3367,10 +3367,16 @@ mod tests {
         qtv_crypto::ml_dsa::keygen(&seed)
     }
 
-    fn attest(sk: &OperatorSecret, fact: &crate::bridge::Fact) -> Vec<u8> {
-        qtv_crypto::ml_dsa::sign(sk, &fact.attest_preimage(), crate::bridge::ATTEST_DOMAIN, &[0u8; 32])
+    const BRIDGE_CHAIN_ID: u64 = qtv_tx::LOCAL_CHAIN_ID;
+
+    fn attest_for(sk: &OperatorSecret, fact: &crate::bridge::Fact, chain_id: u64) -> Vec<u8> {
+        qtv_crypto::ml_dsa::sign(sk, &fact.attest_preimage(chain_id), crate::bridge::ATTEST_DOMAIN, &[0u8; 32])
             .expect("the fact preimage stays within the length bound")
             .to_vec()
+    }
+
+    fn attest(sk: &OperatorSecret, fact: &crate::bridge::Fact) -> Vec<u8> {
+        attest_for(sk, fact, BRIDGE_CHAIN_ID)
     }
 
     fn seed_committee(ledger: &mut Ledger) -> (OperatorSecret, OperatorSecret) {
@@ -3439,6 +3445,35 @@ mod tests {
         assert_eq!(ledger.bridged_balance(&asset, &recipient_id), 500_000, "the recipient holds the attested amount");
         assert_eq!(ledger.bridged_supply(&asset), 500_000, "the bridged supply rose by the attested amount");
         assert!(ledger.bridge_reference_seen(&[0x11; 32]), "the deposit reference is marked against replay");
+    }
+
+    #[test]
+    fn a_quorum_signed_for_a_sibling_chain_id_does_not_mint() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(410);
+        let recipient_id = address_bytes(&keypair(411).address());
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+
+        let sibling = BRIDGE_CHAIN_ID ^ (1u64 << 40);
+        assert_eq!(sibling as u32, BRIDGE_CHAIN_ID as u32, "the sibling shares the low 32 bits");
+        let fact = deposit_fact(recipient_id, asset, 500_000, [0x12; 32]);
+        let artifact = crate::bridge::MintArtifact {
+            attestation: crate::bridge::Attestation {
+                fact: fact.clone(),
+                signatures: vec![
+                    crate::bridge::SignerSig { operator_id: 0, signature: attest_for(&sk0, &fact, sibling) },
+                    crate::bridge::SignerSig { operator_id: 1, signature: attest_for(&sk1, &fact, sibling) },
+                ],
+            },
+            stark: None,
+        };
+        let included = execute_ordered(&mut ledger, &[mint_tx(&relayer, &artifact, &fee)], &fee, 0);
+        assert!(included.is_empty(), "a quorum signed for a sibling chain id never mints here");
+        assert_eq!(ledger.bridged_supply(&asset), 0);
+        assert!(!ledger.bridge_reference_seen(&[0x12; 32]), "the refused mint leaves the reference unseen");
     }
 
     #[test]
