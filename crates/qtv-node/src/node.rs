@@ -413,8 +413,17 @@ fn bridge_mint_fact(ledger: &Ledger, wrapper: &Wrapper) -> Option<crate::bridge:
     }
     let fact = artifact.attestation.fact;
     if let Some(asset) = ledger.bridged_asset(&fact.asset_id) {
-        if asset.requires_stark && artifact.stark.is_none() {
-            return None;
+        if asset.requires_stark {
+            // SEAM: the on chain FRI verifier is founder gated and lives in the oracle's
+            // q-prover-bridge the chain must not link, so a proof backed corridor is quorum trust
+            // today. Until the verifier lands we require the STARK envelope to at least bind to
+            // this fact by its statement digest, refusing an absent or unbound envelope.
+            let prover = operators.operators.first().map(|(id, _)| *id)?;
+            if crate::bridge::check_stark(&fact, artifact.stark.as_ref(), prover)
+                != crate::bridge::StarkCheck::BoundUnverified
+            {
+                return None;
+            }
         }
     }
     Some(fact)
@@ -3135,6 +3144,47 @@ mod tests {
         assert!(frozen_exit.is_empty(), "a frozen bridge refuses an exit");
         assert_eq!(ledger.bridged_balance(&asset, &holder_id), 500_000, "the frozen exit burned nothing");
         assert_eq!(ledger.balance(&holder.address()), start, "the frozen exit charged no fee");
+    }
+
+    #[test]
+    fn a_proof_backed_mint_requires_a_bound_stark_envelope() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(450);
+        let recipient_id = address_bytes(&keypair(451).address());
+        let asset = [0x5A; 16];
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, true);
+
+        let absent = deposit_fact(recipient_id, asset, 100_000, [0xD1; 32]);
+        let mut a = signed_artifact(&absent, &sk0, &sk1);
+        a.stark = None;
+        assert!(
+            execute_ordered(&mut ledger, &[mint_tx(&relayer, &a, &fee)], &fee, 0).is_empty(),
+            "a proof backed asset refuses a mint with no STARK envelope"
+        );
+
+        let unbound = deposit_fact(recipient_id, asset, 100_000, [0xD2; 32]);
+        let mut u = signed_artifact(&unbound, &sk0, &sk1);
+        u.stark = Some(crate::bridge::StarkEnvelope { statement_digest: [0u8; 32], proof: vec![] });
+        assert!(
+            execute_ordered(&mut ledger, &[mint_tx(&relayer, &u, &fee)], &fee, 0).is_empty(),
+            "a proof backed asset refuses an unbound STARK envelope"
+        );
+        assert_eq!(ledger.bridged_supply(&asset), 0, "no unbound mint moved supply");
+
+        let bound = deposit_fact(recipient_id, asset, 100_000, [0xD3; 32]);
+        let mut b = signed_artifact(&bound, &sk0, &sk1);
+        b.stark = Some(crate::bridge::StarkEnvelope {
+            statement_digest: bound.statement_digest(0),
+            proof: vec![1u8; 32],
+        });
+        assert_eq!(
+            execute_ordered(&mut ledger, &[mint_tx(&relayer, &b, &fee)], &fee, 0).len(),
+            1,
+            "a proof backed asset mints on a correctly bound STARK envelope"
+        );
+        assert_eq!(ledger.bridged_balance(&asset, &recipient_id), 100_000);
     }
 
     #[test]
