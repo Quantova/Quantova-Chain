@@ -284,12 +284,81 @@ impl Decode for Seizure {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorClaim {
+    pub operator_id: u32,
+    pub public_key: Vec<u8>,
+    pub pop: Vec<u8>,
+}
+
+impl Encode for OperatorClaim {
+    fn encode(&self, encoder: &mut Encoder) {
+        encoder.put_u32(self.operator_id);
+        encoder.put_bytes(&self.public_key);
+        encoder.put_bytes(&self.pop);
+    }
+}
+
+impl Decode for OperatorClaim {
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
+        let operator_id = decoder.get_u32()?;
+        let public_key = decoder.get_bytes()?.to_vec();
+        let pop = decoder.get_bytes()?.to_vec();
+        Ok(OperatorClaim {
+            operator_id,
+            public_key,
+            pop,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CommitteeRotation {
+    pub operators: Vec<OperatorClaim>,
+    pub threshold: u32,
+}
+
+impl Encode for CommitteeRotation {
+    fn encode(&self, encoder: &mut Encoder) {
+        (self.operators.len() as u64).encode(encoder);
+        for operator in &self.operators {
+            operator.encode(encoder);
+        }
+        encoder.put_u32(self.threshold);
+    }
+}
+
+impl Decode for CommitteeRotation {
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
+        let count = u64::decode(decoder)?;
+        let mut operators =
+            Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_BYTES_VEC)?);
+        for _ in 0..count {
+            operators.push(OperatorClaim::decode(decoder)?);
+        }
+        let threshold = decoder.get_u32()?;
+        Ok(CommitteeRotation {
+            operators,
+            threshold,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Upgrade { blob: Vec<u8> },
     Mint { to: Vec<u8>, amount: u64 },
     BridgeMigration { vault: Vec<u8> },
     BridgeUnfreeze,
     GuardianRotate { set: GuardianSet },
+    CommitteeRotate { rotation: CommitteeRotation },
+    AssetRegister {
+        asset_id: [u8; 16],
+        cap: u128,
+        epoch_cap: u128,
+        requires_stark: bool,
+    },
+    EpochAdvance,
+    OperatorRevoke { operator_id: u32 },
     FreezeRecovery {
         scope: [u8; 32],
         victim: Vec<u8>,
@@ -310,6 +379,10 @@ impl Action {
             Action::BridgeMigration { .. } => Track::BridgeMigration,
             Action::BridgeUnfreeze => Track::BridgeMigration,
             Action::GuardianRotate { .. } => Track::ChainUpgrade,
+            Action::CommitteeRotate { .. } => Track::BridgeMigration,
+            Action::AssetRegister { .. } => Track::BridgeMigration,
+            Action::EpochAdvance => Track::BridgeMigration,
+            Action::OperatorRevoke { .. } => Track::BridgeMigration,
             Action::FreezeRecovery { .. } => Track::FreezeRecovery,
             Action::Blacklist { .. } => Track::BlacklistKill,
             Action::Freeze { .. } => Track::BlacklistKill,
@@ -352,6 +425,29 @@ impl Encode for Action {
             Action::GuardianRotate { set } => {
                 encoder.put_u8(12);
                 set.encode(encoder);
+            }
+            Action::CommitteeRotate { rotation } => {
+                encoder.put_u8(13);
+                rotation.encode(encoder);
+            }
+            Action::AssetRegister {
+                asset_id,
+                cap,
+                epoch_cap,
+                requires_stark,
+            } => {
+                encoder.put_u8(14);
+                encoder.put_bytes(asset_id);
+                encoder.put_u128(*cap);
+                encoder.put_u128(*epoch_cap);
+                encoder.put_u8(*requires_stark as u8);
+            }
+            Action::EpochAdvance => {
+                encoder.put_u8(15);
+            }
+            Action::OperatorRevoke { operator_id } => {
+                encoder.put_u8(16);
+                encoder.put_u32(*operator_id);
             }
             Action::FreezeRecovery {
                 scope,
@@ -416,6 +512,28 @@ impl Decode for Action {
             11 => Ok(Action::BridgeUnfreeze),
             12 => Ok(Action::GuardianRotate {
                 set: GuardianSet::decode(decoder)?,
+            }),
+            13 => Ok(Action::CommitteeRotate {
+                rotation: CommitteeRotation::decode(decoder)?,
+            }),
+            14 => {
+                let asset_id: [u8; 16] = decoder
+                    .get_bytes()?
+                    .try_into()
+                    .map_err(|_| Error::UnknownTag { tag })?;
+                let cap = decoder.get_u128()?;
+                let epoch_cap = decoder.get_u128()?;
+                let requires_stark = decoder.get_u8()? != 0;
+                Ok(Action::AssetRegister {
+                    asset_id,
+                    cap,
+                    epoch_cap,
+                    requires_stark,
+                })
+            }
+            15 => Ok(Action::EpochAdvance),
+            16 => Ok(Action::OperatorRevoke {
+                operator_id: decoder.get_u32()?,
             }),
             4 => {
                 let scope_bytes = decoder.get_bytes()?;
@@ -1018,6 +1136,31 @@ mod tests {
             Action::GuardianRotate {
                 set: GuardianSet::new(vec![[7u8; 32], [8u8; 32], [9u8; 32]], 2),
             },
+            Action::CommitteeRotate {
+                rotation: CommitteeRotation {
+                    operators: vec![
+                        OperatorClaim {
+                            operator_id: 0,
+                            public_key: vec![1, 2, 3],
+                            pop: vec![4, 5, 6],
+                        },
+                        OperatorClaim {
+                            operator_id: 1,
+                            public_key: vec![7, 8],
+                            pop: vec![9],
+                        },
+                    ],
+                    threshold: 2,
+                },
+            },
+            Action::AssetRegister {
+                asset_id: [3u8; 16],
+                cap: 1_000_000,
+                epoch_cap: 250_000,
+                requires_stark: true,
+            },
+            Action::EpochAdvance,
+            Action::OperatorRevoke { operator_id: 7 },
             Action::FreezeRecovery {
                 scope: [7u8; 32],
                 victim: vec![2; 32],
@@ -1095,6 +1238,34 @@ mod tests {
             check_enactment(Track::FreezeRecovery, &Action::BridgeUnfreeze, true, |_| false),
             Err(Violation::WrongTrack)
         );
+    }
+
+    #[test]
+    fn the_bridge_admin_actions_ride_the_bridge_migration_track() {
+        let actions = [
+            Action::CommitteeRotate {
+                rotation: CommitteeRotation::default(),
+            },
+            Action::AssetRegister {
+                asset_id: [1u8; 16],
+                cap: 1,
+                epoch_cap: 1,
+                requires_stark: false,
+            },
+            Action::EpochAdvance,
+            Action::OperatorRevoke { operator_id: 3 },
+        ];
+        for action in actions {
+            assert_eq!(action.track(), Track::BridgeMigration);
+            assert_eq!(
+                check_enactment(Track::BridgeMigration, &action, true, |_| false),
+                Ok(())
+            );
+            assert_eq!(
+                check_enactment(Track::Mint, &action, true, |_| false),
+                Err(Violation::WrongTrack)
+            );
+        }
     }
 
     #[test]
