@@ -2057,12 +2057,15 @@ impl Ledger {
                 Ok(())
             }
             Action::CommitteeRotate { rotation } => {
-                if rotation.threshold == 0 {
+                if rotation.threshold < 2 {
                     return Err(EnactError::BadValue);
                 }
                 let mut operators: Vec<(u32, Vec<u8>)> = Vec::with_capacity(rotation.operators.len());
                 for claim in &rotation.operators {
                     if operators.iter().any(|(id, _)| *id == claim.operator_id) {
+                        return Err(EnactError::BadValue);
+                    }
+                    if operators.iter().any(|(_, key)| *key == claim.public_key) {
                         return Err(EnactError::BadValue);
                     }
                     if !crate::bridge::operator_pop_ok(
@@ -3463,6 +3466,56 @@ mod stake_state_tests {
             l.bridge_operator_set().unwrap().is_revoked(1),
             "a vote strikes a single operator from the seated committee"
         );
+    }
+
+    #[test]
+    fn a_committee_rotation_refuses_a_shared_key_and_a_thin_threshold() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        let proposer = gov_addr(94);
+        fund(&mut l, &proposer, 4_000_000 * 1_000_000);
+        let voter = gov_addr(95);
+        fund(&mut l, &voter, 30_000 * 1_000_000);
+
+        let shared = qtv_governance::CommitteeRotation {
+            operators: vec![operator_claim(5, 0), operator_claim(5, 1), operator_claim(6, 2)],
+            threshold: 2,
+        };
+        let dup = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::CommitteeRotate { rotation: shared },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, dup, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        assert_eq!(
+            l.gov_enact(dup, 5 * 86_400 + 1),
+            Err(EnactError::BadValue),
+            "two operator ids may not share one public key"
+        );
+        assert!(l.bridge_operator_set().is_none(), "the shared key rotation left the bridge inert");
+
+        let thin = qtv_governance::CommitteeRotation {
+            operators: vec![operator_claim(1, 0), operator_claim(2, 1)],
+            threshold: 1,
+        };
+        let single = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::CommitteeRotate { rotation: thin },
+                5 * 86_400 + 2,
+            )
+            .unwrap();
+        l.gov_vote(&voter, single, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 5 * 86_400 + 2);
+        assert_eq!(
+            l.gov_enact(single, 10 * 86_400 + 3),
+            Err(EnactError::BadValue),
+            "a committee needs a threshold of at least two"
+        );
+        assert!(l.bridge_operator_set().is_none(), "the thin threshold rotation left the bridge inert");
     }
 
     #[test]
