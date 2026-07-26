@@ -60,3 +60,10 @@ impl<S: Read + Write> Channel<S> {
         self.opener.open(&mut self.stream)
     }
 }
+
+impl Channel<std::net::TcpStream> {
+    pub(crate) fn set_deadline(&self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
+        self.stream.set_read_timeout(timeout)?;
+        self.stream.set_write_timeout(timeout)
+    }
+}
