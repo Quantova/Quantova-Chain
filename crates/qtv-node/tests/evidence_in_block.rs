@@ -8,10 +8,11 @@
 use qtv_account::{derive, Account as KeyAccount};
 use qtv_attest::{Attester, Beacon, Block, Parent};
 use qtv_node::evidence::Equivocation;
-use qtv_node::execution::TRANSFER_METER;
+use qtv_node::execution::{transfer_call, TRANSFER_METER};
 use qtv_node::fee::FeeParams;
-use qtv_node::ledger::{evidence_address, Account, Ledger};
+use qtv_node::ledger::{evidence_address, registration_address, Account, Ledger};
 use qtv_node::node::execute_ordered;
+use qtv_node::parallel::execute_parallel;
 use qtv_tx::{sign, Body, Call, Wrapper};
 
 const NATIVE_UNIT: u64 = 1_000_000;
@@ -165,6 +166,77 @@ fn forged_evidence_naming_an_innocent_validator_slashes_no_one() {
         ledger.staked_weight(&innocent),
         2_000,
         "the innocent validator keeps its whole stake"
+    );
+}
+
+#[test]
+fn an_evidence_and_registration_block_matches_across_the_parallel_and_ordered_paths() {
+    let fee = FeeParams::devnet();
+    let offender = qtv_node::keys::validator_address(&offender_secret());
+    let offender_pk = Attester::from_secret(1, &offender_secret(), 2_000)
+        .attest_public_key()
+        .to_vec();
+
+    let registrar = derive(&[7u8; 32], 0);
+    let payer = derive(&[8u8; 32], 0);
+    let payee = derive(&[11u8; 32], 0);
+
+    let mut ledger = seeded_ledger(&offender, &offender_pk);
+    for who in [&registrar, &payer, &payee] {
+        ledger.set_account(
+            &who.address(),
+            &Account::funded(1_000_000, who.scheme(), who.public_key().to_vec()),
+        );
+    }
+
+    let evidence = evidence_tx(&equivocation(&offender), &fee);
+    let registration = {
+        let call = Call::new(registration_address(), vec![1, 2, 3, 4]);
+        let body = Body::new(
+            registrar.address(),
+            0,
+            TRANSFER_METER,
+            u128::from(fee.transfer_fee()),
+            call,
+        );
+        sign(&registrar, &body)
+    };
+    let payment = {
+        let call = transfer_call(&payee.address(), 1_000);
+        let body = Body::new(
+            payer.address(),
+            0,
+            TRANSFER_METER,
+            u128::from(fee.transfer_fee()),
+            call,
+        );
+        sign(&payer, &body)
+    };
+    let block = vec![evidence, registration, payment];
+
+    let mut ordered = ledger.clone();
+    let ordered_included = execute_ordered(&mut ordered, &block, &fee, 0);
+
+    let mut parallel = ledger.clone();
+    let parallel_included = execute_parallel(&mut parallel, &block, &fee, 8, 0);
+
+    assert!(
+        ordered.is_validator_banned(&offender),
+        "the ordered path slashes the offender named in the evidence"
+    );
+    assert!(
+        parallel.is_validator_banned(&offender),
+        "the parallel path degrades to ordered and applies the same slash"
+    );
+    assert_eq!(
+        ordered.state_root(),
+        parallel.state_root(),
+        "an evidence and registration block degrades so both paths reach the identical state root"
+    );
+    assert_eq!(
+        ordered_included.len(),
+        parallel_included.len(),
+        "both paths carry the same transactions in the block"
     );
 }
 

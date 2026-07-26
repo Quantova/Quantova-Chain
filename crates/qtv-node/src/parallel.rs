@@ -160,6 +160,8 @@ pub fn execute_parallel(
     let withdraw_address = crate::ledger::stake_withdraw_address();
     let gov_address = crate::ledger::gov_system_address();
     let key_register_address = crate::ledger::key_register_address();
+    let evidence_address = crate::ledger::evidence_address();
+    let registration_address = crate::ledger::registration_address();
     let bridge_freeze_address = crate::ledger::bridge_freeze_address();
     let bridge_unfreeze_address = crate::ledger::bridge_unfreeze_address();
     let bridge_guardian_address = crate::ledger::bridge_guardian_address();
@@ -174,6 +176,8 @@ pub fn execute_parallel(
             || target == withdraw_address.as_str()
             || target == gov_address.as_str()
             || target == key_register_address.as_str()
+            || target == evidence_address.as_str()
+            || target == registration_address.as_str()
             || target == bridge_freeze_address.as_str()
             || target == bridge_unfreeze_address.as_str()
             || target == bridge_guardian_address.as_str()
