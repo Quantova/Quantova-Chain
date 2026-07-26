@@ -361,7 +361,7 @@ impl Mempool {
         } else if crate::node::is_bridge_exit(&wrapper) {
             let account = ledger.account(wrapper.body().sender());
             let signature_ok = qtv_tx::verify(&wrapper, &account.public_key);
-            if crate::node::bridge_exit_admissible(&wrapper, &account, fee_params, signature_ok)
+            if crate::node::bridge_exit_admissible(ledger, &wrapper, &account, fee_params, signature_ok)
                 .is_none()
             {
                 return Err(Reject::BadCall);
@@ -426,7 +426,7 @@ impl Mempool {
                 crate::node::bridge_mint_admissible(ledger, &wrapper)
             } else if crate::node::is_bridge_exit(&wrapper) {
                 let account = ledger.account(wrapper.body().sender());
-                crate::node::bridge_exit_admissible(&wrapper, &account, fee_params, verified[index])
+                crate::node::bridge_exit_admissible(ledger, &wrapper, &account, fee_params, verified[index])
                     .is_some()
             } else {
                 validate_verified(&wrapper, ledger, fee_params, verified[index]).is_ok()
