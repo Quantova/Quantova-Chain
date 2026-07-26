@@ -263,6 +263,101 @@ fn largest_power_of_two_below(n: usize) -> usize {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MerkleStep {
+    pub sibling: [u8; ROOT_LEN],
+    pub sibling_on_left: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MerkleProof {
+    pub steps: Vec<MerkleStep>,
+}
+
+impl MerkleProof {
+    pub fn encode(&self, encoder: &mut Encoder) {
+        encoder.put_u64(self.steps.len() as u64);
+        for step in &self.steps {
+            put_root(encoder, &step.sibling);
+            encoder.put_u8(u8::from(step.sibling_on_left));
+        }
+    }
+
+    pub fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
+        let count = u64::decode(decoder)?;
+        let mut steps = Vec::new();
+        for _ in 0..count {
+            let sibling = get_root(decoder)?;
+            let sibling_on_left = match decoder.get_u8()? {
+                0 => false,
+                1 => true,
+                byte => return Err(Error::Codec(qtv_codec::Error::InvalidOption { byte })),
+            };
+            steps.push(MerkleStep {
+                sibling,
+                sibling_on_left,
+            });
+        }
+        Ok(MerkleProof { steps })
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut encoder = Encoder::new();
+        self.encode(&mut encoder);
+        encoder.into_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        let mut decoder = Decoder::new(bytes);
+        let proof = MerkleProof::decode(&mut decoder)?;
+        decoder.finish()?;
+        Ok(proof)
+    }
+}
+
+pub fn prove_inclusion(events: &[Vec<u8>], index: usize) -> Option<MerkleProof> {
+    if index >= events.len() {
+        return None;
+    }
+    let leaves: Vec<[u8; ROOT_LEN]> = events.iter().map(|event| leaf_hash(event)).collect();
+    let mut steps = Vec::new();
+    collect_steps(&leaves, index, &mut steps);
+    Some(MerkleProof { steps })
+}
+
+fn collect_steps(leaves: &[[u8; ROOT_LEN]], index: usize, steps: &mut Vec<MerkleStep>) {
+    let n = leaves.len();
+    if n <= 1 {
+        return;
+    }
+    let split = largest_power_of_two_below(n);
+    if index < split {
+        collect_steps(&leaves[..split], index, steps);
+        steps.push(MerkleStep {
+            sibling: merkle_root(&leaves[split..]),
+            sibling_on_left: false,
+        });
+    } else {
+        collect_steps(&leaves[split..], index - split, steps);
+        steps.push(MerkleStep {
+            sibling: merkle_root(&leaves[..split]),
+            sibling_on_left: true,
+        });
+    }
+}
+
+pub fn verify_inclusion(root: &[u8; ROOT_LEN], event: &[u8], proof: &MerkleProof) -> bool {
+    let mut acc = leaf_hash(event);
+    for step in &proof.steps {
+        acc = if step.sibling_on_left {
+            pair_hash(&step.sibling, &acc)
+        } else {
+            pair_hash(&acc, &step.sibling)
+        };
+    }
+    &acc == root
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     header: Header,
     certificate: Vec<u8>,
@@ -366,5 +461,79 @@ mod merkle_tests {
         assert_eq!(largest_power_of_two_below(4), 2);
         assert_eq!(largest_power_of_two_below(5), 4);
         assert_eq!(largest_power_of_two_below(9), 8);
+    }
+
+    #[test]
+    fn every_leaf_proves_inclusion_under_the_root_at_each_count() {
+        for count in 1..=9usize {
+            let events: Vec<Vec<u8>> = (0..count).map(|i| event(i as u8)).collect();
+            let root = event_root(&events);
+            for index in 0..count {
+                let proof = prove_inclusion(&events, index).expect("a present leaf proves");
+                assert!(
+                    verify_inclusion(&root, &events[index], &proof),
+                    "leaf {index} of {count} verifies under the event root"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_tampered_leaf_does_not_verify() {
+        let events = vec![event(1), event(2), event(3), event(4), event(5)];
+        let root = event_root(&events);
+        let proof = prove_inclusion(&events, 2).unwrap();
+        let mut tampered = events[2].clone();
+        tampered[0] ^= 0xff;
+        assert!(!verify_inclusion(&root, &tampered, &proof));
+    }
+
+    #[test]
+    fn a_wrong_branch_does_not_verify() {
+        let events = vec![event(1), event(2), event(3), event(4), event(5)];
+        let root = event_root(&events);
+        let mut proof = prove_inclusion(&events, 2).unwrap();
+        proof.steps[0].sibling[0] ^= 0xff;
+        assert!(!verify_inclusion(&root, &events[2], &proof));
+    }
+
+    #[test]
+    fn a_flipped_side_does_not_verify() {
+        let events = vec![event(1), event(2), event(3), event(4), event(5)];
+        let root = event_root(&events);
+        let mut proof = prove_inclusion(&events, 1).unwrap();
+        proof.steps[0].sibling_on_left = !proof.steps[0].sibling_on_left;
+        assert!(!verify_inclusion(&root, &events[1], &proof));
+    }
+
+    #[test]
+    fn a_proof_for_one_leaf_does_not_carry_another() {
+        let events = vec![event(1), event(2), event(3), event(4), event(5)];
+        let root = event_root(&events);
+        let proof = prove_inclusion(&events, 2).unwrap();
+        assert!(!verify_inclusion(&root, &events[3], &proof));
+    }
+
+    #[test]
+    fn a_single_leaf_tree_proves_with_an_empty_path() {
+        let events = vec![event(7)];
+        let root = event_root(&events);
+        let proof = prove_inclusion(&events, 0).unwrap();
+        assert!(proof.steps.is_empty());
+        assert!(verify_inclusion(&root, &events[0], &proof));
+    }
+
+    #[test]
+    fn an_out_of_range_index_has_no_proof() {
+        let events = vec![event(1), event(2)];
+        assert!(prove_inclusion(&events, 2).is_none());
+    }
+
+    #[test]
+    fn the_proof_round_trips_through_its_codec() {
+        let events = vec![event(1), event(2), event(3), event(4), event(5)];
+        let proof = prove_inclusion(&events, 3).unwrap();
+        let bytes = proof.to_bytes();
+        assert_eq!(MerkleProof::from_bytes(&bytes).unwrap(), proof);
     }
 }
