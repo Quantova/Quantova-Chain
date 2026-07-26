@@ -10,6 +10,7 @@ use qtv_node::execution::{transfer_call, TRANSFER_METER};
 use qtv_node::fee::FeeParams;
 use qtv_node::mempool::Reject;
 use qtv_node::node::{Finalized, Genesis, GenesisAccount, Node, ProduceError, ValidatorSpec};
+use qtv_governance::GuardianSet;
 use qtv_tx::{sign, Body, Wrapper};
 
 const USER_SEED: [u8; 32] = [11u8; 32];
@@ -43,6 +44,7 @@ fn genesis(accounts: Vec<GenesisAccount>, online: &[bool]) -> Genesis {
         accounts,
         validators: validators(online),
         genesis_time: GENESIS_TIME,
+        guardians: Default::default(),
     }
 }
 
@@ -508,12 +510,37 @@ fn validators_with_slots(online: &[bool], slots: u64) -> Vec<ValidatorSpec> {
         .collect()
 }
 
+#[test]
+fn a_genesis_guardian_caucus_seeds_the_ledger_and_an_empty_one_stays_fail_closed() {
+    let seeded = Genesis {
+        fee_params: FeeParams::devnet(),
+        accounts: vec![],
+        validators: validators(&[true, true, true]),
+        genesis_time: GENESIS_TIME,
+        guardians: GuardianSet::new(vec![[1u8; 32], [2u8; 32], [3u8; 32]], 2),
+    };
+    let node = boot(seeded);
+    assert_eq!(node.ledger().guardian_set().threshold, 2);
+    assert_eq!(
+        node.ledger().guardian_set().members,
+        vec![[1u8; 32], [2u8; 32], [3u8; 32]]
+    );
+    assert!(node.ledger().guardian_set().well_formed());
+
+    let bare = boot(genesis(vec![], &[true, true, true]));
+    assert!(
+        !bare.ledger().guardian_set().well_formed(),
+        "an unseeded caucus authorizes nothing"
+    );
+}
+
 fn boot_with_slots(online: &[bool], slots: u64) -> Node {
     let g = Genesis {
         fee_params: FeeParams::devnet(),
         accounts: vec![],
         validators: validators_with_slots(online, slots),
         genesis_time: GENESIS_TIME,
+        guardians: Default::default(),
     };
     let secrets = g
         .validators

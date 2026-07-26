@@ -128,6 +128,7 @@ impl DevnetConfig {
             accounts: self.accounts.clone(),
             validators: self.validator_specs(),
             genesis_time: self.genesis_time,
+            guardians: Default::default(),
         }
     }
 }
