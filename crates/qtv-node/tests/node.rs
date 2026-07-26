@@ -45,6 +45,7 @@ fn genesis(accounts: Vec<GenesisAccount>, online: &[bool]) -> Genesis {
         validators: validators(online),
         genesis_time: GENESIS_TIME,
         guardians: Default::default(),
+        bridge_dest_chain: None,
     }
 }
 
@@ -518,6 +519,7 @@ fn a_genesis_guardian_caucus_seeds_the_ledger_and_an_empty_one_stays_fail_closed
         validators: validators(&[true, true, true]),
         genesis_time: GENESIS_TIME,
         guardians: GuardianSet::new(vec![[1u8; 32], [2u8; 32], [3u8; 32]], 2),
+        bridge_dest_chain: None,
     };
     let node = boot(seeded);
     assert_eq!(node.ledger().guardian_set().threshold, 2);
@@ -534,6 +536,26 @@ fn a_genesis_guardian_caucus_seeds_the_ledger_and_an_empty_one_stays_fail_closed
     );
 }
 
+#[test]
+fn a_genesis_bridge_dest_chain_seeds_the_ledger_and_an_unset_one_stays_fail_closed() {
+    let bound = Genesis {
+        fee_params: FeeParams::devnet(),
+        accounts: vec![],
+        validators: validators(&[true, true, true]),
+        genesis_time: GENESIS_TIME,
+        guardians: Default::default(),
+        bridge_dest_chain: Some(9000),
+    };
+    let node = boot(bound);
+    assert_eq!(node.ledger().bridge_dest_chain(), Some(9000));
+
+    let unset = boot(genesis(vec![], &[true, true, true]));
+    assert!(
+        unset.ledger().bridge_dest_chain().is_none(),
+        "an unset destination chain leaves on chain deposits fail closed"
+    );
+}
+
 fn boot_with_slots(online: &[bool], slots: u64) -> Node {
     let g = Genesis {
         fee_params: FeeParams::devnet(),
@@ -541,6 +563,7 @@ fn boot_with_slots(online: &[bool], slots: u64) -> Node {
         validators: validators_with_slots(online, slots),
         genesis_time: GENESIS_TIME,
         guardians: Default::default(),
+        bridge_dest_chain: None,
     };
     let secrets = g
         .validators

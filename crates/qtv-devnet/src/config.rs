@@ -129,6 +129,7 @@ impl DevnetConfig {
             validators: self.validator_specs(),
             genesis_time: self.genesis_time,
             guardians: Default::default(),
+            bridge_dest_chain: None,
         }
     }
 }

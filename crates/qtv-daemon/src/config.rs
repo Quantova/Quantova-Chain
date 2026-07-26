@@ -31,6 +31,13 @@ impl Field {
             .parse()
             .map_err(|_| self.error(&format!("'{name}' is not a whole number")))
     }
+
+    pub fn u32(&self, name: &str) -> Result<u32, String> {
+        self.value
+            .trim()
+            .parse()
+            .map_err(|_| self.error(&format!("'{name}' is not a whole number")))
+    }
 }
 
 pub fn parse_kv(text: &str, path: &Path) -> Result<Vec<Field>, String> {
