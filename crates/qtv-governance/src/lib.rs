@@ -289,6 +289,7 @@ pub enum Action {
     Mint { to: Vec<u8>, amount: u64 },
     BridgeMigration { vault: Vec<u8> },
     BridgeUnfreeze,
+    GuardianRotate { set: GuardianSet },
     FreezeRecovery {
         scope: [u8; 32],
         victim: Vec<u8>,
@@ -308,6 +309,7 @@ impl Action {
             Action::Mint { .. } => Track::Mint,
             Action::BridgeMigration { .. } => Track::BridgeMigration,
             Action::BridgeUnfreeze => Track::BridgeMigration,
+            Action::GuardianRotate { .. } => Track::ChainUpgrade,
             Action::FreezeRecovery { .. } => Track::FreezeRecovery,
             Action::Blacklist { .. } => Track::BlacklistKill,
             Action::Freeze { .. } => Track::BlacklistKill,
@@ -346,6 +348,10 @@ impl Encode for Action {
             }
             Action::BridgeUnfreeze => {
                 encoder.put_u8(11);
+            }
+            Action::GuardianRotate { set } => {
+                encoder.put_u8(12);
+                set.encode(encoder);
             }
             Action::FreezeRecovery {
                 scope,
@@ -408,6 +414,9 @@ impl Decode for Action {
                 vault: Vec::<u8>::decode(decoder)?,
             }),
             11 => Ok(Action::BridgeUnfreeze),
+            12 => Ok(Action::GuardianRotate {
+                set: GuardianSet::decode(decoder)?,
+            }),
             4 => {
                 let scope_bytes = decoder.get_bytes()?;
                 let scope: [u8; 32] = scope_bytes.try_into().map_err(|_| Error::UnknownTag { tag })?;
@@ -1006,6 +1015,9 @@ mod tests {
             },
             Action::BridgeMigration { vault: vec![4; 32] },
             Action::BridgeUnfreeze,
+            Action::GuardianRotate {
+                set: GuardianSet::new(vec![[7u8; 32], [8u8; 32], [9u8; 32]], 2),
+            },
             Action::FreezeRecovery {
                 scope: [7u8; 32],
                 victim: vec![2; 32],
@@ -1081,6 +1093,22 @@ mod tests {
         );
         assert_eq!(
             check_enactment(Track::FreezeRecovery, &Action::BridgeUnfreeze, true, |_| false),
+            Err(Violation::WrongTrack)
+        );
+    }
+
+    #[test]
+    fn a_guardian_rotation_rides_the_chain_upgrade_track() {
+        let action = Action::GuardianRotate {
+            set: GuardianSet::new(vec![[1u8; 32], [2u8; 32], [3u8; 32]], 2),
+        };
+        assert_eq!(action.track(), Track::ChainUpgrade);
+        assert_eq!(
+            check_enactment(Track::ChainUpgrade, &action, true, |_| false),
+            Ok(())
+        );
+        assert_eq!(
+            check_enactment(Track::BridgeMigration, &action, true, |_| false),
             Err(Violation::WrongTrack)
         );
     }
