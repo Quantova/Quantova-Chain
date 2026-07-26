@@ -441,6 +441,11 @@ pub fn bridge_bond_address() -> String {
         .expect("a full hash reaches the address floor")
 }
 
+pub fn bridge_guardian_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/guardian/system"))
+        .expect("a full hash reaches the address floor")
+}
+
 pub fn bridge_mint_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/mint/system"))
         .expect("a full hash reaches the address floor")

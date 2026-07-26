@@ -390,6 +390,200 @@ fn dispatch_evidence(chain_id: u64, ledger: &mut Ledger, wrapper: &Wrapper) -> b
     ledger.slash_validator(&evidence.offender)
 }
 
+const GUARDIAN_DOMAIN: &[u8] = b"QUANTOVA/Q/BRIDGE-GUARDIAN/v1";
+const GUARDIAN_UNFREEZE: u8 = 0;
+const GUARDIAN_FREEZE: u8 = 1;
+const MAX_GUARDIAN_TARGETS: usize = 64;
+const MAX_GUARDIAN_APPROVALS: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GuardianApproval {
+    scheme: u8,
+    public_key: Vec<u8>,
+    signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GuardianAct {
+    op: u8,
+    bound: u64,
+    targets: Vec<[u8; 32]>,
+    approvals: Vec<GuardianApproval>,
+}
+
+impl GuardianAct {
+    fn encode(&self) -> Vec<u8> {
+        let mut encoder = qtv_codec::Encoder::new();
+        encoder.put_u8(self.op);
+        encoder.put_u64(self.bound);
+        encoder.put_u32(self.targets.len() as u32);
+        for target in &self.targets {
+            encoder.put_bytes(target);
+        }
+        encoder.put_u32(self.approvals.len() as u32);
+        for approval in &self.approvals {
+            encoder.put_u8(approval.scheme);
+            encoder.put_bytes(&approval.public_key);
+            encoder.put_bytes(&approval.signature);
+        }
+        encoder.into_bytes()
+    }
+
+    fn decode(bytes: &[u8]) -> Option<GuardianAct> {
+        let mut decoder = Decoder::new(bytes);
+        let op = decoder.get_u8().ok()?;
+        let bound = decoder.get_u64().ok()?;
+        let target_count = decoder.get_u32().ok()? as usize;
+        if target_count > MAX_GUARDIAN_TARGETS {
+            return None;
+        }
+        let mut targets = Vec::with_capacity(target_count);
+        for _ in 0..target_count {
+            targets.push(<[u8; 32]>::try_from(decoder.get_bytes().ok()?).ok()?);
+        }
+        let approval_count = decoder.get_u32().ok()? as usize;
+        if approval_count > MAX_GUARDIAN_APPROVALS {
+            return None;
+        }
+        let mut approvals = Vec::with_capacity(approval_count);
+        for _ in 0..approval_count {
+            let scheme = decoder.get_u8().ok()?;
+            let public_key = decoder.get_bytes().ok()?.to_vec();
+            let signature = decoder.get_bytes().ok()?.to_vec();
+            approvals.push(GuardianApproval {
+                scheme,
+                public_key,
+                signature,
+            });
+        }
+        (decoder.remaining() == 0).then_some(GuardianAct {
+            op,
+            bound,
+            targets,
+            approvals,
+        })
+    }
+}
+
+fn guardian_challenge(chain_id: u64, act: &GuardianAct) -> Vec<u8> {
+    let mut message = Vec::with_capacity(8 + 1 + 8 + 4 + act.targets.len() * 32);
+    message.extend_from_slice(&chain_id.to_le_bytes());
+    message.push(act.op);
+    message.extend_from_slice(&act.bound.to_le_bytes());
+    message.extend_from_slice(&(act.targets.len() as u32).to_le_bytes());
+    for target in &act.targets {
+        message.extend_from_slice(target);
+    }
+    message
+}
+
+fn guardian_member_id(scheme: u8, public_key: &[u8]) -> Option<[u8; 32]> {
+    let address = qtv_account::address_for_key(scheme, public_key);
+    let payload = qtv_idfmt::parse_address(&address).ok()?;
+    <[u8; 32]>::try_from(payload.as_slice()).ok()
+}
+
+fn guardian_signature_ok(scheme: u8, public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    match scheme {
+        qtv_account::SCHEME_LATTICE => {
+            let pk: &[u8; qtv_crypto::ml_dsa::PUBLIC_KEY_BYTES] = match public_key.try_into() {
+                Ok(pk) => pk,
+                Err(_) => return false,
+            };
+            let sig: &[u8; qtv_crypto::ml_dsa::SIGNATURE_BYTES] = match signature.try_into() {
+                Ok(sig) => sig,
+                Err(_) => return false,
+            };
+            qtv_crypto::ml_dsa::verify(pk, message, sig, GUARDIAN_DOMAIN)
+        }
+        qtv_account::SCHEME_HASH => {
+            let pk: &[u8; qtv_crypto::slh_dsa::PUBLIC_KEY_BYTES] = match public_key.try_into() {
+                Ok(pk) => pk,
+                Err(_) => return false,
+            };
+            qtv_crypto::slh_dsa::verify(pk, message, signature, GUARDIAN_DOMAIN)
+        }
+        _ => false,
+    }
+}
+
+fn guardian_approvers(
+    set: &qtv_governance::GuardianSet,
+    act: &GuardianAct,
+    chain_id: u64,
+) -> Vec<[u8; 32]> {
+    let message = guardian_challenge(chain_id, act);
+    let mut verified: Vec<[u8; 32]> = Vec::new();
+    for approval in &act.approvals {
+        let id = match guardian_member_id(approval.scheme, &approval.public_key) {
+            Some(id) => id,
+            None => continue,
+        };
+        if !set.is_member(&id) || verified.contains(&id) {
+            continue;
+        }
+        if guardian_signature_ok(approval.scheme, &approval.public_key, &message, &approval.signature) {
+            verified.push(id);
+        }
+    }
+    verified
+}
+
+pub(crate) fn is_bridge_guardian(wrapper: &Wrapper) -> bool {
+    wrapper.body().call().target() == crate::ledger::bridge_guardian_address()
+}
+
+pub(crate) fn guardian_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_id: u64) -> bool {
+    let set = ledger.guardian_set();
+    if !set.well_formed() {
+        return false;
+    }
+    let act = match GuardianAct::decode(wrapper.body().call().args()) {
+        Some(act) => act,
+        None => return false,
+    };
+    match act.op {
+        GUARDIAN_FREEZE => {
+            if act.targets.is_empty() {
+                return false;
+            }
+        }
+        GUARDIAN_UNFREEZE => match ledger.bridge_freeze() {
+            Some(freeze) if freeze.until == act.bound => {}
+            _ => return false,
+        },
+        _ => return false,
+    }
+    set.authorizes(&guardian_approvers(&set, &act, chain_id))
+}
+
+fn dispatch_bridge_guardian(
+    ledger: &mut Ledger,
+    wrapper: &Wrapper,
+    chain_id: u64,
+    now: u64,
+) -> bool {
+    let set = ledger.guardian_set();
+    if !set.well_formed() {
+        return false;
+    }
+    let act = match GuardianAct::decode(wrapper.body().call().args()) {
+        Some(act) => act,
+        None => return false,
+    };
+    let approvers = guardian_approvers(&set, &act, chain_id);
+    match act.op {
+        GUARDIAN_FREEZE => ledger.guardian_freeze(&act.targets, &approvers),
+        GUARDIAN_UNFREEZE => match ledger.bridge_freeze() {
+            Some(freeze) if freeze.until == act.bound => {
+                ledger.guardian_bridge_unfreeze(&approvers, now)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 pub(crate) fn is_bridge_mint(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::bridge_mint_address()
 }
@@ -710,6 +904,14 @@ fn execute_ordered_across(
         }
         if is_evidence(wrapper) {
             if ledger.apply_atomic(|l| dispatch_evidence(fee_params.chain_id, l, wrapper)) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
+        if is_bridge_guardian(wrapper) {
+            if ledger.apply_atomic(|l| {
+                dispatch_bridge_guardian(l, wrapper, fee_params.chain_id, now_seconds)
+            }) {
                 included.push(wrapper.clone());
             }
             continue;
@@ -2783,6 +2985,147 @@ mod tests {
             ledger.balance(&freezer.address()),
             start - 2 * charged,
             "the full bond returns and only the two fees are spent"
+        );
+    }
+
+    fn guardian_act_bytes(
+        op: u8,
+        bound: u64,
+        targets: Vec<[u8; 32]>,
+        signers: &[&KeyAccount],
+        chain_id: u64,
+    ) -> Vec<u8> {
+        let template = GuardianAct {
+            op,
+            bound,
+            targets: targets.clone(),
+            approvals: Vec::new(),
+        };
+        let message = guardian_challenge(chain_id, &template);
+        let approvals = signers
+            .iter()
+            .map(|signer| {
+                let (_pk, sk) = qtv_crypto::ml_dsa::keygen(signer.seed());
+                let signature = qtv_crypto::ml_dsa::sign(&sk, &message, GUARDIAN_DOMAIN, &[0u8; 32])
+                    .expect("the guardian challenge stays within the length bound")
+                    .to_vec();
+                GuardianApproval {
+                    scheme: signer.scheme(),
+                    public_key: signer.public_key().to_vec(),
+                    signature,
+                }
+            })
+            .collect();
+        GuardianAct {
+            op,
+            bound,
+            targets,
+            approvals,
+        }
+        .encode()
+    }
+
+    #[test]
+    fn an_unseeded_guardian_caucus_authorizes_nothing_and_a_seeded_quorum_freezes_and_lifts() {
+        let fee = FeeParams::devnet();
+        let chain = fee.chain_id;
+        let mut ledger = Ledger::new();
+
+        let g1 = keypair(240);
+        let g2 = keypair(241);
+        let g3 = keypair(242);
+        let relayer = keypair(243);
+        let target_id = [0x5Au8; 32];
+        let target = qtv_idfmt::render_address(&target_id).unwrap();
+
+        let unseeded = system_tx(
+            &relayer,
+            &crate::ledger::bridge_guardian_address(),
+            guardian_act_bytes(GUARDIAN_FREEZE, 0, vec![target_id], &[&g1, &g2], chain),
+            0,
+            TRANSFER_METER,
+            &fee,
+        );
+        assert_eq!(
+            execute_ordered(&mut ledger, &[unseeded], &fee, 0).len(),
+            0,
+            "with no caucus seeded a fully signed act authorizes nothing"
+        );
+        assert!(!ledger.is_frozen(&target));
+
+        ledger.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![
+                address_bytes(&g1.address()),
+                address_bytes(&g2.address()),
+                address_bytes(&g3.address()),
+            ],
+            2,
+        ));
+
+        let lone = system_tx(
+            &relayer,
+            &crate::ledger::bridge_guardian_address(),
+            guardian_act_bytes(GUARDIAN_FREEZE, 0, vec![target_id], &[&g1], chain),
+            0,
+            TRANSFER_METER,
+            &fee,
+        );
+        assert_eq!(
+            execute_ordered(&mut ledger, &[lone], &fee, 0).len(),
+            0,
+            "one guardian falls short of the two threshold"
+        );
+        assert!(!ledger.is_frozen(&target));
+
+        let freeze = system_tx(
+            &relayer,
+            &crate::ledger::bridge_guardian_address(),
+            guardian_act_bytes(GUARDIAN_FREEZE, 0, vec![target_id], &[&g1, &g2], chain),
+            0,
+            TRANSFER_METER,
+            &fee,
+        );
+        assert_eq!(execute_ordered(&mut ledger, &[freeze], &fee, 0).len(), 1);
+        assert!(ledger.is_frozen(&target), "a quorum freezes the target account");
+
+        let freezer = keypair(244);
+        let start = 2_000_000 * 1_000_000;
+        fund(&mut ledger, &freezer, start);
+        let bond_tx = transfer(&freezer, &crate::ledger::bridge_freeze_address(), 0, 0, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[bond_tx], &fee, 0).len(), 1);
+        assert!(ledger.bridge_is_frozen());
+        let until = ledger.bridge_freeze().unwrap().until;
+        let treasury_before = ledger.stake_treasury();
+
+        let stale = system_tx(
+            &relayer,
+            &crate::ledger::bridge_guardian_address(),
+            guardian_act_bytes(GUARDIAN_UNFREEZE, until + 1, Vec::new(), &[&g1, &g3], chain),
+            0,
+            TRANSFER_METER,
+            &fee,
+        );
+        assert_eq!(
+            execute_ordered(&mut ledger, &[stale], &fee, 0).len(),
+            0,
+            "an approval bound to a different freeze horizon is refused"
+        );
+        assert!(ledger.bridge_is_frozen());
+
+        let lift = system_tx(
+            &relayer,
+            &crate::ledger::bridge_guardian_address(),
+            guardian_act_bytes(GUARDIAN_UNFREEZE, until, Vec::new(), &[&g1, &g3], chain),
+            0,
+            TRANSFER_METER,
+            &fee,
+        );
+        assert_eq!(execute_ordered(&mut ledger, &[lift], &fee, 0).len(), 1);
+        assert!(!ledger.bridge_is_frozen(), "a quorum lifts the bridge freeze early");
+        assert_eq!(
+            ledger.stake_treasury(),
+            treasury_before + qtv_governance::BRIDGE_FREEZE_BOND,
+            "a guardian lift slashes the freezer bond to the treasury"
         );
     }
 
