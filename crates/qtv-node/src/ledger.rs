@@ -203,6 +203,7 @@ const BRIDGE_SEEN_TAG: &[u8] = b"qtv/bridge/seen/";
 const BRIDGE_EPOCHMINT_TAG: &[u8] = b"qtv/bridge/epochmint/";
 const BRIDGE_OPERATORS_TAG: &[u8] = b"qtv/bridge/operators";
 const BRIDGE_VAULTBAL_TAG: &[u8] = b"qtv/bridge/vaultbal/";
+const BRIDGE_ASSET_LIST_TAG: &[u8] = b"qtv/bridge/assetlist";
 const BRIDGE_DESTCHAIN_TAG: &[u8] = b"qtv/bridge/destchain";
 const BRIDGE_EPOCH_TAG: &[u8] = b"qtv/bridge/epoch";
 const BRIDGE_BURN_REF_DOMAIN: &[u8] = b"qtv/bridge/burn-ref/v1";
@@ -1154,6 +1155,32 @@ impl Ledger {
         self.write_leaf(bridge_asset_key(asset_id), to_bytes(asset));
     }
 
+    fn bridge_asset_ids(&self) -> Vec<[u8; 16]> {
+        self.trie
+            .get(&stake_singleton_key(BRIDGE_ASSET_LIST_TAG))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| {
+                bytes
+                    .chunks_exact(16)
+                    .map(|chunk| <[u8; 16]>::try_from(chunk).expect("a chunk is sixteen bytes"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn record_bridge_asset_id(&mut self, asset_id: &[u8; 16]) {
+        let mut ids = self.bridge_asset_ids();
+        if ids.contains(asset_id) {
+            return;
+        }
+        ids.push(*asset_id);
+        let mut bytes = Vec::with_capacity(ids.len() * 16);
+        for id in &ids {
+            bytes.extend_from_slice(id);
+        }
+        self.write_leaf(stake_singleton_key(BRIDGE_ASSET_LIST_TAG), bytes);
+    }
+
     pub fn register_bridged_asset(
         &mut self,
         asset_id: &[u8; 16],
@@ -1169,6 +1196,7 @@ impl Ledger {
             requires_stark,
         };
         self.set_bridged_asset(asset_id, &asset);
+        self.record_bridge_asset_id(asset_id);
         (bridge_asset_key(asset_id), to_bytes(&asset))
     }
 
@@ -1207,11 +1235,17 @@ impl Ledger {
         }
     }
 
-    fn debit_vault_custody(&mut self, asset_id: &[u8; 16], amount: u128) {
-        if let Some(vault) = self.bridge_pool_vault() {
-            let held = self.bridge_vault_custody(&vault, asset_id).saturating_sub(amount);
-            self.set_bridge_vault_custody(&vault, asset_id, held);
-        }
+    fn debit_vault_custody(&mut self, asset_id: &[u8; 16], amount: u128) -> bool {
+        let vault = match self.bridge_pool_vault() {
+            Some(vault) => vault,
+            None => return true,
+        };
+        let remaining = match self.bridge_vault_custody(&vault, asset_id).checked_sub(amount) {
+            Some(remaining) => remaining,
+            None => return false,
+        };
+        self.set_bridge_vault_custody(&vault, asset_id, remaining);
+        true
     }
 
     pub fn bridge_operator_set(&self) -> Option<crate::bridge::OperatorSet> {
@@ -1343,6 +1377,9 @@ impl Ledger {
             Some(supply) => supply,
             None => return false,
         };
+        if !self.debit_vault_custody(asset_id, amount) {
+            return false;
+        }
         self.set_bridged_balance(asset_id, holder, balance - amount);
         self.set_bridged_asset(
             asset_id,
@@ -1351,7 +1388,6 @@ impl Ledger {
                 ..asset
             },
         );
-        self.debit_vault_custody(asset_id, amount);
         self.record_bridge_burn_event(
             asset_id,
             holder,
@@ -2046,6 +2082,20 @@ impl Ledger {
                     return Err(EnactError::BridgeNotFrozen);
                 }
                 let vault_id = id_from_slice(vault).ok_or(EnactError::BadAddress)?;
+                if let Some(old_vault) = self.bridge_pool_vault() {
+                    if old_vault != vault_id {
+                        for asset_id in self.bridge_asset_ids() {
+                            let held = self.bridge_vault_custody(&old_vault, &asset_id);
+                            if held == 0 {
+                                continue;
+                            }
+                            self.set_bridge_vault_custody(&old_vault, &asset_id, 0);
+                            let carried =
+                                self.bridge_vault_custody(&vault_id, &asset_id).saturating_add(held);
+                            self.set_bridge_vault_custody(&vault_id, &asset_id, carried);
+                        }
+                    }
+                }
                 self.set_bridge_pool_vault(&vault_id);
                 Ok(())
             }
@@ -3672,6 +3722,16 @@ mod stake_state_tests {
 
         migrate(&mut l, &proposer, &voter, vault_b.to_vec(), 6 * 86_400);
         assert_eq!(l.bridge_pool_vault(), Some(vault_b));
+        assert_eq!(
+            l.bridge_vault_custody(&vault_b, &asset),
+            1_000,
+            "the migration carries the old vault's custody to the new vault"
+        );
+        assert_eq!(
+            l.bridge_vault_custody(&vault_a, &asset),
+            0,
+            "the migration empties the old vault it moved custody from"
+        );
 
         assert!(l.bridge_mint(&crate::bridge::Fact {
             version: crate::bridge::FACT_VERSION,
@@ -3690,22 +3750,81 @@ mod stake_state_tests {
         }));
         assert_eq!(
             l.bridge_vault_custody(&vault_b, &asset),
-            2_000,
-            "after the migration a fresh mint routes to the new vault"
+            3_000,
+            "a fresh mint adds to the carried custody in the new vault"
         );
-        assert_eq!(
-            l.bridge_vault_custody(&vault_a, &asset),
-            1_000,
-            "the old vault keeps only what it controlled before the migration"
-        );
+        assert_eq!(l.bridge_vault_custody(&vault_a, &asset), 0);
 
         assert!(l.bridge_burn(&asset, &recipient, 500, &[0x07u8; 32], 42, 1));
         assert_eq!(
             l.bridge_vault_custody(&vault_b, &asset),
-            1_500,
+            2_500,
             "an exit debits the vault that controls the bridge now"
         );
-        assert_eq!(l.bridge_vault_custody(&vault_a, &asset), 1_000);
+        assert_eq!(l.bridge_vault_custody(&vault_a, &asset), 0);
+    }
+
+    #[test]
+    fn an_underflowing_vault_debit_fails_closed() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        let proposer = gov_addr(96);
+        fund(&mut l, &proposer, 3_000_000 * 1_000_000);
+        let voter = gov_addr(97);
+        fund(&mut l, &voter, 20_000 * 1_000_000);
+        let freezer = gov_addr(98);
+        fund(&mut l, &freezer, 1_500_000 * 1_000_000);
+
+        let asset = [0xC3u8; 16];
+        let holder = [0xEEu8; 32];
+        l.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
+
+        assert!(l.bridge_mint(&crate::bridge::Fact {
+            version: crate::bridge::FACT_VERSION,
+            source_chain: 1,
+            dest_chain: 9_000,
+            route_id: 7,
+            direction: crate::bridge::Direction::Deposit,
+            nonce: 1,
+            source_ref: [0x01u8; 32],
+            asset_id: asset,
+            amount: 1_000,
+            recipient: holder,
+            finality_depth: 6,
+            observed_height: 10,
+            expiry_height: 100,
+        }));
+        assert_eq!(l.bridged_balance(&asset, &holder), 1_000);
+
+        let vault = [0x0Au8; 32];
+        assert!(l.bridge_freeze_with_fee(&freezer, 0, 0));
+        let migrate = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::BridgeMigration { vault: vault.to_vec() },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, migrate, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        l.gov_enact(migrate, 5 * 86_400 + 1, TEST_CHAIN).unwrap();
+        assert_eq!(
+            l.bridge_vault_custody(&vault, &asset),
+            0,
+            "the mint predated any vault so the vault records no custody"
+        );
+
+        assert!(
+            !l.bridge_burn(&asset, &holder, 500, &[0x07u8; 32], 42, 1),
+            "a burn that would underflow the vault custody is refused"
+        );
+        assert_eq!(
+            l.bridged_balance(&asset, &holder),
+            1_000,
+            "the refused burn leaves the holder balance untouched"
+        );
+        assert_eq!(l.bridge_vault_custody(&vault, &asset), 0);
+        assert_eq!(l.bridged_supply(&asset), 1_000, "the refused burn moves no supply");
     }
 
     #[test]
