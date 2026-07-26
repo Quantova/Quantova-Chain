@@ -3337,22 +3337,20 @@ impl Ledger {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
         let unwound = self.journal.take().unwrap_or_default();
         self.journal = restore;
-        match outcome {
-            Ok(applied) => applied,
-            Err(_) => {
-                let trie = &mut self.trie;
-                for (key, prior) in unwound.into_iter().rev() {
-                    match prior {
-                        Some(bytes) => trie.insert(key, bytes),
-                        None => {
-                            trie.remove(&key);
-                        }
+        let committed = matches!(outcome, Ok(true));
+        if !committed {
+            let trie = &mut self.trie;
+            for (key, prior) in unwound.into_iter().rev() {
+                match prior {
+                    Some(bytes) => trie.insert(key, bytes),
+                    None => {
+                        trie.remove(&key);
                     }
                 }
-                self.block_events.truncate(events_mark);
-                false
             }
+            self.block_events.truncate(events_mark);
         }
+        committed
     }
 
     pub fn clear_block_events(&mut self) {
