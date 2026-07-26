@@ -7,6 +7,7 @@
 use qtv_account::Account;
 use qtv_codec::{to_bytes, Encode, Encoder};
 use qtv_crypto::{ml_dsa, sha3, slh_dsa};
+use zeroize::Zeroizing;
 
 pub const SCHEME_LATTICE: u8 = qtv_account::SCHEME_LATTICE;
 
@@ -216,12 +217,14 @@ pub fn sign(account: &Account, body: &Body) -> Wrapper {
     let signature = match scheme {
         SCHEME_LATTICE => {
             let (_public, secret) = ml_dsa::keygen(account.seed());
+            let secret = Zeroizing::new(secret);
             ml_dsa::sign(&secret, &digest, &[], &SIGN_RANDOMIZER)
                 .expect("an empty context stays within the length bound")
                 .to_vec()
         }
         SCHEME_HASH => {
             let (secret, _public) = qtv_account::hash_keypair(account.seed());
+            let secret = Zeroizing::new(secret);
             slh_dsa::sign(&secret, &digest, &[], &SIGN_RANDOMIZER_HASH)
                 .expect("an empty context stays within the length bound")
                 .to_vec()
