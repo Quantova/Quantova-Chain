@@ -4252,7 +4252,7 @@ mod tests {
         assert_eq!(included.len(), 1, "the verified slash rides in the block");
         assert_eq!(ledger.bridged_balance(&EXIT_ASSET, &beneficiary), 550_000, "the beneficiary is paid the attested amount");
         assert_eq!(ledger.bridged_supply(&EXIT_ASSET), 550_000, "the payout re-materializes the refund under the cap");
-        assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 450_000, "the pool custody funds the payout");
+        assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 1_000_000, "the on chain refund is backed by custody but does not draw it down");
         assert_eq!(ledger.bridge_epoch_paid_global(0), 550_000, "the global epoch payout total advances");
         assert!(ledger.bridge_exit_settled(&burn_ref), "the burn_ref is consumed against replay");
     }
@@ -4272,8 +4272,67 @@ mod tests {
         assert_eq!(included.len(), 1, "the verified settle rides in the block");
         assert_eq!(ledger.bridged_balance(&EXIT_ASSET, &beneficiary), 0, "a settle moves no funds on chain");
         assert_eq!(ledger.bridged_supply(&EXIT_ASSET), 0, "a settle changes no supply");
-        assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 1_000_000, "a settle leaves the pool custody whole");
+        assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 450_000, "a proven settle draws the paid amount out of custody once");
         assert!(ledger.bridge_exit_settled(&burn_ref), "the settled burn_ref is consumed against replay");
+    }
+
+    #[test]
+    fn a_mint_then_burn_then_settle_conserves_custody_against_supply() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        // custody starts empty; the mint is what backs the wrapped, so the whole lifecycle stays honest
+        let (sk0, sk1) = seed_exit_bridge(&mut ledger, 0, 10_000_000, 1_000_000, 5_000_000);
+        let relayer = keypair(600);
+        let holder = keypair(601);
+        let holder_id = address_bytes(&holder.address());
+        fund(&mut ledger, &holder, 10_000 * 1_000_000);
+
+        let deposit = deposit_fact(holder_id, EXIT_ASSET, 500_000, [0x31; 32]);
+        assert_eq!(execute_ordered(&mut ledger, &[mint_tx(&relayer, &signed_artifact(&deposit, &sk0, &sk1), &fee)], &fee, 0).len(), 1);
+        assert_eq!(ledger.bridged_supply(&EXIT_ASSET), 500_000);
+        assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 500_000, "the mint backs the wrapped one for one");
+
+        let request = crate::bridge::ExitRequest { asset_id: EXIT_ASSET, amount: 200_000, destination: [0xEE; 32] };
+        let exit = system_tx(&holder, &crate::ledger::bridge_exit_address(), request.encode(), 0, TRANSFER_METER, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[exit], &fee, 0).len(), 1);
+        assert_eq!(ledger.bridged_supply(&EXIT_ASSET), 300_000, "the burn retired the exit amount");
+        assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 500_000, "the burn alone does not move custody");
+
+        let burn_ref = [0x32; 32];
+        let fact = exit_fact(crate::bridge::ExitOutcome::Settle, 200_000, holder_id, burn_ref);
+        assert_eq!(execute_ordered(&mut ledger, &[settle_tx(&relayer, &signed_exit(&fact, &sk0, &sk1), &fee)], &fee, 0).len(), 1);
+        assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 300_000, "the proven settle drew the paid amount from custody exactly once");
+        assert_eq!(ledger.bridged_supply(&EXIT_ASSET), 300_000, "custody and supply conserve after burn then settle");
+        assert!(ledger.bridge_exit_settled(&burn_ref));
+    }
+
+    #[test]
+    fn a_mint_then_burn_then_slash_conserves_custody_against_supply() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_exit_bridge(&mut ledger, 0, 10_000_000, 1_000_000, 5_000_000);
+        let relayer = keypair(602);
+        let holder = keypair(603);
+        let holder_id = address_bytes(&holder.address());
+        fund(&mut ledger, &holder, 10_000 * 1_000_000);
+
+        let deposit = deposit_fact(holder_id, EXIT_ASSET, 500_000, [0x41; 32]);
+        assert_eq!(execute_ordered(&mut ledger, &[mint_tx(&relayer, &signed_artifact(&deposit, &sk0, &sk1), &fee)], &fee, 0).len(), 1);
+
+        let request = crate::bridge::ExitRequest { asset_id: EXIT_ASSET, amount: 200_000, destination: [0xEE; 32] };
+        let exit = system_tx(&holder, &crate::ledger::bridge_exit_address(), request.encode(), 0, TRANSFER_METER, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[exit], &fee, 0).len(), 1);
+        assert_eq!(ledger.bridged_supply(&EXIT_ASSET), 300_000);
+        assert_eq!(ledger.bridged_balance(&EXIT_ASSET, &holder_id), 300_000);
+
+        // the foreign payout failed, so the exit is refunded on chain to the same holder
+        let burn_ref = [0x42; 32];
+        let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 200_000, holder_id, burn_ref);
+        assert_eq!(execute_ordered(&mut ledger, &[settle_tx(&relayer, &signed_exit(&fact, &sk0, &sk1), &fee)], &fee, 0).len(), 1);
+        assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 500_000, "the on chain refund never draws custody down");
+        assert_eq!(ledger.bridged_supply(&EXIT_ASSET), 500_000, "the refund re-materialised the burned wrapped");
+        assert_eq!(ledger.bridged_balance(&EXIT_ASSET, &holder_id), 500_000, "the holder is made whole after a failed payout");
+        assert!(ledger.bridge_exit_settled(&burn_ref));
     }
 
     #[test]
@@ -4388,7 +4447,7 @@ mod tests {
         let second = execute_ordered(&mut ledger, &[settle_tx(&relayer, &attestation, &fee)], &fee, 0);
         assert_eq!(second.len(), 0, "the replayed burn_ref pays nothing the second time");
         assert_eq!(ledger.bridged_balance(&EXIT_ASSET, &beneficiary), 550_000, "the beneficiary is paid exactly once");
-        assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 450_000, "the pool custody is drawn exactly once");
+        assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 1_000_000, "the refund pays once and leaves custody in place");
     }
 
     #[test]
