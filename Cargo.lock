@@ -94,6 +94,7 @@ dependencies = [
  "qtv-idfmt",
  "qtv-node",
  "qtv-staking",
+ "qtv-store",
  "qtv-tx",
 ]
 
