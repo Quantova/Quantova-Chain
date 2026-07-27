@@ -345,7 +345,8 @@ impl Decode for CommitteeRotation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    Upgrade { blob: Vec<u8> },
+    // turn on a feature that shipped in the binary but stayed dormant, by version, so an upgrade rides a vote and never a fork
+    Activate { feature: Vec<u8>, version: u64 },
     Mint { to: Vec<u8>, amount: u64 },
     BridgeMigration { vault: Vec<u8> },
     BridgeUnfreeze,
@@ -374,7 +375,7 @@ pub enum Action {
 impl Action {
     pub fn track(&self) -> Track {
         match self {
-            Action::Upgrade { .. } => Track::ChainUpgrade,
+            Action::Activate { .. } => Track::ChainUpgrade,
             Action::Mint { .. } => Track::Mint,
             Action::BridgeMigration { .. } => Track::BridgeMigration,
             Action::BridgeUnfreeze => Track::BlacklistKill,
@@ -406,9 +407,10 @@ impl Action {
 impl Encode for Action {
     fn encode(&self, encoder: &mut Encoder) {
         match self {
-            Action::Upgrade { blob } => {
+            Action::Activate { feature, version } => {
                 encoder.put_u8(1);
-                blob.encode(encoder);
+                feature.encode(encoder);
+                encoder.put_u64(*version);
             }
             Action::Mint { to, amount } => {
                 encoder.put_u8(2);
@@ -499,8 +501,9 @@ impl Decode for Action {
     fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
         let tag = decoder.get_u8()?;
         match tag {
-            1 => Ok(Action::Upgrade {
-                blob: Vec::<u8>::decode(decoder)?,
+            1 => Ok(Action::Activate {
+                feature: Vec::<u8>::decode(decoder)?,
+                version: decoder.get_u64()?,
             }),
             2 => Ok(Action::Mint {
                 to: Vec::<u8>::decode(decoder)?,
@@ -1126,7 +1129,7 @@ mod tests {
     #[test]
     fn every_action_round_trips_through_the_codec() {
         let actions = [
-            Action::Upgrade { blob: vec![1, 2, 3] },
+            Action::Activate { feature: b"parallel_state".to_vec(), version: 2 },
             Action::Mint {
                 to: vec![9; 32],
                 amount: 12_345,
