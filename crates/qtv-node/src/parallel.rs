@@ -167,6 +167,7 @@ pub fn execute_parallel(
     let bridge_guardian_address = crate::ledger::bridge_guardian_address();
     let bridge_mint_address = crate::ledger::bridge_mint_address();
     let bridge_exit_address = crate::ledger::bridge_exit_address();
+    let bridge_settle_address = crate::ledger::bridge_settle_address();
     ledger.bridge_expire(day.saturating_mul(86_400));
     if candidates.iter().any(|wrapper| {
         let (sender, target) = access(wrapper);
@@ -183,6 +184,7 @@ pub fn execute_parallel(
             || target == bridge_guardian_address.as_str()
             || target == bridge_mint_address.as_str()
             || target == bridge_exit_address.as_str()
+            || target == bridge_settle_address.as_str()
             || ledger.is_blacklisted(sender)
             || ledger.is_blacklisted(target)
             || ledger.is_frozen(sender)
