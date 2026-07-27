@@ -102,7 +102,7 @@ fn a_signed_transfer_executes_lands_in_a_block_and_moves_state() {
     // The transaction landed in the finalized body.
     assert!(finalized.transaction_ids().contains(&tx_id));
     // The post execution state root sits in the finalized header.
-    assert_eq!(*finalized.header().state_root(), node.ledger().state_root());
+    assert_eq!(*finalized.header().q_root(), node.ledger().q_root());
     // The finalized header binds the certificate over the real header.
     assert!(finalized.reconciles());
     assert_eq!(finalized.header().height(), 1);
@@ -283,7 +283,7 @@ fn fingerprint(node: &Node) -> Vec<BlockPrint> {
             (
                 f.id(),
                 f.header_hash(),
-                *f.header().state_root(),
+                *f.header().q_root(),
                 f.certificate.digest(),
                 f.attesters.clone(),
             )
@@ -323,7 +323,7 @@ fn the_same_inputs_give_the_same_finalized_chain() {
     let two = run_scripted(&params).expect("second run");
 
     assert_eq!(fingerprint(&one), fingerprint(&two));
-    assert_eq!(one.ledger().state_root(), two.ledger().state_root());
+    assert_eq!(one.ledger().q_root(), two.ledger().q_root());
     assert_eq!(one.height(), two.height());
 }
 
@@ -380,8 +380,8 @@ fn a_parallel_node_finalizes_the_identical_chain_as_the_sequential_node() {
     // an observer of the chain can see.
     assert_eq!(fingerprint(&sequential), fingerprint(&parallel));
     assert_eq!(
-        sequential.ledger().state_root(),
-        parallel.ledger().state_root()
+        sequential.ledger().q_root(),
+        parallel.ledger().q_root()
     );
     // Every account landed on the same balance and nonce under both paths.
     for i in 0..24u64 {

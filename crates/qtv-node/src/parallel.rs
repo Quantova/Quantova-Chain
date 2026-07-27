@@ -308,8 +308,8 @@ mod tests {
             let mut parallel = base.clone();
             let parallel_included = execute_parallel(&mut parallel, block, fee_params, threads, 0);
             assert_eq!(
-                sequential.state_root(),
-                parallel.state_root(),
+                sequential.q_root(),
+                parallel.q_root(),
                 "state root differs at {threads} threads"
             );
             assert_eq!(
@@ -422,7 +422,7 @@ mod tests {
         for _ in 0..8 {
             let mut again = ledger.clone();
             let again_included = execute_parallel(&mut again, &block, &fee, 8, 0);
-            assert_eq!(first.state_root(), again.state_root());
+            assert_eq!(first.q_root(), again.q_root());
             assert_eq!(included_ids(&first_included), included_ids(&again_included));
         }
     }
@@ -435,7 +435,7 @@ mod tests {
         let mut parallel = ledger.clone();
         let included = execute_parallel(&mut parallel, &[], &fee, 8, 0);
         assert!(included.is_empty());
-        assert_eq!(parallel.state_root(), ledger.state_root());
+        assert_eq!(parallel.q_root(), ledger.q_root());
     }
 
     #[test]
@@ -512,8 +512,8 @@ mod tests {
             let mut parallel = base.clone();
             let parallel_included = execute_parallel(&mut parallel, &block, &fee, threads, day);
             assert_eq!(
-                ordered.state_root(),
-                parallel.state_root(),
+                ordered.q_root(),
+                parallel.q_root(),
                 "armed session state root differs at {threads} threads"
             );
             assert_eq!(

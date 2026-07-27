@@ -4281,7 +4281,7 @@ mod stake_state_tests {
         let mut l = Ledger::new();
         let addr = gov_addr(70);
         fund(&mut l, &addr, 1_000);
-        let root_before = l.state_root();
+        let root_before = l.q_root();
 
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
@@ -4296,7 +4296,7 @@ mod stake_state_tests {
 
         assert!(!applied, "a faulted transition does not apply");
         assert_eq!(l.balance(&addr), 1_000, "the balance is exactly as it began");
-        assert_eq!(l.state_root(), root_before, "the state root is unmoved");
+        assert_eq!(l.q_root(), root_before, "the state root is unmoved");
         assert!(l.block_events().is_empty(), "the faulted transition left no event");
     }
 
@@ -4778,12 +4778,12 @@ impl Ledger {
         self.account(address).nonce
     }
 
-    pub fn state_root(&self) -> [u8; HASH_LEN] {
+    pub fn q_root(&self) -> [u8; HASH_LEN] {
         self.trie.root()
     }
 
-    pub fn state_root_id(&self) -> String {
-        qtv_idfmt::render_state(&self.state_root())
+    pub fn q_root_id(&self) -> String {
+        qtv_idfmt::render_state(&self.q_root())
             .expect("a state root is the fixed digest length")
     }
 
@@ -4983,8 +4983,8 @@ mod tests {
         reference.seed_supply(supply - dust);
         reference.set_account(&victim.address(), &victim_account);
         assert_eq!(
-            ledger.state_root(),
-            reference.state_root(),
+            ledger.q_root(),
+            reference.q_root(),
             "the reaped slot is freed, the state is identical to one that never held it"
         );
 
@@ -5086,9 +5086,9 @@ mod tests {
         let mut ledger = Ledger::new();
         let addr = address(2);
         ledger.set_account(&addr, &Account::funded(1, 0, Vec::new()));
-        let before = ledger.state_root();
+        let before = ledger.q_root();
         ledger.set_account(&addr, &Account::funded(2, 0, Vec::new()));
-        assert_ne!(before, ledger.state_root());
+        assert_ne!(before, ledger.q_root());
     }
 
     #[test]
@@ -5101,7 +5101,7 @@ mod tests {
         let mut two = Ledger::new();
         two.set_account(&b, &Account::funded(20, 0, Vec::new()));
         two.set_account(&a, &Account::funded(10, 0, Vec::new()));
-        assert_eq!(one.state_root(), two.state_root());
+        assert_eq!(one.q_root(), two.q_root());
     }
 
     #[test]

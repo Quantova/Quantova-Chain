@@ -62,7 +62,7 @@ fn get_root(decoder: &mut Decoder<'_>) -> Result<[u8; ROOT_LEN], Error> {
 pub struct Header {
     height: u64,
     parent_hash: [u8; ROOT_LEN],
-    state_root: [u8; ROOT_LEN],
+    q_root: [u8; ROOT_LEN],
     transaction_root: [u8; ROOT_LEN],
     event_root: [u8; ROOT_LEN],
     beacon_seed: [u8; ROOT_LEN],
@@ -75,7 +75,7 @@ impl Header {
     pub fn new(
         height: u64,
         parent_hash: [u8; ROOT_LEN],
-        state_root: [u8; ROOT_LEN],
+        q_root: [u8; ROOT_LEN],
         transaction_root: [u8; ROOT_LEN],
         event_root: [u8; ROOT_LEN],
         beacon_seed: [u8; ROOT_LEN],
@@ -85,7 +85,7 @@ impl Header {
         Header {
             height,
             parent_hash,
-            state_root,
+            q_root,
             transaction_root,
             event_root,
             beacon_seed,
@@ -103,8 +103,8 @@ impl Header {
         &self.parent_hash
     }
 
-    pub fn state_root(&self) -> &[u8; ROOT_LEN] {
-        &self.state_root
+    pub fn q_root(&self) -> &[u8; ROOT_LEN] {
+        &self.q_root
     }
 
     pub fn transaction_root(&self) -> &[u8; ROOT_LEN] {
@@ -146,7 +146,7 @@ impl Header {
     pub fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
         let height = u64::decode(decoder)?;
         let parent_hash = get_root(decoder)?;
-        let state_root = get_root(decoder)?;
+        let q_root = get_root(decoder)?;
         let transaction_root = get_root(decoder)?;
         let event_root = get_root(decoder)?;
         let beacon_seed = get_root(decoder)?;
@@ -160,7 +160,7 @@ impl Header {
         Ok(Header {
             height,
             parent_hash,
-            state_root,
+            q_root,
             transaction_root,
             event_root,
             beacon_seed,
@@ -175,7 +175,7 @@ impl Encode for Header {
     fn encode(&self, encoder: &mut Encoder) {
         self.height.encode(encoder);
         put_root(encoder, &self.parent_hash);
-        put_root(encoder, &self.state_root);
+        put_root(encoder, &self.q_root);
         put_root(encoder, &self.transaction_root);
         put_root(encoder, &self.event_root);
         put_root(encoder, &self.beacon_seed);

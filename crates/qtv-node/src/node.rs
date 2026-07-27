@@ -1427,7 +1427,7 @@ impl Node {
         let included = self.execute_block();
         let included_ids: Vec<String> = included.iter().map(Wrapper::id).collect();
 
-        let state_root = self.ledger.state_root();
+        let q_root = self.ledger.q_root();
         let transaction_root = qtv_block::transaction_root(&included);
         let event_leaves: Vec<Vec<u8>> = self
             .ledger
@@ -1441,7 +1441,7 @@ impl Node {
         let header = Header::new(
             height,
             self.parent_header_hash,
-            state_root,
+            q_root,
             transaction_root,
             event_root,
             *self.beacon.seed(),
@@ -2402,7 +2402,7 @@ mod tests {
         fund(&mut ledger, &dave, 10_000 * 1_000_000);
 
         let carol_before = ledger.account(&carol.address());
-        let root_before = ledger.state_root();
+        let root_before = ledger.q_root();
 
         let good_first = transfer(&alice, &bob.address(), 1_000, 0, &fee);
         let faulting = transfer(&carol, &crate::ledger::fault_probe_address(), 2_000, 0, &fee);
@@ -2424,7 +2424,7 @@ mod tests {
             "no partial write from the faulted transaction survives"
         );
         assert_ne!(
-            ledger.state_root(),
+            ledger.q_root(),
             root_before,
             "the two good transfers still moved the state root"
         );
@@ -2524,20 +2524,20 @@ mod tests {
         );
         let body = Body::new(victim.address(), 0, TRANSFER_METER, u128::from(fee.transfer_fee()), call);
         let forged_wrong_signer = sign(&attacker, &body);
-        let before = ledger.state_root();
+        let before = ledger.q_root();
         assert!(
             execute_ordered(&mut ledger, &[forged_wrong_signer.clone()], &fee, 0).is_empty(),
             "a registration not signed by the key owner is refused"
         );
         assert!(!ledger.account(&victim.address()).has_key(), "the victim still stays keyless");
-        assert_eq!(ledger.state_root(), before, "a refused registration moves nothing");
+        assert_eq!(ledger.q_root(), before, "a refused registration moves nothing");
 
         let mut parallel = ledger.clone();
         assert!(
             crate::parallel::execute_parallel(&mut parallel, &[forged_wrong_signer], &fee, 8, 0)
                 .is_empty()
         );
-        assert_eq!(parallel.state_root(), ledger.state_root());
+        assert_eq!(parallel.q_root(), ledger.q_root());
     }
 
     fn propose_price_args(rate: u128) -> Vec<u8> {
@@ -2632,7 +2632,7 @@ mod tests {
 
         let mut parallel = ledger.clone();
         assert!(crate::parallel::execute_parallel(&mut parallel, &[out], &fee, 8, 3).is_empty());
-        assert_eq!(parallel.state_root(), ledger.state_root());
+        assert_eq!(parallel.q_root(), ledger.q_root());
     }
 
     #[test]
@@ -2777,7 +2777,7 @@ mod tests {
 
         let mut parallel = ledger.clone();
         assert!(crate::parallel::execute_parallel(&mut parallel, &[gov], &fee, 8, 3).is_empty());
-        assert_eq!(parallel.state_root(), ledger.state_root());
+        assert_eq!(parallel.q_root(), ledger.q_root());
     }
 
     #[test]
@@ -2822,7 +2822,7 @@ mod tests {
         execute_ordered(&mut sequential, &block, &fee, 0);
         let mut parallel = base.clone();
         crate::parallel::execute_parallel(&mut parallel, &block, &fee, 8, 0);
-        assert_eq!(sequential.state_root(), parallel.state_root());
+        assert_eq!(sequential.q_root(), parallel.q_root());
         assert!(parallel.gov_referendum(1).is_some());
     }
 
@@ -2905,7 +2905,7 @@ mod tests {
 
         let mut reference = base.clone();
         let reference_included = execute_ordered_inline(&mut reference, &block, &fee);
-        let reference_root = reference.state_root();
+        let reference_root = reference.q_root();
         assert!(
             !reference_included.is_empty() && reference_included.len() < block.len(),
             "the block must both include and skip transactions"
@@ -2920,7 +2920,7 @@ mod tests {
                 "the included set differs at {cores} cores"
             );
             assert_eq!(
-                ledger.state_root(),
+                ledger.q_root(),
                 reference_root,
                 "the state root differs at {cores} cores"
             );
@@ -2929,7 +2929,7 @@ mod tests {
         let mut public = base.clone();
         let public_included = execute_ordered(&mut public, &block, &fee, 0);
         assert_eq!(ids(&public_included), ids(&reference_included));
-        assert_eq!(public.state_root(), reference_root);
+        assert_eq!(public.q_root(), reference_root);
     }
 
     fn execute_ordered_inline(
@@ -4162,8 +4162,8 @@ mod tests {
         crate::parallel::execute_parallel(&mut parallel, &block, &fee, 4, horizon_day);
 
         assert_eq!(
-            ordered.state_root(),
-            parallel.state_root(),
+            ordered.q_root(),
+            parallel.q_root(),
             "the parallel and ordered paths diverge on a bridge mint/exit block crossing a freeze horizon"
         );
         assert!(!parallel.bridge_is_frozen(), "the freeze auto expired on the parallel path");
