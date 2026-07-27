@@ -1454,8 +1454,7 @@ impl Ledger {
         true
     }
 
-    /// Whether an exit's burn_ref has already resolved. The burn_ref is the exit replay key: one
-    /// finalized burn resolves at most once, whether by settle or by slash, and never both.
+    // burn_ref is the exit replay key: one burn resolves at most once, settle or slash never both
     pub fn bridge_exit_settled(&self, burn_ref: &[u8; 32]) -> bool {
         matches!(self.trie.get(&bridge_exit_seen_key(burn_ref)), Some(bytes) if !bytes.is_empty())
     }
@@ -1488,9 +1487,7 @@ impl Ledger {
         self.write_leaf(bridge_epochpay_global_key(epoch), to_bytes(&amount));
     }
 
-    /// The global per epoch exit payout ceiling in base units. Zero is the unconfigured sentinel:
-    /// an oracle enabled bridge whose global payout cap governance has not yet set refuses every
-    /// slash payout, so a half configured bridge fails closed rather than paying out uncapped.
+    // global per epoch payout ceiling in base units; zero is the unset sentinel that refuses payouts
     pub fn bridge_payout_cap(&self) -> u128 {
         self.trie
             .get(&stake_singleton_key(BRIDGE_PAYOUTCAP_TAG))
@@ -1508,11 +1505,7 @@ impl Ledger {
         (stake_singleton_key(BRIDGE_PAYOUTCAP_TAG), to_bytes(&cap))
     }
 
-    /// Settle an exit against a verified oracle SETTLE attestation. The vault proved its foreign
-    /// payout inside the window, so the exit closes with no chain side move: the bridged tokens
-    /// were already burned and the vault custody already debited when the user's burn finalized.
-    /// The burn_ref is consumed so the settle cannot replay and no later slash can double pay.
-    /// Gated by the exits switch, refused while the bridge is frozen, and inert with no pool vault.
+    // close an exit on a proven foreign payout; consume the burn_ref, no chain side move
     pub fn bridge_settle(&mut self, fact: &crate::bridge::ExitFact) -> bool {
         if !self.bridge_exits_enabled() {
             return false;
@@ -1534,12 +1527,7 @@ impl Ledger {
         true
     }
 
-    /// Slash an exit against a verified oracle SLASH decision. The redeem window elapsed with no
-    /// foreign payout proof, so the beneficiary is paid the attested amount from the governance
-    /// held pool vault's custody. Every guard is a hard on chain invariant in base units: the
-    /// per asset and global per epoch payout caps, the supply cap, and the pool custody must
-    /// cover the payout, all with no price feed in the path. The burn_ref is consumed before any
-    /// fund moves so a slash cannot replay and no later settle can double pay.
+    // pay the beneficiary from the pool custody, under the caps, consuming the burn_ref first
     pub fn bridge_slash(&mut self, fact: &crate::bridge::ExitFact) -> bool {
         if !self.bridge_exits_enabled() {
             return false;
@@ -4399,10 +4387,9 @@ pub const EVENT_MINT: [u8; 4] = *b"QMNT";
 pub const EVENT_REWARD: [u8; 4] = *b"QRWD";
 pub const EVENT_BRIDGE_MINT: [u8; 4] = *b"QBMT";
 pub const EVENT_BRIDGE_BURN: [u8; 4] = *b"QBBN";
-/// An exit settled against a proven foreign payout, closing the exit with no chain side move.
+// exit settled against a proven foreign payout, no chain side move
 pub const EVENT_BRIDGE_SETTLE: [u8; 4] = *b"QBSE";
-/// An exit slashed after the redeem window elapsed with no proof, paying the beneficiary from the
-/// governance held pool custody.
+// exit slashed after the window, beneficiary paid from the pool custody
 pub const EVENT_BRIDGE_SLASH: [u8; 4] = *b"QBSL";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

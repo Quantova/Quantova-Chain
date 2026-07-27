@@ -676,13 +676,7 @@ fn verify_exit_signature(
     ml_dsa::verify(pk, message, sig, EXIT_ACK_DOMAIN)
 }
 
-/// Verify an oracle exit settlement attestation exactly as [`quorum_attests`] verifies an inbound
-/// mint, and no weaker. The empty prove nothing attestation is refused at the threshold and the
-/// well formed gate, the fact is bound to this chain's u32 dest chain and folded u64 chain id
-/// through the signed preimage, every signature result is checked explicitly, and only distinct
-/// signers holding distinct registered keys count toward the quorum with no off by one and no
-/// duplicate double count. The operator set is the same registered oracle set the inbound mint
-/// already trusts, read from authenticated on chain state by the caller.
+// verifies the exit attestation exactly as quorum_attests verifies a mint, no weaker
 pub fn exit_quorum_attests(
     set: &OperatorSet,
     attestation: &ExitAttestation,
@@ -1186,6 +1180,35 @@ mod tests {
         let mut trailing = bytes.clone();
         trailing.push(0);
         assert!(ExitFact::decode(&trailing).is_none());
+    }
+
+    #[test]
+    fn the_exit_fact_encoding_matches_the_pinned_cross_repo_layout() {
+        // pins the wire layout the oracle's q-exits decision encoder must match
+        let fact = ExitFact {
+            version: EXIT_FACT_VERSION,
+            corridor: 1,
+            dest_chain: 9000,
+            asset_id: [0x3; 16],
+            amount: 1_100_000,
+            beneficiary: [0x5; 32],
+            burn_ref: [0x9; 32],
+            outcome: ExitOutcome::Slash,
+        };
+        let bytes = fact.encode();
+        assert_eq!(bytes.len(), EXIT_FACT_ENCODED_LEN);
+        assert_eq!(bytes[0], EXIT_FACT_VERSION);
+        assert_eq!(&bytes[1..5], 1u32.to_le_bytes());
+        assert_eq!(&bytes[5..9], 9000u32.to_le_bytes());
+        assert_eq!(&bytes[9..25], [0x3u8; 16]);
+        assert_eq!(&bytes[25..41], 1_100_000u128.to_le_bytes());
+        assert_eq!(&bytes[41..73], [0x5u8; 32]);
+        assert_eq!(&bytes[73..105], [0x9u8; 32]);
+        assert_eq!(bytes[105], 2, "the slash outcome rides in the final byte");
+        let preimage = fact.ack_preimage(0x0123_4567_89AB_CDEF);
+        assert_eq!(preimage.len(), EXIT_ACK_DOMAIN.len() + EXIT_FACT_ENCODED_LEN + 8);
+        assert!(preimage.starts_with(EXIT_ACK_DOMAIN));
+        assert_eq!(&preimage[EXIT_ACK_DOMAIN.len() + EXIT_FACT_ENCODED_LEN..], 0x0123_4567_89AB_CDEFu64.to_le_bytes());
     }
 
     #[test]

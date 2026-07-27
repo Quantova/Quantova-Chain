@@ -681,11 +681,7 @@ pub(crate) fn is_bridge_settle(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::bridge_settle_address()
 }
 
-/// Read the exit settlement fact from a settle transaction, verifying the oracle quorum exactly
-/// as the inbound mint does: the operator set and the dest chain come from authenticated on chain
-/// state, and [`crate::bridge::exit_quorum_attests`] enforces the threshold, the well formed gate,
-/// the chain id binding, and the distinct signer count. There is no sender signature or fee gate
-/// on the carrier, the same as the mint: the security is the operator attestation alone.
+// operator set and dest chain from state, quorum verified; no sender signature, like the mint
 fn bridge_settle_fact(ledger: &Ledger, wrapper: &Wrapper, chain_id: u64) -> Option<crate::bridge::ExitFact> {
     let attestation = crate::bridge::ExitAttestation::decode(wrapper.body().call().args())?;
     let dest_chain = ledger.bridge_dest_chain()?;
@@ -4178,11 +4174,7 @@ mod tests {
         );
     }
 
-    // The outward exit settle and slash path. A finalized burn opens an exit off chain in the
-    // oracle vault; the oracle then returns a post quantum ML-DSA attestation the chain verifies
-    // exactly as the inbound mint, closing the exit on a proven foreign payout or paying the
-    // beneficiary the attested amount from the governance held pool when the window elapses.
-
+    // the outward exit settle and slash path
     const EXIT_VAULT: [u8; 32] = [0x5b; 32];
     const EXIT_ASSET: [u8; 16] = [0x7c; 16];
 
@@ -4344,8 +4336,7 @@ mod tests {
     fn a_settle_without_a_seeded_committee_is_refused() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
-        // Every trust root but the operator set: the settle cannot bind to a committee that is
-        // not in authenticated on chain state, so it fails closed.
+        // every trust root but the operator set, so the settle fails closed
         ledger.register_bridged_asset(&EXIT_ASSET, 10_000_000, 1_000_000, false);
         ledger.seed_bridge_exits_enabled(true);
         ledger.seed_bridge_pool_vault(&EXIT_VAULT);
