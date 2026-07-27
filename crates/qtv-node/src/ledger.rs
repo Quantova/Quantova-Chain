@@ -1284,19 +1284,6 @@ impl Ledger {
         true
     }
 
-    fn debit_vault_custody(&mut self, asset_id: &[u8; 16], amount: u128) -> bool {
-        let vault = match self.bridge_pool_vault() {
-            Some(vault) => vault,
-            None => return true,
-        };
-        let remaining = match self.bridge_vault_custody(&vault, asset_id).checked_sub(amount) {
-            Some(remaining) => remaining,
-            None => return false,
-        };
-        self.set_bridge_vault_custody(&vault, asset_id, remaining);
-        true
-    }
-
     pub fn bridge_operator_set(&self) -> Option<crate::bridge::OperatorSet> {
         self.trie
             .get(&stake_singleton_key(BRIDGE_OPERATORS_TAG))
@@ -1432,9 +1419,7 @@ impl Ledger {
             Some(supply) => supply,
             None => return false,
         };
-        if !self.debit_vault_custody(asset_id, amount) {
-            return false;
-        }
+        // the burn only retires wrapped supply; the backing coins do not leave the pool until a foreign payout is proven at settle, so custody is untouched here
         self.set_bridged_balance(asset_id, holder, balance - amount);
         self.set_bridged_asset(
             asset_id,
@@ -1505,7 +1490,7 @@ impl Ledger {
         (stake_singleton_key(BRIDGE_PAYOUTCAP_TAG), to_bytes(&cap))
     }
 
-    // close an exit on a proven foreign payout; consume the burn_ref, no chain side move
+    // close an exit on a proven foreign payout; the paid coins leave the pool, so draw them from custody exactly once, keeping the remaining custody above every outstanding wrapped token, then consume the burn_ref
     pub fn bridge_settle(&mut self, fact: &crate::bridge::ExitFact) -> bool {
         if !self.bridge_exits_enabled() {
             return false;
@@ -1513,21 +1498,34 @@ impl Ledger {
         if self.bridge_is_frozen() {
             return false;
         }
-        if self.bridge_pool_vault().is_none() {
-            return false;
-        }
+        let vault = match self.bridge_pool_vault() {
+            Some(vault) => vault,
+            None => return false,
+        };
         if fact.amount == 0 {
             return false;
         }
+        let asset = match self.bridged_asset(&fact.asset_id) {
+            Some(asset) => asset,
+            None => return false,
+        };
         if self.bridge_exit_settled(&fact.burn_ref) {
             return false;
         }
+        let held = match self.bridge_vault_custody(&vault, &fact.asset_id).checked_sub(fact.amount) {
+            Some(held) => held,
+            None => return false,
+        };
+        if held < asset.supply {
+            return false;
+        }
         self.mark_bridge_exit_settled(&fact.burn_ref);
+        self.set_bridge_vault_custody(&vault, &fact.asset_id, held);
         self.record_bridge_settle_event(&fact.asset_id, &fact.beneficiary, fact.amount, &fact.burn_ref);
         true
     }
 
-    // pay the beneficiary from the pool custody, under the caps, consuming the burn_ref first
+    // refund the beneficiary on chain when a foreign payout fails; re-materialise the burned wrapped under the caps and never above the custody backing it, without drawing that custody down since the coins never left the pool, then consume the burn_ref
     pub fn bridge_slash(&mut self, fact: &crate::bridge::ExitFact) -> bool {
         if !self.bridge_exits_enabled() {
             return false;
@@ -1571,6 +1569,10 @@ impl Ledger {
         if new_supply > asset.cap {
             return false;
         }
+        // the refund re-issues wrapped against custody that stayed in the pool; the outstanding supply must not exceed that backing, but the backing is not drawn down
+        if new_supply > self.bridge_vault_custody(&vault, &fact.asset_id) {
+            return false;
+        }
         let credited = match self
             .bridged_balance(&fact.asset_id, &fact.beneficiary)
             .checked_add(fact.amount)
@@ -1578,12 +1580,7 @@ impl Ledger {
             Some(credited) => credited,
             None => return false,
         };
-        let held = match self.bridge_vault_custody(&vault, &fact.asset_id).checked_sub(fact.amount) {
-            Some(held) => held,
-            None => return false,
-        };
         self.mark_bridge_exit_settled(&fact.burn_ref);
-        self.set_bridge_vault_custody(&vault, &fact.asset_id, held);
         self.set_bridged_balance(&fact.asset_id, &fact.beneficiary, credited);
         self.set_bridged_asset(&fact.asset_id, &QAsset { supply: new_supply, ..asset });
         self.set_bridge_epoch_paid(&fact.asset_id, epoch, new_asset_paid);
@@ -3955,8 +3952,8 @@ mod stake_state_tests {
         assert!(l.bridge_burn(&asset, &recipient, 500, &[0x07u8; 32], 42, 1));
         assert_eq!(
             l.bridge_vault_custody(&vault_b, &asset),
-            2_500,
-            "an exit debits the vault that controls the bridge now"
+            3_000,
+            "the burn retires supply but leaves the migrated vault's custody in place"
         );
         assert_eq!(l.bridge_vault_custody(&vault_a, &asset), 0);
     }
@@ -3964,18 +3961,11 @@ mod stake_state_tests {
     #[test]
     fn an_underflowing_vault_debit_fails_closed() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
-        let proposer = gov_addr(96);
-        fund(&mut l, &proposer, 3_000_000 * 1_000_000);
-        let voter = gov_addr(97);
-        fund(&mut l, &voter, 20_000 * 1_000_000);
-        let freezer = gov_addr(98);
-        fund(&mut l, &freezer, 1_500_000 * 1_000_000);
-
         let asset = [0xC3u8; 16];
         let holder = [0xEEu8; 32];
         l.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
 
+        // the mint predates any vault, so supply exists but no vault records custody
         assert!(l.bridge_mint(&crate::bridge::Fact {
             version: crate::bridge::FACT_VERSION,
             source_chain: 1,
@@ -3992,36 +3982,46 @@ mod stake_state_tests {
             expiry_height: 100,
         }));
         assert_eq!(l.bridged_balance(&asset, &holder), 1_000);
+        assert_eq!(l.bridged_supply(&asset), 1_000);
 
         let vault = [0x0Au8; 32];
-        assert!(l.bridge_freeze_with_fee(&freezer, 0, 0));
-        let migrate = l
-            .gov_propose(
-                &proposer,
-                qtv_governance::Track::BridgeMigration,
-                qtv_governance::Action::BridgeMigration { vault: vault.to_vec() },
-                0,
-            )
-            .unwrap();
-        l.gov_vote(&voter, migrate, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
-        l.gov_enact(migrate, 5 * 86_400 + 1, TEST_CHAIN).unwrap();
+        l.seed_bridge_pool_vault(&vault);
+        l.seed_bridge_exits_enabled(true);
+        l.seed_bridge_payout_cap(10_000_000);
         assert_eq!(
             l.bridge_vault_custody(&vault, &asset),
             0,
-            "the mint predated any vault so the vault records no custody"
+            "the mint predated the vault so it records no custody"
         );
 
-        assert!(
-            !l.bridge_burn(&asset, &holder, 500, &[0x07u8; 32], 42, 1),
-            "a burn that would underflow the vault custody is refused"
-        );
-        assert_eq!(
-            l.bridged_balance(&asset, &holder),
-            1_000,
-            "the refused burn leaves the holder balance untouched"
-        );
+        // a proven settle cannot draw coins the vault never recorded
+        let settle = crate::bridge::ExitFact {
+            version: crate::bridge::EXIT_FACT_VERSION,
+            corridor: 1,
+            dest_chain: 9_000,
+            asset_id: asset,
+            amount: 500,
+            beneficiary: holder,
+            burn_ref: [0x07u8; 32],
+            outcome: crate::bridge::ExitOutcome::Settle,
+        };
+        assert!(!l.bridge_settle(&settle), "a settle beyond the vault custody fails closed");
         assert_eq!(l.bridge_vault_custody(&vault, &asset), 0);
-        assert_eq!(l.bridged_supply(&asset), 1_000, "the refused burn moves no supply");
+        assert_eq!(l.bridged_supply(&asset), 1_000, "the refused settle moves no supply");
+
+        // a refund slash cannot re-issue wrapped beyond the custody backing it
+        let slash = crate::bridge::ExitFact {
+            version: crate::bridge::EXIT_FACT_VERSION,
+            corridor: 1,
+            dest_chain: 9_000,
+            asset_id: asset,
+            amount: 500,
+            beneficiary: holder,
+            burn_ref: [0x08u8; 32],
+            outcome: crate::bridge::ExitOutcome::Slash,
+        };
+        assert!(!l.bridge_slash(&slash), "a refund above the vault custody fails closed");
+        assert_eq!(l.bridged_supply(&asset), 1_000, "the refused refund moves no supply");
     }
 
     #[test]
