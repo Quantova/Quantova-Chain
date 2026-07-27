@@ -1332,6 +1332,11 @@ impl DevNode {
         self.burn_archive.heights_after(cursor)
     }
 
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn seed_burn_archive(&mut self, entry: BurnArchiveEntry) {
+        let _ = self.burn_archive.append(entry);
+    }
+
     pub fn id(&self) -> u64 {
         self.id
     }
