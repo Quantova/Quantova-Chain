@@ -232,6 +232,13 @@ fn bridge_seen_key(source_ref: &[u8; 32]) -> Key {
     sha3::sha3_256(&input)
 }
 
+fn feature_gate_key(feature: &[u8]) -> Key {
+    let mut input = Vec::with_capacity(GOV_FEATURE_TAG.len() + feature.len());
+    input.extend_from_slice(GOV_FEATURE_TAG);
+    input.extend_from_slice(feature);
+    sha3::sha3_256(&input)
+}
+
 fn bridge_vault_custody_key(vault: &[u8; 32], asset_id: &[u8; 16]) -> Key {
     let mut input = Vec::with_capacity(BRIDGE_VAULTBAL_TAG.len() + vault.len() + asset_id.len());
     input.extend_from_slice(BRIDGE_VAULTBAL_TAG);
@@ -376,6 +383,7 @@ const GOV_BALLOT_TAG: &[u8] = b"qtv/gov/ballot/";
 const GOV_LOCK_TAG: &[u8] = b"qtv/gov/lock/";
 const GOV_BLACKLIST_TAG: &[u8] = b"qtv/gov/blacklist/";
 const GOV_FREEZE_TAG: &[u8] = b"qtv/gov/freeze/";
+const GOV_FEATURE_TAG: &[u8] = b"qtv/gov/feature/";
 const GOV_GUARDIAN_TAG: &[u8] = b"qtv/gov/guardians";
 const GOV_GUARDIAN_EPOCH_TAG: &[u8] = b"qtv/gov/guardian/epoch";
 const GOV_RECEIPT_TAG: &[u8] = b"qtv/gov/receipt/";
@@ -610,7 +618,11 @@ fn u64_from_le(bytes: &[u8]) -> Option<u64> {
 }
 
 fn action_is_enactable(action: &Action) -> bool {
-    !matches!(action, Action::Upgrade { .. })
+    match action {
+        // a feature activation must name a feature; an empty name activates nothing
+        Action::Activate { feature, .. } => !feature.is_empty(),
+        _ => true,
+    }
 }
 
 fn u128_from_le(bytes: &[u8]) -> Option<u128> {
@@ -2353,8 +2365,31 @@ impl Ledger {
                 self.set_bridge_epoch(next);
                 Ok(())
             }
-            Action::Upgrade { .. } => Err(EnactError::NotImplemented),
+            Action::Activate { feature, version } => {
+                if feature.is_empty() {
+                    return Err(EnactError::BadValue);
+                }
+                self.set_feature_version(feature, *version);
+                Ok(())
+            }
         }
+    }
+
+    // a governed feature gate. node logic reads feature_version or feature_active to branch dormant logic on, and only a passed ChainUpgrade vote through execute_action can raise a version, so an upgrade ships in the binary dormant and turns on by vote instead of a fork
+    pub fn feature_version(&self, feature: &[u8]) -> u64 {
+        self.trie
+            .get(&feature_gate_key(feature))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical feature version"))
+            .unwrap_or(0)
+    }
+
+    pub fn feature_active(&self, feature: &[u8]) -> bool {
+        self.feature_version(feature) > 0
+    }
+
+    fn set_feature_version(&mut self, feature: &[u8], version: u64) {
+        self.write_leaf(feature_gate_key(feature), to_bytes(&version));
     }
 
     fn apply_parameter(&mut self, key: &[u8], value: &[u8]) -> Result<(), EnactError> {
@@ -2777,7 +2812,7 @@ mod stake_state_tests {
             .gov_propose(
                 &proposer,
                 qtv_governance::Track::ChainUpgrade,
-                qtv_governance::Action::Upgrade { blob: vec![1, 2, 3] },
+                qtv_governance::Action::Activate { feature: vec![], version: 1 },
                 0,
             )
             .is_none());
@@ -2794,6 +2829,48 @@ mod stake_state_tests {
             .is_none());
         assert!(qtv_governance::Track::from_code(6).is_none());
         assert!(qtv_governance::Track::from_code(7).is_none());
+        assert_eq!(l.balance(&proposer), 3_000_000 * 1_000_000);
+    }
+
+    #[test]
+    fn a_governance_vote_activates_a_dormant_feature_without_a_fork() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        let proposer = gov_addr(40);
+        fund(&mut l, &proposer, 2_250_000 * 1_000_000);
+        let voter = gov_addr(41);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+
+        // the feature ships dormant in the binary, so it reads inactive until a vote turns it on
+        assert!(!l.feature_active(b"parallel_state"));
+        assert_eq!(l.feature_version(b"parallel_state"), 0);
+
+        let action = qtv_governance::Action::Activate { feature: b"parallel_state".to_vec(), version: 2 };
+        let id = l
+            .gov_propose(&proposer, qtv_governance::Track::ChainUpgrade, action, 0)
+            .unwrap();
+        l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        l.gov_enact(id, 14 * 86_400 + 1, TEST_CHAIN).unwrap();
+
+        // the same binary now runs the feature because the vote raised its version, no fork
+        assert!(l.feature_active(b"parallel_state"));
+        assert_eq!(l.feature_version(b"parallel_state"), 2);
+    }
+
+    #[test]
+    fn a_feature_activation_off_the_chain_upgrade_track_is_refused() {
+        let mut l = Ledger::new();
+        let proposer = gov_addr(42);
+        fund(&mut l, &proposer, 3_000_000 * 1_000_000);
+        // Activate belongs to the ChainUpgrade track, so proposing it on any other track is refused and stakes nothing
+        assert!(l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::Mint,
+                qtv_governance::Action::Activate { feature: b"parallel_state".to_vec(), version: 1 },
+                0,
+            )
+            .is_none());
         assert_eq!(l.balance(&proposer), 3_000_000 * 1_000_000);
     }
 
