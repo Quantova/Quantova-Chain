@@ -38,6 +38,9 @@ pub enum Request {
     Storage(String),
     Supply,
     Events(u64),
+    FinalizedHead,
+    BurnBlock(u64),
+    BurnHeightsAfter(u64),
 }
 
 pub struct ClientError {
@@ -110,6 +113,21 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
                 .ok_or_else(|| ClientError::bad("bad_request", "get_events needs a height"))?;
             Ok(Request::Events(height))
         }
+        "finalized_head" => Ok(Request::FinalizedHead),
+        "burn_block" => {
+            let height = body
+                .get("height")
+                .and_then(Json::as_u64)
+                .ok_or_else(|| ClientError::bad("bad_request", "burn_block needs a height"))?;
+            Ok(Request::BurnBlock(height))
+        }
+        "burn_heights_after" => {
+            let cursor = body
+                .get("cursor")
+                .and_then(Json::as_u64)
+                .ok_or_else(|| ClientError::bad("bad_request", "burn_heights_after needs a cursor"))?;
+            Ok(Request::BurnHeightsAfter(cursor))
+        }
         other => Err(ClientError {
             code: "unknown_method".to_string(),
             message: format!("no method named {other}"),
@@ -141,7 +159,54 @@ pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result
         Request::Container(address) => container(node, &address),
         Request::Storage(address) => storage(node, &address),
         Request::Events(height) => Ok(events(node, height)),
+        Request::FinalizedHead => Ok(finalized_head(node)),
+        Request::BurnBlock(height) => burn_block(node, height),
+        Request::BurnHeightsAfter(cursor) => Ok(burn_heights_after(node, cursor)),
     }
+}
+
+fn finalized_head(node: &DevNode) -> Json {
+    object(vec![("head", Json::Int(node.finalized_head()))])
+}
+
+fn burn_block(node: &DevNode, height: u64) -> Result<Json, ClientError> {
+    match node.burn_block(height) {
+        Some(entry) => {
+            let events: Vec<Json> = entry
+                .events
+                .iter()
+                .map(|leaf| Json::str(crate::json::to_hex(leaf)))
+                .collect();
+            Ok(object(vec![
+                ("height", Json::Int(entry.height)),
+                (
+                    "header_bytes",
+                    Json::str(crate::json::to_hex(&entry.header_bytes)),
+                ),
+                (
+                    "certificate",
+                    Json::str(crate::json::to_hex(&entry.certificate)),
+                ),
+                ("events", Json::Array(events)),
+            ]))
+        }
+        None => Err(ClientError::not_found(format!(
+            "no archived burn block at height {height}"
+        ))),
+    }
+}
+
+fn burn_heights_after(node: &DevNode, cursor: u64) -> Json {
+    let items: Vec<Json> = node
+        .burn_heights_after(cursor)
+        .into_iter()
+        .map(Json::Int)
+        .collect();
+    object(vec![
+        ("cursor", Json::Int(cursor)),
+        ("count", Json::Int(items.len() as u64)),
+        ("heights", Json::Array(items)),
+    ])
 }
 
 fn staking_state(node: &DevNode) -> Json {
