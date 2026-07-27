@@ -516,6 +516,219 @@ impl ExitRequest {
     }
 }
 
+pub const EXIT_ACK_DOMAIN: &[u8] = b"QUANTOVA/Q-ORACLE/EXIT-ACK/v1";
+pub const EXIT_FACT_VERSION: u8 = 1;
+pub const EXIT_FACT_ENCODED_LEN: usize = 106;
+pub const ARTIFACT_EXIT_ACK: u8 = 0x03;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitOutcome {
+    Settle,
+    Slash,
+}
+
+impl ExitOutcome {
+    fn tag(self) -> u8 {
+        match self {
+            ExitOutcome::Settle => 1,
+            ExitOutcome::Slash => 2,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Option<ExitOutcome> {
+        match tag {
+            1 => Some(ExitOutcome::Settle),
+            2 => Some(ExitOutcome::Slash),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExitFact {
+    pub version: u8,
+    pub corridor: u32,
+    pub dest_chain: u32,
+    pub asset_id: [u8; 16],
+    pub amount: u128,
+    pub beneficiary: [u8; 32],
+    pub burn_ref: [u8; 32],
+    pub outcome: ExitOutcome,
+}
+
+impl ExitFact {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(EXIT_FACT_ENCODED_LEN);
+        out.push(self.version);
+        out.extend_from_slice(&self.corridor.to_le_bytes());
+        out.extend_from_slice(&self.dest_chain.to_le_bytes());
+        out.extend_from_slice(&self.asset_id);
+        out.extend_from_slice(&self.amount.to_le_bytes());
+        out.extend_from_slice(&self.beneficiary);
+        out.extend_from_slice(&self.burn_ref);
+        out.push(self.outcome.tag());
+        out
+    }
+
+    fn read(reader: &mut Reader<'_>) -> Option<ExitFact> {
+        let version = reader.u8()?;
+        let corridor = reader.u32()?;
+        let dest_chain = reader.u32()?;
+        let asset_id = reader.array::<16>()?;
+        let amount = reader.u128()?;
+        let beneficiary = reader.array::<32>()?;
+        let burn_ref = reader.array::<32>()?;
+        let outcome = ExitOutcome::from_tag(reader.u8()?)?;
+        Some(ExitFact {
+            version,
+            corridor,
+            dest_chain,
+            asset_id,
+            amount,
+            beneficiary,
+            burn_ref,
+            outcome,
+        })
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<ExitFact> {
+        let mut reader = Reader::new(bytes);
+        let fact = ExitFact::read(&mut reader)?;
+        reader.done().then_some(fact)
+    }
+
+    pub fn ack_preimage(&self, chain_id: u64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(EXIT_ACK_DOMAIN.len() + EXIT_FACT_ENCODED_LEN + 8);
+        out.extend_from_slice(EXIT_ACK_DOMAIN);
+        out.extend_from_slice(&self.encode());
+        out.extend_from_slice(&chain_id.to_le_bytes());
+        out
+    }
+
+    fn well_formed(&self) -> bool {
+        self.version == EXIT_FACT_VERSION
+            && self.corridor != 0
+            && self.dest_chain != 0
+            && self.amount != 0
+            && self.asset_id != [0u8; 16]
+            && self.beneficiary != [0u8; 32]
+            && self.burn_ref != [0u8; 32]
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExitAttestation {
+    pub fact: ExitFact,
+    pub signatures: Vec<SignerSig>,
+}
+
+impl ExitAttestation {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(ARTIFACT_EXIT_ACK);
+        out.push(ENVELOPE_VERSION);
+        out.extend_from_slice(&self.fact.encode());
+        out.extend_from_slice(&(self.signatures.len() as u32).to_le_bytes());
+        for signer in &self.signatures {
+            out.extend_from_slice(&signer.operator_id.to_le_bytes());
+            out.extend_from_slice(&(signer.signature.len() as u16).to_le_bytes());
+            out.extend_from_slice(&signer.signature);
+        }
+        out
+    }
+
+    fn read(reader: &mut Reader<'_>) -> Option<ExitAttestation> {
+        if reader.u8()? != ARTIFACT_EXIT_ACK {
+            return None;
+        }
+        if reader.u8()? != ENVELOPE_VERSION {
+            return None;
+        }
+        let fact = ExitFact::read(reader)?;
+        let count = reader.u32()? as usize;
+        let mut signatures = Vec::with_capacity(count.min(1024));
+        for _ in 0..count {
+            let operator_id = reader.u32()?;
+            let len = reader.u16()? as usize;
+            let signature = reader.take(len)?.to_vec();
+            signatures.push(SignerSig {
+                operator_id,
+                signature,
+            });
+        }
+        Some(ExitAttestation { fact, signatures })
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<ExitAttestation> {
+        let mut reader = Reader::new(bytes);
+        let attestation = ExitAttestation::read(&mut reader)?;
+        reader.done().then_some(attestation)
+    }
+}
+
+fn verify_exit_signature(
+    pk: &[u8; PUBLIC_KEY_BYTES],
+    message: &[u8],
+    sig: &[u8; SIGNATURE_BYTES],
+) -> bool {
+    #[cfg(test)]
+    VERIFY_CALLS.with(|c| c.set(c.get() + 1));
+    ml_dsa::verify(pk, message, sig, EXIT_ACK_DOMAIN)
+}
+
+/// Verify an oracle exit settlement attestation exactly as [`quorum_attests`] verifies an inbound
+/// mint, and no weaker. The empty prove nothing attestation is refused at the threshold and the
+/// well formed gate, the fact is bound to this chain's u32 dest chain and folded u64 chain id
+/// through the signed preimage, every signature result is checked explicitly, and only distinct
+/// signers holding distinct registered keys count toward the quorum with no off by one and no
+/// duplicate double count. The operator set is the same registered oracle set the inbound mint
+/// already trusts, read from authenticated on chain state by the caller.
+pub fn exit_quorum_attests(
+    set: &OperatorSet,
+    attestation: &ExitAttestation,
+    dest_chain: u32,
+    chain_id: u64,
+) -> bool {
+    if set.threshold == 0 {
+        return false;
+    }
+    let fact = &attestation.fact;
+    if !fact.well_formed() {
+        return false;
+    }
+    if fact.dest_chain != dest_chain {
+        return false;
+    }
+    let message = fact.ack_preimage(chain_id);
+    let mut attempted: Vec<u32> = Vec::new();
+    let mut counted_keys: Vec<&[u8]> = Vec::new();
+    for signer in &attestation.signatures {
+        if attempted.contains(&signer.operator_id) {
+            continue;
+        }
+        attempted.push(signer.operator_id);
+        let public_key = match set.public_key(signer.operator_id) {
+            Some(key) => key,
+            None => continue,
+        };
+        if counted_keys.contains(&public_key) {
+            continue;
+        }
+        let pk: &[u8; PUBLIC_KEY_BYTES] = match public_key.try_into() {
+            Ok(pk) => pk,
+            Err(_) => continue,
+        };
+        let sig: &[u8; SIGNATURE_BYTES] = match signer.signature.as_slice().try_into() {
+            Ok(sig) => sig,
+            Err(_) => continue,
+        };
+        if verify_exit_signature(pk, &message, sig) {
+            counted_keys.push(public_key);
+        }
+    }
+    counted_keys.len() as u32 >= set.threshold
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -942,5 +1155,212 @@ mod tests {
             destination: [8u8; 32],
         };
         assert_eq!(ExitRequest::decode(&request.encode()), Some(request));
+    }
+
+    fn sample_exit_fact(outcome: ExitOutcome) -> ExitFact {
+        ExitFact {
+            version: EXIT_FACT_VERSION,
+            corridor: 1,
+            dest_chain: 9000,
+            asset_id: [3u8; 16],
+            amount: 1_100_000,
+            beneficiary: [5u8; 32],
+            burn_ref: [9u8; 32],
+            outcome,
+        }
+    }
+
+    fn sign_exit(sk: &[u8; qtv_crypto::ml_dsa::SECRET_KEY_BYTES], fact: &ExitFact, chain_id: u64) -> Vec<u8> {
+        ml_dsa::sign(sk, &fact.ack_preimage(chain_id), EXIT_ACK_DOMAIN, &[0u8; 32])
+            .expect("the exit preimage stays within the length bound")
+            .to_vec()
+    }
+
+    #[test]
+    fn an_exit_fact_round_trips_and_is_the_fixed_length() {
+        let fact = sample_exit_fact(ExitOutcome::Slash);
+        let bytes = fact.encode();
+        assert_eq!(bytes.len(), EXIT_FACT_ENCODED_LEN);
+        assert_eq!(ExitFact::decode(&bytes), Some(fact));
+        assert!(ExitFact::decode(&bytes[..EXIT_FACT_ENCODED_LEN - 1]).is_none());
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(ExitFact::decode(&trailing).is_none());
+    }
+
+    #[test]
+    fn an_exit_attestation_round_trips_and_carries_the_outcome() {
+        let fact = sample_exit_fact(ExitOutcome::Settle);
+        let (_pk, sk) = operator(60);
+        let attestation = ExitAttestation {
+            fact: fact.clone(),
+            signatures: vec![SignerSig { operator_id: 0, signature: sign_exit(&sk, &fact, 7) }],
+        };
+        assert_eq!(ExitAttestation::decode(&attestation.encode()), Some(attestation));
+    }
+
+    #[test]
+    fn a_quorum_of_distinct_valid_signers_acks_an_exit() {
+        let fact = sample_exit_fact(ExitOutcome::Slash);
+        let (pk0, sk0) = operator(50);
+        let (pk1, sk1) = operator(51);
+        let (pk2, _sk2) = operator(52);
+        let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec()), (2, pk2.to_vec())], 2);
+        let attestation = ExitAttestation {
+            fact: fact.clone(),
+            signatures: vec![
+                SignerSig { operator_id: 0, signature: sign_exit(&sk0, &fact, TEST_CHAIN_ID) },
+                SignerSig { operator_id: 1, signature: sign_exit(&sk1, &fact, TEST_CHAIN_ID) },
+            ],
+        };
+        assert!(exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
+    }
+
+    #[test]
+    fn an_exit_quorum_for_a_sibling_chain_id_is_refused() {
+        let fact = sample_exit_fact(ExitOutcome::Slash);
+        let (pk0, sk0) = operator(50);
+        let (pk1, sk1) = operator(51);
+        let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 2);
+        let chain_a = TEST_CHAIN_ID;
+        let chain_b = TEST_CHAIN_ID ^ (1u64 << 40);
+        assert_eq!(chain_a as u32, chain_b as u32, "the two siblings share the low 32 bits");
+        let attestation = ExitAttestation {
+            fact: fact.clone(),
+            signatures: vec![
+                SignerSig { operator_id: 0, signature: sign_exit(&sk0, &fact, chain_a) },
+                SignerSig { operator_id: 1, signature: sign_exit(&sk1, &fact, chain_a) },
+            ],
+        };
+        assert!(exit_quorum_attests(&set, &attestation, fact.dest_chain, chain_a));
+        assert!(
+            !exit_quorum_attests(&set, &attestation, fact.dest_chain, chain_b),
+            "a sibling sharing the u32 dest chain refuses the exit replay"
+        );
+    }
+
+    #[test]
+    fn an_exit_quorum_bound_to_another_dest_chain_is_refused() {
+        let fact = sample_exit_fact(ExitOutcome::Settle);
+        let (pk0, sk0) = operator(50);
+        let (pk1, sk1) = operator(51);
+        let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 2);
+        let attestation = ExitAttestation {
+            fact: fact.clone(),
+            signatures: vec![
+                SignerSig { operator_id: 0, signature: sign_exit(&sk0, &fact, TEST_CHAIN_ID) },
+                SignerSig { operator_id: 1, signature: sign_exit(&sk1, &fact, TEST_CHAIN_ID) },
+            ],
+        };
+        assert!(
+            !exit_quorum_attests(&set, &attestation, fact.dest_chain + 1, TEST_CHAIN_ID),
+            "a fact bound for another dest chain does not ack here"
+        );
+    }
+
+    #[test]
+    fn a_prove_nothing_exit_attestation_is_refused() {
+        let (pk0, _sk0) = operator(50);
+        let (pk1, _sk1) = operator(51);
+        let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 2);
+        let empty = ExitFact {
+            version: EXIT_FACT_VERSION,
+            corridor: 0,
+            dest_chain: 0,
+            asset_id: [0u8; 16],
+            amount: 0,
+            beneficiary: [0u8; 32],
+            burn_ref: [0u8; 32],
+            outcome: ExitOutcome::Settle,
+        };
+        let attestation = ExitAttestation { fact: empty, signatures: vec![] };
+        assert!(
+            !exit_quorum_attests(&set, &attestation, 9000, TEST_CHAIN_ID),
+            "an empty prove nothing attestation never acks"
+        );
+        let zero_threshold = OperatorSet::new(vec![(0, pk0.to_vec())], 0);
+        assert!(
+            !exit_quorum_attests(&zero_threshold, &attestation, 9000, TEST_CHAIN_ID),
+            "a zero threshold set never acks"
+        );
+    }
+
+    #[test]
+    fn a_duplicated_exit_signer_index_counts_once() {
+        let fact = sample_exit_fact(ExitOutcome::Slash);
+        let (pk0, sk0) = operator(50);
+        let (pk1, _sk1) = operator(51);
+        let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 2);
+        let signature = sign_exit(&sk0, &fact, TEST_CHAIN_ID);
+        let attestation = ExitAttestation {
+            fact: fact.clone(),
+            signatures: vec![
+                SignerSig { operator_id: 0, signature: signature.clone() },
+                SignerSig { operator_id: 0, signature },
+            ],
+        };
+        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
+    }
+
+    #[test]
+    fn a_duplicate_exit_public_key_fills_only_one_slot() {
+        let fact = sample_exit_fact(ExitOutcome::Slash);
+        let (pk0, sk0) = operator(50);
+        let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk0.to_vec())], 2);
+        let signature = sign_exit(&sk0, &fact, TEST_CHAIN_ID);
+        let attestation = ExitAttestation {
+            fact: fact.clone(),
+            signatures: vec![
+                SignerSig { operator_id: 0, signature: signature.clone() },
+                SignerSig { operator_id: 1, signature },
+            ],
+        };
+        assert!(
+            !exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID),
+            "one public key under two ids fills only one slot"
+        );
+    }
+
+    #[test]
+    fn one_exit_signer_falls_short_of_a_two_threshold() {
+        let fact = sample_exit_fact(ExitOutcome::Slash);
+        let (pk0, sk0) = operator(50);
+        let (pk1, _sk1) = operator(51);
+        let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 2);
+        let attestation = ExitAttestation {
+            fact: fact.clone(),
+            signatures: vec![SignerSig { operator_id: 0, signature: sign_exit(&sk0, &fact, TEST_CHAIN_ID) }],
+        };
+        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
+    }
+
+    #[test]
+    fn a_stranger_key_never_acks_an_exit() {
+        let fact = sample_exit_fact(ExitOutcome::Slash);
+        let (pk0, _sk0) = operator(50);
+        let (pk1, _sk1) = operator(51);
+        let (_pkx, skx) = operator(99);
+        let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 1);
+        let attestation = ExitAttestation {
+            fact: fact.clone(),
+            signatures: vec![SignerSig { operator_id: 0, signature: sign_exit(&skx, &fact, TEST_CHAIN_ID) }],
+        };
+        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
+    }
+
+    #[test]
+    fn a_tampered_exit_fact_breaks_the_quorum() {
+        let fact = sample_exit_fact(ExitOutcome::Slash);
+        let (pk0, sk0) = operator(50);
+        let (pk1, sk1) = operator(51);
+        let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 2);
+        let signatures = vec![
+            SignerSig { operator_id: 0, signature: sign_exit(&sk0, &fact, TEST_CHAIN_ID) },
+            SignerSig { operator_id: 1, signature: sign_exit(&sk1, &fact, TEST_CHAIN_ID) },
+        ];
+        let mut tampered = fact.clone();
+        tampered.amount += 1;
+        let attestation = ExitAttestation { fact: tampered, signatures };
+        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
     }
 }
