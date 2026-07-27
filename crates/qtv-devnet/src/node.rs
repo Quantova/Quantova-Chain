@@ -17,11 +17,14 @@ use qtv_node::consensus::{
 use qtv_node::evidence::{Equivocation, EvidencePool};
 use qtv_node::watermark::SignGuard;
 use qtv_node::fee::FeeParams;
-use qtv_node::ledger::{account_key, evidence_address, registration_address, Account, BlockEvent, Ledger};
+use qtv_node::ledger::{
+    account_key, evidence_address, registration_address, Account, BlockEvent, Ledger,
+    EVENT_BRIDGE_BURN, NATIVE_EVENT_SOURCE,
+};
 use qtv_node::mempool::{Admitted, Mempool, Reject};
 use qtv_node::node::{day_of_height, execute_ordered, reweigh_roster, Genesis};
 use qtv_sampler::committee::PublishedReveal;
-use qtv_store::{BlockStore, StateStore};
+use qtv_store::{BlockStore, BurnArchive, BurnArchiveEntry, StateStore};
 use qtv_tx::{Body, Call, Wrapper};
 
 use crate::config::{DevnetConfig, NodeConfig};
@@ -204,6 +207,7 @@ pub struct DevNode {
     genesis_time: u64,
     block_store: BlockStore,
     state_store: StateStore,
+    burn_archive: BurnArchive,
     outbox: Vec<Wrapper>,
     staged: Option<Staged>,
     round_atts: Vec<Attestation>,
@@ -231,6 +235,7 @@ impl DevNode {
         std::fs::create_dir_all(&node.store_dir)?;
         let block_store = BlockStore::open(node.store_dir.join("blocks.log"))?;
         let state_store = StateStore::open(node.store_dir.join("state.log"))?;
+        let burn_archive = BurnArchive::open(node.store_dir.join("burns.log"))?;
         let sign_guard = SignGuard::open(node.store_dir.join("sign.watermark"))?;
 
         let roster: Vec<ValidatorRegistration> = devnet.roster();
@@ -259,6 +264,7 @@ impl DevNode {
             genesis_time: devnet.genesis_time,
             block_store,
             state_store,
+            burn_archive,
             outbox: Vec::new(),
             staged: None,
             round_atts: Vec::new(),
@@ -853,6 +859,7 @@ impl DevNode {
         let cert_slot = crate::wire::certificate_to_bytes(&certificate);
         let chain_block = ChainBlock::new(staged.header, cert_slot, staged.body);
         self.persist(&chain_block)?;
+        self.archive_burn_block(&chain_block);
 
         self.beacon = self
             .beacon
@@ -1295,6 +1302,36 @@ impl DevNode {
         Ok(())
     }
 
+    fn archive_burn_block(&mut self, block: &ChainBlock) {
+        let events = self.ledger.block_events();
+        let carries_burn = events
+            .iter()
+            .any(|event| event.selector == EVENT_BRIDGE_BURN && event.contract == NATIVE_EVENT_SOURCE);
+        if !carries_burn {
+            return;
+        }
+        let leaves: Vec<Vec<u8>> = events.iter().map(BlockEvent::encode).collect();
+        let entry = BurnArchiveEntry {
+            height: block.header().height(),
+            header_bytes: to_bytes(block.header()),
+            certificate: block.certificate().to_vec(),
+            events: leaves,
+        };
+        let _ = self.burn_archive.append(entry);
+    }
+
+    pub fn finalized_head(&self) -> Height {
+        self.block_store.head_height().unwrap_or(0)
+    }
+
+    pub fn burn_block(&self, height: Height) -> Option<&BurnArchiveEntry> {
+        self.burn_archive.entry(height)
+    }
+
+    pub fn burn_heights_after(&self, cursor: Height) -> Vec<Height> {
+        self.burn_archive.heights_after(cursor)
+    }
+
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -1495,6 +1532,7 @@ impl DevNode {
             self.events_by_height.insert(self.height, block_events);
         }
         self.persist(&block).map_err(|_| SyncError::Io)?;
+        self.archive_burn_block(&block);
         let leader = selection
             .members
             .iter()
