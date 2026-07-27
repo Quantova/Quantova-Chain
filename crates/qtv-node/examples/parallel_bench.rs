@@ -146,7 +146,7 @@ fn measure_full(base: &Ledger, block: &[Wrapper], fee: &FeeParams, threads: usiz
             let included = execute_ordered(&mut ledger, block, fee, 0);
             let elapsed = start.elapsed().as_secs_f64();
             black_box(&included);
-            sequential_root = Some(ledger.state_root());
+            sequential_root = Some(ledger.q_root());
             n / elapsed
         })
         .collect();
@@ -159,7 +159,7 @@ fn measure_full(base: &Ledger, block: &[Wrapper], fee: &FeeParams, threads: usiz
             let included = execute_parallel(&mut ledger, block, fee, threads, 0);
             let elapsed = start.elapsed().as_secs_f64();
             black_box(&included);
-            parallel_root = Some(ledger.state_root());
+            parallel_root = Some(ledger.q_root());
             n / elapsed
         })
         .collect();
@@ -265,7 +265,7 @@ fn main() {
         );
     }
     // Warm the base root so a clone starts with the cache the node would hold.
-    let _ = base.state_root();
+    let _ = base.q_root();
 
     let independent = build_block(&senders, 0, &fee, threads);
     let mixed = build_block(&senders, conflict_percent, &fee, threads);
@@ -339,7 +339,7 @@ fn main() {
         let mut probe = base.clone();
         let _ = execute_ordered(&mut probe, &independent, &fee, 0);
         let start = Instant::now();
-        black_box(probe.state_root());
+        black_box(probe.q_root());
         samples.push(start.elapsed().as_secs_f64());
     }
     println!(

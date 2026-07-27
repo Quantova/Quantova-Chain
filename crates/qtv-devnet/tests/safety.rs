@@ -69,9 +69,9 @@ fn no_two_nodes_finalize_different_blocks_at_a_height() {
     }
 
     // The state root agrees across nodes and no node was slashed.
-    let root = devnet.node(0).ledger().state_root();
+    let root = devnet.node(0).ledger().q_root();
     for i in 0..devnet.len() {
-        assert_eq!(devnet.node(i).ledger().state_root(), root, "node {i} state");
+        assert_eq!(devnet.node(i).ledger().q_root(), root, "node {i} state");
         assert!(
             devnet.node(i).slashed().is_empty(),
             "node {i} slashed a peer"

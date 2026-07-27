@@ -53,7 +53,7 @@ fn run(name: &str, fanout: usize) -> (Vec<Vec<u8>>, [u8; 32], usize) {
     }
     (
         chain,
-        devnet.node(0).ledger().state_root(),
+        devnet.node(0).ledger().q_root(),
         devnet.max_neighbor_count(),
     )
 }

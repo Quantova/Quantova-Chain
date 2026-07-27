@@ -43,9 +43,9 @@ fn nodes_reach_a_byte_identical_chain_at_each_height() {
 
     // Every node reached the same state, and every height carries the full
     // committee of attesters.
-    let root = devnet.node(0).ledger().state_root();
+    let root = devnet.node(0).ledger().q_root();
     for i in 0..devnet.len() {
-        assert_eq!(devnet.node(i).ledger().state_root(), root);
+        assert_eq!(devnet.node(i).ledger().q_root(), root);
         for finalized in devnet.node(i).chain() {
             assert_eq!(finalized.attesters, vec![1, 2, 3, 4]);
         }

@@ -79,10 +79,10 @@ fn a_devnet_of_keystore_backed_nodes_stands_up_and_finalizes() {
         assert_eq!(chain.len(), 1, "node {i} did not finalize");
         assert_eq!(chain[0].header().height(), 1);
     }
-    let root = devnet.node(0).ledger().state_root();
+    let root = devnet.node(0).ledger().q_root();
     for i in 1..devnet.len() {
         assert_eq!(
-            devnet.node(i).ledger().state_root(),
+            devnet.node(i).ledger().q_root(),
             root,
             "node {i} finalized a different state"
         );

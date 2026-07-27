@@ -341,7 +341,7 @@ impl DevNode {
         for (key, value) in self.ledger.take_dirty_entries() {
             self.state_store.put_account(key, value)?;
         }
-        self.state_store.commit(self.ledger.state_root())?;
+        self.state_store.commit(self.ledger.q_root())?;
         self.ledger.clear_dirty();
         self.refresh_committee();
         Ok(())
@@ -676,7 +676,7 @@ impl DevNode {
         let mut header = Header::new(
             height,
             self.parent_header_hash,
-            ledger.state_root(),
+            ledger.q_root(),
             transaction_root(&included),
             event_root(&event_leaves),
             *self.beacon.seed(),
@@ -737,7 +737,7 @@ impl DevNode {
         let included = execute_ordered(&mut ledger, body, &self.fee_params, day_of_height(header.height()));
         let event_leaves: Vec<Vec<u8>> = ledger.block_events().iter().map(BlockEvent::encode).collect();
         if included.len() != body.len()
-            || ledger.state_root() != *header.state_root()
+            || ledger.q_root() != *header.q_root()
             || transaction_root(&included) != *header.transaction_root()
             || event_root(&event_leaves) != *header.event_root()
         {
@@ -1298,7 +1298,7 @@ impl DevNode {
         for (key, value) in self.ledger.take_dirty_entries() {
             self.state_store.put_account(key, value)?;
         }
-        self.state_store.commit(self.ledger.state_root())?;
+        self.state_store.commit(self.ledger.q_root())?;
         Ok(())
     }
 
@@ -1524,7 +1524,7 @@ impl DevNode {
         let included = execute_ordered(&mut ledger, block.body(), &self.fee_params, day_of_height(header.height()));
         let event_leaves: Vec<Vec<u8>> = ledger.block_events().iter().map(BlockEvent::encode).collect();
         if included.len() != block.body().len()
-            || ledger.state_root() != *header.state_root()
+            || ledger.q_root() != *header.q_root()
             || transaction_root(&included) != *header.transaction_root()
             || event_root(&event_leaves) != *header.event_root()
         {

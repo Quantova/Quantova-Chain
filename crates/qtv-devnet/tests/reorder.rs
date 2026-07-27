@@ -55,9 +55,9 @@ fn honest_nodes_finalize_the_same_chain_under_reordering() {
     }
 
     // Every transaction was finalized, and the state agrees across nodes.
-    let root = devnet.node(0).ledger().state_root();
+    let root = devnet.node(0).ledger().q_root();
     for i in 0..devnet.len() {
-        assert_eq!(devnet.node(i).ledger().state_root(), root);
+        assert_eq!(devnet.node(i).ledger().q_root(), root);
         let finalized: Vec<String> = devnet
             .node(i)
             .chain()

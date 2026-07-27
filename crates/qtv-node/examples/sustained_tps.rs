@@ -118,7 +118,7 @@ fn main() {
             &Account::funded(SENDER_BALANCE, sender.scheme(), sender.public_key().to_vec()),
         );
     }
-    let _ = base.state_root();
+    let _ = base.q_root();
     let block = build_block(&senders, &fee, threads);
 
     // Trust the number only after the parallel executor is proven to match the sequential root.
@@ -128,8 +128,8 @@ fn main() {
         let mut b = base.clone();
         let _ = execute_parallel(&mut b, &block, &fee, threads, 0);
         assert_eq!(
-            a.state_root(),
-            b.state_root(),
+            a.q_root(),
+            b.q_root(),
             "the parallel executor must match the sequential state root before any number is trusted"
         );
     }

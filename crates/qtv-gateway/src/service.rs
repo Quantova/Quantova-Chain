@@ -316,7 +316,7 @@ fn node_info(ctx: &NodeContext, node: &DevNode) -> Json {
 
 fn head(node: &DevNode) -> Json {
     let head_height = node.height().saturating_sub(1);
-    let state_root = node.ledger().state_root_id();
+    let q_root = node.ledger().q_root_id();
     let block = if head_height >= qtv_bft::params::MIN_HEIGHT {
         Json::str(qtv_idfmt::render_block(&node.head_hash()).expect("a header hash is digest length"))
     } else {
@@ -325,7 +325,7 @@ fn head(node: &DevNode) -> Json {
     object(vec![
         ("height", Json::Int(head_height)),
         ("block", block),
-        ("state_root", Json::str(state_root)),
+        ("q_root", Json::str(q_root)),
     ])
 }
 
@@ -556,9 +556,9 @@ fn block(node: &DevNode, selector: BlockSelector) -> Result<Json, ClientError> {
             ),
         ),
         (
-            "state_root",
+            "q_root",
             Json::str(
-                qtv_idfmt::render_state(header.state_root())
+                qtv_idfmt::render_state(header.q_root())
                     .expect("a state root is digest length"),
             ),
         ),

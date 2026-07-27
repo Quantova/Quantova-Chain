@@ -82,9 +82,9 @@ fn a_split_finalizes_nothing_and_heals_to_one_branch() {
     );
 
     // The state agrees across nodes and no node was slashed.
-    let root = devnet.node(0).ledger().state_root();
+    let root = devnet.node(0).ledger().q_root();
     for i in 0..devnet.len() {
-        assert_eq!(devnet.node(i).ledger().state_root(), root, "node {i} state");
+        assert_eq!(devnet.node(i).ledger().q_root(), root, "node {i} state");
         assert!(
             devnet.node(i).slashed().is_empty(),
             "node {i} slashed a peer"

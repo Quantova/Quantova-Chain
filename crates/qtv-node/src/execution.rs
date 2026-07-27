@@ -84,14 +84,14 @@ pub fn execute_transfer(
         .run()
         .map_err(|fault| match fault {
             Fault::Overflow => ExecError::InsufficientFunds,
-            Fault::OutOfGas => ExecError::MeterExhausted,
+            Fault::OutOfMeter => ExecError::MeterExhausted,
             other => ExecError::Vm(other),
         })?;
 
     Ok(Transferred {
         sender_balance: outcome.storage.get(&sender_key).copied().unwrap_or(0),
         recipient_balance: outcome.storage.get(&recipient_key).copied().unwrap_or(0),
-        meter_used: outcome.gas_used,
+        meter_used: outcome.meter_used,
     })
 }
 
@@ -188,7 +188,7 @@ pub fn execute_contract_call(
     let container = decode_container(container_bytes).ok_or(ExecError::BadContainer)?;
     // Validate the selector exists, then dispatch every entry under its storage manifest, including the
     // first entry at code offset zero. Routing offset zero through Interpreter::new would leave the
-    // manifest unset and silently drop the declared slot enforcement, the dispatch gas, and the
+    // manifest unset and silently drop the declared slot enforcement, the dispatch meter, and the
     // instruction boundary jump checks for the first entry of every contract.
     container
         .entry_offset(&selector)
@@ -201,13 +201,13 @@ pub fn execute_contract_call(
         .run()
         .map_err(|fault| match fault {
             Fault::Overflow => ExecError::InsufficientFunds,
-            Fault::OutOfGas => ExecError::MeterExhausted,
+            Fault::OutOfMeter => ExecError::MeterExhausted,
             other => ExecError::Vm(other),
         })?;
     Ok(ContractOutcome {
         storage: outcome.storage,
         effects: outcome.effects,
-        meter_used: outcome.gas_used,
+        meter_used: outcome.meter_used,
     })
 }
 

@@ -126,8 +126,8 @@ fn a_block_of_valid_evidence_slashes_the_offender_identically_on_every_node() {
     assert!(node_two.is_validator_banned(&offender), "node two slashed the offender");
     assert_eq!(node_one.staked_weight(&offender), 0, "the offender's stake is slashed");
     assert_eq!(
-        node_one.state_root(),
-        node_two.state_root(),
+        node_one.q_root(),
+        node_two.q_root(),
         "both nodes reach the identical post slash state from the block alone"
     );
 }
@@ -229,8 +229,8 @@ fn an_evidence_and_registration_block_matches_across_the_parallel_and_ordered_pa
         "the parallel path degrades to ordered and applies the same slash"
     );
     assert_eq!(
-        ordered.state_root(),
-        parallel.state_root(),
+        ordered.q_root(),
+        parallel.q_root(),
         "an evidence and registration block degrades so both paths reach the identical state root"
     );
     assert_eq!(

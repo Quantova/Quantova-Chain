@@ -392,7 +392,7 @@ impl Driver {
 
     fn log_finalized(&self) {
         let height = self.node.height().saturating_sub(1);
-        let root = hex(&self.node.ledger().state_root());
+        let root = hex(&self.node.ledger().q_root());
         let (txs, id) = self
             .node
             .chain()
@@ -400,7 +400,7 @@ impl Driver {
             .map(|block| (block.block.body().len(), block.id()))
             .unwrap_or((0, String::new()));
         log(&format!(
-            "finalised height {height} txs {txs} state_root {root} block {id}"
+            "finalised height {height} txs {txs} q_root {root} block {id}"
         ));
     }
 }

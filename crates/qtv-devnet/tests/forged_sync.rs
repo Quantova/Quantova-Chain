@@ -56,7 +56,7 @@ fn a_forged_block_is_rejected_and_does_not_advance_the_node() {
         Header::new(
             header.height(),
             wrong_parent_hash,
-            *header.state_root(),
+            *header.q_root(),
             *header.transaction_root(),
             *header.event_root(),
             *header.beacon_seed(),

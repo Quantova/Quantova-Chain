@@ -36,7 +36,7 @@ fn run_view_change(name: &str, params: &FeeParams) -> (Vec<Vec<u8>>, [u8; 32]) {
 
     (
         encoded_chain(devnet.node(0)),
-        devnet.node(0).ledger().state_root(),
+        devnet.node(0).ledger().q_root(),
     )
 }
 
