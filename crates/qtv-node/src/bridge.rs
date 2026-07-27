@@ -1189,6 +1189,37 @@ mod tests {
     }
 
     #[test]
+    fn the_exit_fact_encoding_matches_the_pinned_cross_repo_layout() {
+        // The oracle's q-exits ExitDecision must encode to these exact bytes and offsets so a
+        // decision signed there verifies here. Any drift in either repo's layout is caught by
+        // this and the mirrored q-exits pinned vector rather than at a live settle.
+        let fact = ExitFact {
+            version: EXIT_FACT_VERSION,
+            corridor: 1,
+            dest_chain: 9000,
+            asset_id: [0x3; 16],
+            amount: 1_100_000,
+            beneficiary: [0x5; 32],
+            burn_ref: [0x9; 32],
+            outcome: ExitOutcome::Slash,
+        };
+        let bytes = fact.encode();
+        assert_eq!(bytes.len(), EXIT_FACT_ENCODED_LEN);
+        assert_eq!(bytes[0], EXIT_FACT_VERSION);
+        assert_eq!(&bytes[1..5], 1u32.to_le_bytes());
+        assert_eq!(&bytes[5..9], 9000u32.to_le_bytes());
+        assert_eq!(&bytes[9..25], [0x3u8; 16]);
+        assert_eq!(&bytes[25..41], 1_100_000u128.to_le_bytes());
+        assert_eq!(&bytes[41..73], [0x5u8; 32]);
+        assert_eq!(&bytes[73..105], [0x9u8; 32]);
+        assert_eq!(bytes[105], 2, "the slash outcome rides in the final byte");
+        let preimage = fact.ack_preimage(0x0123_4567_89AB_CDEF);
+        assert_eq!(preimage.len(), EXIT_ACK_DOMAIN.len() + EXIT_FACT_ENCODED_LEN + 8);
+        assert!(preimage.starts_with(EXIT_ACK_DOMAIN));
+        assert_eq!(&preimage[EXIT_ACK_DOMAIN.len() + EXIT_FACT_ENCODED_LEN..], 0x0123_4567_89AB_CDEFu64.to_le_bytes());
+    }
+
+    #[test]
     fn an_exit_attestation_round_trips_and_carries_the_outcome() {
         let fact = sample_exit_fact(ExitOutcome::Settle);
         let (_pk, sk) = operator(60);
