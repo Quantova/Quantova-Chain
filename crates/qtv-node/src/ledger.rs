@@ -206,6 +206,9 @@ const BRIDGE_ASSET_LIST_TAG: &[u8] = b"qtv/bridge/assetlist";
 const BRIDGE_DESTCHAIN_TAG: &[u8] = b"qtv/bridge/destchain";
 const BRIDGE_EPOCH_TAG: &[u8] = b"qtv/bridge/epoch";
 const BRIDGE_BURN_REF_DOMAIN: &[u8] = b"qtv/bridge/burn-ref/v1";
+const BRIDGE_EXIT_SEEN_TAG: &[u8] = b"qtv/bridge/exitseen/";
+const BRIDGE_EPOCHPAY_TAG: &[u8] = b"qtv/bridge/epochpay/";
+const BRIDGE_EPOCHPAYG_TAG: &[u8] = b"qtv/bridge/epochpayglobal/";
 
 fn bridge_asset_key(asset_id: &[u8; 16]) -> Key {
     let mut input = Vec::with_capacity(BRIDGE_ASSET_TAG.len() + asset_id.len());
@@ -241,6 +244,28 @@ fn bridge_epochmint_key(asset_id: &[u8; 16], epoch: u64) -> Key {
     let mut input = Vec::with_capacity(BRIDGE_EPOCHMINT_TAG.len() + asset_id.len() + 8);
     input.extend_from_slice(BRIDGE_EPOCHMINT_TAG);
     input.extend_from_slice(asset_id);
+    input.extend_from_slice(&epoch.to_le_bytes());
+    sha3::sha3_256(&input)
+}
+
+fn bridge_exit_seen_key(burn_ref: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(BRIDGE_EXIT_SEEN_TAG.len() + burn_ref.len());
+    input.extend_from_slice(BRIDGE_EXIT_SEEN_TAG);
+    input.extend_from_slice(burn_ref);
+    sha3::sha3_256(&input)
+}
+
+fn bridge_epochpay_key(asset_id: &[u8; 16], epoch: u64) -> Key {
+    let mut input = Vec::with_capacity(BRIDGE_EPOCHPAY_TAG.len() + asset_id.len() + 8);
+    input.extend_from_slice(BRIDGE_EPOCHPAY_TAG);
+    input.extend_from_slice(asset_id);
+    input.extend_from_slice(&epoch.to_le_bytes());
+    sha3::sha3_256(&input)
+}
+
+fn bridge_epochpay_global_key(epoch: u64) -> Key {
+    let mut input = Vec::with_capacity(BRIDGE_EPOCHPAYG_TAG.len() + 8);
+    input.extend_from_slice(BRIDGE_EPOCHPAYG_TAG);
     input.extend_from_slice(&epoch.to_le_bytes());
     sha3::sha3_256(&input)
 }
@@ -360,6 +385,7 @@ const BRIDGE_LAST_LIFT_TAG: &[u8] = b"qtv/bridge/lastlift";
 const BRIDGE_VAULT_TAG: &[u8] = b"qtv/bridge/vault";
 const BRIDGE_GATEWAY_TAG: &[u8] = b"qtv/bridge/gateway";
 const BRIDGE_EXITS_TAG: &[u8] = b"qtv/bridge/exits";
+const BRIDGE_PAYOUTCAP_TAG: &[u8] = b"qtv/bridge/payoutcap";
 
 fn is_reserved_pot(id: &[u8; 32]) -> bool {
     const POTS: &[&[u8]] = &[
@@ -463,6 +489,11 @@ pub fn bridge_mint_address() -> String {
 
 pub fn bridge_exit_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/exit/system"))
+        .expect("a full hash reaches the address floor")
+}
+
+pub fn bridge_settle_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/settle/system"))
         .expect("a full hash reaches the address floor")
 }
 
@@ -981,6 +1012,21 @@ impl Ledger {
         self.write_leaf(stake_singleton_key(BRIDGE_VAULT_TAG), vault.to_vec());
     }
 
+    pub fn seed_bridge_pool_vault(&mut self, vault: &[u8; 32]) -> (Key, Vec<u8>) {
+        self.set_bridge_pool_vault(vault);
+        (stake_singleton_key(BRIDGE_VAULT_TAG), vault.to_vec())
+    }
+
+    pub fn seed_bridge_vault_custody(
+        &mut self,
+        vault: &[u8; 32],
+        asset_id: &[u8; 16],
+        amount: u128,
+    ) -> (Key, Vec<u8>) {
+        self.set_bridge_vault_custody(vault, asset_id, amount);
+        (bridge_vault_custody_key(vault, asset_id), to_bytes(&amount))
+    }
+
     pub fn bridge_gateway(&self) -> Option<[u8; 32]> {
         self.trie
             .get(&stake_singleton_key(BRIDGE_GATEWAY_TAG))
@@ -1405,6 +1451,156 @@ impl Ledger {
             chain_id,
             sender_nonce,
         );
+        true
+    }
+
+    /// Whether an exit's burn_ref has already resolved. The burn_ref is the exit replay key: one
+    /// finalized burn resolves at most once, whether by settle or by slash, and never both.
+    pub fn bridge_exit_settled(&self, burn_ref: &[u8; 32]) -> bool {
+        matches!(self.trie.get(&bridge_exit_seen_key(burn_ref)), Some(bytes) if !bytes.is_empty())
+    }
+
+    fn mark_bridge_exit_settled(&mut self, burn_ref: &[u8; 32]) {
+        self.write_leaf(bridge_exit_seen_key(burn_ref), vec![1]);
+    }
+
+    pub fn bridge_epoch_paid(&self, asset_id: &[u8; 16], epoch: u64) -> u128 {
+        self.trie
+            .get(&bridge_epochpay_key(asset_id, epoch))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical epoch payout total"))
+            .unwrap_or(0)
+    }
+
+    fn set_bridge_epoch_paid(&mut self, asset_id: &[u8; 16], epoch: u64, amount: u128) {
+        self.write_leaf(bridge_epochpay_key(asset_id, epoch), to_bytes(&amount));
+    }
+
+    pub fn bridge_epoch_paid_global(&self, epoch: u64) -> u128 {
+        self.trie
+            .get(&bridge_epochpay_global_key(epoch))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical global epoch payout total"))
+            .unwrap_or(0)
+    }
+
+    fn set_bridge_epoch_paid_global(&mut self, epoch: u64, amount: u128) {
+        self.write_leaf(bridge_epochpay_global_key(epoch), to_bytes(&amount));
+    }
+
+    /// The global per epoch exit payout ceiling in base units. Zero is the unconfigured sentinel:
+    /// an oracle enabled bridge whose global payout cap governance has not yet set refuses every
+    /// slash payout, so a half configured bridge fails closed rather than paying out uncapped.
+    pub fn bridge_payout_cap(&self) -> u128 {
+        self.trie
+            .get(&stake_singleton_key(BRIDGE_PAYOUTCAP_TAG))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical payout cap"))
+            .unwrap_or(0)
+    }
+
+    fn set_bridge_payout_cap(&mut self, cap: u128) {
+        self.write_leaf(stake_singleton_key(BRIDGE_PAYOUTCAP_TAG), to_bytes(&cap));
+    }
+
+    pub fn seed_bridge_payout_cap(&mut self, cap: u128) -> (Key, Vec<u8>) {
+        self.set_bridge_payout_cap(cap);
+        (stake_singleton_key(BRIDGE_PAYOUTCAP_TAG), to_bytes(&cap))
+    }
+
+    /// Settle an exit against a verified oracle SETTLE attestation. The vault proved its foreign
+    /// payout inside the window, so the exit closes with no chain side move: the bridged tokens
+    /// were already burned and the vault custody already debited when the user's burn finalized.
+    /// The burn_ref is consumed so the settle cannot replay and no later slash can double pay.
+    /// Gated by the exits switch, refused while the bridge is frozen, and inert with no pool vault.
+    pub fn bridge_settle(&mut self, fact: &crate::bridge::ExitFact) -> bool {
+        if !self.bridge_exits_enabled() {
+            return false;
+        }
+        if self.bridge_is_frozen() {
+            return false;
+        }
+        if self.bridge_pool_vault().is_none() {
+            return false;
+        }
+        if fact.amount == 0 {
+            return false;
+        }
+        if self.bridge_exit_settled(&fact.burn_ref) {
+            return false;
+        }
+        self.mark_bridge_exit_settled(&fact.burn_ref);
+        self.record_bridge_settle_event(&fact.asset_id, &fact.beneficiary, fact.amount, &fact.burn_ref);
+        true
+    }
+
+    /// Slash an exit against a verified oracle SLASH decision. The redeem window elapsed with no
+    /// foreign payout proof, so the beneficiary is paid the attested amount from the governance
+    /// held pool vault's custody. Every guard is a hard on chain invariant in base units: the
+    /// per asset and global per epoch payout caps, the supply cap, and the pool custody must
+    /// cover the payout, all with no price feed in the path. The burn_ref is consumed before any
+    /// fund moves so a slash cannot replay and no later settle can double pay.
+    pub fn bridge_slash(&mut self, fact: &crate::bridge::ExitFact) -> bool {
+        if !self.bridge_exits_enabled() {
+            return false;
+        }
+        if self.bridge_is_frozen() {
+            return false;
+        }
+        let vault = match self.bridge_pool_vault() {
+            Some(vault) => vault,
+            None => return false,
+        };
+        if fact.amount == 0 {
+            return false;
+        }
+        let asset = match self.bridged_asset(&fact.asset_id) {
+            Some(asset) => asset,
+            None => return false,
+        };
+        if self.bridge_exit_settled(&fact.burn_ref) {
+            return false;
+        }
+        let epoch = self.bridge_epoch();
+        let new_asset_paid = match self.bridge_epoch_paid(&fact.asset_id, epoch).checked_add(fact.amount) {
+            Some(total) => total,
+            None => return false,
+        };
+        if new_asset_paid > asset.epoch_cap {
+            return false;
+        }
+        let new_global_paid = match self.bridge_epoch_paid_global(epoch).checked_add(fact.amount) {
+            Some(total) => total,
+            None => return false,
+        };
+        if new_global_paid > self.bridge_payout_cap() {
+            return false;
+        }
+        let new_supply = match asset.supply.checked_add(fact.amount) {
+            Some(supply) => supply,
+            None => return false,
+        };
+        if new_supply > asset.cap {
+            return false;
+        }
+        let credited = match self
+            .bridged_balance(&fact.asset_id, &fact.beneficiary)
+            .checked_add(fact.amount)
+        {
+            Some(credited) => credited,
+            None => return false,
+        };
+        let held = match self.bridge_vault_custody(&vault, &fact.asset_id).checked_sub(fact.amount) {
+            Some(held) => held,
+            None => return false,
+        };
+        self.mark_bridge_exit_settled(&fact.burn_ref);
+        self.set_bridge_vault_custody(&vault, &fact.asset_id, held);
+        self.set_bridged_balance(&fact.asset_id, &fact.beneficiary, credited);
+        self.set_bridged_asset(&fact.asset_id, &QAsset { supply: new_supply, ..asset });
+        self.set_bridge_epoch_paid(&fact.asset_id, epoch, new_asset_paid);
+        self.set_bridge_epoch_paid_global(epoch, new_global_paid);
+        self.record_bridge_slash_event(&fact.asset_id, &fact.beneficiary, fact.amount, &fact.burn_ref);
         true
     }
 
@@ -2200,6 +2396,10 @@ impl Ledger {
                     _ => return Err(EnactError::BadValue),
                 };
                 self.set_bridge_exits_enabled(enabled);
+                Ok(())
+            }
+            b"bridge_payout_cap" => {
+                self.set_bridge_payout_cap(u128_from_le(value).ok_or(EnactError::BadValue)?);
                 Ok(())
             }
             _ => Err(EnactError::UnknownParameter),
@@ -4199,6 +4399,11 @@ pub const EVENT_MINT: [u8; 4] = *b"QMNT";
 pub const EVENT_REWARD: [u8; 4] = *b"QRWD";
 pub const EVENT_BRIDGE_MINT: [u8; 4] = *b"QBMT";
 pub const EVENT_BRIDGE_BURN: [u8; 4] = *b"QBBN";
+/// An exit settled against a proven foreign payout, closing the exit with no chain side move.
+pub const EVENT_BRIDGE_SETTLE: [u8; 4] = *b"QBSE";
+/// An exit slashed after the redeem window elapsed with no proof, paying the beneficiary from the
+/// governance held pool custody.
+pub const EVENT_BRIDGE_SLASH: [u8; 4] = *b"QBSL";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockEvent {
@@ -4450,6 +4655,36 @@ impl Ledger {
         encoder.put_u64(event_index);
         encoder.put_bytes(&burn_ref);
         self.record_native_event(EVENT_BRIDGE_BURN, encoder.into_bytes());
+    }
+
+    fn record_bridge_settle_event(
+        &mut self,
+        asset_id: &[u8; 16],
+        beneficiary: &[u8; 32],
+        amount: u128,
+        burn_ref: &[u8; 32],
+    ) {
+        let mut encoder = Encoder::new();
+        encoder.put_bytes(asset_id);
+        encoder.put_bytes(beneficiary);
+        encoder.put_u128(amount);
+        encoder.put_bytes(burn_ref);
+        self.record_native_event(EVENT_BRIDGE_SETTLE, encoder.into_bytes());
+    }
+
+    fn record_bridge_slash_event(
+        &mut self,
+        asset_id: &[u8; 16],
+        beneficiary: &[u8; 32],
+        amount: u128,
+        burn_ref: &[u8; 32],
+    ) {
+        let mut encoder = Encoder::new();
+        encoder.put_bytes(asset_id);
+        encoder.put_bytes(beneficiary);
+        encoder.put_u128(amount);
+        encoder.put_bytes(burn_ref);
+        self.record_native_event(EVENT_BRIDGE_SLASH, encoder.into_bytes());
     }
 
     pub fn account(&self, address: &str) -> Account {

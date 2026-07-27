@@ -677,6 +677,70 @@ fn dispatch_bridge_mint(ledger: &mut Ledger, wrapper: &Wrapper, chain_id: u64) -
     ledger.bridge_mint(&fact)
 }
 
+pub(crate) fn is_bridge_settle(wrapper: &Wrapper) -> bool {
+    wrapper.body().call().target() == crate::ledger::bridge_settle_address()
+}
+
+/// Read the exit settlement fact from a settle transaction, verifying the oracle quorum exactly
+/// as the inbound mint does: the operator set and the dest chain come from authenticated on chain
+/// state, and [`crate::bridge::exit_quorum_attests`] enforces the threshold, the well formed gate,
+/// the chain id binding, and the distinct signer count. There is no sender signature or fee gate
+/// on the carrier, the same as the mint: the security is the operator attestation alone.
+fn bridge_settle_fact(ledger: &Ledger, wrapper: &Wrapper, chain_id: u64) -> Option<crate::bridge::ExitFact> {
+    let attestation = crate::bridge::ExitAttestation::decode(wrapper.body().call().args())?;
+    let dest_chain = ledger.bridge_dest_chain()?;
+    let operators = ledger.bridge_operator_set()?;
+    if !crate::bridge::exit_quorum_attests(&operators, &attestation, dest_chain, chain_id) {
+        return None;
+    }
+    Some(attestation.fact)
+}
+
+pub(crate) fn bridge_settle_burn_ref(wrapper: &Wrapper) -> Option<[u8; 32]> {
+    crate::bridge::ExitAttestation::decode(wrapper.body().call().args())
+        .map(|attestation| attestation.fact.burn_ref)
+}
+
+fn max_settle_artifact_bytes(ledger: &Ledger) -> usize {
+    let operators = ledger.bridge_operator_set().map(|s| s.operators.len()).unwrap_or(0);
+    let sig_frame = 4 + 2 + qtv_crypto::ml_dsa::SIGNATURE_BYTES;
+    2 + crate::bridge::EXIT_FACT_ENCODED_LEN + 4 + operators.saturating_mul(sig_frame)
+}
+
+pub(crate) fn bridge_settle_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_id: u64) -> bool {
+    if !ledger.bridge_exits_enabled() {
+        return false;
+    }
+    if ledger.bridge_is_frozen() {
+        return false;
+    }
+    if wrapper.body().call().args().len() > max_settle_artifact_bytes(ledger) {
+        return false;
+    }
+    let fact = match bridge_settle_fact(ledger, wrapper, chain_id) {
+        Some(fact) => fact,
+        None => return false,
+    };
+    !ledger.bridge_exit_settled(&fact.burn_ref)
+}
+
+fn dispatch_bridge_settle(ledger: &mut Ledger, wrapper: &Wrapper, chain_id: u64) -> bool {
+    if !ledger.bridge_exits_enabled() {
+        return false;
+    }
+    if ledger.bridge_is_frozen() {
+        return false;
+    }
+    let fact = match bridge_settle_fact(ledger, wrapper, chain_id) {
+        Some(fact) => fact,
+        None => return false,
+    };
+    match fact.outcome {
+        crate::bridge::ExitOutcome::Settle => ledger.bridge_settle(&fact),
+        crate::bridge::ExitOutcome::Slash => ledger.bridge_slash(&fact),
+    }
+}
+
 pub(crate) fn bridge_exit_admissible(
     ledger: &Ledger,
     wrapper: &Wrapper,
@@ -943,6 +1007,12 @@ fn execute_ordered_across(
         }
         if is_bridge_mint(wrapper) {
             if ledger.apply_atomic(|l| dispatch_bridge_mint(l, wrapper, fee_params.chain_id)) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
+        if is_bridge_settle(wrapper) {
+            if ledger.apply_atomic(|l| dispatch_bridge_settle(l, wrapper, fee_params.chain_id)) {
                 included.push(wrapper.clone());
             }
             continue;
@@ -4106,5 +4176,296 @@ mod tests {
             1_100_000,
             "the mint and exit both applied on the parallel path"
         );
+    }
+
+    // The outward exit settle and slash path. A finalized burn opens an exit off chain in the
+    // oracle vault; the oracle then returns a post quantum ML-DSA attestation the chain verifies
+    // exactly as the inbound mint, closing the exit on a proven foreign payout or paying the
+    // beneficiary the attested amount from the governance held pool when the window elapses.
+
+    const EXIT_VAULT: [u8; 32] = [0x5b; 32];
+    const EXIT_ASSET: [u8; 16] = [0x7c; 16];
+
+    fn exit_fact(
+        outcome: crate::bridge::ExitOutcome,
+        amount: u128,
+        beneficiary: [u8; 32],
+        burn_ref: [u8; 32],
+    ) -> crate::bridge::ExitFact {
+        crate::bridge::ExitFact {
+            version: crate::bridge::EXIT_FACT_VERSION,
+            corridor: 1,
+            dest_chain: BRIDGE_DEST,
+            asset_id: EXIT_ASSET,
+            amount,
+            beneficiary,
+            burn_ref,
+            outcome,
+        }
+    }
+
+    fn attest_exit(sk: &OperatorSecret, fact: &crate::bridge::ExitFact, chain_id: u64) -> Vec<u8> {
+        qtv_crypto::ml_dsa::sign(sk, &fact.ack_preimage(chain_id), crate::bridge::EXIT_ACK_DOMAIN, &[0u8; 32])
+            .expect("the exit preimage stays within the length bound")
+            .to_vec()
+    }
+
+    fn signed_exit(
+        fact: &crate::bridge::ExitFact,
+        sk0: &OperatorSecret,
+        sk1: &OperatorSecret,
+    ) -> crate::bridge::ExitAttestation {
+        crate::bridge::ExitAttestation {
+            fact: fact.clone(),
+            signatures: vec![
+                crate::bridge::SignerSig { operator_id: 0, signature: attest_exit(sk0, fact, BRIDGE_CHAIN_ID) },
+                crate::bridge::SignerSig { operator_id: 1, signature: attest_exit(sk1, fact, BRIDGE_CHAIN_ID) },
+            ],
+        }
+    }
+
+    fn settle_tx(relayer: &KeyAccount, attestation: &crate::bridge::ExitAttestation, fee: &FeeParams) -> Wrapper {
+        system_tx(relayer, &crate::ledger::bridge_settle_address(), attestation.encode(), 0, TRANSFER_METER, fee)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_exit_bridge(
+        ledger: &mut Ledger,
+        custody: u128,
+        cap: u128,
+        epoch_cap: u128,
+        payout_cap: u128,
+    ) -> (OperatorSecret, OperatorSecret) {
+        let (sk0, sk1) = seed_committee(ledger);
+        ledger.register_bridged_asset(&EXIT_ASSET, cap, epoch_cap, false);
+        ledger.seed_bridge_exits_enabled(true);
+        ledger.seed_bridge_pool_vault(&EXIT_VAULT);
+        ledger.seed_bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET, custody);
+        ledger.seed_bridge_payout_cap(payout_cap);
+        (sk0, sk1)
+    }
+
+    #[test]
+    fn a_verified_slash_pays_the_beneficiary_from_the_pool_custody() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_exit_bridge(&mut ledger, 1_000_000, 10_000_000, 1_000_000, 5_000_000);
+        let relayer = keypair(500);
+        let beneficiary = [0x55u8; 32];
+        let burn_ref = [0x11u8; 32];
+        let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, beneficiary, burn_ref);
+        let attestation = signed_exit(&fact, &sk0, &sk1);
+
+        let included = execute_ordered(&mut ledger, &[settle_tx(&relayer, &attestation, &fee)], &fee, 0);
+        assert_eq!(included.len(), 1, "the verified slash rides in the block");
+        assert_eq!(ledger.bridged_balance(&EXIT_ASSET, &beneficiary), 550_000, "the beneficiary is paid the attested amount");
+        assert_eq!(ledger.bridged_supply(&EXIT_ASSET), 550_000, "the payout re-materializes the refund under the cap");
+        assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 450_000, "the pool custody funds the payout");
+        assert_eq!(ledger.bridge_epoch_paid_global(0), 550_000, "the global epoch payout total advances");
+        assert!(ledger.bridge_exit_settled(&burn_ref), "the burn_ref is consumed against replay");
+    }
+
+    #[test]
+    fn a_verified_settle_closes_the_exit_without_moving_funds() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_exit_bridge(&mut ledger, 1_000_000, 10_000_000, 1_000_000, 5_000_000);
+        let relayer = keypair(500);
+        let beneficiary = [0x55u8; 32];
+        let burn_ref = [0x22u8; 32];
+        let fact = exit_fact(crate::bridge::ExitOutcome::Settle, 550_000, beneficiary, burn_ref);
+        let attestation = signed_exit(&fact, &sk0, &sk1);
+
+        let included = execute_ordered(&mut ledger, &[settle_tx(&relayer, &attestation, &fee)], &fee, 0);
+        assert_eq!(included.len(), 1, "the verified settle rides in the block");
+        assert_eq!(ledger.bridged_balance(&EXIT_ASSET, &beneficiary), 0, "a settle moves no funds on chain");
+        assert_eq!(ledger.bridged_supply(&EXIT_ASSET), 0, "a settle changes no supply");
+        assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 1_000_000, "a settle leaves the pool custody whole");
+        assert!(ledger.bridge_exit_settled(&burn_ref), "the settled burn_ref is consumed against replay");
+    }
+
+    #[test]
+    fn a_prove_nothing_settle_attestation_is_refused() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let _ = seed_exit_bridge(&mut ledger, 1_000_000, 10_000_000, 1_000_000, 5_000_000);
+        let relayer = keypair(500);
+        let empty = crate::bridge::ExitFact {
+            version: crate::bridge::EXIT_FACT_VERSION,
+            corridor: 0,
+            dest_chain: 0,
+            asset_id: [0u8; 16],
+            amount: 0,
+            beneficiary: [0u8; 32],
+            burn_ref: [0u8; 32],
+            outcome: crate::bridge::ExitOutcome::Slash,
+        };
+        let attestation = crate::bridge::ExitAttestation { fact: empty, signatures: vec![] };
+        let included = execute_ordered(&mut ledger, &[settle_tx(&relayer, &attestation, &fee)], &fee, 0);
+        assert_eq!(included.len(), 0, "an empty prove nothing attestation never settles");
+        assert_eq!(ledger.bridged_supply(&EXIT_ASSET), 0);
+    }
+
+    #[test]
+    fn a_duplicate_signer_slash_is_refused() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, _sk1) = seed_exit_bridge(&mut ledger, 1_000_000, 10_000_000, 1_000_000, 5_000_000);
+        let relayer = keypair(500);
+        let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, [0x55u8; 32], [0x33u8; 32]);
+        let attestation = crate::bridge::ExitAttestation {
+            fact: fact.clone(),
+            signatures: vec![
+                crate::bridge::SignerSig { operator_id: 0, signature: attest_exit(&sk0, &fact, BRIDGE_CHAIN_ID) },
+                crate::bridge::SignerSig { operator_id: 0, signature: attest_exit(&sk0, &fact, BRIDGE_CHAIN_ID) },
+            ],
+        };
+        let included = execute_ordered(&mut ledger, &[settle_tx(&relayer, &attestation, &fee)], &fee, 0);
+        assert_eq!(included.len(), 0, "one signer named twice never reaches a two quorum");
+        assert_eq!(ledger.bridged_balance(&EXIT_ASSET, &[0x55u8; 32]), 0);
+    }
+
+    #[test]
+    fn an_under_quorum_slash_is_refused() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, _sk1) = seed_exit_bridge(&mut ledger, 1_000_000, 10_000_000, 1_000_000, 5_000_000);
+        let relayer = keypair(500);
+        let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, [0x55u8; 32], [0x44u8; 32]);
+        let attestation = crate::bridge::ExitAttestation {
+            fact: fact.clone(),
+            signatures: vec![crate::bridge::SignerSig { operator_id: 0, signature: attest_exit(&sk0, &fact, BRIDGE_CHAIN_ID) }],
+        };
+        let included = execute_ordered(&mut ledger, &[settle_tx(&relayer, &attestation, &fee)], &fee, 0);
+        assert_eq!(included.len(), 0, "one signer falls short of the two quorum");
+    }
+
+    #[test]
+    fn a_settle_without_a_seeded_committee_is_refused() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        // Every trust root but the operator set: the settle cannot bind to a committee that is
+        // not in authenticated on chain state, so it fails closed.
+        ledger.register_bridged_asset(&EXIT_ASSET, 10_000_000, 1_000_000, false);
+        ledger.seed_bridge_exits_enabled(true);
+        ledger.seed_bridge_pool_vault(&EXIT_VAULT);
+        ledger.seed_bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET, 1_000_000);
+        ledger.seed_bridge_payout_cap(5_000_000);
+        ledger.seed_bridge_dest_chain(BRIDGE_DEST);
+        let (_pk0, sk0) = bridge_operator(1);
+        let (_pk1, sk1) = bridge_operator(2);
+        let relayer = keypair(500);
+        let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, [0x55u8; 32], [0x66u8; 32]);
+        let attestation = signed_exit(&fact, &sk0, &sk1);
+        let included = execute_ordered(&mut ledger, &[settle_tx(&relayer, &attestation, &fee)], &fee, 0);
+        assert_eq!(included.len(), 0, "a settle with no on chain operator set is refused");
+    }
+
+    #[test]
+    fn a_slash_signed_for_a_sibling_chain_id_is_refused() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_exit_bridge(&mut ledger, 1_000_000, 10_000_000, 1_000_000, 5_000_000);
+        let relayer = keypair(500);
+        let sibling = BRIDGE_CHAIN_ID ^ (1u64 << 40);
+        assert_eq!(sibling as u32, BRIDGE_CHAIN_ID as u32, "the sibling shares the low 32 bits");
+        let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, [0x55u8; 32], [0x77u8; 32]);
+        let attestation = crate::bridge::ExitAttestation {
+            fact: fact.clone(),
+            signatures: vec![
+                crate::bridge::SignerSig { operator_id: 0, signature: attest_exit(&sk0, &fact, sibling) },
+                crate::bridge::SignerSig { operator_id: 1, signature: attest_exit(&sk1, &fact, sibling) },
+            ],
+        };
+        let included = execute_ordered(&mut ledger, &[settle_tx(&relayer, &attestation, &fee)], &fee, 0);
+        assert_eq!(included.len(), 0, "a quorum signed for a sibling chain id does not settle here");
+    }
+
+    #[test]
+    fn a_replayed_slash_burn_ref_pays_at_most_once() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_exit_bridge(&mut ledger, 1_000_000, 10_000_000, 1_000_000, 5_000_000);
+        let relayer = keypair(500);
+        let beneficiary = [0x55u8; 32];
+        let burn_ref = [0x88u8; 32];
+        let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, beneficiary, burn_ref);
+        let attestation = signed_exit(&fact, &sk0, &sk1);
+
+        let first = execute_ordered(&mut ledger, &[settle_tx(&relayer, &attestation, &fee)], &fee, 0);
+        assert_eq!(first.len(), 1, "the first slash pays");
+        let second = execute_ordered(&mut ledger, &[settle_tx(&relayer, &attestation, &fee)], &fee, 0);
+        assert_eq!(second.len(), 0, "the replayed burn_ref pays nothing the second time");
+        assert_eq!(ledger.bridged_balance(&EXIT_ASSET, &beneficiary), 550_000, "the beneficiary is paid exactly once");
+        assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 450_000, "the pool custody is drawn exactly once");
+    }
+
+    #[test]
+    fn an_over_cap_slash_is_refused() {
+        let fee = FeeParams::devnet();
+        let relayer = keypair(500);
+        let beneficiary = [0x55u8; 32];
+
+        // Over the global per epoch payout cap.
+        let mut over_global = Ledger::new();
+        let (sk0, sk1) = seed_exit_bridge(&mut over_global, 1_000_000, 10_000_000, 1_000_000, 500_000);
+        let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, beneficiary, [0x91u8; 32]);
+        let att = signed_exit(&fact, &sk0, &sk1);
+        assert_eq!(execute_ordered(&mut over_global, &[settle_tx(&relayer, &att, &fee)], &fee, 0).len(), 0, "a payout over the global cap is refused");
+        assert_eq!(over_global.bridged_balance(&EXIT_ASSET, &beneficiary), 0, "the refused payout moves no funds");
+
+        // Over the per asset epoch payout cap.
+        let mut over_asset = Ledger::new();
+        let (sk0, sk1) = seed_exit_bridge(&mut over_asset, 1_000_000, 10_000_000, 500_000, 5_000_000);
+        let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, beneficiary, [0x92u8; 32]);
+        let att = signed_exit(&fact, &sk0, &sk1);
+        assert_eq!(execute_ordered(&mut over_asset, &[settle_tx(&relayer, &att, &fee)], &fee, 0).len(), 0, "a payout over the per asset epoch cap is refused");
+
+        // Over the pool custody the bridge actually holds.
+        let mut thin_pool = Ledger::new();
+        let (sk0, sk1) = seed_exit_bridge(&mut thin_pool, 100_000, 10_000_000, 1_000_000, 5_000_000);
+        let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, beneficiary, [0x93u8; 32]);
+        let att = signed_exit(&fact, &sk0, &sk1);
+        assert_eq!(execute_ordered(&mut thin_pool, &[settle_tx(&relayer, &att, &fee)], &fee, 0).len(), 0, "a payout above the pool custody fails closed");
+        assert_eq!(thin_pool.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 100_000, "the thin pool is untouched");
+    }
+
+    #[test]
+    fn a_frozen_bridge_blocks_settle_and_slash() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_exit_bridge(&mut ledger, 1_000_000, 10_000_000, 1_000_000, 5_000_000);
+        let relayer = keypair(500);
+        let freezer = keypair(501);
+        fund(&mut ledger, &freezer, 2_000_000 * 1_000_000);
+        let freeze = transfer(&freezer, &crate::ledger::bridge_freeze_address(), 0, 0, &fee);
+        execute_ordered(&mut ledger, &[freeze], &fee, 0);
+        assert!(ledger.bridge_is_frozen(), "the bridge is frozen");
+
+        let slash = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, [0x55u8; 32], [0xa1u8; 32]);
+        let settle = exit_fact(crate::bridge::ExitOutcome::Settle, 550_000, [0x55u8; 32], [0xa2u8; 32]);
+        let slash_att = signed_exit(&slash, &sk0, &sk1);
+        let settle_att = signed_exit(&settle, &sk0, &sk1);
+        assert_eq!(execute_ordered(&mut ledger, &[settle_tx(&relayer, &slash_att, &fee)], &fee, 0).len(), 0, "a frozen bridge blocks slash");
+        assert_eq!(execute_ordered(&mut ledger, &[settle_tx(&relayer, &settle_att, &fee)], &fee, 0).len(), 0, "a frozen bridge blocks settle");
+        assert!(!ledger.bridge_exit_settled(&[0xa1u8; 32]));
+        assert!(!ledger.bridge_exit_settled(&[0xa2u8; 32]));
+    }
+
+    #[test]
+    fn a_slash_is_refused_while_exits_are_disabled() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        // Seed every trust root but leave the exits switch at its default off.
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        ledger.register_bridged_asset(&EXIT_ASSET, 10_000_000, 1_000_000, false);
+        ledger.seed_bridge_pool_vault(&EXIT_VAULT);
+        ledger.seed_bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET, 1_000_000);
+        ledger.seed_bridge_payout_cap(5_000_000);
+        assert!(!ledger.bridge_exits_enabled(), "the exits switch defaults off");
+        let relayer = keypair(500);
+        let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, [0x55u8; 32], [0xb1u8; 32]);
+        let att = signed_exit(&fact, &sk0, &sk1);
+        assert_eq!(execute_ordered(&mut ledger, &[settle_tx(&relayer, &att, &fee)], &fee, 0).len(), 0, "the default gate off build settles nothing");
     }
 }

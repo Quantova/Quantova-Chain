@@ -211,6 +211,7 @@ pub const DEFAULT_FEELESS_ADMITS_PER_WINDOW: usize = 128;
 
 fn is_feeless(wrapper: &Wrapper) -> bool {
     crate::node::is_bridge_mint(wrapper)
+        || crate::node::is_bridge_settle(wrapper)
         || crate::node::is_evidence(wrapper)
         || crate::node::is_bridge_guardian(wrapper)
 }
@@ -277,6 +278,17 @@ impl Mempool {
         self.pending.iter().any(|w| {
             crate::node::is_bridge_mint(w)
                 && crate::node::bridge_mint_source_ref(w) == Some(source_ref)
+        })
+    }
+
+    fn duplicate_settle(&self, incoming: &Wrapper) -> bool {
+        let burn_ref = match crate::node::bridge_settle_burn_ref(incoming) {
+            Some(burn_ref) => burn_ref,
+            None => return false,
+        };
+        self.pending.iter().any(|w| {
+            crate::node::is_bridge_settle(w)
+                && crate::node::bridge_settle_burn_ref(w) == Some(burn_ref)
         })
     }
 
@@ -380,6 +392,16 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         }
+        if crate::node::is_bridge_settle(&wrapper) {
+            if self.duplicate_settle(&wrapper) {
+                return Ok(Admitted::Known);
+            }
+            let fresh = crate::node::bridge_settle_burn_ref(&wrapper)
+                .is_some_and(|burn_ref| !ledger.bridge_exit_settled(&burn_ref));
+            if !fresh {
+                return Err(Reject::BadCall);
+            }
+        }
         if is_feeless(&wrapper) {
             if !self.has_capacity(&wrapper) {
                 return Err(Reject::PoolFull);
@@ -420,6 +442,10 @@ impl Mempool {
             }
         } else if crate::node::is_bridge_mint(&wrapper) {
             if !crate::node::bridge_mint_admissible(ledger, &wrapper, fee_params.chain_id) {
+                return Err(Reject::BadCall);
+            }
+        } else if crate::node::is_bridge_settle(&wrapper) {
+            if !crate::node::bridge_settle_admissible(ledger, &wrapper, fee_params.chain_id) {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_bridge_exit(&wrapper) {
@@ -477,6 +503,16 @@ impl Mempool {
                     continue;
                 }
             }
+            if crate::node::is_bridge_settle(&wrapper) {
+                if self.duplicate_settle(&wrapper) {
+                    continue;
+                }
+                let fresh = crate::node::bridge_settle_burn_ref(&wrapper)
+                    .is_some_and(|burn_ref| !ledger.bridge_exit_settled(&burn_ref));
+                if !fresh {
+                    continue;
+                }
+            }
             if is_feeless(&wrapper) {
                 if !self.has_capacity(&wrapper) {
                     continue;
@@ -505,6 +541,8 @@ impl Mempool {
                 crate::node::guardian_admissible(ledger, &wrapper, fee_params.chain_id)
             } else if crate::node::is_bridge_mint(&wrapper) {
                 crate::node::bridge_mint_admissible(ledger, &wrapper, fee_params.chain_id)
+            } else if crate::node::is_bridge_settle(&wrapper) {
+                crate::node::bridge_settle_admissible(ledger, &wrapper, fee_params.chain_id)
             } else if crate::node::is_bridge_exit(&wrapper) {
                 let account = ledger.account(wrapper.body().sender());
                 crate::node::bridge_exit_admissible(ledger, &wrapper, &account, fee_params, verified[index])
