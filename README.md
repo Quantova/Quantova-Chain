@@ -1,8 +1,6 @@
 # Quantova-Chain
 
-Quantova is a sovereign post quantum Layer 1, built from scratch, sharing no code, no wire format, and no trust assumption with any other chain. It is post quantum end to end, not a classical chain with a post quantum signature bolted on. Every layer is its own, and every layer stands on NIST standardized schemes with no classical escape hatch anywhere.
-
-Quantova-Chain is the node and the ledger. It is the integration repository where the cryptography, the virtual machine, and the consensus come together into a running chain. It carries the identifier format, the canonical codec, the account model, the transaction and block and state formats, the post quantum network layer, the mempool, execution, the fee and staking and governance logic, persistence, the RPC gateway, and the `quantovad` daemon.
+Quantova-Chain is the node and ledger of Quantova, a sovereign post quantum Layer 1 built from scratch with no classical escape hatch anywhere. It is the integration repository where the cryptography, the virtual machine, and the consensus come together into a running chain. It carries the identifier format, the canonical codec, the account model, the transaction and block and state formats, the post quantum network layer, the mempool, execution, the fee and staking and governance logic, persistence, the RPC gateway, and the `quantovad` daemon.
 
 ## What it is
 
