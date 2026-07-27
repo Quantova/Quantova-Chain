@@ -676,13 +676,7 @@ fn verify_exit_signature(
     ml_dsa::verify(pk, message, sig, EXIT_ACK_DOMAIN)
 }
 
-/// Verify an oracle exit settlement attestation exactly as [`quorum_attests`] verifies an inbound
-/// mint, and no weaker. The empty prove nothing attestation is refused at the threshold and the
-/// well formed gate, the fact is bound to this chain's u32 dest chain and folded u64 chain id
-/// through the signed preimage, every signature result is checked explicitly, and only distinct
-/// signers holding distinct registered keys count toward the quorum with no off by one and no
-/// duplicate double count. The operator set is the same registered oracle set the inbound mint
-/// already trusts, read from authenticated on chain state by the caller.
+// verifies the exit attestation exactly as quorum_attests verifies a mint, no weaker
 pub fn exit_quorum_attests(
     set: &OperatorSet,
     attestation: &ExitAttestation,
@@ -1190,9 +1184,7 @@ mod tests {
 
     #[test]
     fn the_exit_fact_encoding_matches_the_pinned_cross_repo_layout() {
-        // The oracle's q-exits ExitDecision must encode to these exact bytes and offsets so a
-        // decision signed there verifies here. Any drift in either repo's layout is caught by
-        // this and the mirrored q-exits pinned vector rather than at a live settle.
+        // pins the wire layout the oracle's q-exits decision encoder must match
         let fact = ExitFact {
             version: EXIT_FACT_VERSION,
             corridor: 1,
