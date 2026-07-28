@@ -1,22 +1,11 @@
 # Copyright 2026 Quantova Inc
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 
-#
-#
-
 [graph]
 all-features = true
 
 [bans]
-# Duplicate versions of a crate are drift and a hard failure here, never a
-# warning. The single crypto crate is the one this guards. It must resolve to
-# exactly one version across the whole graph, so a split crypto graph cannot land
-# quietly. The stack carries no third party registry crates, so the only way a
-# duplicate arises is a pin left behind at an old tag.
 multiple-versions = "deny"
-# The stack has no third party registry crates, only the standard library and our
-# own crates pinned by git tag and path, which carry no registry version. The
-# wildcard check has nothing to guard here and only false flags our own pins.
 wildcards = "allow"
 deny = [
     "k256",
@@ -53,7 +42,5 @@ confidence-threshold = 0.9
 unknown-registry = "deny"
 unknown-git = "deny"
 
-# The stack pins its own crates from the Quantova organization by git tag. Any
-# other git source stays denied.
 [sources.allow-org]
 github = ["Quantova"]
