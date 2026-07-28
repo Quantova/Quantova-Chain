@@ -74,9 +74,8 @@ const STAKE_POOL_TAG: &[u8] = b"qtv/stake/pool";
 const STAKE_TREASURY_TAG: &[u8] = b"qtv/stake/treasury";
 const SUPPLY_TAG: &[u8] = b"qtv/supply";
 
-// Genesis fee split per the v0.4 tokenomics, 20 percent burned so supply falls with real use, 60
-pub const FEE_BURN_BPS: u64 = 2_000;
-pub const FEE_PROPOSER_BPS: u64 = 6_000;
+pub const FEE_BURN_BPS: u64 = 7_000;
+pub const FEE_PROPOSER_BPS: u64 = 1_000;
 pub const FEE_GRANTS_BPS: u64 = 2_000;
 const _: () = assert!(FEE_BURN_BPS + FEE_PROPOSER_BPS + FEE_GRANTS_BPS == 10_000);
 
@@ -5033,25 +5032,25 @@ mod tests {
     }
 
     #[test]
-    fn a_fee_split_is_twenty_sixty_twenty_with_dust_to_grants() {
+    fn a_fee_split_is_seventy_ten_twenty_with_dust_to_grants() {
         let split = FeeSplit::of(1_000);
-        assert_eq!(split.burn, 200, "a fifth of the fee burns");
-        assert_eq!(split.proposer, 600, "three fifths to the validators");
+        assert_eq!(split.burn, 700, "seven tenths of the fee burns");
+        assert_eq!(split.proposer, 100, "a tenth to the round proposer");
         assert_eq!(split.grants, 200, "a fifth to grants");
         assert_eq!(split.total(), 1_000, "the shares sum to the fee");
 
         let odd = FeeSplit::of(7);
         assert_eq!(
             (odd.burn, odd.proposer),
-            (1, 4),
+            (4, 0),
             "the burn and proposer shares floor"
         );
-        assert_eq!(odd.grants, 2, "the rounding dust lands in the grants share");
+        assert_eq!(odd.grants, 3, "the rounding dust lands in the grants share");
         assert_eq!(odd.total(), 7, "the split conserves the fee to the unit");
     }
 
     #[test]
-    fn a_fee_burns_twenty_percent_of_the_supply_and_a_mint_raises_it() {
+    fn a_fee_burns_seventy_percent_of_the_supply_and_a_mint_raises_it() {
         let mut ledger = Ledger::new();
         ledger.seed_supply(1_000_000);
         assert_eq!(ledger.total_supply(), 1_000_000, "genesis fixes the supply");
@@ -5059,14 +5058,14 @@ mod tests {
         ledger.collect_fee(1_000);
         assert_eq!(
             ledger.total_supply(),
-            1_000_000 - 200,
-            "a fee burns a fifth and lowers the supply by that much"
+            1_000_000 - 700,
+            "a fee burns seven tenths and lowers the supply by that much"
         );
 
         ledger.credit_supply(500);
         assert_eq!(
             ledger.total_supply(),
-            1_000_000 - 200 + 500,
+            1_000_000 - 700 + 500,
             "a mint raises the supply"
         );
     }
