@@ -2099,14 +2099,10 @@ impl Ledger {
     }
 
     pub(crate) fn is_protected_account(&self, addr: &[u8]) -> bool {
-        let id = match id_from_slice(addr) {
-            Some(id) => id,
-            None => return false,
-        };
-        if self.stake_bond(&id).is_some() || self.gov_lock(&id).is_some() {
-            return true;
+        match id_from_slice(addr) {
+            Some(id) => is_reserved_pot(&id),
+            None => false,
         }
-        is_reserved_pot(&id)
     }
 
     pub fn gov_propose(
@@ -2194,7 +2190,7 @@ impl Ledger {
         if referendum.status != Status::Deciding {
             return Some(referendum.status);
         }
-        let electorate = self.total_staked() as u128;
+        let electorate = self.gov_total_locked();
         let status = referendum.resolve(now, electorate);
         if status == Status::Deciding {
             return Some(status);
@@ -2961,42 +2957,58 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn governance_freezes_a_named_account_and_shields_protected_stake_from_a_freeze() {
+    fn a_freeze_reaches_an_ordinary_or_bonded_account_but_never_a_reserved_pot() {
         let mut l = Ledger::new();
         l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        let bond_before = l.stake_bond(&[99u8; 32]).unwrap().amount;
         let proposer = gov_addr(40);
         fund(&mut l, &proposer, 400_000 * 1_000_000);
-        let target = gov_addr(41);
-        let id = l
-            .gov_propose(
-                &proposer,
-                qtv_governance::Track::BlacklistKill,
-                qtv_governance::Action::Freeze { targets: vec![[41u8; 32].to_vec()] },
-                0,
-            )
-            .unwrap();
+        let ordinary = gov_addr(41);
+        let bonded = gov_addr(99);
         let voter = gov_addr(42);
-        fund(&mut l, &voter, 10_000 * 1_000_000);
-        l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
-        assert!(!l.is_frozen(&target));
-        l.gov_enact(id, 2 * 86_400 + 1, TEST_CHAIN).unwrap();
-        assert!(l.is_frozen(&target));
+        fund(&mut l, &voter, 20_000 * 1_000_000);
 
-        let bonded = l
+        let hit = l
             .gov_propose(
                 &proposer,
                 qtv_governance::Track::BlacklistKill,
-                qtv_governance::Action::Freeze { targets: vec![[99u8; 32].to_vec()] },
+                qtv_governance::Action::Freeze {
+                    targets: vec![[41u8; 32].to_vec(), [99u8; 32].to_vec()],
+                },
                 0,
             )
             .unwrap();
-        l.gov_vote(&voter, bonded, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        l.gov_vote(&voter, hit, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        assert!(!l.is_frozen(&ordinary));
+        assert!(!l.is_frozen(&bonded));
+        l.gov_enact(hit, 2 * 86_400 + 1, TEST_CHAIN).unwrap();
+        assert!(l.is_frozen(&ordinary));
+        assert!(l.is_frozen(&bonded), "a bond is not a shield against a freeze");
         assert_eq!(
-            l.gov_enact(bonded, 2 * 86_400 + 1, TEST_CHAIN),
+            l.stake_bond(&[99u8; 32]).unwrap().amount,
+            bond_before,
+            "the freeze never confiscates the consensus bond"
+        );
+        assert_eq!(l.total_staked(), 10_000 * 1_000_000);
+
+        let pot = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BlacklistKill,
+                qtv_governance::Action::Freeze {
+                    targets: vec![sha3::sha3_256(STAKE_TREASURY_TAG).to_vec()],
+                },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, pot, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        assert_eq!(
+            l.gov_enact(pot, 2 * 86_400 + 1, TEST_CHAIN),
             Err(EnactError::Constitution(
                 qtv_governance::Violation::FreezeTouchesProtected
             ))
         );
+        assert!(!l.is_frozen(&stake_treasury_address()));
     }
 
     #[test]
@@ -3021,11 +3033,8 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn a_lone_voter_no_longer_passes_a_proposal_a_real_turnout_would_carry() {
+    fn a_lone_voter_cannot_carry_a_proposal_against_a_real_governance_electorate() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 1_000_000 * 1_000_000);
-        assert_eq!(l.total_staked(), 1_000_000 * 1_000_000);
-
         let action = || qtv_governance::Action::Parameter {
             key: b"price".to_vec(),
             value: 70_000_000u128.to_le_bytes().to_vec(),
@@ -3034,22 +3043,29 @@ mod stake_state_tests {
         fund(&mut l, &proposer, 5_000_000 * 1_000_000);
         let close = 14 * 86_400 + 1;
 
+        let whale = gov_addr(83);
+        fund(&mut l, &whale, 1_000_000 * 1_000_000);
+
         let lone = l
             .gov_propose(&proposer, qtv_governance::Track::ChainUpgrade, action(), 0)
             .unwrap();
+        assert!(l.gov_vote(&whale, lone, false, qtv_governance::Conviction::Liquid, 1_000_000 * 1_000_000, 0));
         let solo = gov_addr(81);
         fund(&mut l, &solo, 10_000 * 1_000_000);
         assert!(l.gov_vote(&solo, lone, true, qtv_governance::Conviction::Liquid, 2_000 * 1_000_000, 0));
-        let electorate = l.total_staked() as u128;
-        assert!(!l.gov_referendum(lone).unwrap().tally.approved(electorate));
+        assert!(!l
+            .gov_referendum(lone)
+            .unwrap()
+            .tally
+            .approved(l.gov_total_locked()));
         assert_eq!(l.gov_conclude(lone, close), Some(qtv_governance::Status::Rejected));
 
         let real = l
             .gov_propose(&proposer, qtv_governance::Track::ChainUpgrade, action(), 0)
             .unwrap();
         let backer = gov_addr(82);
-        fund(&mut l, &backer, 600_000 * 1_000_000);
-        assert!(l.gov_vote(&backer, real, true, qtv_governance::Conviction::Liquid, 500_000 * 1_000_000, 0));
+        fund(&mut l, &backer, 3_000_000 * 1_000_000);
+        assert!(l.gov_vote(&backer, real, true, qtv_governance::Conviction::Liquid, 2_000_000 * 1_000_000, 0));
         assert_eq!(l.gov_conclude(real, close), Some(qtv_governance::Status::Approved));
     }
 
@@ -3192,11 +3208,11 @@ mod stake_state_tests {
         );
 
         let recipient = gov_addr(52);
-        let pass = |l: &mut Ledger, action: qtv_governance::Action| {
+        let pass = |l: &mut Ledger, action: qtv_governance::Action, stake: u64| {
             let id = l
                 .gov_propose(&proposer, qtv_governance::Track::Mint, action, 0)
                 .unwrap();
-            l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+            l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, stake, 0);
             id
         };
 
@@ -3207,6 +3223,7 @@ mod stake_state_tests {
                 to: [52u8; 32].to_vec(),
                 amount: 12_000 * 1_000_000,
             },
+            5_000 * 1_000_000,
         );
         l.gov_enact(from_grants, 3 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert_eq!(l.balance(&recipient), 12_000 * 1_000_000);
@@ -3219,6 +3236,7 @@ mod stake_state_tests {
                 to: [52u8; 32].to_vec(),
                 amount: 5_000 * 1_000_000,
             },
+            5_000 * 1_000_000,
         );
         l.gov_enact(from_treasury, 3 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert_eq!(l.balance(&recipient), 17_000 * 1_000_000);
@@ -3233,22 +3251,25 @@ mod stake_state_tests {
                 to: [52u8; 32].to_vec(),
                 amount: 9_000 * 1_000_000,
             },
+            10_000 * 1_000_000,
         );
         assert_eq!(l.gov_enact(steal, 3 * 86_400 + 1, TEST_CHAIN), Err(EnactError::BadAddress));
         assert_eq!(l.balance(&user), 9_000 * 1_000_000);
     }
 
     #[test]
-    fn the_constitution_refuses_a_recovery_that_reaches_bonded_stake() {
+    fn a_recovery_reaches_a_thiefs_free_balance_but_never_its_bond() {
         let mut l = Ledger::new();
         let proposer = gov_addr(26);
         fund(&mut l, &proposer, 300_000 * 1_000_000);
-        let bonded = gov_addr(41);
-        l.seed_validator_bond(&bonded, 2_000 * 1_000_000);
+        let thief = gov_addr(41);
+        l.seed_validator_bond(&thief, 2_000 * 1_000_000);
+        fund(&mut l, &thief, 5_000 * 1_000_000);
+        let victim = gov_addr(40);
 
         let seizures = vec![qtv_governance::Seizure {
             from: [41u8; 32].to_vec(),
-            amount: 100,
+            amount: 5_000 * 1_000_000,
         }];
         let scope = sha3::sha3_256(&qtv_governance::Action::recovery_scope_preimage(
             &[40u8; 32],
@@ -3265,12 +3286,16 @@ mod stake_state_tests {
         let voter = gov_addr(27);
         fund(&mut l, &voter, 10_000 * 1_000_000);
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        l.gov_enact(id, 6 * 3_600 + 1, TEST_CHAIN).unwrap();
+
+        assert_eq!(l.balance(&thief), 0, "the thief's stolen free balance is recovered");
+        assert_eq!(l.balance(&victim), 5_000 * 1_000_000, "the victim is made whole");
         assert_eq!(
-            l.gov_enact(id, 6 * 3_600 + 1, TEST_CHAIN),
-            Err(EnactError::Constitution(
-                qtv_governance::Violation::RecoveryTouchesProtected
-            ))
+            l.stake_bond(&[41u8; 32]).unwrap().amount,
+            2_000 * 1_000_000,
+            "the recovery never confiscates the consensus bond"
         );
+        assert_eq!(l.total_staked(), 2_000 * 1_000_000);
     }
 
     #[test]
@@ -3867,7 +3892,7 @@ mod stake_state_tests {
                 10 * 86_400 + 4,
             )
             .unwrap();
-        l.gov_vote(&voter, revoke, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 10 * 86_400 + 4);
+        l.gov_vote(&voter, revoke, true, qtv_governance::Conviction::Liquid, 10_000 * 1_000_000, 10 * 86_400 + 4);
         l.gov_enact(revoke, 15 * 86_400 + 5, TEST_CHAIN).unwrap();
         assert!(
             l.bridge_operator_set().unwrap().is_revoked(1),
