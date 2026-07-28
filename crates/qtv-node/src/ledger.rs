@@ -385,6 +385,9 @@ const GOV_FREEZE_TAG: &[u8] = b"qtv/gov/freeze/";
 const GOV_FEATURE_TAG: &[u8] = b"qtv/gov/feature/";
 const GOV_GUARDIAN_TAG: &[u8] = b"qtv/gov/guardians";
 const GOV_GUARDIAN_EPOCH_TAG: &[u8] = b"qtv/gov/guardian/epoch";
+const GOV_GUARDIAN_FREEZE_UNTIL_TAG: &[u8] = b"qtv/gov/guardian/freeze/until";
+const GOV_GUARDIAN_FREEZE_TARGETS_TAG: &[u8] = b"qtv/gov/guardian/freeze/targets";
+const GUARDIAN_FREEZE_WINDOW_SECONDS: u64 = 7 * 86_400;
 const GOV_RECEIPT_TAG: &[u8] = b"qtv/gov/receipt/";
 
 const BRIDGE_FREEZE_TAG: &[u8] = b"qtv/bridge/freeze";
@@ -961,7 +964,7 @@ impl Ledger {
         self.write_leaf(stake_singleton_key(GOV_GUARDIAN_EPOCH_TAG), to_bytes(&epoch));
     }
 
-    pub fn guardian_freeze(&mut self, bound: u64, targets: &[[u8; 32]], approvers: &[[u8; 32]]) -> bool {
+    pub fn guardian_freeze(&mut self, bound: u64, targets: &[[u8; 32]], approvers: &[[u8; 32]], now: u64) -> bool {
         if targets.is_empty() || !self.guardian_set().authorizes(approvers) {
             return false;
         }
@@ -974,8 +977,53 @@ impl Ledger {
         for target in targets {
             self.set_frozen(target);
         }
+        let until = now.saturating_add(GUARDIAN_FREEZE_WINDOW_SECONDS);
+        self.write_leaf(stake_singleton_key(GOV_GUARDIAN_FREEZE_UNTIL_TAG), to_bytes(&until));
+        let mut packed = Vec::with_capacity(targets.len() * 32);
+        for target in targets {
+            packed.extend_from_slice(target);
+        }
+        self.write_leaf(stake_singleton_key(GOV_GUARDIAN_FREEZE_TARGETS_TAG), packed);
         self.set_guardian_freeze_epoch(bound.saturating_add(1));
         true
+    }
+
+    pub fn guardian_expire(&mut self, now: u64) {
+        let until: u64 = match self
+            .trie
+            .get(&stake_singleton_key(GOV_GUARDIAN_FREEZE_UNTIL_TAG))
+        {
+            Some(bytes) if !bytes.is_empty() => {
+                from_bytes(bytes).expect("state holds a canonical guardian freeze expiry")
+            }
+            _ => return,
+        };
+        if now < until {
+            return;
+        }
+        let ids: Vec<[u8; 32]> = match self
+            .trie
+            .get(&stake_singleton_key(GOV_GUARDIAN_FREEZE_TARGETS_TAG))
+        {
+            Some(packed) if !packed.is_empty() => packed
+                .chunks_exact(32)
+                .map(|chunk| {
+                    let mut id = [0u8; 32];
+                    id.copy_from_slice(chunk);
+                    id
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        for id in &ids {
+            self.clear_frozen(id);
+        }
+        self.clear_guardian_freeze_record();
+    }
+
+    fn clear_guardian_freeze_record(&mut self) {
+        self.write_leaf(stake_singleton_key(GOV_GUARDIAN_FREEZE_UNTIL_TAG), Vec::new());
+        self.write_leaf(stake_singleton_key(GOV_GUARDIAN_FREEZE_TARGETS_TAG), Vec::new());
     }
 
     pub fn bridge_freeze(&self) -> Option<BridgeFreeze> {
@@ -2260,6 +2308,7 @@ impl Ledger {
                 let mut account = self.account(&victim_addr);
                 account.balance = account.balance.saturating_add(recovered);
                 self.set_account(&victim_addr, &account);
+                self.clear_guardian_freeze_record();
                 Ok(())
             }
             Action::Freeze { targets } => {
@@ -3016,14 +3065,14 @@ mod stake_state_tests {
         let target_id = [60u8; 32];
         let target = qtv_idfmt::render_address(&target_id).unwrap();
 
-        assert!(!l.guardian_freeze(0, &[target_id], &[[201u8; 32]]));
+        assert!(!l.guardian_freeze(0, &[target_id], &[[201u8; 32]], 0));
         assert!(!l.is_frozen(&target));
 
-        assert!(l.guardian_freeze(0, &[target_id], &[[201u8; 32], [202u8; 32]]));
+        assert!(l.guardian_freeze(0, &[target_id], &[[201u8; 32], [202u8; 32]], 0));
         assert!(l.is_frozen(&target));
 
         let treasury_id = sha3::sha3_256(STAKE_TREASURY_TAG);
-        assert!(!l.guardian_freeze(1, &[treasury_id], &[[201u8; 32], [202u8; 32]]));
+        assert!(!l.guardian_freeze(1, &[treasury_id], &[[201u8; 32], [202u8; 32]], 0));
         assert!(!l.is_frozen(&stake_treasury_address()));
 
         let proposer = gov_addr(61);
@@ -3056,7 +3105,7 @@ mod stake_state_tests {
         let target = qtv_idfmt::render_address(&target_id).unwrap();
 
         assert_eq!(l.guardian_freeze_epoch(), 0);
-        assert!(l.guardian_freeze(0, &[target_id], &[[201u8; 32], [202u8; 32]]));
+        assert!(l.guardian_freeze(0, &[target_id], &[[201u8; 32], [202u8; 32]], 0));
         assert!(l.is_frozen(&target));
         assert_eq!(l.guardian_freeze_epoch(), 1, "the freeze consumes its epoch");
 
@@ -3077,17 +3126,51 @@ mod stake_state_tests {
         assert!(!l.is_frozen(&target), "a vote clears the account freeze");
 
         assert!(
-            !l.guardian_freeze(0, &[target_id], &[[201u8; 32], [202u8; 32]]),
+            !l.guardian_freeze(0, &[target_id], &[[201u8; 32], [202u8; 32]], 0),
             "the consumed act replayed at the old epoch is refused"
         );
         assert!(!l.is_frozen(&target), "the replayed act never re-freezes the account");
 
         assert!(
-            l.guardian_freeze(1, &[target_id], &[[201u8; 32], [202u8; 32]]),
+            l.guardian_freeze(1, &[target_id], &[[201u8; 32], [202u8; 32]], 0),
             "a fresh quorum signing the current epoch can still freeze"
         );
         assert!(l.is_frozen(&target));
         assert_eq!(l.guardian_freeze_epoch(), 2);
+    }
+
+    #[test]
+    fn a_guardian_freeze_lifts_itself_when_its_window_passes() {
+        let mut l = Ledger::new();
+        l.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![[201u8; 32], [202u8; 32], [203u8; 32]],
+            2,
+        ));
+        let target_id = [0x44u8; 32];
+        let target = qtv_idfmt::render_address(&target_id).unwrap();
+        let now = 1_000_000u64;
+        assert!(l.guardian_freeze(0, &[target_id], &[[201u8; 32], [202u8; 32]], now));
+        assert!(l.is_frozen(&target), "the caucus freeze takes effect");
+        l.guardian_expire(now + GUARDIAN_FREEZE_WINDOW_SECONDS - 1);
+        assert!(l.is_frozen(&target), "the freeze holds inside its window");
+        l.guardian_expire(now + GUARDIAN_FREEZE_WINDOW_SECONDS);
+        assert!(!l.is_frozen(&target), "the freeze lifts itself once the window passes with no confirming vote");
+    }
+
+    #[test]
+    fn a_confirmed_guardian_freeze_is_not_lifted_by_the_window_sweep() {
+        let mut l = Ledger::new();
+        l.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![[201u8; 32], [202u8; 32], [203u8; 32]],
+            2,
+        ));
+        let target_id = [0x45u8; 32];
+        let target = qtv_idfmt::render_address(&target_id).unwrap();
+        let now = 2_000_000u64;
+        assert!(l.guardian_freeze(0, &[target_id], &[[201u8; 32], [202u8; 32]], now));
+        l.clear_guardian_freeze_record();
+        l.guardian_expire(now + GUARDIAN_FREEZE_WINDOW_SECONDS + 1);
+        assert!(l.is_frozen(&target), "a confirmed freeze is not lifted by the window sweep");
     }
 
     #[test]
