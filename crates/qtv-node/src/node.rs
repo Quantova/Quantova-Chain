@@ -3302,7 +3302,7 @@ mod tests {
     }
 
     #[test]
-    fn the_mempool_gate_refuses_a_freeze_aimed_at_a_protected_account() {
+    fn the_mempool_gate_refuses_a_guardian_freeze_aimed_at_a_reserved_pot() {
         let fee = FeeParams::devnet();
         let chain = fee.chain_id;
         let mut ledger = Ledger::new();
@@ -3314,21 +3314,34 @@ mod tests {
             2,
         ));
 
-        let bonded = keypair(273);
-        ledger.seed_validator_bond(&bonded.address(), 5_000 * 1_000_000);
-        let protected_id = address_bytes(&bonded.address());
-
+        let pot_id = address_bytes(&crate::ledger::stake_treasury_address());
         let barred = system_tx(
             &relayer,
             &crate::ledger::bridge_guardian_address(),
-            guardian_act_bytes(GUARDIAN_FREEZE, 0, vec![protected_id], &[&g1, &g2], chain),
+            guardian_act_bytes(GUARDIAN_FREEZE, 0, vec![pot_id], &[&g1, &g2], chain),
             0,
             TRANSFER_METER,
             &fee,
         );
         assert!(
             !guardian_admissible(&ledger, &barred, chain),
-            "a freeze aimed at a protected account is refused at admission"
+            "a freeze aimed at a reserved pot is refused at admission"
+        );
+
+        let bonded = keypair(273);
+        ledger.seed_validator_bond(&bonded.address(), 5_000 * 1_000_000);
+        let bonded_id = address_bytes(&bonded.address());
+        let onto_bonded = system_tx(
+            &relayer,
+            &crate::ledger::bridge_guardian_address(),
+            guardian_act_bytes(GUARDIAN_FREEZE, 0, vec![bonded_id], &[&g1, &g2], chain),
+            0,
+            TRANSFER_METER,
+            &fee,
+        );
+        assert!(
+            guardian_admissible(&ledger, &onto_bonded, chain),
+            "a bonded validator carries no shield and is freezable"
         );
 
         let plain = system_tx(
