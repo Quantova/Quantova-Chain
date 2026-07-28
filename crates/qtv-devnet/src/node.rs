@@ -566,12 +566,11 @@ impl DevNode {
             self.consensus.rotate_to_epoch(head_epoch, roster);
             *self.selection_cache.borrow_mut() = None;
         }
-        let selection = self
-            .committee_for_certificate(head, &certificate)
+        self.committee_for_certificate(head, &certificate)
             .ok_or(RoundError::Decode)?;
         self.beacon = self
             .beacon
-            .advance_from_reveals(self.consensus.slot_for(head), &selection.reveals);
+            .advance(&certificate.digest(), head);
         self.height = head + 1;
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();
@@ -863,7 +862,7 @@ impl DevNode {
 
         self.beacon = self
             .beacon
-            .advance_from_reveals(self.slot(), &selection.reveals);
+            .advance(&certificate.digest(), self.height);
         self.parent_header_hash = chain_block.header_hash();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
         let finalised_height = self.height;
@@ -1548,7 +1547,7 @@ impl DevNode {
         let included_ids: Vec<String> = block.body().iter().map(Wrapper::id).collect();
         self.beacon = self
             .beacon
-            .advance_from_reveals(self.slot(), &selection.reveals);
+            .advance(&certificate.digest(), self.height);
         self.parent_header_hash = block.header_hash();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
         self.height += 1;
