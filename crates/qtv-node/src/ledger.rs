@@ -385,7 +385,6 @@ const GOV_FREEZE_TAG: &[u8] = b"qtv/gov/freeze/";
 const GOV_FEATURE_TAG: &[u8] = b"qtv/gov/feature/";
 const GOV_GUARDIAN_TAG: &[u8] = b"qtv/gov/guardians";
 const GOV_GUARDIAN_EPOCH_TAG: &[u8] = b"qtv/gov/guardian/epoch";
-const GOV_GUARDIAN_FREEZE_UNTIL_TAG: &[u8] = b"qtv/gov/guardian/freeze/until";
 const GOV_GUARDIAN_FREEZE_TARGETS_TAG: &[u8] = b"qtv/gov/guardian/freeze/targets";
 const GUARDIAN_FREEZE_WINDOW_SECONDS: u64 = 7 * 86_400;
 const GOV_RECEIPT_TAG: &[u8] = b"qtv/gov/receipt/";
@@ -974,56 +973,68 @@ impl Ledger {
         if targets.iter().any(|target| self.is_protected_account(target)) {
             return false;
         }
+        let until = now.saturating_add(GUARDIAN_FREEZE_WINDOW_SECONDS);
+        let mut entries = self.guardian_freeze_entries();
         for target in targets {
             self.set_frozen(target);
+            match entries.iter().position(|(id, _)| id == target) {
+                Some(i) => entries[i].1 = until,
+                None => entries.push((*target, until)),
+            }
         }
-        let until = now.saturating_add(GUARDIAN_FREEZE_WINDOW_SECONDS);
-        self.write_leaf(stake_singleton_key(GOV_GUARDIAN_FREEZE_UNTIL_TAG), to_bytes(&until));
-        let mut packed = Vec::with_capacity(targets.len() * 32);
-        for target in targets {
-            packed.extend_from_slice(target);
-        }
-        self.write_leaf(stake_singleton_key(GOV_GUARDIAN_FREEZE_TARGETS_TAG), packed);
+        self.write_guardian_freeze_entries(&entries);
         self.set_guardian_freeze_epoch(bound.saturating_add(1));
         true
     }
 
     pub fn guardian_expire(&mut self, now: u64) {
-        let until: u64 = match self
-            .trie
-            .get(&stake_singleton_key(GOV_GUARDIAN_FREEZE_UNTIL_TAG))
-        {
-            Some(bytes) if !bytes.is_empty() => {
-                from_bytes(bytes).expect("state holds a canonical guardian freeze expiry")
-            }
-            _ => return,
-        };
-        if now < until {
+        let entries = self.guardian_freeze_entries();
+        if entries.is_empty() {
             return;
         }
-        let ids: Vec<[u8; 32]> = match self
+        let mut survivors = Vec::with_capacity(entries.len());
+        for (id, until) in entries {
+            if now >= until {
+                self.clear_frozen(&id);
+            } else {
+                survivors.push((id, until));
+            }
+        }
+        self.write_guardian_freeze_entries(&survivors);
+    }
+
+    fn guardian_freeze_forget(&mut self, targets: &[[u8; 32]]) {
+        let mut entries = self.guardian_freeze_entries();
+        entries.retain(|(id, _)| !targets.contains(id));
+        self.write_guardian_freeze_entries(&entries);
+    }
+
+    fn guardian_freeze_entries(&self) -> Vec<([u8; 32], u64)> {
+        match self
             .trie
             .get(&stake_singleton_key(GOV_GUARDIAN_FREEZE_TARGETS_TAG))
         {
-            Some(packed) if !packed.is_empty() => packed
-                .chunks_exact(32)
+            Some(packed) if packed.len() >= 40 => packed
+                .chunks_exact(40)
                 .map(|chunk| {
                     let mut id = [0u8; 32];
-                    id.copy_from_slice(chunk);
-                    id
+                    id.copy_from_slice(&chunk[..32]);
+                    let mut u = [0u8; 8];
+                    u.copy_from_slice(&chunk[32..40]);
+                    (id, u64::from_le_bytes(u))
                 })
                 .collect(),
             _ => Vec::new(),
-        };
-        for id in &ids {
-            self.clear_frozen(id);
         }
-        self.clear_guardian_freeze_record();
     }
 
-    fn clear_guardian_freeze_record(&mut self) {
-        self.write_leaf(stake_singleton_key(GOV_GUARDIAN_FREEZE_UNTIL_TAG), Vec::new());
-        self.write_leaf(stake_singleton_key(GOV_GUARDIAN_FREEZE_TARGETS_TAG), Vec::new());
+    fn write_guardian_freeze_entries(&mut self, entries: &[([u8; 32], u64)]) {
+        let mut packed = Vec::with_capacity(entries.len() * 40);
+        for (id, until) in entries {
+            packed.extend_from_slice(id);
+            packed.extend_from_slice(&until.to_le_bytes());
+        }
+        self.write_leaf(stake_singleton_key(GOV_GUARDIAN_FREEZE_TARGETS_TAG), packed);
     }
 
     pub fn bridge_freeze(&self) -> Option<BridgeFreeze> {
@@ -2304,7 +2315,11 @@ impl Ledger {
                 let mut account = self.account(&victim_addr);
                 account.balance = account.balance.saturating_add(recovered);
                 self.set_account(&victim_addr, &account);
-                self.clear_guardian_freeze_record();
+                let handled: Vec<[u8; 32]> = seizures
+                    .iter()
+                    .filter_map(|seizure| <[u8; 32]>::try_from(seizure.from.as_slice()).ok())
+                    .collect();
+                self.guardian_freeze_forget(&handled);
                 Ok(())
             }
             Action::Freeze { targets } => {
@@ -3184,9 +3199,32 @@ mod stake_state_tests {
         let target = qtv_idfmt::render_address(&target_id).unwrap();
         let now = 2_000_000u64;
         assert!(l.guardian_freeze(0, &[target_id], &[[201u8; 32], [202u8; 32]], now));
-        l.clear_guardian_freeze_record();
+        l.guardian_freeze_forget(&[target_id]);
         l.guardian_expire(now + GUARDIAN_FREEZE_WINDOW_SECONDS + 1);
         assert!(l.is_frozen(&target), "a confirmed freeze is not lifted by the window sweep");
+    }
+
+    #[test]
+    fn two_concurrent_guardian_freezes_each_expire_on_their_own_window() {
+        let mut l = Ledger::new();
+        l.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![[201u8; 32], [202u8; 32], [203u8; 32]],
+            2,
+        ));
+        let a_id = [0x51u8; 32];
+        let b_id = [0x52u8; 32];
+        let a = qtv_idfmt::render_address(&a_id).unwrap();
+        let b = qtv_idfmt::render_address(&b_id).unwrap();
+        let t0 = 1_000_000u64;
+        assert!(l.guardian_freeze(0, &[a_id], &[[201u8; 32], [202u8; 32]], t0));
+        let t1 = t0 + 3 * 86_400;
+        assert!(l.guardian_freeze(1, &[b_id], &[[201u8; 32], [202u8; 32]], t1));
+        assert!(l.is_frozen(&a) && l.is_frozen(&b), "both freezes are live");
+        l.guardian_expire(t0 + GUARDIAN_FREEZE_WINDOW_SECONDS);
+        assert!(!l.is_frozen(&a), "the first freeze lifts on its own window");
+        assert!(l.is_frozen(&b), "the second freeze is untouched by the first expiring");
+        l.guardian_expire(t1 + GUARDIAN_FREEZE_WINDOW_SECONDS);
+        assert!(!l.is_frozen(&b), "the second freeze lifts on its own window");
     }
 
     #[test]
