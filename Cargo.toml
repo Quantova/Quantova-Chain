@@ -10,6 +10,12 @@ edition = "2021"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/Quantova/Quantova-Chain"
 
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+
 # The hash based verifiable random function in qtv-crypto is heavy without
 # optimization, and the node drives it once per validator per height. Optimize
 # the crypto dependency in dev and test builds so the node loop and its tests run
