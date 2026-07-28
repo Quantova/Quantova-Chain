@@ -594,7 +594,7 @@ fn dispatch_bridge_guardian(
     };
     let approvers = guardian_approvers(&set, &act, chain_id);
     match act.op {
-        GUARDIAN_FREEZE => ledger.guardian_freeze(act.bound, &act.targets, &approvers),
+        GUARDIAN_FREEZE => ledger.guardian_freeze(act.bound, &act.targets, &approvers, now),
         GUARDIAN_UNFREEZE => match ledger.bridge_freeze() {
             Some(freeze) if freeze.until == act.bound => {
                 ledger.guardian_bridge_unfreeze(&approvers, now)
@@ -948,6 +948,7 @@ fn execute_ordered_across(
     let bridge_unfreeze_address = crate::ledger::bridge_unfreeze_address();
     let now_seconds = day.saturating_mul(86_400);
     ledger.bridge_expire(now_seconds);
+    ledger.guardian_expire(now_seconds);
     let mut included = Vec::new();
     let mut vm_meter: u64 = 0;
     for (index, wrapper) in candidates.iter().enumerate() {
