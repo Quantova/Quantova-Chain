@@ -8,7 +8,7 @@ use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::json::{self, object, Json};
 use crate::service::build_request;
@@ -20,14 +20,26 @@ const MAX_HEAD: usize = 16 * 1024;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 
+// A total deadline for the whole request head and body, so a slow trickle cannot hold a connection open.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(20);
+
 const MAX_CONNECTIONS: usize = 512;
 
 const MAX_CONNECTIONS_PER_IP: usize = 32;
+
+// Sustained request rate per address and its burst; a token bucket caps the sustained rate.
+const RATE_REFILL_PER_SEC: f64 = 50.0;
+
+const RATE_BURST: f64 = 100.0;
+
+// Cap on the rate table so a spray from many addresses cannot grow it without bound.
+const RATE_TABLE_CAP: usize = 100_000;
 
 enum Admit {
     Ok,
     TotalFull,
     IpFull,
+    RateLimited,
 }
 
 // A global connection count bounds total load; a per address count keeps one
@@ -41,11 +53,52 @@ struct Limiter {
 struct LimiterInner {
     total: usize,
     per_ip: HashMap<IpAddr, usize>,
+    // Two generations of rate buckets; the live map rotates into rate_old at the cap, bounding total buckets.
+    rate: HashMap<IpAddr, Bucket>,
+    rate_old: HashMap<IpAddr, Bucket>,
+}
+
+// A token bucket for one address. It starts full, refills with elapsed time up
+// to the burst ceiling, and spends one token per request.
+struct Bucket {
+    tokens: f64,
+    last: Instant,
+}
+
+impl LimiterInner {
+    // Spend one token for this address at `now`, refilling first for the time
+    // since its last request. Returns false when the address is over its rate.
+    fn spend_rate_token(&mut self, ip: IpAddr, now: Instant) -> bool {
+        let mut bucket = match self.rate.remove(&ip) {
+            Some(bucket) => bucket,
+            None => self
+                .rate_old
+                .remove(&ip)
+                .unwrap_or(Bucket { tokens: RATE_BURST, last: now }),
+        };
+        let elapsed = now.saturating_duration_since(bucket.last).as_secs_f64();
+        bucket.last = now;
+        bucket.tokens = (bucket.tokens + elapsed * RATE_REFILL_PER_SEC).min(RATE_BURST);
+        let allowed = if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        };
+        if self.rate.len() >= RATE_TABLE_CAP {
+            self.rate_old = std::mem::take(&mut self.rate);
+        }
+        self.rate.insert(ip, bucket);
+        allowed
+    }
 }
 
 impl Limiter {
-    fn try_admit(&self, ip: IpAddr, total_cap: usize, per_ip_cap: usize) -> Admit {
+    fn try_admit(&self, ip: IpAddr, total_cap: usize, per_ip_cap: usize, now: Instant) -> Admit {
         let mut inner = self.inner.lock().expect("the gateway limiter lock is not poisoned");
+        if !inner.spend_rate_token(ip, now) {
+            return Admit::RateLimited;
+        }
         if inner.total >= total_cap {
             return Admit::TotalFull;
         }
@@ -70,7 +123,7 @@ impl Limiter {
     }
 }
 
-pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>) {
+pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>, allow: Vec<IpAddr>) {
     thread::spawn(move || {
         let limiter = Arc::new(Limiter::default());
         for stream in listener.incoming() {
@@ -79,7 +132,14 @@ pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>) {
                 .peer_addr()
                 .map(|addr| addr.ip())
                 .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-            match limiter.try_admit(ip, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP) {
+            // When an allowlist is configured, only its addresses may reach the RPC. A
+            // validator sets this to its own read nodes so the endpoint is not public.
+            if !allow.is_empty() && !allow.contains(&ip) {
+                stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
+                let _ = write_error(&mut stream, 403, "forbidden", "this address may not reach the rpc");
+                continue;
+            }
+            match limiter.try_admit(ip, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, Instant::now()) {
                 Admit::Ok => {}
                 Admit::TotalFull => {
                     stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
@@ -93,6 +153,16 @@ pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>) {
                         429,
                         "too_many",
                         "too many open connections from this address",
+                    );
+                    continue;
+                }
+                Admit::RateLimited => {
+                    stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
+                    let _ = write_error(
+                        &mut stream,
+                        429,
+                        "rate_limited",
+                        "too many requests from this address, slow down",
                     );
                     continue;
                 }
@@ -111,9 +181,10 @@ fn handle_connection(mut stream: TcpStream, requests: Sender<GatewayCall>) -> Io
     stream.set_read_timeout(Some(IO_TIMEOUT)).ok();
     stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
     let mut reader = BufReader::new(stream.try_clone()?);
+    let deadline = Instant::now() + REQUEST_DEADLINE;
 
     let mut head_budget = MAX_HEAD;
-    let request_line = match read_capped_line(&mut reader, &mut head_budget) {
+    let request_line = match read_capped_line(&mut reader, &mut head_budget, deadline) {
         Ok(Some(line)) => line,
         Ok(None) => return Ok(()),
         Err(_) => return write_error(&mut stream, 431, "head_too_large", "the request head is too large"),
@@ -124,7 +195,7 @@ fn handle_connection(mut stream: TcpStream, requests: Sender<GatewayCall>) -> Io
 
     let mut content_length = 0usize;
     loop {
-        let header = match read_capped_line(&mut reader, &mut head_budget) {
+        let header = match read_capped_line(&mut reader, &mut head_budget, deadline) {
             Ok(Some(header)) => header,
             Ok(None) => break,
             Err(_) => {
@@ -151,7 +222,20 @@ fn handle_connection(mut stream: TcpStream, requests: Sender<GatewayCall>) -> Io
     }
 
     let mut body = vec![0u8; content_length];
-    reader.read_exact(&mut body)?;
+    let mut filled = 0usize;
+    while filled < content_length {
+        if Instant::now() >= deadline {
+            return write_error(&mut stream, 408, "timeout", "the request body did not arrive in time");
+        }
+        match reader.read(&mut body[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) => return Err(e),
+        }
+    }
+    if filled < content_length {
+        return write_error(&mut stream, 400, "bad_request", "the request body was shorter than declared");
+    }
     let body_text = String::from_utf8_lossy(&body);
 
     let Some(method) = path.strip_prefix("/v1/") else {
@@ -192,10 +276,20 @@ fn handle_connection(mut stream: TcpStream, requests: Sender<GatewayCall>) -> Io
     }
 }
 
-fn read_capped_line<R: BufRead>(reader: &mut R, budget: &mut usize) -> IoResult<Option<String>> {
+fn read_capped_line<R: BufRead>(
+    reader: &mut R,
+    budget: &mut usize,
+    deadline: Instant,
+) -> IoResult<Option<String>> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
     loop {
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the request exceeded its deadline",
+            ));
+        }
         if reader.read(&mut byte)? == 0 {
             return Ok(if line.is_empty() {
                 None
@@ -258,8 +352,10 @@ fn reason(code: u16) -> &'static str {
         200 => "OK",
         204 => "No Content",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
         413 => "Payload Too Large",
         429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
@@ -281,16 +377,17 @@ mod tests {
     fn the_limiter_caps_connections_per_address_and_frees_them_on_release() {
         let limiter = Limiter::default();
         let peer = ip(7);
+        let t = Instant::now();
         for _ in 0..3 {
-            assert!(matches!(limiter.try_admit(peer, 100, 3), Admit::Ok));
+            assert!(matches!(limiter.try_admit(peer, 100, 3, t), Admit::Ok));
         }
         assert!(
-            matches!(limiter.try_admit(peer, 100, 3), Admit::IpFull),
+            matches!(limiter.try_admit(peer, 100, 3, t), Admit::IpFull),
             "the fourth connection from one address is refused"
         );
         limiter.release(peer);
         assert!(
-            matches!(limiter.try_admit(peer, 100, 3), Admit::Ok),
+            matches!(limiter.try_admit(peer, 100, 3, t), Admit::Ok),
             "a released slot is reusable"
         );
     }
@@ -298,14 +395,69 @@ mod tests {
     #[test]
     fn the_limiter_caps_the_total_across_addresses() {
         let limiter = Limiter::default();
-        assert!(matches!(limiter.try_admit(ip(1), 2, 10), Admit::Ok));
-        assert!(matches!(limiter.try_admit(ip(2), 2, 10), Admit::Ok));
+        let t = Instant::now();
+        assert!(matches!(limiter.try_admit(ip(1), 2, 10, t), Admit::Ok));
+        assert!(matches!(limiter.try_admit(ip(2), 2, 10, t), Admit::Ok));
         assert!(
-            matches!(limiter.try_admit(ip(3), 2, 10), Admit::TotalFull),
+            matches!(limiter.try_admit(ip(3), 2, 10, t), Admit::TotalFull),
             "the global cap holds even with per address room left"
         );
         limiter.release(ip(1));
-        assert!(matches!(limiter.try_admit(ip(3), 2, 10), Admit::Ok));
+        assert!(matches!(limiter.try_admit(ip(3), 2, 10, t), Admit::Ok));
+    }
+
+    #[test]
+    fn the_limiter_throttles_the_sustained_request_rate_per_address() {
+        let limiter = Limiter::default();
+        let peer = ip(9);
+        let t = Instant::now();
+        // At one instant an address may spend its whole burst and no more. The
+        // connection caps are held wide open so the rate is the only limit here.
+        let mut admitted = 0usize;
+        for _ in 0..(RATE_BURST as usize + 16) {
+            match limiter.try_admit(peer, 1_000_000, 1_000_000, t) {
+                Admit::Ok => {
+                    admitted += 1;
+                    limiter.release(peer);
+                }
+                Admit::RateLimited => {}
+                _ => panic!("the connection caps are wide open so counts are not the limit here"),
+            }
+        }
+        assert_eq!(admitted, RATE_BURST as usize, "the burst is the ceiling at one instant");
+        assert!(
+            matches!(limiter.try_admit(peer, 1_000_000, 1_000_000, t), Admit::RateLimited),
+            "an address over its rate is refused"
+        );
+        // A second later the bucket has refilled by the sustained rate.
+        let later = t + Duration::from_secs(1);
+        let mut refilled = 0usize;
+        for _ in 0..(RATE_REFILL_PER_SEC as usize + 8) {
+            if let Admit::Ok = limiter.try_admit(peer, 1_000_000, 1_000_000, later) {
+                refilled += 1;
+                limiter.release(peer);
+            }
+        }
+        assert_eq!(refilled, RATE_REFILL_PER_SEC as usize, "one second refills exactly the sustained rate");
+    }
+
+    #[test]
+    fn the_rate_table_stays_bounded_under_a_flood_of_distinct_addresses() {
+        let limiter = Limiter::default();
+        let t = Instant::now();
+        // Three caps' worth of distinct source addresses, as an IPv6 flood would present.
+        for i in 0..(RATE_TABLE_CAP as u32 * 3) {
+            let ip = IpAddr::V4(Ipv4Addr::from(i));
+            let _ = limiter.try_admit(ip, 1_000_000, 1_000_000, t);
+            limiter.release(ip);
+        }
+        let inner = limiter.inner.lock().expect("the gateway limiter lock is not poisoned");
+        assert!(inner.rate.len() <= RATE_TABLE_CAP, "the live generation is capped");
+        assert!(inner.rate_old.len() <= RATE_TABLE_CAP, "the old generation is capped");
+        assert!(
+            inner.rate.len() + inner.rate_old.len() <= 2 * RATE_TABLE_CAP,
+            "the whole rate table is bounded to twice the cap"
+        );
     }
 
     #[test]
@@ -314,7 +466,7 @@ mod tests {
         let spent = raw.len();
         let mut reader = Cursor::new(raw);
         let mut budget = MAX_HEAD;
-        let line = read_capped_line(&mut reader, &mut budget).unwrap().unwrap();
+        let line = read_capped_line(&mut reader, &mut budget, Instant::now() + Duration::from_secs(3600)).unwrap().unwrap();
         assert_eq!(line, "POST /v1/node_info HTTP/1.1\r");
         assert_eq!(budget, MAX_HEAD - spent, "every byte read draws down the budget");
     }
@@ -324,7 +476,7 @@ mod tests {
         let mut reader = Cursor::new(vec![b'a'; 100]);
         let mut budget = 16usize;
         assert!(
-            read_capped_line(&mut reader, &mut budget).is_err(),
+            read_capped_line(&mut reader, &mut budget, Instant::now() + Duration::from_secs(3600)).is_err(),
             "an endless line is refused once the budget is spent"
         );
     }
@@ -333,15 +485,26 @@ mod tests {
     fn a_capped_line_returns_none_at_end_of_stream() {
         let mut reader = Cursor::new(Vec::new());
         let mut budget = MAX_HEAD;
-        assert!(read_capped_line(&mut reader, &mut budget).unwrap().is_none());
+        assert!(read_capped_line(&mut reader, &mut budget, Instant::now() + Duration::from_secs(3600)).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_capped_line_refuses_a_read_past_its_deadline() {
+        let mut reader = Cursor::new(vec![b'a'; 100]);
+        let mut budget = MAX_HEAD;
+        let past = Instant::now() - Duration::from_secs(1);
+        assert!(
+            read_capped_line(&mut reader, &mut budget, past).is_err(),
+            "a read whose total deadline has passed is refused rather than held open"
+        );
     }
 
     #[test]
     fn the_head_budget_is_shared_across_the_lines() {
         let mut reader = Cursor::new(b"aaaaa\nbbbbb\n".to_vec());
         let mut budget = 8usize;
-        assert!(read_capped_line(&mut reader, &mut budget).unwrap().is_some());
-        assert!(read_capped_line(&mut reader, &mut budget).is_err());
+        assert!(read_capped_line(&mut reader, &mut budget, Instant::now() + Duration::from_secs(3600)).unwrap().is_some());
+        assert!(read_capped_line(&mut reader, &mut budget, Instant::now() + Duration::from_secs(3600)).is_err());
     }
 
     fn serve_stub() -> u16 {
@@ -353,7 +516,7 @@ mod tests {
                 let _ = call.reply.send(Ok(object(vec![("ok", Json::Bool(true))])));
             }
         });
-        serve(listener, tx);
+        serve(listener, tx, Vec::new());
         port
     }
 
@@ -401,5 +564,21 @@ mod tests {
         let port = serve_stub();
         let response = round_trip(port, "POST /v1/does_not_exist HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}");
         assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+    }
+
+    #[test]
+    fn an_address_outside_the_allowlist_is_refused_over_the_socket() {
+        use std::io::{Read, Write};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, _rx) = channel::<GatewayCall>();
+        // Allow only a documentation address, so loopback (the test client) is not on it.
+        serve(listener, tx, vec![IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))]);
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        // The server refuses and closes early, so tolerate a broken write and read the reply.
+        let _ = stream.write_all(b"POST /v1/node_info HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}");
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response);
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
     }
 }
