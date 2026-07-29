@@ -173,6 +173,53 @@ pub fn equivocation_offenders(
     flagged
 }
 
+/// Validators signed into two conflicting quorums of `tau` at one height, the cross view double finalise the equal view rule misses; a value below `tau` is not finalized so an honest lone re vote never flags.
+pub fn double_finalize_offenders(
+    chain_id: u64,
+    attestations: &[Attestation],
+    roster: &[ValidatorRegistration],
+    tau: u64,
+) -> Vec<u64> {
+    let mut quorums: Vec<(u64, [u8; 32], Vec<u64>)> = Vec::new();
+    for att in attestations {
+        let Some(registration) = roster.iter().find(|r| r.id == att.from) else {
+            continue;
+        };
+        if !att.signature_verifies(chain_id, &registration.attest_pk) {
+            continue;
+        }
+        match quorums
+            .iter_mut()
+            .find(|(height, value, _)| *height == att.height && *value == att.block.val)
+        {
+            Some(entry) => {
+                if !entry.2.contains(&att.from) {
+                    entry.2.push(att.from);
+                }
+            }
+            None => quorums.push((att.height, att.block.val, vec![att.from])),
+        }
+    }
+    let finalized: Vec<&(u64, [u8; 32], Vec<u64>)> = quorums
+        .iter()
+        .filter(|(_, _, signers)| signers.len() as u64 >= tau)
+        .collect();
+    let mut flagged: Vec<u64> = Vec::new();
+    for (index, first) in finalized.iter().enumerate() {
+        for second in &finalized[index + 1..] {
+            if first.0 == second.0 && first.1 != second.1 {
+                for id in &first.2 {
+                    if second.2.contains(id) && !flagged.contains(id) {
+                        flagged.push(*id);
+                    }
+                }
+            }
+        }
+    }
+    flagged.sort_unstable();
+    flagged
+}
+
 pub fn header_value(header_hash: &[u8; 32]) -> [u8; 32] {
     *header_hash
 }
@@ -727,6 +774,60 @@ mod tests {
         assert!(
             equivocation_offenders(CHAIN_ID, &[forged_a, forged_b], &roster).is_empty(),
             "a relabelled pair never slashes the named validator"
+        );
+    }
+
+    #[test]
+    fn a_cross_view_double_finalize_is_flagged_while_honest_and_forged_votes_are_not() {
+        let validators = secrets(&[true, true, true, true]);
+        let roster = roster_of(&validators, SLOTS);
+        let sim = Sim::new(&validators);
+        let beacon = genesis_beacon();
+
+        let value_a = block_for(1);
+        let value_b = Block::new(1, header_value(&[9u8; 32]), Parent::Genesis);
+
+        // A finalizes at view zero; 2, 3, 4 also sign a conflicting B quorum at view one.
+        let mut evidence: Vec<Attestation> = [1u64, 2, 3, 4]
+            .iter()
+            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, value_a, &beacon))
+            .collect();
+        for id in [2u64, 3, 4] {
+            evidence.push(sim.attesters[&id].attest(CHAIN_ID, 1, 1, 1, value_b, &beacon));
+        }
+        assert_eq!(
+            double_finalize_offenders(CHAIN_ID, &evidence, &roster, 3),
+            vec![2, 3, 4],
+            "a conflicting finalization vote in a different view is slashed"
+        );
+
+        // A re vote across a view change, and a higher view vote below a quorum, never flag.
+        let mut honest: Vec<Attestation> = [1u64, 2, 3, 4]
+            .iter()
+            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, value_a, &beacon))
+            .collect();
+        honest.push(sim.attesters[&2].attest(CHAIN_ID, 1, 1, 2, value_a, &beacon));
+        honest.push(sim.attesters[&3].attest(CHAIN_ID, 1, 1, 2, value_b, &beacon));
+        assert!(
+            double_finalize_offenders(CHAIN_ID, &honest, &roster, 3).is_empty(),
+            "a lone cross view re vote below a finalizing quorum is not a double finalize"
+        );
+
+        // A relabelled vote naming validator 1 in the B quorum never authenticates under 1's key.
+        let mut framed: Vec<Attestation> = [1u64, 2, 3, 4]
+            .iter()
+            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, value_a, &beacon))
+            .collect();
+        for id in [2u64, 3, 4] {
+            framed.push(sim.attesters[&id].attest(CHAIN_ID, 1, 1, 1, value_b, &beacon));
+        }
+        let mut forged = sim.attesters[&2].attest(CHAIN_ID, 1, 1, 1, value_b, &beacon);
+        forged.from = 1;
+        framed.push(forged);
+        assert_eq!(
+            double_finalize_offenders(CHAIN_ID, &framed, &roster, 3),
+            vec![2, 3, 4],
+            "a relabelled vote never puts an honest validator in a second quorum"
         );
     }
 
