@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 
+use std::collections::HashSet;
 use std::thread;
 
 use qtv_tx::Wrapper;
@@ -219,6 +220,8 @@ fn is_feeless(wrapper: &Wrapper) -> bool {
 #[derive(Debug, Clone)]
 pub struct Mempool {
     pending: Vec<Wrapper>,
+    // Ids currently in pending, kept in sync, so the duplicate check is O(1) not an O(n) rehash.
+    ids: HashSet<String>,
     cap: usize,
     per_sender: usize,
     reserve: usize,
@@ -244,12 +247,21 @@ impl Mempool {
     pub fn with_limits(cap: usize, per_sender: usize, reserve: usize) -> Self {
         Mempool {
             pending: Vec::new(),
+            ids: HashSet::new(),
             cap: cap.max(1),
             per_sender: per_sender.max(1),
             reserve: reserve.min(cap.saturating_sub(1)),
             feeless_cap: DEFAULT_FEELESS_ADMITS_PER_WINDOW,
             feeless_admits: 0,
         }
+    }
+
+    // Remove the pending entry at `index`, keeping the id set in sync. Used by the
+    // eviction paths, which are the only places a pending entry leaves by index.
+    fn remove_at(&mut self, index: usize) -> Wrapper {
+        let wrapper = self.pending.remove(index);
+        self.ids.remove(&wrapper.id());
+        wrapper
     }
 
     fn lowest_fee_normal(&self) -> Option<(usize, u128)> {
@@ -317,6 +329,11 @@ impl Mempool {
         true
     }
 
+    // Whether the feeless window has room, without spending it, to reject before the admissibility check.
+    fn feeless_has_room(&self) -> bool {
+        self.feeless_admits < self.feeless_cap
+    }
+
     fn make_room(&mut self, incoming: &Wrapper) -> Result<(), Reject> {
         let sender = incoming.body().sender();
         let sender_count = self
@@ -332,12 +349,12 @@ impl Mempool {
                 return Ok(());
             }
             if let Some((index, _)) = self.lowest_fee_normal() {
-                self.pending.remove(index);
+                self.remove_at(index);
                 return Ok(());
             }
             match self.lowest_fee_priority() {
                 Some((index, fee)) if fee < incoming.body().fee() => {
-                    self.pending.remove(index);
+                    self.remove_at(index);
                     Ok(())
                 }
                 _ => Err(Reject::PoolFull),
@@ -349,7 +366,7 @@ impl Mempool {
             }
             match self.lowest_fee_normal() {
                 Some((index, fee)) if fee < incoming.body().fee() => {
-                    self.pending.remove(index);
+                    self.remove_at(index);
                     Ok(())
                 }
                 _ => Err(Reject::PoolFull),
@@ -362,7 +379,7 @@ impl Mempool {
     }
 
     pub fn contains(&self, id: &str) -> bool {
-        self.pending.iter().any(|w| w.id() == id)
+        self.ids.contains(id)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -379,7 +396,7 @@ impl Mempool {
             return Err(Reject::WrongChain);
         }
         let id = wrapper.id();
-        if self.pending.iter().any(|w| w.id() == id) {
+        if self.ids.contains(&id) {
             return Ok(Admitted::Known);
         }
         if crate::node::is_bridge_mint(&wrapper) {
@@ -402,11 +419,12 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         }
+        // Gate a feeless call before the admissibility check; the window is charged only once it proves admissible.
         if is_feeless(&wrapper) {
             if !self.has_capacity(&wrapper) {
                 return Err(Reject::PoolFull);
             }
-            if !self.charge_feeless() {
+            if !self.feeless_has_room() {
                 return Err(Reject::RateLimited);
             }
         }
@@ -459,8 +477,13 @@ impl Mempool {
         } else {
             validate(&wrapper, ledger, fee_params)?;
         }
+        // Charge the feeless window only now the call is admissible, so a malformed call cannot spend it.
+        if is_feeless(&wrapper) && !self.charge_feeless() {
+            return Err(Reject::RateLimited);
+        }
         self.make_room(&wrapper)?;
         self.pending.push(wrapper);
+        self.ids.insert(id);
         Ok(Admitted::Fresh)
     }
 
@@ -490,7 +513,7 @@ impl Mempool {
                 continue;
             }
             let id = wrapper.id();
-            if self.pending.iter().any(|w| w.id() == id) {
+            if self.ids.contains(&id) {
                 continue;
             }
             if crate::node::is_bridge_mint(&wrapper) {
@@ -513,13 +536,9 @@ impl Mempool {
                     continue;
                 }
             }
-            if is_feeless(&wrapper) {
-                if !self.has_capacity(&wrapper) {
-                    continue;
-                }
-                if !self.charge_feeless() {
-                    continue;
-                }
+            // Gate a feeless call before the admissibility check; charged only after it proves admissible.
+            if is_feeless(&wrapper) && (!self.has_capacity(&wrapper) || !self.feeless_has_room()) {
+                continue;
             }
             let admissible = if crate::node::is_vm_op(ledger, &wrapper) {
                 if !CONTRACTS_ENABLED {
@@ -553,10 +572,14 @@ impl Mempool {
             if !admissible {
                 continue;
             }
+            if is_feeless(&wrapper) && !self.charge_feeless() {
+                continue;
+            }
             if self.make_room(&wrapper).is_err() {
                 continue;
             }
             self.pending.push(wrapper.clone());
+            self.ids.insert(id);
             admitted.push(wrapper);
         }
         admitted
@@ -575,7 +598,11 @@ impl Mempool {
     }
 
     pub fn remove_included(&mut self, ids: &[String]) {
-        self.pending.retain(|w| !ids.contains(&w.id()));
+        let included: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        self.pending.retain(|w| !included.contains(w.id().as_str()));
+        for id in ids {
+            self.ids.remove(id);
+        }
         self.feeless_admits = 0;
     }
 }
@@ -603,6 +630,40 @@ mod tests {
         let call = transfer_call(to, amount);
         let body = Body::new(from.address(), nonce, TRANSFER_METER, fee, call);
         sign(from, &body)
+    }
+
+    #[test]
+    fn remove_included_keeps_the_id_set_in_sync() {
+        let params = FeeParams::devnet();
+        let alice = keypair(1);
+        let mut ledger = Ledger::new();
+        fund(&mut ledger, &alice, 1_000_000_000);
+        let tx = signed_transfer(
+            &alice,
+            &keypair(2).address(),
+            100,
+            0,
+            u128::from(params.transfer_fee()),
+        );
+        let id = tx.id();
+        let mut pool = Mempool::new();
+
+        assert_eq!(pool.admit(tx.clone(), &ledger, &params), Ok(Admitted::Fresh));
+        assert!(pool.contains(&id), "the admitted id is in the set");
+        assert_eq!(
+            pool.admit(tx.clone(), &ledger, &params),
+            Ok(Admitted::Known),
+            "a resubmission before inclusion is known through the set"
+        );
+
+        pool.remove_included(&[id.clone()]);
+        assert_eq!(pool.len(), 0, "the included tx left the pool");
+        assert!(!pool.contains(&id), "and left the id set, so the set did not drift");
+        assert_eq!(
+            pool.admit(tx, &ledger, &params),
+            Ok(Admitted::Fresh),
+            "the same tx admits fresh again, proving the set was cleaned"
+        );
     }
 
     fn seeded_evidence(offender_secret: &[u8; 32]) -> (Ledger, Wrapper, String) {
@@ -666,6 +727,29 @@ mod tests {
             "evidence naming an offender with no attestation key in state is refused"
         );
         assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn an_inadmissible_feeless_call_does_not_spend_the_window() {
+        let params = FeeParams::devnet();
+        let mut pool = Mempool::new();
+
+        // A forged evidence tx is feeless by target but inadmissible; it must not charge the window.
+        let (_bare, forged, _) = seeded_evidence(&[11u8; 32]);
+        let empty = Ledger::new();
+        assert_eq!(pool.admit(forged, &empty, &params), Err(Reject::BadCall));
+        assert_eq!(
+            pool.feeless_admits, 0,
+            "an inadmissible feeless call must not spend the feeless window"
+        );
+
+        // A genuinely admissible feeless call spends exactly one unit.
+        let (ledger, valid, _) = seeded_evidence(&[9u8; 32]);
+        assert_eq!(pool.admit(valid, &ledger, &params), Ok(Admitted::Fresh));
+        assert_eq!(
+            pool.feeless_admits, 1,
+            "an admitted feeless call spends one unit of the window"
+        );
     }
 
     #[test]
