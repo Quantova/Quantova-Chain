@@ -104,11 +104,15 @@ fn write_string(s: &str, out: &mut String) {
 
 const MAX_DEPTH: usize = 64;
 
+// A separate node budget bounds total values, since the depth cap does nothing against width.
+const MAX_NODES: usize = 200_000;
+
 pub fn parse(input: &str) -> Result<Json, String> {
     let mut parser = Parser {
         chars: input.chars().collect(),
         pos: 0,
         depth: 0,
+        nodes: 0,
     };
     parser.skip_ws();
     let value = parser.value()?;
@@ -123,6 +127,7 @@ struct Parser {
     chars: Vec<char>,
     pos: usize,
     depth: usize,
+    nodes: usize,
 }
 
 impl Parser {
@@ -145,6 +150,10 @@ impl Parser {
     }
 
     fn value(&mut self) -> Result<Json, String> {
+        self.nodes += 1;
+        if self.nodes > MAX_NODES {
+            return Err("the JSON has more elements than the gateway allows".to_string());
+        }
         self.skip_ws();
         match self.peek() {
             Some('{') => self.nested(Self::object),
@@ -359,6 +368,17 @@ mod tests {
         let wide = format!("[{}]", vec!["1"; 10_000].join(","));
         let value = parse(&wide).expect("a wide flat array parses");
         assert!(matches!(value, Json::Array(items) if items.len() == 10_000));
+    }
+
+    #[test]
+    fn a_body_with_too_many_elements_is_refused() {
+        let over = format!("[{}]", vec!["1"; MAX_NODES + 16].join(","));
+        let result = parse(&over);
+        assert!(result.is_err(), "an element count past the node budget must be refused");
+        assert!(
+            result.unwrap_err().contains("more elements"),
+            "the refusal names the element budget"
+        );
     }
 
     #[test]
