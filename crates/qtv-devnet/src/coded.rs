@@ -175,6 +175,11 @@ pub fn code_proposal(proposal: &Proposal) -> Result<Vec<CodedProposal>, CodedErr
 
 type ProposalKey = (u64, [u8; DIGEST_LEN]);
 
+// Bound the assembler maps; a Byzantine peer picks keys freely, so evict lowest-height on overflow.
+const MAX_PENDING_PROPOSALS: usize = 256;
+
+const MAX_DONE_KEYS: usize = 4_096;
+
 #[derive(Clone, Default)]
 pub struct ProposalAssembler {
     pending: HashMap<ProposalKey, Pending>,
@@ -219,6 +224,9 @@ impl ProposalAssembler {
             shard,
             proof,
         } = coded;
+        if !self.pending.contains_key(&key) && self.pending.len() >= MAX_PENDING_PROPOSALS {
+            self.evict_lowest_pending();
+        }
         let entry = self.pending.entry(key).or_insert_with(|| Pending {
             height,
             view,
@@ -242,6 +250,9 @@ impl ProposalAssembler {
             .pending
             .remove(&key)
             .expect("the pending proposal was just present");
+        if !self.done.contains_key(&key) && self.done.len() >= MAX_DONE_KEYS {
+            self.evict_lowest_done();
+        }
         self.done.insert(key, pending.height);
         let header_hash = pending.header.hash();
         let rebuilt = reconstruct_block(
@@ -266,6 +277,28 @@ impl ProposalAssembler {
         let floor = height.saturating_sub(2);
         self.pending.retain(|_, p| p.height >= floor);
         self.done.retain(|_, &mut h| h >= floor);
+    }
+
+    fn evict_lowest_pending(&mut self) {
+        if let Some(key) = self
+            .pending
+            .iter()
+            .min_by_key(|(_, p)| p.height)
+            .map(|(key, _)| *key)
+        {
+            self.pending.remove(&key);
+        }
+    }
+
+    fn evict_lowest_done(&mut self) {
+        if let Some(key) = self
+            .done
+            .iter()
+            .min_by_key(|(_, &height)| height)
+            .map(|(key, _)| *key)
+        {
+            self.done.remove(&key);
+        }
     }
 }
 
@@ -477,6 +510,22 @@ mod tests {
         for (a, b) in rebuilt.body.iter().zip(original.body.iter()) {
             assert_eq!(a.id(), b.id(), "a body transaction differed");
         }
+    }
+
+    #[test]
+    fn the_assembler_bounds_pending_under_a_flood_of_distinct_keys() {
+        let mut assembler = ProposalAssembler::new();
+        // Distinct views are distinct keys; one shard each leaves pending incomplete, so the cap must hold.
+        for view in 0..(MAX_PENDING_PROPOSALS as u64 + 64) {
+            let proposal = sample_proposal(1, view);
+            let shards = code_proposal(&proposal).expect("code the proposal");
+            let _ = assembler.admit(shards[0].clone());
+        }
+        assert!(
+            assembler.pending.len() <= MAX_PENDING_PROPOSALS,
+            "pending stays bounded under a distinct-key flood, got {}",
+            assembler.pending.len()
+        );
     }
 
     #[test]
