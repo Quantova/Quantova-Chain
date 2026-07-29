@@ -80,6 +80,7 @@ pub struct NodeSettings {
     pub view_timeout_ms: u64,
     pub peers: Vec<(u64, String)>,
     pub rpc_listen: Option<String>,
+    pub rpc_allow: Vec<String>,
     pub block_messages_path: Option<PathBuf>,
     pub checkpoint: Option<(u64, [u8; 32])>,
 }
@@ -99,6 +100,7 @@ impl NodeSettings {
         let mut view_timeout_ms = DEFAULT_VIEW_TIMEOUT_MS;
         let mut peers: Vec<(u64, String)> = Vec::new();
         let mut rpc_listen: Option<String> = None;
+        let mut rpc_allow: Vec<String> = Vec::new();
         let mut block_messages_path: Option<PathBuf> = None;
         let mut checkpoint: Option<(u64, [u8; 32])> = None;
 
@@ -113,6 +115,19 @@ impl NodeSettings {
                 "view_timeout_ms" => view_timeout_ms = field.u64("view_timeout_ms")?,
                 "peer" => peers.push(parse_peer(field)?),
                 "rpc" => rpc_listen = Some(field.value.clone()),
+                "rpc_allow" => {
+                    let mut addrs = Vec::new();
+                    for entry in field.value.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                        if entry.parse::<std::net::IpAddr>().is_err() {
+                            return Err(field.error(&format!(
+                                "'rpc_allow' entry '{entry}' is not a bare IP address; \
+                                 list comma separated IPs, not a CIDR range or a hostname"
+                            )));
+                        }
+                        addrs.push(entry.to_string());
+                    }
+                    rpc_allow = addrs;
+                }
                 "block_messages" => block_messages_path = Some(PathBuf::from(&field.value)),
                 "checkpoint" => checkpoint = Some(parse_checkpoint(field)?),
                 other => return Err(field.error(&format!("unknown config key '{other}'"))),
@@ -138,6 +153,7 @@ impl NodeSettings {
             view_timeout_ms,
             peers,
             rpc_listen,
+            rpc_allow,
             block_messages_path,
             checkpoint,
         })

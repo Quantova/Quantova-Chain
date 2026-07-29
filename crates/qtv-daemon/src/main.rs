@@ -175,8 +175,20 @@ fn run(config_path: &Path) -> Result<(), String> {
             version: env!("CARGO_PKG_VERSION").to_string(),
         };
         driver.attach_rpc(context, requests_rx);
-        qtv_gateway::serve(rpc_listener, requests_tx);
-        util::log(&format!("RPC gateway serving on {rpc_addr}"));
+        let allow: Vec<std::net::IpAddr> =
+            settings.rpc_allow.iter().filter_map(|s| s.parse().ok()).collect();
+        if allow.is_empty() {
+            util::log(&format!(
+                "RPC gateway serving on {rpc_addr} with no allowlist, reachable by any host; \
+                 set rpc_allow to restrict it"
+            ));
+        } else {
+            util::log(&format!(
+                "RPC gateway serving on {rpc_addr}, restricted to {} allowlisted address(es)",
+                allow.len()
+            ));
+        }
+        qtv_gateway::serve(rpc_listener, requests_tx, allow);
     } else {
         util::log("no RPC configured, the node runs with no client facing surface");
     }
