@@ -74,7 +74,9 @@ impl BurnArchive {
     }
 
     pub fn append(&mut self, entry: BurnArchiveEntry) -> io::Result<()> {
+        // Each entry is one self-contained frame, so append and sync commit it atomically.
         self.log.append(&entry.encode())?;
+        self.log.sync()?;
         self.by_height.insert(entry.height, entry);
         Ok(())
     }
