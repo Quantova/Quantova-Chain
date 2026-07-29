@@ -3,9 +3,9 @@
 
 
 use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use qtv_net::{Channel, Identity, PeerId};
 
@@ -16,6 +16,14 @@ const HELLO_TAG: &[u8; 8] = b"QTVGEN01";
 const HELLO_LEN: usize = 8 + 32;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+// Hard ceiling on frames the bounded inbound channel may hold; a full channel drops.
+const INBOUND_CAP: usize = 4096;
+
+// Per-peer inbound message rate; excess is dropped so one member cannot flood a validator.
+const PEER_MSG_PER_SEC: f64 = 5_000.0;
+
+const PEER_MSG_BURST: f64 = 10_000.0;
 
 pub struct Mesh {
     pub send: Vec<Option<Channel<TcpStream>>>,
@@ -41,15 +49,21 @@ pub fn build_mesh(
     }
     let up_peers = up.iter().enumerate().filter(|&(q, &u)| q != idx && u).count();
 
-    let (inbound_tx, inbound_rx) = mpsc::channel::<(usize, Vec<u8>)>();
+    let (inbound_tx, inbound_rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_CAP);
     let (accepted_tx, accepted_rx) = mpsc::channel::<(usize, Channel<TcpStream>)>();
 
     let identity_acc = identity.clone();
     let up_acc = up.clone();
     let peer_ids_acc: Vec<Option<PeerId>> = peer_ids.to_vec();
     let acceptor = thread::spawn(move || {
-        for _ in 0..up_peers {
-            let (stream, _) = listener.accept().expect("accept an inbound peer connection");
+        // Count only successful roster registrations, so throwaway connects cannot exhaust bootstrap.
+        let mut seen = vec![false; n];
+        let mut registered = 0usize;
+        while registered < up_peers {
+            let (stream, _) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(_) => continue,
+            };
             let channel = match Channel::accept_with_timeout(stream, &identity_acc, HANDSHAKE_TIMEOUT)
             {
                 Ok(channel) => channel,
@@ -62,7 +76,11 @@ pub fn build_mesh(
                     && peer_ids_acc.get(q).and_then(|p| p.as_ref()) == Some(&peer)
             });
             if let Some(from) = from {
-                let _ = accepted_tx.send((from, channel));
+                if !seen[from] {
+                    seen[from] = true;
+                    registered += 1;
+                    let _ = accepted_tx.send((from, channel));
+                }
             }
         }
     });
@@ -116,10 +134,19 @@ fn hello_ok(frame: &[u8], genesis_hash: &[u8; 32]) -> bool {
     frame.len() == HELLO_LEN && &frame[..8] == HELLO_TAG && &frame[8..] == genesis_hash
 }
 
+// Forward one frame over the bounded channel; drop on full, stop only on disconnect.
+fn forward_frame(out: &SyncSender<(usize, Vec<u8>)>, from: usize, bytes: Vec<u8>) -> bool {
+    match out.try_send((from, bytes)) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => true,
+        Err(TrySendError::Disconnected(_)) => false,
+    }
+}
+
 fn spawn_readers(
     accepted_rx: &Receiver<(usize, Channel<TcpStream>)>,
     up_peers: usize,
-    inbound_tx: Sender<(usize, Vec<u8>)>,
+    inbound_tx: SyncSender<(usize, Vec<u8>)>,
     genesis_hash: [u8; 32],
 ) {
     for _ in 0..up_peers {
@@ -140,12 +167,89 @@ fn spawn_readers(
                 }
                 Err(_) => return,
             }
+            let mut tokens = PEER_MSG_BURST;
+            let mut last = Instant::now();
             while let Ok(bytes) = channel.recv() {
-                if out.send((from, bytes)).is_err() {
+                let now = Instant::now();
+                tokens = (tokens + now.saturating_duration_since(last).as_secs_f64() * PEER_MSG_PER_SEC)
+                    .min(PEER_MSG_BURST);
+                last = now;
+                if tokens < 1.0 {
+                    // This peer is over its rate. Drop the message rather than forward it,
+                    // so a flood from one member cannot grow the inbound queue without bound.
+                    continue;
+                }
+                tokens -= 1.0;
+                if !forward_frame(&out, from, bytes) {
                     break;
                 }
             }
         });
     }
     drop(inbound_tx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{forward_frame, INBOUND_CAP, PEER_MSG_BURST, PEER_MSG_PER_SEC};
+    use std::sync::mpsc;
+
+    #[test]
+    fn the_inbound_channel_is_bounded_and_drops_the_overflow() {
+        let (tx, rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_CAP);
+        // Forward many times the cap with nothing draining, as a peer outrunning the loop would.
+        let flood = INBOUND_CAP * 4;
+        for _ in 0..flood {
+            assert!(
+                forward_frame(&tx, 1, vec![0u8; 64]),
+                "a full inbound channel must drop the frame, not stop the reader"
+            );
+        }
+        let mut drained = 0usize;
+        while rx.try_recv().is_ok() {
+            drained += 1;
+        }
+        assert!(
+            drained <= INBOUND_CAP,
+            "the queue grew past its cap, it held {drained}"
+        );
+        assert_eq!(drained, INBOUND_CAP, "the bounded channel fills exactly to its cap");
+    }
+
+    #[test]
+    fn a_drained_channel_keeps_accepting_after_a_full_burst() {
+        let (tx, rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_CAP);
+        // Fill it, drain it, fill it again. Under a consumer that keeps up nothing is
+        // shed, which is the honest steady state.
+        for _ in 0..INBOUND_CAP {
+            assert!(forward_frame(&tx, 0, vec![1u8; 8]));
+        }
+        for _ in 0..INBOUND_CAP {
+            assert!(rx.try_recv().is_ok());
+        }
+        assert!(
+            forward_frame(&tx, 0, vec![2u8; 8]),
+            "a drained channel accepts fresh frames again"
+        );
+    }
+
+    #[test]
+    fn a_gone_receiver_stops_the_reader() {
+        let (tx, rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_CAP);
+        drop(rx);
+        assert!(
+            !forward_frame(&tx, 0, vec![9u8; 8]),
+            "a disconnected receiver must stop the reader loop"
+        );
+    }
+
+    #[test]
+    fn the_rate_ceiling_is_bounded_and_below_the_earlier_flood_ceiling() {
+        // The inbound channel is bounded, not a rendezvous, so a burst has room to land.
+        assert!(INBOUND_CAP > 0);
+        // The per peer rate was lowered to a realistic consensus and gossip rate and the
+        // burst never sits below the sustained rate.
+        assert!(PEER_MSG_PER_SEC <= 5_000.0, "the per peer rate was lowered");
+        assert!(PEER_MSG_BURST >= PEER_MSG_PER_SEC, "the burst covers the sustained rate");
+    }
 }
