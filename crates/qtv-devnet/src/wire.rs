@@ -78,6 +78,8 @@ pub struct ViewChange {
     pub lock_view: u64,
     pub locked: Option<LockedBlock>,
     pub att: Attestation,
+    // The signer's own attestation for the locked block: proof of the lock, not a claim.
+    pub lock_att: Option<Attestation>,
 }
 
 /// A validator's own sortition reveal for a height, its height, author id, and
@@ -456,6 +458,13 @@ fn encode_view_change(encoder: &mut Encoder, record: &ViewChange) {
         None => encoder.put_u8(0),
     }
     encode_attestation(encoder, &record.att);
+    match &record.lock_att {
+        Some(att) => {
+            encoder.put_u8(1);
+            encode_attestation(encoder, att);
+        }
+        None => encoder.put_u8(0),
+    }
 }
 
 fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeError> {
@@ -477,12 +486,18 @@ fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeErr
         other => return Err(DecodeError::BadParent(other)),
     };
     let att = decode_attestation(decoder)?;
+    let lock_att = match decoder.get_u8()? {
+        0 => None,
+        1 => Some(decode_attestation(decoder)?),
+        other => return Err(DecodeError::BadParent(other)),
+    };
     Ok(ViewChange {
         height,
         target_view,
         lock_view,
         locked,
         att,
+        lock_att,
     })
 }
 
