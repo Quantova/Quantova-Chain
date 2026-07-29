@@ -84,6 +84,10 @@ pub fn leader_for(selection: &Selection, view: View) -> u64 {
     members[(base + view as usize) % members.len()]
 }
 
+/// The committed height recorded for genesis state. Genesis has no block of its
+/// own, and the first block is `MIN_HEIGHT` (one), so genesis is height zero.
+const GENESIS_COMMIT_HEIGHT: Height = 0;
+
 #[derive(Debug)]
 pub enum RoundError {
     Io(io::Error),
@@ -93,6 +97,11 @@ pub enum RoundError {
     ProposalRejected,
     NotStaged,
     Decode,
+    StateRootMismatch {
+        height: Height,
+        block_root: [u8; 32],
+        state_root: Option<[u8; 32]>,
+    },
     Coding(crate::coded::CodedError),
 }
 
@@ -287,6 +296,11 @@ impl DevNode {
             evidence_pool: EvidencePool::new(),
         };
 
+        // Reconcile the logs after a crash: drop blocks above the last committed state.
+        if let Some(committed) = dev.state_store.committed_height() {
+            dev.block_store.truncate_to_height(committed)?;
+        }
+
         if dev.block_store.is_empty() {
             dev.init_genesis(&devnet.genesis())?;
         } else {
@@ -341,7 +355,8 @@ impl DevNode {
         for (key, value) in self.ledger.take_dirty_entries() {
             self.state_store.put_account(key, value)?;
         }
-        self.state_store.commit(self.ledger.q_root())?;
+        // Genesis has no block; its committed state marks height zero.
+        self.state_store.commit(GENESIS_COMMIT_HEIGHT, self.ledger.q_root())?;
         self.ledger.clear_dirty();
         self.refresh_committee();
         Ok(())
@@ -556,6 +571,17 @@ impl DevNode {
             .ok_or(RoundError::Decode)?
             .to_vec();
         let (header, certificate) = decode_head(&bytes)?;
+        // Refuse to resume when the committed state root does not match the head block.
+        let block_root = *header.q_root();
+        if self.state_store.head() != Some(block_root)
+            || self.state_store.committed_height() != Some(head)
+        {
+            return Err(RoundError::StateRootMismatch {
+                height: head,
+                block_root,
+                state_root: self.state_store.head(),
+            });
+        }
         self.parent_header_hash = header.hash();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
         self.beacon = Beacon::from_seed(*header.beacon_seed());
@@ -962,7 +988,7 @@ impl DevNode {
             return Vec::new();
         };
         let proposed_value = header_value(&proposal.header.hash());
-        match justified_choice(&records) {
+        match self.justified_lock(selection, &records) {
             Some(locked) => {
                 if header_value(&locked.header.hash()) != proposed_value {
                     return Vec::new();
@@ -994,18 +1020,32 @@ impl DevNode {
         }
     }
 
+    /// The lock binding the next proposal: the block clearing the quorum-intersection floor at the highest view.
+    fn justified_lock(&self, selection: &Selection, records: &[ViewChange]) -> Option<LockedBlock> {
+        let floor = (2 * selection.tau).saturating_sub(selection.expected).max(1);
+        safe_value(records, floor)
+    }
+
     pub fn make_view_change(&mut self, target_view: View) -> ViewChange {
         let _ = self.guard_height();
-        let (lock_view, locked_value, has_lock, locked) = match &self.staged {
+        let (lock_view, locked_value, has_lock, locked, lock_att) = match &self.staged {
             Some(staged) => {
                 let value = header_value(&staged.header.hash());
                 let block = LockedBlock {
                     header: staged.header.clone(),
                     body: staged.body.clone(),
                 };
-                (staged.view, value, true, Some(block))
+                // The node's own attestation for its locked block: proof of the lock, not a claim.
+                let proof = self.consensus.own_attestation(
+                    self.height,
+                    self.slot(),
+                    staged.view,
+                    staged.block,
+                    &self.beacon,
+                );
+                (staged.view, value, true, Some(block), Some(proof))
             }
-            None => (0, [0u8; 32], false, None),
+            None => (0, [0u8; 32], false, None, None),
         };
         let subject =
             view_change_subject(self.height, target_view, lock_view, locked_value, has_lock);
@@ -1018,6 +1058,7 @@ impl DevNode {
             lock_view,
             locked,
             att,
+            lock_att,
         }
     }
 
@@ -1058,13 +1099,39 @@ impl DevNode {
         if !record.att.signature_verifies(self.consensus.chain_id(), &member.attest_pk) {
             return false;
         }
-        record.att.is_entitled(
+        if !record.att.is_entitled(
             &member.root,
             &self.beacon,
             member.weight,
             selection.commitment.total_weight,
             selection.commitment.budget,
-        )
+        ) {
+            return false;
+        }
+        // A lock must carry the signer's own attestation for it, so no peer can claim a lock it never cast.
+        match (&record.locked, &record.lock_att) {
+            (None, None) => {}
+            (Some(_), Some(proof)) => {
+                let ok = proof.from == record.att.from
+                    && proof.height == record.height
+                    && proof.slot == self.consensus.slot_for(record.height)
+                    && proof.view == record.lock_view
+                    && proof.block.val == locked_value
+                    && proof.signature_verifies(self.consensus.chain_id(), &member.attest_pk)
+                    && proof.is_entitled(
+                        &member.root,
+                        &self.beacon,
+                        member.weight,
+                        selection.commitment.total_weight,
+                        selection.commitment.budget,
+                    );
+                if !ok {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        true
     }
 
     fn valid_justification(
@@ -1101,7 +1168,7 @@ impl DevNode {
         view: View,
     ) -> Option<Proposal> {
         let records = self.justified_records(selection, view)?;
-        let proposal = match justified_choice(&records) {
+        let proposal = match self.justified_lock(selection, &records) {
             Some(locked) => {
                 self.stage_from(&locked.header, &locked.body, view).ok()?;
                 Proposal {
@@ -1289,15 +1356,17 @@ impl DevNode {
     }
 
     fn persist(&mut self, block: &ChainBlock) -> Result<(), RoundError> {
-        self.block_store.put_block(block)?;
         let height = block.header().height();
         for wrapper in block.body() {
             self.tx_index.insert(wrapper.id(), height);
         }
+        // Write state effects and the block, then the commit marker; the block is synced before the marker.
         for (key, value) in self.ledger.take_dirty_entries() {
             self.state_store.put_account(key, value)?;
         }
-        self.state_store.commit(self.ledger.q_root())?;
+        self.block_store.put_block(block)?;
+        self.block_store.sync()?;
+        self.state_store.commit(height, self.ledger.q_root())?;
         Ok(())
     }
 
@@ -1607,17 +1676,37 @@ fn view_change_subject(
     ConsensusBlock::new(height, commitment, Parent::Genesis)
 }
 
-fn justified_choice(records: &[ViewChange]) -> Option<LockedBlock> {
-    records
-        .iter()
-        .filter_map(|record| {
-            record
-                .locked
-                .as_ref()
-                .map(|block| (record.lock_view, header_value(&block.header.hash()), block))
-        })
-        .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)))
-        .map(|(_, _, block)| block.clone())
+/// The safe value binding the next proposal: the block clearing the quorum-intersection floor at the highest view.
+fn safe_value(records: &[ViewChange], floor: u64) -> Option<LockedBlock> {
+    let mut groups: Vec<([u8; 32], View, Vec<u64>)> = Vec::new();
+    for record in records {
+        let Some(proof) = record.lock_att.as_ref() else {
+            continue;
+        };
+        let value = proof.block.val;
+        let view = proof.view;
+        match groups.iter_mut().find(|(v, w, _)| *v == value && *w == view) {
+            Some(entry) => {
+                if !entry.2.contains(&proof.from) {
+                    entry.2.push(proof.from);
+                }
+            }
+            None => groups.push((value, view, vec![proof.from])),
+        }
+    }
+    let value = groups
+        .into_iter()
+        .filter(|(_, _, attesters)| attesters.len() as u64 >= floor)
+        .map(|(value, view, _)| (view, value))
+        .max_by_key(|(view, _)| *view)
+        .map(|(_, value)| value)?;
+    records.iter().find_map(|record| {
+        record
+            .locked
+            .as_ref()
+            .filter(|locked| header_value(&locked.header.hash()) == value)
+            .cloned()
+    })
 }
 
 fn decode_head(bytes: &[u8]) -> Result<(Header, qtv_attest::Certificate), RoundError> {
