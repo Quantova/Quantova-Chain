@@ -1180,6 +1180,7 @@ pub struct Node {
     slashed: Vec<u64>,
     exec_threads: usize,
     equivocator: Option<u64>,
+    foreign_evidence: Vec<qtv_attest::Attestation>,
     sign_guard: Option<crate::watermark::SignGuard>,
     finality: crate::consensus::FinalityLedger,
 }
@@ -1325,6 +1326,7 @@ impl Node {
             slashed: Vec::new(),
             exec_threads: min_validator_cores(),
             equivocator: None,
+            foreign_evidence: Vec::new(),
             sign_guard: None,
             finality: crate::consensus::FinalityLedger::new(),
         }
@@ -1332,6 +1334,28 @@ impl Node {
 
     pub fn force_equivocation(&mut self, id: u64) {
         self.equivocator = Some(id);
+    }
+
+    /// Stage peer finalization votes to be weighed as evidence at the next height.
+    pub fn observe_finalization_evidence(&mut self, attestations: Vec<qtv_attest::Attestation>) {
+        self.foreign_evidence.extend(attestations);
+    }
+
+    /// A finalization quorum the given validators sign for a value in a view at this height.
+    pub fn forge_finalization_quorum(
+        &self,
+        ids: &[u64],
+        view: u64,
+        value: [u8; 32],
+    ) -> Vec<qtv_attest::Attestation> {
+        let height = self.height;
+        let slot = qtv_sampler::epoch::slot_in_epoch(height, self.slots);
+        let chain_id = self.consensus.chain_id();
+        let block = crate::consensus::Block::new(height, value, self.parent_val);
+        ids.iter()
+            .filter_map(|id| self.sim_attesters.get(id))
+            .map(|attester| attester.attest(chain_id, height, slot, view, block, &self.beacon))
+            .collect()
     }
 
     pub fn with_sign_guard(mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
@@ -1476,7 +1500,13 @@ impl Node {
                 }
             }
         }
-        let offenders = crate::consensus::equivocation_offenders(chain_id, &evidence, &roster);
+        evidence.append(&mut self.foreign_evidence);
+        let mut offenders = crate::consensus::equivocation_offenders(chain_id, &evidence, &roster);
+        for id in crate::consensus::double_finalize_offenders(chain_id, &evidence, &roster, selection.tau) {
+            if !offenders.contains(&id) {
+                offenders.push(id);
+            }
+        }
 
         let certificate = self
             .consensus

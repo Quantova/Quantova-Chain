@@ -164,6 +164,53 @@ fn an_equivocator_is_banned_in_chain_state_and_excluded_from_the_next_committee(
 }
 
 #[test]
+fn a_cross_view_double_finalizer_is_slashed_and_excluded_while_an_honest_voter_is_not() {
+    let alice = user(0);
+    let mut node = boot(genesis(
+        vec![GenesisAccount::from_account(&alice, 1_000_000)],
+        &[true, true, true, true],
+    ));
+
+    // 2, 3, 4 sign a conflicting quorum in view one while the honest round finalizes in view zero.
+    let conflicting = node.forge_finalization_quorum(&[2, 3, 4], 1, [0xAB; 32]);
+    node.observe_finalization_evidence(conflicting);
+    node.produce().expect("height one finalizes");
+
+    for id in [2u64, 3, 4] {
+        let address = qtv_node::node::validator_address(id);
+        assert!(
+            node.slashed().contains(&id),
+            "the cross view double finalizer {id} is slashed"
+        );
+        assert!(
+            node.ledger().is_validator_banned(&address),
+            "the cross view double finalizer {id} is banned in chain state"
+        );
+        assert_eq!(
+            node.ledger().staked_weight(&address),
+            0,
+            "the slashed bond carries no committee weight"
+        );
+    }
+    assert!(
+        !node.slashed().contains(&1),
+        "an honest validator that voted in one view is never slashed"
+    );
+
+    node.produce()
+        .expect("the next height finalizes without the excluded validators");
+    let latest = node.chain().last().expect("a finalized block");
+    for id in [2u64, 3, 4] {
+        assert!(
+            !latest.members.contains(&id),
+            "the banned validator {id} is excluded from the next committee"
+        );
+    }
+    assert!(latest.members.contains(&1));
+    assert_eq!(latest.header().height(), 2);
+}
+
+#[test]
 fn the_committee_finalizes_a_run_of_heights_in_order() {
     let params = FeeParams::devnet();
     let alice = user(0);
