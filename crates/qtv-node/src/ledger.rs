@@ -2231,7 +2231,7 @@ impl Ledger {
                 scope,
                 victim,
                 seizures,
-            } => sha3::sha3_256(&Action::recovery_scope_preimage(victim, seizures)) == *scope,
+            } => sha3::sha3_256(&Action::recovery_scope_preimage(chain_id, victim, seizures)) == *scope,
             _ => true,
         };
         check_enactment(referendum.track, &action, scope_ok, |addr| {
@@ -2449,6 +2449,14 @@ impl Ledger {
 
     fn set_feature_version(&mut self, feature: &[u8], version: u64) {
         self.write_leaf(feature_gate_key(feature), to_bytes(&version));
+    }
+
+    /// Seed a feature version, returning the state leaf so a caller can persist it beside the genesis seeds.
+    pub fn seed_feature_version(&mut self, feature: &[u8], version: u64) -> (Key, Vec<u8>) {
+        let key = feature_gate_key(feature);
+        let bytes = to_bytes(&version);
+        self.write_leaf(key, bytes.clone());
+        (key, bytes)
     }
 
     fn apply_parameter(&mut self, key: &[u8], value: &[u8]) -> Result<(), EnactError> {
@@ -3310,6 +3318,7 @@ mod stake_state_tests {
             amount: 5_000 * 1_000_000,
         }];
         let scope = sha3::sha3_256(&qtv_governance::Action::recovery_scope_preimage(
+            TEST_CHAIN,
             &[40u8; 32],
             &seizures,
         ));
