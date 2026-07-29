@@ -21,6 +21,7 @@ fn bounded_capacity(remaining: usize, count: u64, min_element: usize) -> Result<
 pub const NATIVE_UNIT: u64 = 1_000_000;
 pub const BPS_DENOM: u128 = 10_000;
 pub const THRESHOLD_BPS: u128 = 4_000;
+pub const PARTICIPATION_FLOOR_BPS: u128 = 2_500;
 
 pub const DAY_SECONDS: u64 = 86_400;
 pub const HOUR_SECONDS: u64 = 3_600;
@@ -241,7 +242,9 @@ impl Tally {
     }
 
     pub fn approved(&self, electorate_stake: u128) -> bool {
-        electorate_stake > 0 && self.aye_stake * BPS_DENOM >= electorate_stake * THRESHOLD_BPS
+        electorate_stake > 0
+            && self.turnout() * BPS_DENOM >= electorate_stake * PARTICIPATION_FLOOR_BPS
+            && self.aye_stake * BPS_DENOM >= electorate_stake * THRESHOLD_BPS
     }
 }
 
@@ -393,8 +396,9 @@ impl Action {
         }
     }
 
-    pub fn recovery_scope_preimage(victim: &[u8], seizures: &[Seizure]) -> Vec<u8> {
+    pub fn recovery_scope_preimage(chain_id: u64, victim: &[u8], seizures: &[Seizure]) -> Vec<u8> {
         let mut encoder = Encoder::new();
+        encoder.put_u64(chain_id);
         victim.to_vec().encode(&mut encoder);
         (seizures.len() as u64).encode(&mut encoder);
         for seizure in seizures {
@@ -1074,8 +1078,8 @@ mod tests {
             from: vec![1; 32],
             amount: 100,
         }];
-        let a = Action::recovery_scope_preimage(&[2; 32], &seizures);
-        let b = Action::recovery_scope_preimage(&[2; 32], &seizures);
+        let a = Action::recovery_scope_preimage(1, &[2; 32], &seizures);
+        let b = Action::recovery_scope_preimage(1, &[2; 32], &seizures);
         assert_eq!(a, b);
         let widened = vec![
             Seizure {
@@ -1087,7 +1091,37 @@ mod tests {
                 amount: 50,
             },
         ];
-        assert_ne!(a, Action::recovery_scope_preimage(&[2; 32], &widened));
+        assert_ne!(a, Action::recovery_scope_preimage(1, &[2; 32], &widened));
+    }
+
+    #[test]
+    fn a_recovery_scope_is_bound_to_its_chain_and_does_not_replay_on_another() {
+        let seizures = vec![Seizure {
+            from: vec![1; 32],
+            amount: 100,
+        }];
+        let on_chain_a = Action::recovery_scope_preimage(7, &[2; 32], &seizures);
+        let on_chain_b = Action::recovery_scope_preimage(9, &[2; 32], &seizures);
+        assert_ne!(
+            on_chain_a, on_chain_b,
+            "the same recovery scope preimage differs by chain id"
+        );
+    }
+
+    #[test]
+    fn a_proposal_below_the_participation_floor_is_rejected() {
+        let electorate = 1_000_000u128;
+        // Turnout under the floor is rejected, so a sliver of the electorate cannot carry it.
+        let mut thin = Tally::default();
+        thin.record(true, 200_000);
+        assert!(thin.turnout() * BPS_DENOM < electorate * PARTICIPATION_FLOOR_BPS);
+        assert!(!thin.approved(electorate));
+
+        // A turnout that clears the floor and the ayes that clear the threshold pass.
+        let mut full = Tally::default();
+        full.record(true, 450_000);
+        assert!(full.turnout() * BPS_DENOM >= electorate * PARTICIPATION_FLOOR_BPS);
+        assert!(full.approved(electorate));
     }
 
     #[test]
