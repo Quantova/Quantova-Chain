@@ -397,10 +397,15 @@ fn transaction(node: &DevNode, tx_id: &str) -> Json {
     }
 }
 
+// Cap list entries per RPC response, so a large mempool or contract cannot build a huge string on the consensus thread.
+const MAX_LIST_ITEMS: usize = 1_000;
+
 fn pending(node: &DevNode) -> Json {
-    let items: Vec<Json> = node
-        .pending_transactions()
+    let all = node.pending_transactions();
+    let total = all.len();
+    let items: Vec<Json> = all
         .iter()
+        .take(MAX_LIST_ITEMS)
         .map(|wrapper| {
             let mut fields = vec![("tx_id", Json::str(wrapper.id()))];
             fields.extend(tx_fields(wrapper));
@@ -408,7 +413,9 @@ fn pending(node: &DevNode) -> Json {
         })
         .collect();
     object(vec![
-        ("count", Json::Int(items.len() as u64)),
+        ("count", Json::Int(total as u64)),
+        ("returned", Json::Int(items.len() as u64)),
+        ("truncated", Json::Bool(total > items.len())),
         ("transactions", Json::Array(items)),
     ])
 }
@@ -457,10 +464,11 @@ fn storage(node: &DevNode, address: &str) -> Result<Json, ClientError> {
     if qtv_idfmt::parse_address(address).is_err() {
         return Err(ClientError::bad("bad_address", "the address is not a q1 address"));
     }
-    let slots: Vec<Json> = node
-        .ledger()
-        .contract_storage_at(address)
+    let all = node.ledger().contract_storage_at(address);
+    let total = all.len();
+    let slots: Vec<Json> = all
         .into_iter()
+        .take(MAX_LIST_ITEMS)
         .map(|(slot, value)| {
             let slot_hex: String = slot.iter().map(|b| format!("{b:02x}")).collect();
             object(vec![
@@ -471,6 +479,9 @@ fn storage(node: &DevNode, address: &str) -> Result<Json, ClientError> {
         .collect();
     Ok(object(vec![
         ("address", Json::str(address)),
+        ("count", Json::Int(total as u64)),
+        ("returned", Json::Int(slots.len() as u64)),
+        ("truncated", Json::Bool(total > slots.len())),
         ("slots", Json::Array(slots)),
     ]))
 }

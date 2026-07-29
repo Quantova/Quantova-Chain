@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 
+use std::collections::VecDeque;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -21,6 +22,53 @@ use crate::util::{hex, log};
 
 const TICK: Duration = Duration::from_millis(20);
 
+// Bound the ahead-of-height replay buffer by frame count and total bytes.
+const MAX_BUFFERED_FRAMES: usize = 8192;
+
+const MAX_BUFFERED_BYTES: usize = 32 * 1024 * 1024;
+
+/// Ahead-of-height replay buffer; oldest frames are evicted when a ceiling is hit.
+#[derive(Default)]
+struct FrameBuffer {
+    frames: VecDeque<Vec<u8>>,
+    bytes: usize,
+}
+
+impl FrameBuffer {
+    fn push(&mut self, frame: Vec<u8>) {
+        // A frame larger than the whole byte budget can never fit, so refuse it.
+        if frame.len() > MAX_BUFFERED_BYTES {
+            return;
+        }
+        while !self.frames.is_empty()
+            && (self.frames.len() + 1 > MAX_BUFFERED_FRAMES
+                || self.bytes + frame.len() > MAX_BUFFERED_BYTES)
+        {
+            if let Some(dropped) = self.frames.pop_front() {
+                self.bytes -= dropped.len();
+            }
+        }
+        self.bytes += frame.len();
+        self.frames.push_back(frame);
+    }
+
+    /// Drain the buffer for a replay pass, leaving it empty.
+    fn take(&mut self) -> VecDeque<Vec<u8>> {
+        self.bytes = 0;
+        std::mem::take(&mut self.frames)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    #[cfg(test)]
+    fn byte_len(&self) -> usize {
+        self.bytes
+    }
+}
+
 pub struct Driver {
     node: DevNode,
     idx: usize,
@@ -29,7 +77,7 @@ pub struct Driver {
     inbound: Receiver<(usize, Vec<u8>)>,
     up: Vec<bool>,
     assembler: ProposalAssembler,
-    buffered: Vec<Vec<u8>>,
+    buffered: FrameBuffer,
     budget: u64,
     rpc_context: Option<NodeContext>,
     rpc_requests: Option<Receiver<GatewayCall>>,
@@ -45,7 +93,7 @@ impl Driver {
             inbound: mesh.inbound,
             up: mesh.up,
             assembler: ProposalAssembler::new(),
-            buffered: Vec::new(),
+            buffered: FrameBuffer::default(),
             budget: u64::MAX,
             rpc_context: None,
             rpc_requests: None,
@@ -58,10 +106,14 @@ impl Driver {
     }
 
     fn serve_rpc(&mut self) {
+        // Cap RPC calls served per consensus tick so a backlog cannot stall block production.
+        const RPC_CALLS_PER_TICK: usize = 128;
         let Some(requests) = self.rpc_requests.as_ref() else {
             return;
         };
-        let calls: Vec<GatewayCall> = std::iter::from_fn(|| requests.try_recv().ok()).collect();
+        let calls: Vec<GatewayCall> = std::iter::from_fn(|| requests.try_recv().ok())
+            .take(RPC_CALLS_PER_TICK)
+            .collect();
         let Some(context) = self.rpc_context.as_ref() else {
             return;
         };
@@ -340,7 +392,7 @@ impl Driver {
     }
 
     fn replay_buffered(&mut self, start_height: u64, selection: &Selection) {
-        let buffered = std::mem::take(&mut self.buffered);
+        let buffered = self.buffered.take();
         for bytes in buffered {
             let Ok(message) = Message::decode(&bytes) else {
                 continue;
@@ -418,5 +470,129 @@ fn message_height(message: &Message) -> Option<u64> {
         | Message::Status(_)
         | Message::GetBlocks { .. }
         | Message::Blocks(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FrameBuffer, MAX_BUFFERED_BYTES, MAX_BUFFERED_FRAMES};
+
+    // The one invariant every case must uphold: the held frame count and the held byte
+    // count both stay at or under their ceilings, whatever a peer streams at the buffer.
+    fn within_ceilings(buffer: &FrameBuffer) {
+        assert!(
+            buffer.len() <= MAX_BUFFERED_FRAMES,
+            "frame count {} breached the ceiling {}",
+            buffer.len(),
+            MAX_BUFFERED_FRAMES
+        );
+        assert!(
+            buffer.byte_len() <= MAX_BUFFERED_BYTES,
+            "held bytes {} breached the ceiling {}",
+            buffer.byte_len(),
+            MAX_BUFFERED_BYTES
+        );
+    }
+
+    #[test]
+    fn a_flood_of_tiny_ahead_frames_stays_within_the_count_ceiling() {
+        let mut buffer = FrameBuffer::default();
+        // Stream far more small frames than the count ceiling, as an ahead of height
+        // flood would. The buffer must never grow past the ceiling.
+        for _ in 0..(MAX_BUFFERED_FRAMES * 4) {
+            buffer.push(vec![7u8; 32]);
+            within_ceilings(&buffer);
+        }
+        assert_eq!(buffer.len(), MAX_BUFFERED_FRAMES);
+    }
+
+    #[test]
+    fn a_flood_of_large_ahead_frames_stays_within_the_byte_ceiling() {
+        let mut buffer = FrameBuffer::default();
+        // Near record sized frames, enough of them to demand many times the byte ceiling.
+        let frame = vec![3u8; 1024 * 1024];
+        for _ in 0..((MAX_BUFFERED_BYTES / frame.len()) * 4) {
+            buffer.push(frame.clone());
+            within_ceilings(&buffer);
+        }
+        // The byte ceiling, not the count ceiling, is what binds a large frame flood.
+        assert!(buffer.len() < MAX_BUFFERED_FRAMES);
+        assert!(buffer.byte_len() + frame.len() > MAX_BUFFERED_BYTES);
+    }
+
+    #[test]
+    fn mixed_frame_sizes_cannot_bypass_either_ceiling() {
+        let mut buffer = FrameBuffer::default();
+        // Interleave a tiny frame and a large frame, the shape an attacker would try to
+        // slip a payload past a single dimension bound. Both ceilings must hold every step.
+        for round in 0..5000 {
+            buffer.push(vec![1u8; 16]);
+            within_ceilings(&buffer);
+            buffer.push(vec![2u8; 200 * 1024]);
+            within_ceilings(&buffer);
+            if round % 1000 == 0 {
+                buffer.push(vec![9u8; 900 * 1024]);
+                within_ceilings(&buffer);
+            }
+        }
+    }
+
+    #[test]
+    fn the_count_ceiling_holds_exactly_at_and_over_the_boundary() {
+        let mut buffer = FrameBuffer::default();
+        for _ in 0..MAX_BUFFERED_FRAMES {
+            buffer.push(vec![0u8; 8]);
+        }
+        assert_eq!(buffer.len(), MAX_BUFFERED_FRAMES, "the buffer fills to the ceiling");
+        // One frame over the boundary evicts the oldest rather than growing the buffer.
+        buffer.push(vec![0u8; 8]);
+        assert_eq!(buffer.len(), MAX_BUFFERED_FRAMES, "the ceiling holds one frame over");
+        within_ceilings(&buffer);
+    }
+
+    #[test]
+    fn an_oversized_single_frame_is_refused_and_leaves_the_buffer_intact() {
+        let mut buffer = FrameBuffer::default();
+        buffer.push(vec![5u8; 4096]);
+        let before_frames = buffer.len();
+        let before_bytes = buffer.byte_len();
+        // A frame larger than the whole byte budget can never be held, so it is dropped
+        // without evicting what is already buffered.
+        buffer.push(vec![6u8; MAX_BUFFERED_BYTES + 1]);
+        assert_eq!(buffer.len(), before_frames, "the oversized frame was not stored");
+        assert_eq!(buffer.byte_len(), before_bytes, "no bytes were charged for it");
+        within_ceilings(&buffer);
+    }
+
+    #[test]
+    fn eviction_keeps_the_freshest_frames() {
+        let mut buffer = FrameBuffer::default();
+        // Tag frames with a running counter in the first bytes, overflow the count ceiling,
+        // then confirm the survivors are the most recent ones, oldest first.
+        let total = MAX_BUFFERED_FRAMES + 100;
+        for tag in 0..total as u64 {
+            let mut frame = tag.to_le_bytes().to_vec();
+            frame.resize(64, 0);
+            buffer.push(frame);
+        }
+        let held = buffer.take();
+        assert_eq!(held.len(), MAX_BUFFERED_FRAMES);
+        let first_tag = u64::from_le_bytes(held.front().unwrap()[..8].try_into().unwrap());
+        let last_tag = u64::from_le_bytes(held.back().unwrap()[..8].try_into().unwrap());
+        assert_eq!(first_tag, (total - MAX_BUFFERED_FRAMES) as u64);
+        assert_eq!(last_tag, (total - 1) as u64);
+    }
+
+    #[test]
+    fn take_empties_the_buffer_and_resets_the_byte_count() {
+        let mut buffer = FrameBuffer::default();
+        for _ in 0..64 {
+            buffer.push(vec![4u8; 1000]);
+        }
+        assert!(buffer.byte_len() > 0);
+        let held = buffer.take();
+        assert_eq!(held.len(), 64);
+        assert_eq!(buffer.len(), 0, "the buffer is empty after a drain");
+        assert_eq!(buffer.byte_len(), 0, "the byte count resets on a drain");
     }
 }
