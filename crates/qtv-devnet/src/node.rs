@@ -90,6 +90,10 @@ const GENESIS_COMMIT_HEIGHT: Height = 0;
 
 const MAX_ROUND_ATTESTATIONS: usize = 8192;
 
+const MAX_FUTURE_PROPOSALS: usize = 256;
+
+const MAX_VIEW_CHANGES_PER_SENDER: usize = 64;
+
 const MAX_SERVE_BLOCKS: u64 = 256;
 
 #[derive(Debug)]
@@ -1082,9 +1086,18 @@ impl DevNode {
             .view_changes
             .iter()
             .any(|r| r.att.from == record.att.from && r.target_view == record.target_view);
-        if !seen {
-            self.view_changes.push(record);
+        if seen {
+            return;
         }
+        let from_count = self
+            .view_changes
+            .iter()
+            .filter(|r| r.att.from == record.att.from)
+            .count();
+        if from_count >= MAX_VIEW_CHANGES_PER_SENDER {
+            return;
+        }
+        self.view_changes.push(record);
     }
 
     fn verify_view_change(&self, selection: &Selection, record: &ViewChange) -> bool {
@@ -1353,9 +1366,25 @@ impl DevNode {
     }
 
     fn buffer_proposal(&mut self, proposal: Proposal) {
-        if !self.future_props.iter().any(|p| p.view == proposal.view) {
-            self.future_props.push(proposal);
+        if self.future_props.iter().any(|p| p.view == proposal.view) {
+            return;
         }
+        if self.future_props.len() >= MAX_FUTURE_PROPOSALS {
+            let Some((index, highest)) = self
+                .future_props
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (i, p.view))
+                .max_by_key(|(_, view)| *view)
+            else {
+                return;
+            };
+            if proposal.view >= highest {
+                return;
+            }
+            self.future_props.remove(index);
+        }
+        self.future_props.push(proposal);
     }
 
     pub fn view(&self) -> View {
@@ -1418,6 +1447,16 @@ impl DevNode {
     #[cfg(any(test, feature = "test-fixtures"))]
     pub fn seed_burn_archive(&mut self, entry: BurnArchiveEntry) {
         let _ = self.burn_archive.append(entry);
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn future_proposals_len(&self) -> usize {
+        self.future_props.len()
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn view_changes_len(&self) -> usize {
+        self.view_changes.len()
     }
 
     #[cfg(any(test, feature = "test-fixtures"))]
