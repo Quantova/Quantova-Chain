@@ -10,4 +10,7 @@
 # QRC-CONSENSUS is likewise anchored to an immutable commit rather than a tag, so it is out of the
 # tag gate's scope. It is pinned by rev in every crate manifest and recorded in the committed
 # lockfile. For the record it is QRC-CONSENSUS at 4b6622f8ddc36b02111fdc91853520616aba112d.
-QVM            v0.5.4
+#
+# QVM is now anchored to an immutable commit rather than a tag as well, carrying the effects memory
+# bound and the access list verification bound. It is pinned by rev in the qtv-node manifest and
+# recorded in the committed lockfile. For the record it is QVM at e60a93ff44adc76b1d118f971cc38a2e13bc5b2a.
