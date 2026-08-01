@@ -43,6 +43,9 @@ pub enum Request {
     FinalizedHead,
     BurnBlock(u64),
     BurnHeightsAfter(u64),
+    BridgedBalance { asset_id: [u8; 16], holder: [u8; 32] },
+    BridgedSupply { asset_id: [u8; 16] },
+    GenesisAccounts,
 }
 
 pub struct ClientError {
@@ -122,6 +125,14 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
                 .ok_or_else(|| ClientError::bad("bad_request", "get_side_events needs a height"))?;
             Ok(Request::SideEvents(height))
         }
+        "get_bridged_balance" => Ok(Request::BridgedBalance {
+            asset_id: hex_bytes::<16>(body, "asset_id")?,
+            holder: holder_id(body)?,
+        }),
+        "get_bridged_supply" => Ok(Request::BridgedSupply {
+            asset_id: hex_bytes::<16>(body, "asset_id")?,
+        }),
+        "genesis_accounts" => Ok(Request::GenesisAccounts),
         "finalized_head" => Ok(Request::FinalizedHead),
         "burn_block" => {
             let height = body
@@ -152,6 +163,23 @@ fn string_field(body: &Json, key: &str) -> Result<String, ClientError> {
         .ok_or_else(|| ClientError::bad("bad_request", format!("missing string field {key}")))
 }
 
+fn hex_bytes<const N: usize>(body: &Json, key: &str) -> Result<[u8; N], ClientError> {
+    let hex = string_field(body, key)?;
+    let bytes = crate::json::from_hex(&hex)
+        .map_err(|e| ClientError::bad("bad_request", format!("the {key} field is not hex, {e}")))?;
+    <[u8; N]>::try_from(bytes.as_slice())
+        .map_err(|_| ClientError::bad("bad_request", format!("the {key} field must be {N} bytes")))
+}
+
+fn holder_id(body: &Json) -> Result<[u8; 32], ClientError> {
+    let holder = string_field(body, "holder")?;
+    if let Ok(payload) = qtv_idfmt::parse_address(&holder) {
+        return <[u8; 32]>::try_from(payload.as_slice())
+            .map_err(|_| ClientError::bad("bad_request", "the holder address is not 32 bytes"));
+    }
+    hex_bytes::<32>(body, "holder")
+}
+
 pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result<Json, ClientError> {
     match request {
         Request::NodeInfo => Ok(node_info(ctx, node)),
@@ -172,7 +200,57 @@ pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result
         Request::FinalizedHead => Ok(finalized_head(node)),
         Request::BurnBlock(height) => burn_block(node, height),
         Request::BurnHeightsAfter(cursor) => Ok(burn_heights_after(node, cursor)),
+        Request::BridgedBalance { asset_id, holder } => Ok(bridged_balance(node, &asset_id, &holder)),
+        Request::BridgedSupply { asset_id } => Ok(bridged_supply(node, &asset_id)),
+        Request::GenesisAccounts => Ok(genesis_accounts(node)),
     }
+}
+
+fn bridged_balance(node: &DevNode, asset_id: &[u8; 16], holder: &[u8; 32]) -> Json {
+    let ledger = node.ledger();
+    object(vec![
+        ("asset_id", Json::str(crate::json::to_hex(asset_id))),
+        ("holder", Json::str(crate::json::to_hex(holder))),
+        (
+            "holder_address",
+            Json::str(qtv_idfmt::render_address(holder).unwrap_or_default()),
+        ),
+        ("balance", amount_str(ledger.bridged_balance(asset_id, holder))),
+        ("supply", amount_str(ledger.bridged_supply(asset_id))),
+    ])
+}
+
+fn bridged_supply(node: &DevNode, asset_id: &[u8; 16]) -> Json {
+    let ledger = node.ledger();
+    let asset = ledger.bridged_asset(asset_id);
+    object(vec![
+        ("asset_id", Json::str(crate::json::to_hex(asset_id))),
+        ("supply", amount_str(ledger.bridged_supply(asset_id))),
+        (
+            "cap",
+            amount_str(asset.as_ref().map(|a| a.cap).unwrap_or(0)),
+        ),
+        ("registered", Json::Bool(asset.is_some())),
+    ])
+}
+
+fn genesis_accounts(node: &DevNode) -> Json {
+    let accounts: Vec<Json> = node
+        .genesis_accounts()
+        .iter()
+        .map(|account| {
+            object(vec![
+                ("address", Json::str(&account.address)),
+                ("balance", Json::str(account.balance.to_string())),
+                ("scheme", Json::Int(account.scheme as u64)),
+            ])
+        })
+        .collect();
+    object(vec![
+        ("count", Json::Int(accounts.len() as u64)),
+        ("supply_quon", Json::str(node.genesis_supply().to_string())),
+        ("accounts", Json::Array(accounts)),
+    ])
 }
 
 fn finalized_head(node: &DevNode) -> Json {
@@ -642,11 +720,20 @@ fn side_event_json(index: u64, event: &SideEvent) -> Json {
             set(&mut fields, "actor", Json::str(validator));
             set(&mut fields, "amount", amount_str(*amount as u128));
         }
-        SideEvent::Slash { validator, amount } => {
+        SideEvent::Slash {
+            validator,
+            amount,
+            disposition,
+        } => {
+            set(&mut fields, "actor", Json::str(validator));
+            set(&mut fields, "amount", amount_str(*amount as u128));
+            fields.push(("disposition", Json::str(*disposition)));
+        }
+        SideEvent::Reward { validator, amount } => {
             set(&mut fields, "actor", Json::str(validator));
             set(&mut fields, "amount", amount_str(*amount as u128));
         }
-        SideEvent::Reward { validator, amount } => {
+        SideEvent::RewardClaim { validator, amount } => {
             set(&mut fields, "actor", Json::str(validator));
             set(&mut fields, "amount", amount_str(*amount as u128));
         }

@@ -962,6 +962,7 @@ impl Ledger {
             self.record_side_event(SideEvent::Slash {
                 validator: address.to_string(),
                 amount: bond.amount,
+                disposition: SLASH_DISPOSITION_BURN,
             });
         }
         self.clear_stake_rewards(&id);
@@ -1972,6 +1973,10 @@ impl Ledger {
         let mut account = self.account(address);
         account.balance = account.balance.saturating_add(credited);
         self.set_account(address, &account);
+        self.record_side_event(SideEvent::RewardClaim {
+            validator: address.to_string(),
+            amount: credited,
+        });
         credited
     }
 
@@ -2899,6 +2904,7 @@ impl Ledger {
             self.record_side_event(SideEvent::Slash {
                 validator: address.to_string(),
                 amount: taken,
+                disposition: SLASH_DISPOSITION_TREASURY,
             });
         }
         if let qtv_staking::Fault::Attributable = fault {
@@ -3842,6 +3848,128 @@ mod stake_state_tests {
         assert_eq!(l.balance(&addr), emission);
         assert_eq!(l.claim_reward(&addr, 400 + 365), 0);
         assert_eq!(l.claimable_reward(&addr, 400 + 365 + 1_000), 0);
+    }
+
+    #[test]
+    fn a_reward_claim_records_the_spendable_credit_as_a_root_invariant_side_event() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[21u8; 32]).unwrap();
+        l.seed_stake_pool(700_000 * 1_000_000);
+        l.seed_validator_bond(&addr, 2_000 * 1_000_000);
+        l.set_stake_mainnet_start(0);
+        let emission = qtv_staking::SESSION_EMISSION;
+        assert_eq!(l.accrue_reward(&addr, 400), emission);
+
+        // Accrual pays a locked tranche, not a spendable balance; only a reward event marks it.
+        assert_eq!(l.balance(&addr), 0);
+        let after_accrual: Vec<&str> = l.side_events().iter().map(SideEvent::kind).collect();
+        assert!(after_accrual.contains(&"reward"));
+        assert!(!after_accrual.contains(&"reward_claim"));
+
+        let leaves_before: Vec<Vec<u8>> = l.block_events().iter().map(BlockEvent::encode).collect();
+        let event_root_before = qtv_block::event_root(&leaves_before);
+        let committed_before = l.block_events().len();
+
+        let credited = l.claim_reward(&addr, 400 + 365);
+        assert_eq!(credited, emission);
+        assert_eq!(l.balance(&addr), emission, "the claim credits the spendable balance");
+
+        let claim = l
+            .side_events()
+            .iter()
+            .find(|event| event.kind() == "reward_claim")
+            .expect("the claim records a reward_claim side event");
+        match claim {
+            SideEvent::RewardClaim { validator, amount } => {
+                assert_eq!(validator, &addr);
+                assert_eq!(*amount, credited, "the side event carries the exact spendable credit");
+            }
+            other => panic!("expected a reward_claim, got {other:?}"),
+        }
+
+        // The claim records no committed block event, so the header event root is unmoved by it.
+        let leaves_after: Vec<Vec<u8>> = l.block_events().iter().map(BlockEvent::encode).collect();
+        assert_eq!(l.block_events().len(), committed_before);
+        assert_eq!(event_root_before, qtv_block::event_root(&leaves_after));
+
+        // Recording further side events touches neither the state root nor the event root.
+        let q_fixed = l.q_root();
+        for tag in 0..8u8 {
+            l.record_side_event(SideEvent::Freeze { target: gov_addr(tag) });
+        }
+        let leaves_marker: Vec<Vec<u8>> = l.block_events().iter().map(BlockEvent::encode).collect();
+        assert_eq!(q_fixed, l.q_root(), "a side event moves no state root");
+        assert_eq!(event_root_before, qtv_block::event_root(&leaves_marker));
+    }
+
+    #[test]
+    fn a_slash_side_event_names_its_supply_disposition_and_the_field_stays_off_every_root() {
+        // A validator-set slash burns the bond and lowers the money supply.
+        let mut burn = Ledger::new();
+        let v1 = qtv_idfmt::render_address(&[31u8; 32]).unwrap();
+        burn.credit_supply(5_000 * 1_000_000);
+        burn.seed_validator_bond(&v1, 2_000 * 1_000_000);
+        let supply_before = burn.total_supply();
+        assert!(burn.slash_validator(&v1));
+        assert_eq!(
+            burn.total_supply(),
+            supply_before - 2_000 * 1_000_000,
+            "a burn slash removes the bond from the supply",
+        );
+        let burn_event = burn
+            .side_events()
+            .iter()
+            .find(|event| event.kind() == "slash")
+            .expect("a burn slash records a slash side event");
+        let burn_leaf = match burn.block_events().iter().find(|event| event.selector == EVENT_SLASH) {
+            Some(event) => event.encode(),
+            None => panic!("a burn slash records a committed slash event"),
+        };
+        match burn_event {
+            SideEvent::Slash { disposition, amount, .. } => {
+                assert_eq!(*disposition, SLASH_DISPOSITION_BURN);
+                assert_eq!(*amount, 2_000 * 1_000_000);
+            }
+            other => panic!("expected a slash, got {other:?}"),
+        }
+
+        // A staking slash moves the taken amount into the treasury, leaving the supply untouched.
+        let mut treasury = Ledger::new();
+        let v2 = qtv_idfmt::render_address(&[31u8; 32]).unwrap();
+        treasury.credit_supply(5_000 * 1_000_000);
+        treasury.set_account(&v2, &Account::funded(3_000 * 1_000_000, 1, vec![]));
+        treasury.credit_supply(3_000 * 1_000_000);
+        assert!(treasury.bond(&v2, 2_000 * 1_000_000, 0));
+        let supply_held = treasury.total_supply();
+        assert_eq!(
+            treasury.slash_stake(&v2, qtv_staking::Fault::Attributable),
+            2_000 * 1_000_000,
+        );
+        assert_eq!(treasury.total_supply(), supply_held, "a treasury slash leaves the supply fixed");
+        assert_eq!(treasury.stake_treasury(), 2_000 * 1_000_000, "the bond lands in the treasury");
+        let treasury_event = treasury
+            .side_events()
+            .iter()
+            .find(|event| event.kind() == "slash")
+            .expect("a treasury slash records a slash side event");
+        let treasury_leaf = match treasury.block_events().iter().find(|event| event.selector == EVENT_SLASH) {
+            Some(event) => event.encode(),
+            None => panic!("a treasury slash records a committed slash event"),
+        };
+        match treasury_event {
+            SideEvent::Slash { disposition, amount, .. } => {
+                assert_eq!(*disposition, SLASH_DISPOSITION_TREASURY);
+                assert_eq!(*amount, 2_000 * 1_000_000);
+            }
+            other => panic!("expected a slash, got {other:?}"),
+        }
+
+        // Both paths slash the same address and amount, so the committed QSLH leaf is byte-identical:
+        // the supply disposition rides only the node-local side event, never a committed root.
+        assert_eq!(
+            burn_leaf, treasury_leaf,
+            "the disposition never enters the committed slash event",
+        );
     }
 
     #[test]
@@ -5070,6 +5198,11 @@ mod stake_state_tests {
 /// change to the event root function.
 pub const NATIVE_EVENT_SOURCE: &str = "qtv/native";
 
+/// A slash that removed the amount from the money supply.
+pub const SLASH_DISPOSITION_BURN: &str = "burn";
+/// A slash that moved the amount from the bond into the treasury, supply unchanged.
+pub const SLASH_DISPOSITION_TREASURY: &str = "treasury";
+
 /// A plain value send that moved an amount and paid a fee.
 pub const EVENT_TRANSFER: [u8; 4] = *b"QXFR";
 /// A stake bond that locked an amount into a validator bond.
@@ -5222,8 +5355,13 @@ pub enum SideEvent {
     Slash {
         validator: String,
         amount: u64,
+        disposition: &'static str,
     },
     Reward {
+        validator: String,
+        amount: u64,
+    },
+    RewardClaim {
         validator: String,
         amount: u64,
     },
@@ -5287,6 +5425,7 @@ impl SideEvent {
             SideEvent::Unbond { .. } => "unbond",
             SideEvent::Slash { .. } => "slash",
             SideEvent::Reward { .. } => "reward",
+            SideEvent::RewardClaim { .. } => "reward_claim",
             SideEvent::ContractTransfer { .. } => "contract_transfer",
             SideEvent::BridgeMint { .. } => "bridge_mint",
             SideEvent::BridgeBurn { .. } => "bridge_burn",
