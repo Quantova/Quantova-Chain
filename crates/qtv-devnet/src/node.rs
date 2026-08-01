@@ -1773,7 +1773,14 @@ fn view_change_subject(
     buf.extend_from_slice(&locked_value);
     buf.push(has_lock as u8);
     let commitment = qtv_bft::hash::digest_256(&buf);
-    ConsensusBlock::new(height, commitment, Parent::Genesis)
+    // Mark the subject with the reserved control plane cost so the equivocation slasher never
+    // reads a view change vote as a block double vote and frames the honest signer.
+    ConsensusBlock::with_cost(
+        height,
+        commitment,
+        Parent::Genesis,
+        qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST,
+    )
 }
 
 /// The safe value binding the next proposal: the block clearing the quorum-intersection floor at the highest view.

@@ -140,11 +140,22 @@ pub fn genesis_beacon() -> Beacon {
     Beacon::genesis()
 }
 
+/// The reserved resource cost that marks a control plane subject, the view change vote and
+/// the lock proof a node signs during a view change, apart from a block proposal. Every block
+/// proposal carries a unit cost, so a subject at this cost is never a block a validator voted
+/// to finalize. A locked validator signs its view change vote and its lock proof at the same
+/// height and view it locked in, over two different subjects; without this mark the two read
+/// as a same view double vote and a reporter could lift them from one honest view change
+/// message and slash the signer. The mark rides inside the signed subject, so it cannot be
+/// stripped without breaking the signature.
+pub const VIEW_CHANGE_SUBJECT_COST: u64 = u64::MAX;
+
 /// The ids of validators that signed two conflicting attestations at one height in one view,
 /// each proven by verifying both signatures against the offender's registered attestation key.
 /// The view rides inside each signed attestation, so a pair whose signed views differ is a
 /// justified cross view re vote and never flags, and a forged pair naming a validator that
-/// never double signed does not authenticate and is never flagged.
+/// never double signed does not authenticate and is never flagged. A control plane view change
+/// subject is not a block vote, so a pair touching one never flags.
 pub fn equivocation_offenders(
     chain_id: u64,
     attestations: &[Attestation],
@@ -157,6 +168,8 @@ pub fn equivocation_offenders(
                 && first.height == second.height
                 && first.view == second.view
                 && first.block != second.block
+                && first.block.cost != VIEW_CHANGE_SUBJECT_COST
+                && second.block.cost != VIEW_CHANGE_SUBJECT_COST
                 && !flagged.contains(&first.from)
             {
                 if let Some(registration) = roster.iter().find(|r| r.id == first.from) {
@@ -182,6 +195,9 @@ pub fn double_finalize_offenders(
 ) -> Vec<u64> {
     let mut quorums: Vec<(u64, [u8; 32], Vec<u64>)> = Vec::new();
     for att in attestations {
+        if att.block.cost == VIEW_CHANGE_SUBJECT_COST {
+            continue;
+        }
         let Some(registration) = roster.iter().find(|r| r.id == att.from) else {
             continue;
         };
