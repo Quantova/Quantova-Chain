@@ -90,6 +90,8 @@ const GENESIS_COMMIT_HEIGHT: Height = 0;
 
 const MAX_ROUND_ATTESTATIONS: usize = 8192;
 
+const MAX_SERVE_BLOCKS: u64 = 256;
+
 #[derive(Debug)]
 pub enum RoundError {
     Io(io::Error),
@@ -1558,9 +1560,10 @@ impl DevNode {
     }
 
     pub fn serve_blocks(&self, from: Height, to: Height) -> Vec<ChainBlock> {
+        let ceiling = serve_ceiling(from, to);
         let mut blocks = Vec::new();
         let mut height = from;
-        while height <= to {
+        while height <= ceiling {
             let Some(bytes) = self.block_store.block_by_height(height) else {
                 break;
             };
@@ -1741,4 +1744,47 @@ fn decode_head(bytes: &[u8]) -> Result<(Header, qtv_attest::Certificate), RoundE
     let certificate =
         crate::wire::certificate_from_bytes(cert_slot).map_err(|_| RoundError::Decode)?;
     Ok((header, certificate))
+}
+
+fn serve_ceiling(from: Height, to: Height) -> Height {
+    to.min(from.saturating_add(MAX_SERVE_BLOCKS.saturating_sub(1)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{serve_ceiling, Height, MAX_SERVE_BLOCKS};
+
+    fn span(from: Height, ceiling: Height) -> u64 {
+        ceiling - from + 1
+    }
+
+    #[test]
+    fn a_hostile_upper_height_is_clamped_to_the_serve_window() {
+        let ceiling = serve_ceiling(0, u64::MAX);
+        assert_eq!(ceiling, MAX_SERVE_BLOCKS - 1, "the window did not clamp a u64::MAX request");
+        assert_eq!(span(0, ceiling), MAX_SERVE_BLOCKS, "the served span exceeded the window");
+    }
+
+    #[test]
+    fn the_window_never_overflows_for_a_high_lower_bound() {
+        let from = u64::MAX - 3;
+        let ceiling = serve_ceiling(from, u64::MAX);
+        assert_eq!(ceiling, u64::MAX, "a near ceiling from must saturate, not wrap");
+        assert!(span(from, ceiling) <= MAX_SERVE_BLOCKS, "the span breached the window near u64::MAX");
+    }
+
+    #[test]
+    fn a_request_within_the_window_is_served_whole() {
+        let ceiling = serve_ceiling(10, 12);
+        assert_eq!(ceiling, 12, "an in window request was clamped");
+        assert_eq!(span(10, ceiling), 3);
+    }
+
+    #[test]
+    fn a_request_exactly_at_the_window_edge_is_served_whole() {
+        let to = MAX_SERVE_BLOCKS - 1;
+        let ceiling = serve_ceiling(0, to);
+        assert_eq!(ceiling, to, "a request at the window edge was clamped");
+        assert_eq!(span(0, ceiling), MAX_SERVE_BLOCKS);
+    }
 }
