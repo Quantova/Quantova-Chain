@@ -88,6 +88,8 @@ pub fn leader_for(selection: &Selection, view: View) -> u64 {
 /// own, and the first block is `MIN_HEIGHT` (one), so genesis is height zero.
 const GENESIS_COMMIT_HEIGHT: Height = 0;
 
+const MAX_ROUND_ATTESTATIONS: usize = 8192;
+
 #[derive(Debug)]
 pub enum RoundError {
     Io(io::Error),
@@ -1302,6 +1304,9 @@ impl DevNode {
             .iter()
             .any(|a| a.from == attestation.from && a.block == attestation.block);
         if !seen {
+            if self.round_atts.len() >= MAX_ROUND_ATTESTATIONS {
+                self.round_atts.remove(0);
+            }
             self.round_atts.push(attestation.clone());
         }
     }
