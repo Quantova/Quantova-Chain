@@ -168,10 +168,16 @@ pub fn execute_parallel(
     let bridge_mint_address = crate::ledger::bridge_mint_address();
     let bridge_exit_address = crate::ledger::bridge_exit_address();
     let bridge_settle_address = crate::ledger::bridge_settle_address();
+    let round_proposer = ledger.round_proposer().map(str::to_string);
+    let grants_address = crate::ledger::grants_address();
     ledger.bridge_expire(day.saturating_mul(86_400));
     if candidates.iter().any(|wrapper| {
         let (sender, target) = access(wrapper);
-        target == stake_address.as_str()
+        round_proposer.as_deref() == Some(sender)
+            || round_proposer.as_deref() == Some(target)
+            || sender == grants_address.as_str()
+            || target == grants_address.as_str()
+            || target == stake_address.as_str()
             || target == claim_address.as_str()
             || target == exit_address.as_str()
             || target == withdraw_address.as_str()
@@ -672,6 +678,67 @@ mod tests {
                     + parallel.balance(&sink_b.address())
                     <= parallel.total_supply(),
                 "conservation broke on the parallel path at {threads} threads"
+            );
+        }
+    }
+
+    #[test]
+    fn a_transfer_into_then_out_of_the_fee_recipient_does_not_fork_parallel_from_serial() {
+        let fee = FeeParams::devnet();
+        let a = keypair(0);
+        let b = keypair(1);
+        let proposer = keypair(3);
+
+        let f = fee.transfer_fee();
+        let ps = FeeSplit::of(f).proposer;
+        assert!(ps > 0, "the proposer fee share must be non zero for the collision to bite");
+
+        let amount0 = 1_000u64;
+        let amount1 = amount0 + ps - f;
+
+        let tx0 = transfer(&a, &proposer.address(), amount0, 0, &fee);
+        let tx1 = transfer(&proposer, &b.address(), amount1, 0, &fee);
+        let block = vec![tx0, tx1];
+
+        let layers = plan_layers(&block);
+        assert_eq!(
+            layers.len(),
+            2,
+            "the fee recipient is party to both sends so the pair is serialised across two layers"
+        );
+
+        let start = 10_000_000u64;
+        let mut base = Ledger::new();
+        fund(&mut base, &a, start);
+        fund(&mut base, &proposer, 0);
+        base.seed_supply(start);
+        base.set_round_proposer(&proposer.address());
+
+        let mut ordered = base.clone();
+        let ordered_included = execute_ordered(&mut ordered, &block, &fee, 0);
+        assert_eq!(
+            ordered_included.len(),
+            2,
+            "sequentially the proposer fee from the first send funds the second send"
+        );
+
+        for threads in [1usize, 2, 4, 8, 16] {
+            let mut parallel = base.clone();
+            let parallel_included = execute_parallel(&mut parallel, &block, &fee, threads, 0);
+            assert_eq!(
+                included_ids(&ordered_included),
+                included_ids(&parallel_included),
+                "included set differs at {threads} threads"
+            );
+            assert_eq!(
+                ordered.q_root(),
+                parallel.q_root(),
+                "state root forked at {threads} threads"
+            );
+            assert_eq!(
+                parallel.balance(&b.address()),
+                ordered.balance(&b.address()),
+                "the fee recipient outflow diverged at {threads} threads"
             );
         }
     }
