@@ -39,6 +39,23 @@ pub enum HeightOutcome {
     Stalled,
 }
 
+const MAX_BUFFERED_FRAMES: usize = 8192;
+const MAX_BUFFERED_BYTES: usize = 32 * 1024 * 1024;
+
+fn buffer_bounded(buffered: &mut Vec<(usize, Vec<u8>)>, from: usize, frame: Vec<u8>) {
+    if frame.len() > MAX_BUFFERED_BYTES {
+        return;
+    }
+    let mut total: usize = buffered.iter().map(|(_, f)| f.len()).sum();
+    while !buffered.is_empty()
+        && (buffered.len() + 1 > MAX_BUFFERED_FRAMES || total + frame.len() > MAX_BUFFERED_BYTES)
+    {
+        let (_, dropped) = buffered.remove(0);
+        total = total.saturating_sub(dropped.len());
+    }
+    buffered.push((from, frame));
+}
+
 pub struct Runtime {
     pub idx: usize,
     pub n: usize,
@@ -134,7 +151,7 @@ impl Runtime {
             match self.inbound.recv_timeout(Duration::from_millis(10)) {
                 Ok((_, bytes)) => match Message::decode(&bytes) {
                     Ok(Message::Register(note)) => self.node.collect_registration(*note),
-                    Ok(_) => self.buffered.push((0, bytes)),
+                    Ok(_) => buffer_bounded(&mut self.buffered, 0, bytes),
                     Err(_) => {}
                 },
                 Err(RecvTimeoutError::Timeout) => {}
@@ -163,7 +180,7 @@ impl Runtime {
             match self.inbound.recv_timeout(Duration::from_millis(10)) {
                 Ok((_, bytes)) => match Message::decode(&bytes) {
                     Ok(Message::Reveal(note)) => self.node.collect_reveal(*note),
-                    Ok(_) => self.buffered.push((0, bytes)),
+                    Ok(_) => buffer_bounded(&mut self.buffered, 0, bytes),
                     Err(_) => {}
                 },
                 Err(RecvTimeoutError::Timeout) => {}
@@ -290,7 +307,7 @@ impl Runtime {
             Ok(Message::Tx(transaction)) => gossiped.push(transaction),
             Ok(other) => match message_height(&other) {
                 Some(h) if h < start_height => {}
-                _ => buffered.push((0, bytes)),
+                _ => buffer_bounded(buffered, 0, bytes),
             },
             Err(_) => {}
         }
@@ -350,7 +367,7 @@ impl Runtime {
             match Message::decode(&bytes) {
                 Ok(message) => match message_height(&message) {
                     Some(h) if h == start_height => self.dispatch(message, &selection),
-                    Some(h) if h > start_height => self.buffered.push((0, bytes)),
+                    Some(h) if h > start_height => buffer_bounded(&mut self.buffered, 0, bytes),
                     _ => {}
                 },
                 Err(_) => {}
@@ -421,7 +438,7 @@ impl Runtime {
                         Err(_) => continue,
                     };
                     match message_height(&message) {
-                        Some(h) if h > start_height => self.buffered.push((0, bytes)),
+                        Some(h) if h > start_height => buffer_bounded(&mut self.buffered, 0, bytes),
                         Some(h) if h < start_height => {}
                         _ => self.dispatch(message, &selection),
                     }
