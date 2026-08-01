@@ -205,6 +205,42 @@ impl Decode for QAsset {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OutstandingBurn {
+    pub asset_id: [u8; 16],
+    pub amount: u128,
+    pub beneficiary: [u8; 32],
+}
+
+impl Encode for OutstandingBurn {
+    fn encode(&self, encoder: &mut Encoder) {
+        encoder.put_bytes(&self.asset_id);
+        self.amount.encode(encoder);
+        encoder.put_bytes(&self.beneficiary);
+    }
+}
+
+impl Decode for OutstandingBurn {
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
+        let asset_bytes = decoder.get_bytes()?;
+        let asset_id = <[u8; 16]>::try_from(asset_bytes).map_err(|_| Error::Truncated {
+            needed: 16,
+            found: asset_bytes.len(),
+        })?;
+        let amount = u128::decode(decoder)?;
+        let beneficiary_bytes = decoder.get_bytes()?;
+        let beneficiary = <[u8; 32]>::try_from(beneficiary_bytes).map_err(|_| Error::Truncated {
+            needed: 32,
+            found: beneficiary_bytes.len(),
+        })?;
+        Ok(OutstandingBurn {
+            asset_id,
+            amount,
+            beneficiary,
+        })
+    }
+}
+
 const BRIDGE_ASSET_TAG: &[u8] = b"qtv/bridge/asset/";
 const BRIDGE_BALANCE_TAG: &[u8] = b"qtv/bridge/bal/";
 const BRIDGE_SEEN_TAG: &[u8] = b"qtv/bridge/seen/";
@@ -216,6 +252,7 @@ const BRIDGE_DESTCHAIN_TAG: &[u8] = b"qtv/bridge/destchain";
 const BRIDGE_EPOCH_TAG: &[u8] = b"qtv/bridge/epoch";
 const BRIDGE_BURN_REF_DOMAIN: &[u8] = b"qtv/bridge/burn-ref/v1";
 const BRIDGE_EXIT_SEEN_TAG: &[u8] = b"qtv/bridge/exitseen/";
+const BRIDGE_OUTSTANDING_TAG: &[u8] = b"qtv/bridge/outstanding/";
 const BRIDGE_EPOCHPAY_TAG: &[u8] = b"qtv/bridge/epochpay/";
 const BRIDGE_EPOCHPAYG_TAG: &[u8] = b"qtv/bridge/epochpayglobal/";
 
@@ -267,6 +304,13 @@ fn bridge_epochmint_key(asset_id: &[u8; 16], epoch: u64) -> Key {
 fn bridge_exit_seen_key(burn_ref: &[u8; 32]) -> Key {
     let mut input = Vec::with_capacity(BRIDGE_EXIT_SEEN_TAG.len() + burn_ref.len());
     input.extend_from_slice(BRIDGE_EXIT_SEEN_TAG);
+    input.extend_from_slice(burn_ref);
+    sha3::sha3_256(&input)
+}
+
+fn bridge_outstanding_key(burn_ref: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(BRIDGE_OUTSTANDING_TAG.len() + burn_ref.len());
+    input.extend_from_slice(BRIDGE_OUTSTANDING_TAG);
     input.extend_from_slice(burn_ref);
     sha3::sha3_256(&input)
 }
@@ -784,6 +828,14 @@ impl Ledger {
 
     pub fn round_proposer(&self) -> Option<&str> {
         self.round_proposer.as_deref()
+    }
+
+    pub fn set_execution_height(&mut self, height: u64) {
+        self.execution_height = height;
+    }
+
+    pub fn execution_height(&self) -> u64 {
+        self.execution_height
     }
 
     fn credit_account(&mut self, address: &str, amount: u64) {
@@ -1341,6 +1393,17 @@ impl Ledger {
         self.write_leaf(bridge_balance_key(asset_id, holder), to_bytes(&amount));
     }
 
+    #[cfg(test)]
+    pub(crate) fn seed_outstanding_burn(
+        &mut self,
+        burn_ref: &[u8; 32],
+        asset_id: &[u8; 16],
+        amount: u128,
+        beneficiary: &[u8; 32],
+    ) {
+        self.record_outstanding_burn(burn_ref, asset_id, amount, beneficiary);
+    }
+
     pub fn bridge_vault_custody(&self, vault: &[u8; 32], asset_id: &[u8; 16]) -> u128 {
         self.trie
             .get(&bridge_vault_custody_key(vault, asset_id))
@@ -1371,11 +1434,17 @@ impl Ledger {
             .map(|bytes| from_bytes(bytes).expect("state holds a canonical operator set"))
     }
 
-    pub fn seed_bridge_operator_set(&mut self, set: &crate::bridge::OperatorSet) -> (Key, Vec<u8>) {
+    pub fn seed_bridge_operator_set(
+        &mut self,
+        set: &crate::bridge::OperatorSet,
+    ) -> Option<(Key, Vec<u8>)> {
+        if set.threshold < 2 {
+            return None;
+        }
         let key = stake_singleton_key(BRIDGE_OPERATORS_TAG);
         let bytes = to_bytes(set);
         self.write_leaf(key, bytes.clone());
-        (key, bytes)
+        Some((key, bytes))
     }
 
     pub fn bridge_dest_chain(&self) -> Option<u32> {
@@ -1426,6 +1495,9 @@ impl Ledger {
 
     pub fn bridge_mint(&mut self, fact: &crate::bridge::Fact) -> bool {
         if fact.amount == 0 {
+            return false;
+        }
+        if self.execution_height() > fact.expiry_height {
             return false;
         }
         let asset = match self.bridged_asset(&fact.asset_id) {
@@ -1508,6 +1580,17 @@ impl Ledger {
                 ..asset
             },
         );
+        let event_index = self.block_events.len() as u64;
+        let burn_ref = bridge_burn_ref(
+            chain_id,
+            asset_id,
+            holder,
+            amount,
+            destination,
+            sender_nonce,
+            event_index,
+        );
+        self.record_outstanding_burn(&burn_ref, asset_id, amount, holder);
         self.record_bridge_burn_event(
             asset_id,
             holder,
@@ -1515,6 +1598,8 @@ impl Ledger {
             destination,
             chain_id,
             sender_nonce,
+            event_index,
+            &burn_ref,
         );
         true
     }
@@ -1526,6 +1611,48 @@ impl Ledger {
 
     fn mark_bridge_exit_settled(&mut self, burn_ref: &[u8; 32]) {
         self.write_leaf(bridge_exit_seen_key(burn_ref), vec![1]);
+    }
+
+    pub fn bridge_outstanding_burn(&self, burn_ref: &[u8; 32]) -> Option<OutstandingBurn> {
+        self.trie
+            .get(&bridge_outstanding_key(burn_ref))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical outstanding burn"))
+    }
+
+    fn record_outstanding_burn(
+        &mut self,
+        burn_ref: &[u8; 32],
+        asset_id: &[u8; 16],
+        amount: u128,
+        beneficiary: &[u8; 32],
+    ) {
+        let record = OutstandingBurn {
+            asset_id: *asset_id,
+            amount,
+            beneficiary: *beneficiary,
+        };
+        self.write_leaf(bridge_outstanding_key(burn_ref), to_bytes(&record));
+    }
+
+    fn outstanding_burn_matches(
+        &self,
+        burn_ref: &[u8; 32],
+        asset_id: &[u8; 16],
+        amount: u128,
+        beneficiary: &[u8; 32],
+    ) -> bool {
+        matches!(
+            self.bridge_outstanding_burn(burn_ref),
+            Some(record)
+                if record.asset_id == *asset_id
+                    && record.amount == amount
+                    && record.beneficiary == *beneficiary
+        )
+    }
+
+    fn consume_outstanding_burn(&mut self, burn_ref: &[u8; 32]) {
+        self.erase_leaf(&bridge_outstanding_key(burn_ref));
     }
 
     pub fn bridge_epoch_paid(&self, asset_id: &[u8; 16], epoch: u64) -> u128 {
@@ -1592,6 +1719,9 @@ impl Ledger {
         if self.bridge_exit_settled(&fact.burn_ref) {
             return false;
         }
+        if !self.outstanding_burn_matches(&fact.burn_ref, &fact.asset_id, fact.amount, &fact.beneficiary) {
+            return false;
+        }
         let held = match self.bridge_vault_custody(&vault, &fact.asset_id).checked_sub(fact.amount) {
             Some(held) => held,
             None => return false,
@@ -1600,6 +1730,7 @@ impl Ledger {
             return false;
         }
         self.mark_bridge_exit_settled(&fact.burn_ref);
+        self.consume_outstanding_burn(&fact.burn_ref);
         self.set_bridge_vault_custody(&vault, &fact.asset_id, held);
         self.record_bridge_settle_event(&fact.asset_id, &fact.beneficiary, fact.amount, &fact.burn_ref);
         true
@@ -1625,6 +1756,9 @@ impl Ledger {
             None => return false,
         };
         if self.bridge_exit_settled(&fact.burn_ref) {
+            return false;
+        }
+        if !self.outstanding_burn_matches(&fact.burn_ref, &fact.asset_id, fact.amount, &fact.beneficiary) {
             return false;
         }
         let epoch = self.bridge_epoch();
@@ -1661,6 +1795,7 @@ impl Ledger {
             None => return false,
         };
         self.mark_bridge_exit_settled(&fact.burn_ref);
+        self.consume_outstanding_burn(&fact.burn_ref);
         self.set_bridged_balance(&fact.asset_id, &fact.beneficiary, credited);
         self.set_bridged_asset(&fact.asset_id, &QAsset { supply: new_supply, ..asset });
         self.set_bridge_epoch_paid(&fact.asset_id, epoch, new_asset_paid);
@@ -4235,7 +4370,7 @@ mod stake_state_tests {
             "the mint predated the vault so it records no custody"
         );
 
-        // a proven settle cannot draw coins the vault never recorded
+        l.seed_outstanding_burn(&[0x07u8; 32], &asset, 500, &holder);
         let settle = crate::bridge::ExitFact {
             version: crate::bridge::EXIT_FACT_VERSION,
             corridor: 1,
@@ -4251,6 +4386,7 @@ mod stake_state_tests {
         assert_eq!(l.bridged_supply(&asset), 1_000, "the refused settle moves no supply");
 
         // a refund slash cannot re-issue wrapped beyond the custody backing it
+        l.seed_outstanding_burn(&[0x08u8; 32], &asset, 500, &holder);
         let slash = crate::bridge::ExitFact {
             version: crate::bridge::EXIT_FACT_VERSION,
             corridor: 1,
@@ -4687,6 +4823,7 @@ pub struct Ledger {
     trie: Trie,
     block_events: Vec<BlockEvent>,
     round_proposer: Option<String>,
+    execution_height: u64,
     // An undo log of prior leaf images, present only while a transition applies under
     // apply_atomic. Every leaf write records its prior value here so a fault partway through
     // a transition rolls the leaves back to the pre transition image. It is an internal
@@ -4700,6 +4837,7 @@ impl Ledger {
             trie: Trie::new(),
             block_events: Vec::new(),
             round_proposer: None,
+            execution_height: 0,
             journal: None,
         }
     }
@@ -4710,6 +4848,7 @@ impl Ledger {
             trie,
             block_events: Vec::new(),
             round_proposer: None,
+            execution_height: 0,
             journal: None,
         }
     }
@@ -4854,6 +4993,7 @@ impl Ledger {
         self.record_native_event(EVENT_BRIDGE_MINT, encoder.into_bytes());
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_bridge_burn_event(
         &mut self,
         asset_id: &[u8; 16],
@@ -4862,17 +5002,9 @@ impl Ledger {
         destination: &[u8; 32],
         chain_id: u64,
         sender_nonce: u64,
+        event_index: u64,
+        burn_ref: &[u8; 32],
     ) {
-        let event_index = self.block_events.len() as u64;
-        let burn_ref = bridge_burn_ref(
-            chain_id,
-            asset_id,
-            holder,
-            amount,
-            destination,
-            sender_nonce,
-            event_index,
-        );
         let mut encoder = Encoder::new();
         encoder.put_bytes(asset_id);
         encoder.put_bytes(holder);
@@ -4881,7 +5013,7 @@ impl Ledger {
         encoder.put_u64(chain_id);
         encoder.put_u64(sender_nonce);
         encoder.put_u64(event_index);
-        encoder.put_bytes(&burn_ref);
+        encoder.put_bytes(burn_ref);
         self.record_native_event(EVENT_BRIDGE_BURN, encoder.into_bytes());
     }
 
