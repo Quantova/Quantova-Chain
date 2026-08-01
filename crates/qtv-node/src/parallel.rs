@@ -485,6 +485,128 @@ mod tests {
     }
 
     #[test]
+    fn a_case_aliased_self_transfer_cannot_mint_or_stall_the_nonce() {
+        let fee = FeeParams::devnet();
+        let attacker = keypair(0);
+        let canonical = attacker.address();
+        let alias = canonical.to_ascii_lowercase();
+        assert_ne!(canonical, alias, "the alias is a distinct surface string");
+        assert_eq!(
+            qtv_idfmt::parse_address(&alias).unwrap(),
+            qtv_idfmt::parse_address(&canonical).unwrap(),
+            "the alias decodes to the same payload, so it shares the sender account leaf"
+        );
+        assert_eq!(
+            state_key(&alias),
+            state_key(&canonical),
+            "the alias and the canonical form collide on one state key"
+        );
+
+        let start = 1_000_000u64;
+        let amount = 250_000u64;
+
+        let build = || {
+            let call = transfer_call(&alias, amount);
+            let body = qtv_tx::Body::new(
+                canonical.clone(),
+                0,
+                crate::execution::TRANSFER_METER,
+                u128::from(fee.transfer_fee()),
+                call,
+            );
+            sign(&attacker, &body)
+        };
+
+        for parallel_path in [false, true] {
+            let mut ledger = Ledger::new();
+            fund(&mut ledger, &attacker, start);
+            ledger.seed_supply(start);
+            let before = ledger.balance(&canonical);
+            assert_eq!(before, start);
+
+            let tx = build();
+            let included = if parallel_path {
+                execute_parallel(&mut ledger, &[tx], &fee, 8, 0)
+            } else {
+                execute_ordered(&mut ledger, &[tx], &fee, 0)
+            };
+
+            let after = ledger.balance(&canonical);
+            assert_eq!(
+                after, before,
+                "case aliased transfer minted funds (parallel={parallel_path}): {before} -> {after}"
+            );
+            assert!(
+                after <= ledger.total_supply(),
+                "conservation broke (parallel={parallel_path}): balance {after} exceeds supply {}",
+                ledger.total_supply()
+            );
+            assert!(
+                included.is_empty(),
+                "the aliased transfer must be refused, not included (parallel={parallel_path})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_case_aliased_duplicate_cannot_fork_the_ordered_and_parallel_paths() {
+        let fee = FeeParams::devnet();
+        let attacker = keypair(0);
+        let sink = keypair(1);
+        let canonical = attacker.address();
+        let alias = canonical.to_ascii_lowercase();
+
+        let signed = |sender: &str| {
+            let call = transfer_call(&sink.address(), 1_000);
+            let body = qtv_tx::Body::new(
+                sender.to_string(),
+                0,
+                crate::execution::TRANSFER_METER,
+                u128::from(fee.transfer_fee()),
+                call,
+            );
+            sign(&attacker, &body)
+        };
+        let block = vec![signed(&canonical), signed(&alias)];
+
+        let mut base = Ledger::new();
+        fund(&mut base, &attacker, 10_000_000);
+
+        let mut ordered = base.clone();
+        let ordered_included = execute_ordered(&mut ordered, &block, &fee, 0);
+        assert_eq!(
+            ordered_included.len(),
+            1,
+            "only the canonical transfer applies; the alias is refused"
+        );
+
+        for threads in [1usize, 2, 4, 8, 16] {
+            let mut parallel = base.clone();
+            let parallel_included = execute_parallel(&mut parallel, &block, &fee, threads, 0);
+            assert_eq!(
+                ordered.q_root(),
+                parallel.q_root(),
+                "state root forked at {threads} threads"
+            );
+            assert_eq!(
+                ordered_included.len(),
+                parallel_included.len(),
+                "included set differs at {threads} threads"
+            );
+        }
+    }
+
+    #[test]
+    fn unparseable_addresses_do_not_share_one_account_leaf() {
+        let a = state_key("not an address");
+        let b = state_key("also not an address");
+        let real = state_key(&keypair(0).address());
+        assert_ne!(a, b, "distinct unparseable strings must not share a leaf");
+        assert_ne!(a, real, "an unparseable string must not collide with a real account");
+        assert_ne!(b, real, "an unparseable string must not collide with a real account");
+    }
+
+    #[test]
     fn the_parallel_and_ordered_paths_settle_the_armed_session_identically() {
         let fee = FeeParams::devnet();
         let (mut base, keys) = population(24, 50_000_000);
