@@ -946,7 +946,8 @@ impl DevNode {
             };
             messages.push(Message::Proposal(proposal));
         }
-        if self.staged.is_some() {
+        let stage_is_current = matches!(&self.staged, Some(staged) if staged.view == self.view);
+        if stage_is_current {
             if let Some(attestation) = self.attest_guarded() {
                 self.record_attestation(&attestation);
                 messages.push(Message::Attest(Box::new(attestation)));
