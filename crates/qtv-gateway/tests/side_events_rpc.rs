@@ -128,3 +128,90 @@ fn get_side_events_serialises_the_recorded_kinds_for_a_height() {
 
     std::fs::remove_dir_all(&base).ok();
 }
+
+#[test]
+fn get_side_events_serialises_the_bridge_economic_kinds() {
+    let base = unique_base("bridge-side-events");
+    let cfg = single_node(&base);
+    let ctx = context();
+    let mut node = DevNode::open(&cfg.nodes[0], &cfg).expect("open");
+
+    let asset_id = [7u8; 16];
+    let recipient = [9u8; 32];
+    let holder = [4u8; 32];
+    let beneficiary = [6u8; 32];
+    let burn_ref = [3u8; 32];
+    let destination = [1u8; 32];
+    node.seed_side_events(
+        8,
+        vec![
+            SideEvent::BridgeMint {
+                asset_id,
+                recipient,
+                amount: 1_000,
+            },
+            SideEvent::BridgeBurn {
+                asset_id,
+                holder,
+                amount: 400,
+                destination,
+                chain_id: 2,
+                burn_ref,
+            },
+            SideEvent::BridgeSettle {
+                asset_id,
+                beneficiary,
+                amount: 400,
+                burn_ref,
+            },
+            SideEvent::BridgeSlash {
+                asset_id,
+                beneficiary,
+                amount: 400,
+                burn_ref,
+            },
+        ],
+    );
+
+    let out = served(handle(
+        &ctx,
+        &mut node,
+        build("get_side_events", object(vec![("height", Json::Int(8))])),
+    ));
+    assert_eq!(out.get("count").and_then(Json::as_u64), Some(4));
+    let events = match out.get("events") {
+        Some(Json::Array(items)) => items.clone(),
+        other => panic!("events must be an array, got {other:?}"),
+    };
+    assert_eq!(events.len(), 4);
+
+    let asset_hex: String = asset_id.iter().map(|b| format!("{b:02x}")).collect();
+    let burn_hex: String = burn_ref.iter().map(|b| format!("{b:02x}")).collect();
+
+    assert_eq!(field(&events[0], "kind").and_then(Json::as_str), Some("bridge_mint"));
+    assert_eq!(field(&events[0], "amount").and_then(Json::as_str), Some("1000"));
+    assert_eq!(field(&events[0], "asset_id").and_then(Json::as_str), Some(asset_hex.as_str()));
+    assert_eq!(
+        field(&events[0], "target").and_then(Json::as_str),
+        Some(qtv_idfmt::render_address(&recipient).unwrap().as_str()),
+    );
+
+    assert_eq!(field(&events[1], "kind").and_then(Json::as_str), Some("bridge_burn"));
+    assert_eq!(field(&events[1], "amount").and_then(Json::as_str), Some("400"));
+    assert_eq!(field(&events[1], "chain_id").and_then(Json::as_u64), Some(2));
+    assert_eq!(field(&events[1], "burn_ref").and_then(Json::as_str), Some(burn_hex.as_str()));
+    assert_eq!(
+        field(&events[1], "actor").and_then(Json::as_str),
+        Some(qtv_idfmt::render_address(&holder).unwrap().as_str()),
+    );
+
+    assert_eq!(field(&events[2], "kind").and_then(Json::as_str), Some("bridge_settle"));
+    assert_eq!(field(&events[2], "burn_ref").and_then(Json::as_str), Some(burn_hex.as_str()));
+    assert_eq!(field(&events[3], "kind").and_then(Json::as_str), Some("bridge_slash"));
+    assert_eq!(
+        field(&events[3], "target").and_then(Json::as_str),
+        Some(qtv_idfmt::render_address(&beneficiary).unwrap().as_str()),
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
