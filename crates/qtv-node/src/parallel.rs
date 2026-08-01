@@ -597,6 +597,86 @@ mod tests {
     }
 
     #[test]
+    fn a_case_aliased_pair_to_distinct_sinks_shares_no_layer_and_cannot_mint() {
+        let fee = FeeParams::devnet();
+        let attacker = keypair(0);
+        let sink_a = keypair(1);
+        let sink_b = keypair(2);
+        let canonical = attacker.address();
+        let alias = canonical.to_ascii_lowercase();
+        assert_ne!(canonical, alias, "the alias is a distinct surface string");
+        assert_eq!(
+            state_key(&alias),
+            state_key(&canonical),
+            "the alias collides with the canonical account leaf"
+        );
+
+        let signed = |sender: &str, sink: &str| {
+            let call = transfer_call(sink, 1_000);
+            let body = qtv_tx::Body::new(
+                sender.to_string(),
+                0,
+                crate::execution::TRANSFER_METER,
+                u128::from(fee.transfer_fee()),
+                call,
+            );
+            sign(&attacker, &body)
+        };
+        let block = vec![
+            signed(&canonical, &sink_a.address()),
+            signed(&alias, &sink_b.address()),
+        ];
+
+        let layers = plan_layers(&block);
+        assert_eq!(
+            layers.len(),
+            1,
+            "distinct surface senders and distinct sinks land in one parallel layer"
+        );
+
+        let start = 10_000_000u64;
+        let mut base = Ledger::new();
+        fund(&mut base, &attacker, start);
+        base.seed_supply(start);
+
+        let mut ordered = base.clone();
+        let ordered_included = execute_ordered(&mut ordered, &block, &fee, 0);
+        assert_eq!(
+            ordered_included.len(),
+            1,
+            "only the canonical send applies; the aliased sender is refused"
+        );
+        assert_eq!(ordered.balance(&sink_b.address()), 0, "the aliased sink is never credited");
+
+        for threads in [1usize, 2, 4, 8, 16] {
+            let mut parallel = base.clone();
+            let parallel_included = execute_parallel(&mut parallel, &block, &fee, threads, 0);
+            assert_eq!(
+                ordered.q_root(),
+                parallel.q_root(),
+                "state root forked at {threads} threads"
+            );
+            assert_eq!(
+                included_ids(&ordered_included),
+                included_ids(&parallel_included),
+                "included set differs at {threads} threads"
+            );
+            assert_eq!(
+                parallel.balance(&sink_b.address()),
+                0,
+                "the aliased sink is credited on the parallel path at {threads} threads"
+            );
+            assert!(
+                parallel.balance(&canonical)
+                    + parallel.balance(&sink_a.address())
+                    + parallel.balance(&sink_b.address())
+                    <= parallel.total_supply(),
+                "conservation broke on the parallel path at {threads} threads"
+            );
+        }
+    }
+
+    #[test]
     fn unparseable_addresses_do_not_share_one_account_leaf() {
         let a = state_key("not an address");
         let b = state_key("also not an address");
