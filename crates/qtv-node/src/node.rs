@@ -1539,7 +1539,7 @@ impl Node {
             attesters,
         };
 
-        self.beacon = self.beacon.advance(&cert_digest, self.height);
+        self.beacon = self.beacon.advance_from_reveals(slot, &selection.reveals);
         self.parent_header_hash = header_hash;
         self.parent_val = Parent::Value(value);
         self.height += 1;
