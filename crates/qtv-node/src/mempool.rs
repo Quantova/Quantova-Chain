@@ -98,10 +98,12 @@ pub fn plan_verified(
 }
 
 fn canonical_address(address: &str) -> bool {
-    matches!(
-        qtv_idfmt::parse_address(address),
-        Ok(payload) if payload.len() == qtv_idfmt::DIGEST_LEN
-    )
+    match qtv_idfmt::parse_address(address) {
+        Ok(payload) if payload.len() == qtv_idfmt::DIGEST_LEN => {
+            qtv_idfmt::render_address(&payload).ok().as_deref() == Some(address)
+        }
+        _ => false,
+    }
 }
 
 fn plan_from_account_checks(
@@ -132,6 +134,9 @@ fn plan_from_account_checks(
         return Err(Reject::BadCall);
     }
     if recipient == sender {
+        return Err(Reject::SelfTransfer);
+    }
+    if crate::ledger::state_key(&sender) == crate::ledger::state_key(&recipient) {
         return Err(Reject::SelfTransfer);
     }
     if body.meter_limit() < TRANSFER_METER {
@@ -750,6 +755,84 @@ mod tests {
             pool.feeless_admits, 1,
             "an admitted feeless call spends one unit of the window"
         );
+    }
+
+    fn mixed_case(address: &str) -> String {
+        let mut out = address.to_string();
+        if let Some(pos) = out.rfind(|c: char| c.is_ascii_uppercase()) {
+            let lowered = out[pos..=pos].to_ascii_lowercase();
+            out.replace_range(pos..=pos, &lowered);
+        }
+        out
+    }
+
+    #[test]
+    fn non_canonical_addresses_are_refused_at_admission() {
+        let params = FeeParams::devnet();
+        let fee = u128::from(params.transfer_fee());
+        let attacker = keypair(0);
+        let victim = keypair(1);
+        let mut ledger = Ledger::new();
+        fund(&mut ledger, &attacker, 10_000_000);
+        let canonical = attacker.address();
+        let alias = canonical.to_ascii_lowercase();
+        let mut pool = Mempool::new();
+
+        let tx = signed_transfer(&attacker, &alias, 1_000, 0, fee);
+        assert!(
+            matches!(
+                pool.admit(tx, &ledger, &params),
+                Err(Reject::BadCall) | Err(Reject::SelfTransfer)
+            ),
+            "a lowercase aliased recipient must be refused after its signature verifies"
+        );
+
+        let call = transfer_call(&victim.address(), 1_000);
+        let tx = sign(&attacker, &Body::new(alias.clone(), 0, TRANSFER_METER, fee, call));
+        assert_eq!(
+            pool.admit(tx, &ledger, &params),
+            Err(Reject::UnknownSender),
+            "a non canonical sender is refused"
+        );
+
+        let forged = Wrapper::new(
+            Body::new(
+                canonical.clone(),
+                0,
+                TRANSFER_METER,
+                fee,
+                transfer_call(&mixed_case(&victim.address()), 1_000),
+            ),
+            attacker.scheme(),
+            vec![0u8; 8],
+        );
+        assert!(
+            pool.admit(forged, &ledger, &params).is_err(),
+            "a hand crafted mixed case recipient is refused at admission"
+        );
+
+        let forged = Wrapper::new(
+            Body::new(
+                canonical.clone(),
+                0,
+                TRANSFER_METER,
+                fee,
+                transfer_call("Q1nope", 1_000),
+            ),
+            attacker.scheme(),
+            vec![0u8; 8],
+        );
+        assert!(
+            pool.admit(forged, &ledger, &params).is_err(),
+            "a hand crafted unparseable recipient is refused at admission"
+        );
+
+        let tx = signed_transfer(&attacker, &victim.address(), 1_000, 0, fee);
+        assert!(
+            pool.admit(tx, &ledger, &params).is_ok(),
+            "a canonical transfer still admits after the gate"
+        );
+        assert_eq!(pool.len(), 1, "only the canonical transfer entered the pool");
     }
 
     #[test]

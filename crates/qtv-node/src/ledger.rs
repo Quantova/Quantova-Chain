@@ -55,13 +55,23 @@ impl Decode for Account {
 }
 
 const ACCOUNT_TAG: &[u8] = b"qtv/account/";
+const ACCOUNT_UNPARSED_TAG: &[u8] = b"qtv/account/unparsed/";
 
 pub(crate) fn state_key(address: &str) -> Key {
-    let payload = qtv_idfmt::parse_address(address).unwrap_or_default();
-    let mut input = Vec::with_capacity(ACCOUNT_TAG.len() + payload.len());
-    input.extend_from_slice(ACCOUNT_TAG);
-    input.extend_from_slice(&payload);
-    sha3::sha3_256(&input)
+    match qtv_idfmt::parse_address(address) {
+        Ok(payload) => {
+            let mut input = Vec::with_capacity(ACCOUNT_TAG.len() + payload.len());
+            input.extend_from_slice(ACCOUNT_TAG);
+            input.extend_from_slice(&payload);
+            sha3::sha3_256(&input)
+        }
+        Err(_) => {
+            let mut input = Vec::with_capacity(ACCOUNT_UNPARSED_TAG.len() + address.len());
+            input.extend_from_slice(ACCOUNT_UNPARSED_TAG);
+            input.extend_from_slice(address.as_bytes());
+            sha3::sha3_256(&input)
+        }
+    }
 }
 
 pub fn account_key(address: &str) -> Key {
