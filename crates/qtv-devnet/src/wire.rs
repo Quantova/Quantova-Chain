@@ -611,7 +611,8 @@ fn decode_block(decoder: &mut Decoder<'_>) -> Result<Block, DecodeError> {
     let parent_tag = decoder.get_u8()?;
     let parent_value = get_value(decoder)?;
     let parent = match parent_tag {
-        PARENT_GENESIS => Parent::Genesis,
+        PARENT_GENESIS if parent_value == [0u8; 32] => Parent::Genesis,
+        PARENT_GENESIS => return Err(DecodeError::BadParent(parent_tag)),
         PARENT_VALUE => Parent::Value(parent_value),
         other => return Err(DecodeError::BadParent(other)),
     };
