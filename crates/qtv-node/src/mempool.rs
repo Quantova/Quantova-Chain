@@ -288,13 +288,13 @@ impl Mempool {
     }
 
     fn duplicate_mint(&self, incoming: &Wrapper) -> bool {
-        let source_ref = match crate::node::bridge_mint_source_ref(incoming) {
-            Some(source_ref) => source_ref,
+        let source_key = match crate::node::bridge_mint_source_key(incoming) {
+            Some(source_key) => source_key,
             None => return false,
         };
         self.pending.iter().any(|w| {
             crate::node::is_bridge_mint(w)
-                && crate::node::bridge_mint_source_ref(w) == Some(source_ref)
+                && crate::node::bridge_mint_source_key(w) == Some(source_key)
         })
     }
 
@@ -408,8 +408,8 @@ impl Mempool {
             if self.duplicate_mint(&wrapper) {
                 return Ok(Admitted::Known);
             }
-            let fresh = crate::node::bridge_mint_source_ref(&wrapper)
-                .is_some_and(|source_ref| !ledger.bridge_reference_seen(&source_ref));
+            let fresh = crate::node::bridge_mint_source_key(&wrapper)
+                .is_some_and(|(source_chain, source_ref)| !ledger.bridge_reference_seen(source_chain, &source_ref));
             if !fresh {
                 return Err(Reject::BadCall);
             }
@@ -525,8 +525,8 @@ impl Mempool {
                 if self.duplicate_mint(&wrapper) {
                     continue;
                 }
-                let fresh = crate::node::bridge_mint_source_ref(&wrapper)
-                    .is_some_and(|source_ref| !ledger.bridge_reference_seen(&source_ref));
+                let fresh = crate::node::bridge_mint_source_key(&wrapper)
+                    .is_some_and(|(source_chain, source_ref)| !ledger.bridge_reference_seen(source_chain, &source_ref));
                 if !fresh {
                     continue;
                 }
