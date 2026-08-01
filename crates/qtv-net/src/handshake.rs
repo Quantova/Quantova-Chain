@@ -128,7 +128,8 @@ fn initiate<S: Read + Write>(
 
     let mut kem_random = [0u8; 32];
     fill_random(&mut kem_random)?;
-    let (shared_secret, ciphertext) = ml_kem::encaps(&encaps_key, &kem_random);
+    let (shared_secret, ciphertext) = ml_kem::encaps(&encaps_key, &kem_random)
+        .ok_or(Error::Handshake("non canonical encapsulation key"))?;
     transcript.absorb(&ciphertext);
     let final_bound = transcript.hash();
 
