@@ -22,7 +22,7 @@ use qtv_node::ledger::{
     EVENT_BRIDGE_BURN, NATIVE_EVENT_SOURCE,
 };
 use qtv_node::mempool::{Admitted, Mempool, Reject};
-use qtv_node::node::{day_of_height, execute_ordered, reweigh_roster, Genesis};
+use qtv_node::node::{day_of_height, execute_ordered, reweigh_roster, Genesis, GenesisAccount};
 use qtv_sampler::committee::PublishedReveal;
 use qtv_store::{BlockStore, BurnArchive, BurnArchiveEntry, StateStore};
 use qtv_tx::{Body, Call, Wrapper};
@@ -246,6 +246,24 @@ pub struct DevNode {
     fatal: Option<Fatal>,
     checkpoint: Option<Checkpoint>,
     evidence_pool: EvidencePool,
+    genesis_accounts: Vec<GenesisAccount>,
+    genesis_supply: u64,
+}
+
+/// The money supply committed at genesis: the funded account balances, the staking pool, and the
+/// validator bonds. It matches the figure `init_genesis` seeds into the supply leaf and lets a
+/// from-genesis reconstruction start from a complete supply baseline. Reading it moves no root.
+fn genesis_supply_value(genesis: &Genesis, roster: &[ValidatorRegistration]) -> u64 {
+    let mut supply: u64 = 0;
+    for account in &genesis.accounts {
+        supply = supply.saturating_add(account.balance);
+    }
+    supply = supply.saturating_add(qtv_staking::STAKING_POOL);
+    for v in roster {
+        let bond = v.stake.saturating_mul(qtv_staking::NATIVE_UNIT as u64);
+        supply = supply.saturating_add(bond);
+    }
+    supply
 }
 
 impl DevNode {
@@ -257,6 +275,10 @@ impl DevNode {
         let sign_guard = SignGuard::open(node.store_dir.join("sign.watermark"))?;
 
         let roster: Vec<ValidatorRegistration> = devnet.roster();
+
+        let genesis = devnet.genesis();
+        let genesis_accounts = genesis.accounts.clone();
+        let genesis_supply = genesis_supply_value(&genesis, &roster);
 
         let secret = node.secret;
         let mut dev = DevNode {
@@ -304,6 +326,8 @@ impl DevNode {
             fatal: None,
             checkpoint: None,
             evidence_pool: EvidencePool::new(),
+            genesis_accounts,
+            genesis_supply,
         };
 
         // Reconcile the logs after a crash: drop blocks above the last committed state.
@@ -312,7 +336,7 @@ impl DevNode {
         }
 
         if dev.block_store.is_empty() {
-            dev.init_genesis(&devnet.genesis())?;
+            dev.init_genesis(&genesis)?;
         } else {
             dev.reload()?;
         }
@@ -1550,6 +1574,14 @@ impl DevNode {
 
     pub fn ledger(&self) -> &Ledger {
         &self.ledger
+    }
+
+    pub fn genesis_accounts(&self) -> &[GenesisAccount] {
+        &self.genesis_accounts
+    }
+
+    pub fn genesis_supply(&self) -> u64 {
+        self.genesis_supply
     }
 
     pub fn mempool_len(&self) -> usize {
