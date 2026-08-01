@@ -645,6 +645,7 @@ pub enum EnactError {
     BridgeNotFrozen,
     NoCommittee,
     NotImplemented,
+    Overflow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2347,7 +2348,7 @@ impl Ledger {
         if referendum.status != Status::Deciding {
             return Some(referendum.status);
         }
-        let electorate = self.gov_total_locked();
+        let electorate = u128::from(self.total_staked());
         let status = referendum.resolve(now, electorate);
         if status == Status::Deciding {
             return Some(status);
@@ -2406,9 +2407,10 @@ impl Ledger {
             Action::Mint { to, amount } => {
                 let addr = id_bytes_to_address(to).ok_or(EnactError::BadAddress)?;
                 let mut account = self.account(&addr);
-                account.balance = account.balance.saturating_add(*amount);
+                account.balance = account.balance.checked_add(*amount).ok_or(EnactError::Overflow)?;
+                let supply = self.total_supply().checked_add(*amount).ok_or(EnactError::Overflow)?;
                 self.set_account(&addr, &account);
-                self.credit_supply(*amount);
+                self.set_total_supply(supply);
                 self.record_mint_event(&addr, *amount);
                 Ok(())
             }
@@ -3204,6 +3206,7 @@ mod stake_state_tests {
     #[test]
     fn a_lone_voter_cannot_carry_a_proposal_against_a_real_governance_electorate() {
         let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(90), 10_000_000 * 1_000_000);
         let action = || qtv_governance::Action::Parameter {
             key: b"price".to_vec(),
             value: 70_000_000u128.to_le_bytes().to_vec(),
@@ -3212,29 +3215,28 @@ mod stake_state_tests {
         fund(&mut l, &proposer, 5_000_000 * 1_000_000);
         let close = 14 * 86_400 + 1;
 
-        let whale = gov_addr(83);
-        fund(&mut l, &whale, 1_000_000 * 1_000_000);
-
         let lone = l
             .gov_propose(&proposer, qtv_governance::Track::ChainUpgrade, action(), 0)
             .unwrap();
-        assert!(l.gov_vote(&whale, lone, false, qtv_governance::Conviction::Liquid, 1_000_000 * 1_000_000, 0));
         let solo = gov_addr(81);
         fund(&mut l, &solo, 10_000 * 1_000_000);
         assert!(l.gov_vote(&solo, lone, true, qtv_governance::Conviction::Liquid, 2_000 * 1_000_000, 0));
-        assert!(!l
-            .gov_referendum(lone)
-            .unwrap()
-            .tally
-            .approved(l.gov_total_locked()));
-        assert_eq!(l.gov_conclude(lone, close), Some(qtv_governance::Status::Rejected));
+        assert!(
+            l.gov_referendum(lone).unwrap().tally.approved(l.gov_total_locked()),
+            "the lone vote would have carried under a self referential electorate"
+        );
+        assert_eq!(
+            l.gov_conclude(lone, close),
+            Some(qtv_governance::Status::Rejected),
+            "against the bonded electorate the lone vote cannot carry"
+        );
 
         let real = l
             .gov_propose(&proposer, qtv_governance::Track::ChainUpgrade, action(), 0)
             .unwrap();
         let backer = gov_addr(82);
-        fund(&mut l, &backer, 3_000_000 * 1_000_000);
-        assert!(l.gov_vote(&backer, real, true, qtv_governance::Conviction::Liquid, 2_000_000 * 1_000_000, 0));
+        fund(&mut l, &backer, 6_000_000 * 1_000_000);
+        assert!(l.gov_vote(&backer, real, true, qtv_governance::Conviction::Liquid, 5_000_000 * 1_000_000, 0));
         assert_eq!(l.gov_conclude(real, close), Some(qtv_governance::Status::Approved));
     }
 
