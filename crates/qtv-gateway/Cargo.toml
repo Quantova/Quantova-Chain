@@ -23,7 +23,7 @@ qtv-idfmt = { path = "../qtv-idfmt" }
 
 # The consensus parameters, for the minimum height that tells a fresh node from one
 # that holds a finalised head. Pinned at the same tag the rest of the graph uses.
-qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "4b6622f8ddc36b02111fdc91853520616aba112d" }
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "aef699b6b03e55d1bbb26bd3d562b07a28d12cd7" }
 
 [dev-dependencies]
 qtv-devnet = { path = "../qtv-devnet", features = ["test-fixtures"] }
