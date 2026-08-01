@@ -474,6 +474,10 @@ fn amount_str(amount: u128) -> Json {
     Json::str(amount.to_string())
 }
 
+fn id_address(id: &[u8; 32]) -> String {
+    qtv_idfmt::render_address(id).unwrap_or_else(|_| crate::json::to_hex(id))
+}
+
 fn side_event_json(index: u64, event: &SideEvent) -> Json {
     let mut fields: Vec<(&str, Json)> = vec![
         ("index", Json::Int(index)),
@@ -655,6 +659,53 @@ fn side_event_json(index: u64, event: &SideEvent) -> Json {
             set(&mut fields, "target", Json::str(to));
             set(&mut fields, "amount", amount_str(*amount as u128));
         }
+        SideEvent::BridgeMint {
+            asset_id,
+            recipient,
+            amount,
+        } => {
+            set(&mut fields, "target", Json::str(id_address(recipient)));
+            set(&mut fields, "amount", amount_str(*amount));
+            fields.push(("asset_id", Json::str(crate::json::to_hex(asset_id))));
+        }
+        SideEvent::BridgeBurn {
+            asset_id,
+            holder,
+            amount,
+            destination,
+            chain_id,
+            burn_ref,
+        } => {
+            set(&mut fields, "actor", Json::str(id_address(holder)));
+            set(&mut fields, "amount", amount_str(*amount));
+            set(&mut fields, "aux", Json::Int(*chain_id));
+            fields.push(("asset_id", Json::str(crate::json::to_hex(asset_id))));
+            fields.push(("destination", Json::str(crate::json::to_hex(destination))));
+            fields.push(("chain_id", Json::Int(*chain_id)));
+            fields.push(("burn_ref", Json::str(crate::json::to_hex(burn_ref))));
+        }
+        SideEvent::BridgeSettle {
+            asset_id,
+            beneficiary,
+            amount,
+            burn_ref,
+        } => {
+            set(&mut fields, "target", Json::str(id_address(beneficiary)));
+            set(&mut fields, "amount", amount_str(*amount));
+            fields.push(("asset_id", Json::str(crate::json::to_hex(asset_id))));
+            fields.push(("burn_ref", Json::str(crate::json::to_hex(burn_ref))));
+        }
+        SideEvent::BridgeSlash {
+            asset_id,
+            beneficiary,
+            amount,
+            burn_ref,
+        } => {
+            set(&mut fields, "target", Json::str(id_address(beneficiary)));
+            set(&mut fields, "amount", amount_str(*amount));
+            fields.push(("asset_id", Json::str(crate::json::to_hex(asset_id))));
+            fields.push(("burn_ref", Json::str(crate::json::to_hex(burn_ref))));
+        }
     }
     object(fields)
 }
@@ -785,6 +836,14 @@ fn block(node: &DevNode, selector: BlockSelector) -> Result<Json, ClientError> {
                 qtv_idfmt::render_state(header.q_root())
                     .expect("a state root is digest length"),
             ),
+        ),
+        (
+            "transaction_root",
+            Json::str(crate::json::to_hex(header.transaction_root())),
+        ),
+        (
+            "event_root",
+            Json::str(crate::json::to_hex(header.event_root())),
         ),
         ("proposer", Json::str(header.proposer())),
         ("time", Json::Int(header.time())),

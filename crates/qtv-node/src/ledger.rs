@@ -1556,6 +1556,11 @@ impl Ledger {
         self.mark_bridge_reference(fact.source_chain, &fact.source_ref);
         self.set_bridge_epoch_minted(&fact.asset_id, epoch, new_minted);
         self.record_bridge_mint_event(&fact.asset_id, &fact.recipient, fact.amount);
+        self.record_side_event(SideEvent::BridgeMint {
+            asset_id: fact.asset_id,
+            recipient: fact.recipient,
+            amount: fact.amount,
+        });
         true
     }
 
@@ -1613,6 +1618,14 @@ impl Ledger {
             event_index,
             &burn_ref,
         );
+        self.record_side_event(SideEvent::BridgeBurn {
+            asset_id: *asset_id,
+            holder: *holder,
+            amount,
+            destination: *destination,
+            chain_id,
+            burn_ref,
+        });
         true
     }
 
@@ -1745,6 +1758,12 @@ impl Ledger {
         self.consume_outstanding_burn(&fact.burn_ref);
         self.set_bridge_vault_custody(&vault, &fact.asset_id, held);
         self.record_bridge_settle_event(&fact.asset_id, &fact.beneficiary, fact.amount, &fact.burn_ref);
+        self.record_side_event(SideEvent::BridgeSettle {
+            asset_id: fact.asset_id,
+            beneficiary: fact.beneficiary,
+            amount: fact.amount,
+            burn_ref: fact.burn_ref,
+        });
         true
     }
 
@@ -1813,6 +1832,12 @@ impl Ledger {
         self.set_bridge_epoch_paid(&fact.asset_id, epoch, new_asset_paid);
         self.set_bridge_epoch_paid_global(epoch, new_global_paid);
         self.record_bridge_slash_event(&fact.asset_id, &fact.beneficiary, fact.amount, &fact.burn_ref);
+        self.record_side_event(SideEvent::BridgeSlash {
+            asset_id: fact.asset_id,
+            beneficiary: fact.beneficiary,
+            amount: fact.amount,
+            burn_ref: fact.burn_ref,
+        });
         true
     }
 
@@ -3380,6 +3405,74 @@ mod stake_state_tests {
         assert!(
             l.side_events().len() > side_before,
             "the side log carries the extra observability records"
+        );
+    }
+
+    #[test]
+    fn bridge_side_events_are_root_invariant_and_reach_the_side_log() {
+        let mut l = Ledger::new();
+        l.record_transfer_event("qtv1payer", "qtv1payee", 10, 1);
+        l.record_transfer_event("qtv1other", "qtv1sink", 5, 1);
+
+        let q_before = l.q_root();
+        let leaves_before: Vec<Vec<u8>> = l.block_events().iter().map(BlockEvent::encode).collect();
+        let event_root_before = qtv_block::event_root(&leaves_before);
+        let committed_before = l.block_events().len();
+        let side_before = l.side_events().len();
+
+        let asset_id = [7u8; 16];
+        let party = [9u8; 32];
+        let burn_ref = [3u8; 32];
+        l.record_side_event(SideEvent::BridgeMint {
+            asset_id,
+            recipient: party,
+            amount: 1_000,
+        });
+        l.record_side_event(SideEvent::BridgeBurn {
+            asset_id,
+            holder: party,
+            amount: 400,
+            destination: [1u8; 32],
+            chain_id: 2,
+            burn_ref,
+        });
+        l.record_side_event(SideEvent::BridgeSettle {
+            asset_id,
+            beneficiary: party,
+            amount: 400,
+            burn_ref,
+        });
+        l.record_side_event(SideEvent::BridgeSlash {
+            asset_id,
+            beneficiary: party,
+            amount: 400,
+            burn_ref,
+        });
+
+        let leaves_after: Vec<Vec<u8>> = l.block_events().iter().map(BlockEvent::encode).collect();
+        assert_eq!(
+            q_before,
+            l.q_root(),
+            "recording bridge side events must not move the state root"
+        );
+        assert_eq!(
+            event_root_before,
+            qtv_block::event_root(&leaves_after),
+            "recording bridge side events must not move the block event root"
+        );
+        assert_eq!(
+            committed_before,
+            l.block_events().len(),
+            "the side log adds no leaf to the committed event log"
+        );
+        let kinds: Vec<&str> = l.side_events()[side_before..]
+            .iter()
+            .map(SideEvent::kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["bridge_mint", "bridge_burn", "bridge_settle", "bridge_slash"],
+            "every bridge economic transition reaches the node local side log"
         );
     }
 
@@ -5139,6 +5232,31 @@ pub enum SideEvent {
         to: String,
         amount: u64,
     },
+    BridgeMint {
+        asset_id: [u8; 16],
+        recipient: [u8; 32],
+        amount: u128,
+    },
+    BridgeBurn {
+        asset_id: [u8; 16],
+        holder: [u8; 32],
+        amount: u128,
+        destination: [u8; 32],
+        chain_id: u64,
+        burn_ref: [u8; 32],
+    },
+    BridgeSettle {
+        asset_id: [u8; 16],
+        beneficiary: [u8; 32],
+        amount: u128,
+        burn_ref: [u8; 32],
+    },
+    BridgeSlash {
+        asset_id: [u8; 16],
+        beneficiary: [u8; 32],
+        amount: u128,
+        burn_ref: [u8; 32],
+    },
 }
 
 impl SideEvent {
@@ -5170,6 +5288,10 @@ impl SideEvent {
             SideEvent::Slash { .. } => "slash",
             SideEvent::Reward { .. } => "reward",
             SideEvent::ContractTransfer { .. } => "contract_transfer",
+            SideEvent::BridgeMint { .. } => "bridge_mint",
+            SideEvent::BridgeBurn { .. } => "bridge_burn",
+            SideEvent::BridgeSettle { .. } => "bridge_settle",
+            SideEvent::BridgeSlash { .. } => "bridge_slash",
         }
     }
 }
