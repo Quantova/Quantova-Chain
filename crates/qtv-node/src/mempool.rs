@@ -404,6 +404,9 @@ impl Mempool {
         if self.ids.contains(&id) {
             return Ok(Admitted::Known);
         }
+        if !canonical_address(wrapper.body().sender()) {
+            return Err(Reject::UnknownSender);
+        }
         if crate::node::is_bridge_mint(&wrapper) {
             if self.duplicate_mint(&wrapper) {
                 return Ok(Admitted::Known);
@@ -833,6 +836,51 @@ mod tests {
             "a canonical transfer still admits after the gate"
         );
         assert_eq!(pool.len(), 1, "only the canonical transfer entered the pool");
+    }
+
+    #[test]
+    fn a_non_canonical_sender_is_refused_on_every_lane_not_only_transfers() {
+        let params = FeeParams::devnet();
+        let fee = u128::from(params.transfer_fee());
+        let owner = keypair(5);
+        let mut ledger = Ledger::new();
+        fund(&mut ledger, &owner, 10_000_000);
+        let alias = owner.address().to_ascii_lowercase();
+        assert_ne!(alias, owner.address(), "the alias is a distinct surface string");
+        let mut pool = Mempool::new();
+
+        let aliased = sign(
+            &owner,
+            &Body::new(
+                alias,
+                0,
+                TRANSFER_METER,
+                fee,
+                qtv_tx::Call::new(crate::ledger::gov_system_address(), vec![5]),
+            ),
+        );
+        assert_eq!(
+            pool.admit(aliased, &ledger, &params),
+            Err(Reject::UnknownSender),
+            "a non canonical sender is refused before lane dispatch, not only on the transfer lane"
+        );
+        assert_eq!(pool.len(), 0, "the aliased special-op did not enter the pool");
+
+        let canonical = sign(
+            &owner,
+            &Body::new(
+                owner.address(),
+                0,
+                TRANSFER_METER,
+                fee,
+                qtv_tx::Call::new(crate::ledger::gov_system_address(), vec![5]),
+            ),
+        );
+        assert_ne!(
+            pool.admit(canonical, &ledger, &params),
+            Err(Reject::UnknownSender),
+            "a canonical sender passes the sender gate and reaches its lane"
+        );
     }
 
     #[test]
