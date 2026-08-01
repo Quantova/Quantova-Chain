@@ -6,5 +6,8 @@
 # drift and is out of this gate's scope. It is pinned by rev in every crate manifest, recorded in
 # the committed lockfile, and its source org is gated in deny.toml. For the record it is
 # Q-Crypto at 4c0bdcb7dce9d2de6f9f510b0695377321076fef, the same rev the SDKs pin.
-QRC-CONSENSUS  v0.9.1
+#
+# QRC-CONSENSUS is likewise anchored to an immutable commit rather than a tag, so it is out of the
+# tag gate's scope. It is pinned by rev in every crate manifest and recorded in the committed
+# lockfile. For the record it is QRC-CONSENSUS at 4b6622f8ddc36b02111fdc91853520616aba112d.
 QVM            v0.5.4
