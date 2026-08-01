@@ -10,5 +10,5 @@ mod log;
 mod state_store;
 
 pub use block_store::BlockStore;
-pub use burn_archive::{BurnArchive, BurnArchiveEntry};
+pub use burn_archive::{BurnArchive, BurnArchiveEntry, MAX_HEIGHTS_AFTER};
 pub use state_store::StateStore;
