@@ -11,6 +11,8 @@ use qtv_codec::{Decoder, Encoder, Error};
 
 use crate::log::Log;
 
+pub const MAX_HEIGHTS_AFTER: usize = 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BurnArchiveEntry {
     pub height: u64,
@@ -92,6 +94,7 @@ impl BurnArchive {
     pub fn heights_after(&self, cursor: u64) -> Vec<u64> {
         self.by_height
             .range((Bound::Excluded(cursor), Bound::Unbounded))
+            .take(MAX_HEIGHTS_AFTER)
             .map(|(height, _)| *height)
             .collect()
     }

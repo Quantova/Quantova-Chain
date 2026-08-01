@@ -153,3 +153,34 @@ fn burn_heights_after_lists_archived_heights_in_order_from_the_cursor() {
 
     std::fs::remove_dir_all(&base).ok();
 }
+
+#[test]
+fn a_zero_cursor_burn_heights_request_is_bounded_to_one_serve_page() {
+    let base = unique_base("heights-after-flood");
+    let cfg = single_node(&base);
+    let ctx = context();
+    let mut node = DevNode::open(&cfg.nodes[0], &cfg).expect("open");
+
+    let seeded = (qtv_store::MAX_HEIGHTS_AFTER + 64) as u64;
+    for height in 1..=seeded {
+        node.seed_burn_archive(entry(height, (height & 0xff) as u8));
+    }
+
+    let flood = served(handle(&ctx, &mut node, build("burn_heights_after", object(vec![("cursor", Json::Int(0))]))));
+    let returned = match flood.get("heights") {
+        Some(Json::Array(items)) => items.len(),
+        other => panic!("heights must be an array, got {other:?}"),
+    };
+    assert!(
+        returned <= qtv_store::MAX_HEIGHTS_AFTER,
+        "a single burn_heights_after request served {returned} heights, past the {} page cap",
+        qtv_store::MAX_HEIGHTS_AFTER
+    );
+    assert_eq!(
+        flood.get("count").and_then(Json::as_u64),
+        Some(returned as u64),
+        "the reported count must match the bounded page"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
