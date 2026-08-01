@@ -136,6 +136,7 @@ pub struct EvidencePool {
     seen: HashMap<(String, u64), (u64, u64, Vec<u8>, Vec<u8>)>,
     pending: Vec<Equivocation>,
     flagged: Vec<(String, u64)>,
+    floor: u64,
 }
 
 impl EvidencePool {
@@ -152,6 +153,12 @@ impl EvidencePool {
         block_bytes: Vec<u8>,
         sig: Vec<u8>,
     ) -> Option<Equivocation> {
+        // Lower height bookkeeping can never attribute again once observation moves on, so drop it on advance; drained evidence in pending is untouched.
+        if height > self.floor {
+            self.floor = height;
+            self.seen.retain(|(_, h), _| *h >= height);
+            self.flagged.retain(|(_, h)| *h >= height);
+        }
         let key = (offender.to_string(), height);
         match self.seen.get(&key) {
             Some((prev_view, _, prev_block, prev_sig)) => {
@@ -371,6 +378,32 @@ mod tests {
             .observe(&address, 1, 1, 0, block_b.to_bytes(), b.sig.to_vec())
             .is_none(), "a validator is flagged only once");
         assert_eq!(pool.drain().len(), 1);
+    }
+
+    #[test]
+    fn the_dedup_maps_stay_bounded_across_advancing_heights() {
+        let (attester, address) = attester();
+        let beacon = Beacon::genesis();
+        let block = Block::new(1, [1u8; 32], Parent::Genesis);
+        let mut pool = EvidencePool::new();
+
+        // A peer that feeds one attestation per advancing height, the shape of a slow
+        // leak: without a floor the seen and flagged maps grow one entry per height.
+        for height in 1..=10_000u64 {
+            let att = attester.attest(CHAIN_ID, height, 1, 0, block, &beacon);
+            let _ = pool.observe(&address, height, 1, 0, block.to_bytes(), att.sig.to_vec());
+        }
+
+        assert!(
+            pool.seen.len() <= 1,
+            "seen holds only the current height, held {}",
+            pool.seen.len()
+        );
+        assert!(
+            pool.flagged.len() <= 1,
+            "flagged holds only the current height, held {}",
+            pool.flagged.len()
+        );
     }
 
     #[test]
