@@ -317,4 +317,52 @@ mod fail_closed_tests {
         let wrapper = sign(&account, &body);
         assert!(verify(&wrapper, account.public_key()));
     }
+
+    #[test]
+    fn address_case_does_not_move_the_signed_preimage_or_the_id() {
+        let account = derive(&[7u8; 32], 0);
+        let canonical_sender = account.address();
+        let alias_sender = canonical_sender.to_ascii_lowercase();
+        let canonical_target = derive(&[7u8; 32], 1).address();
+        let alias_target = canonical_target.to_ascii_lowercase();
+        assert_ne!(
+            canonical_sender, alias_sender,
+            "the alias is a distinct surface string, so the check is not vacuous"
+        );
+        assert_ne!(canonical_target, alias_target);
+        assert_eq!(
+            qtv_idfmt::parse_address(&alias_sender).unwrap(),
+            qtv_idfmt::parse_address(&canonical_sender).unwrap(),
+            "both surface forms decode to one payload"
+        );
+
+        let build = |sender: &str, target: &str| {
+            let call = Call::new(target.to_string(), vec![1, 2, 3]);
+            let body = Body::new(sender.to_string(), 0, 1_210, 500, call);
+            sign(&account, &body)
+        };
+        let canonical = build(&canonical_sender, &canonical_target);
+        let aliased = build(&alias_sender, &alias_target);
+
+        assert_eq!(
+            body_digest(canonical.body()),
+            body_digest(aliased.body()),
+            "the surface case reached the signed preimage"
+        );
+        assert_eq!(
+            canonical.signature(),
+            aliased.signature(),
+            "the surface case moved the signature over one fixed randomizer"
+        );
+        assert_eq!(
+            canonical.id(),
+            aliased.id(),
+            "the surface case moved the transaction id"
+        );
+        assert!(verify(&canonical, account.public_key()));
+        assert!(
+            verify(&aliased, account.public_key()),
+            "the signature stands for either surface form because both bind one payload"
+        );
+    }
 }
