@@ -663,7 +663,11 @@ pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_i
     if ledger.bridge_reference_seen(&source_ref) {
         return false;
     }
-    bridge_mint_fact(ledger, wrapper, chain_id).is_some()
+    let fact = match bridge_mint_fact(ledger, wrapper, chain_id) {
+        Some(fact) => fact,
+        None => return false,
+    };
+    ledger.execution_height() <= fact.expiry_height
 }
 
 fn dispatch_bridge_mint(ledger: &mut Ledger, wrapper: &Wrapper, chain_id: u64) -> bool {
@@ -1555,6 +1559,7 @@ impl Node {
 
     fn execute_block(&mut self) -> Vec<Wrapper> {
         self.ledger.clear_block_events();
+        self.ledger.set_execution_height(self.height);
         let candidates = self.mempool.candidates();
         let day = day_of_height(self.height);
         let threads = self.exec_cores();
@@ -3545,6 +3550,110 @@ mod tests {
     }
 
     #[test]
+    fn a_single_signer_committee_is_refused_at_seed_and_cannot_mint() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let asset = [7u8; 16];
+        ledger.seed_bridge_dest_chain(BRIDGE_DEST);
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+
+        let (pk0, sk0) = bridge_operator(1);
+        let seeded = ledger
+            .seed_bridge_operator_set(&crate::bridge::OperatorSet::new(vec![(0, pk0.to_vec())], 1));
+        assert!(seeded.is_none(), "a threshold one operator set is refused at the seed");
+        assert!(
+            ledger.bridge_operator_set().is_none(),
+            "the refused threshold one set left the bridge without a committee"
+        );
+
+        let relayer = keypair(450);
+        let recipient_id = address_bytes(&keypair(451).address());
+        let lone_fact = deposit_fact(recipient_id, asset, 100_000, [0x71; 32]);
+        let lone_signature = crate::bridge::MintArtifact {
+            attestation: crate::bridge::Attestation {
+                fact: lone_fact.clone(),
+                signatures: vec![crate::bridge::SignerSig {
+                    operator_id: 0,
+                    signature: attest(&sk0, &lone_fact),
+                }],
+            },
+            stark: None,
+        };
+        assert!(
+            execute_ordered(&mut ledger, &[mint_tx(&relayer, &lone_signature, &fee)], &fee, 0)
+                .is_empty(),
+            "with no committee seated, a single signature mints nothing"
+        );
+        assert_eq!(ledger.bridged_supply(&asset), 0, "the refused mint moved no supply");
+
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        assert_eq!(
+            ledger.bridge_operator_set().map(|set| set.threshold),
+            Some(2),
+            "a two of n committee seats normally"
+        );
+        let fresh = deposit_fact(recipient_id, asset, 100_000, [0x72; 32]);
+        assert_eq!(
+            execute_ordered(
+                &mut ledger,
+                &[mint_tx(&relayer, &signed_artifact(&fresh, &sk0, &sk1), &fee)],
+                &fee,
+                0,
+            )
+            .len(),
+            1,
+            "a two of n committee still mints"
+        );
+        assert_eq!(ledger.bridged_supply(&asset), 100_000);
+    }
+
+    #[test]
+    fn a_mint_past_its_signed_expiry_height_is_refused() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(700);
+        let recipient_id = address_bytes(&keypair(701).address());
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
+
+        let stale = deposit_fact(recipient_id, asset, 100_000, [0x81; 32]);
+        assert_eq!(stale.expiry_height, 100, "the fixture stamps a signed expiry height");
+
+        ledger.set_execution_height(101);
+        assert!(
+            execute_ordered(
+                &mut ledger,
+                &[mint_tx(&relayer, &signed_artifact(&stale, &sk0, &sk1), &fee)],
+                &fee,
+                0,
+            )
+            .is_empty(),
+            "a fact past its signed expiry height mints nothing"
+        );
+        assert_eq!(ledger.bridged_supply(&asset), 0, "the stale mint moved no supply");
+        assert!(
+            !ledger.bridge_reference_seen(&[0x81; 32]),
+            "the refused stale mint left its source reference unseen for a timely retry"
+        );
+
+        ledger.set_execution_height(100);
+        let fresh = deposit_fact(recipient_id, asset, 100_000, [0x82; 32]);
+        assert_eq!(
+            execute_ordered(
+                &mut ledger,
+                &[mint_tx(&relayer, &signed_artifact(&fresh, &sk0, &sk1), &fee)],
+                &fee,
+                0,
+            )
+            .len(),
+            1,
+            "a fact at or before its signed expiry height still mints"
+        );
+        assert_eq!(ledger.bridged_supply(&asset), 100_000, "the timely mint credited the amount");
+    }
+
+    #[test]
     fn a_verified_attestation_mints_the_exact_amount_to_the_recipient() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
@@ -4281,6 +4390,16 @@ mod tests {
         (sk0, sk1)
     }
 
+    fn last_burn_ref(ledger: &Ledger) -> [u8; 32] {
+        ledger
+            .block_events()
+            .iter()
+            .rev()
+            .find(|event| event.selector == crate::ledger::EVENT_BRIDGE_BURN)
+            .and_then(|event| crate::ledger::bridge_burn_leaf_ref(&event.data))
+            .expect("a burn event is present")
+    }
+
     #[test]
     fn a_verified_slash_pays_the_beneficiary_from_the_pool_custody() {
         let fee = FeeParams::devnet();
@@ -4289,6 +4408,7 @@ mod tests {
         let relayer = keypair(500);
         let beneficiary = [0x55u8; 32];
         let burn_ref = [0x11u8; 32];
+        ledger.seed_outstanding_burn(&burn_ref, &EXIT_ASSET, 550_000, &beneficiary);
         let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, beneficiary, burn_ref);
         let attestation = signed_exit(&fact, &sk0, &sk1);
 
@@ -4309,6 +4429,7 @@ mod tests {
         let relayer = keypair(500);
         let beneficiary = [0x55u8; 32];
         let burn_ref = [0x22u8; 32];
+        ledger.seed_outstanding_burn(&burn_ref, &EXIT_ASSET, 550_000, &beneficiary);
         let fact = exit_fact(crate::bridge::ExitOutcome::Settle, 550_000, beneficiary, burn_ref);
         let attestation = signed_exit(&fact, &sk0, &sk1);
 
@@ -4342,7 +4463,7 @@ mod tests {
         assert_eq!(ledger.bridged_supply(&EXIT_ASSET), 300_000, "the burn retired the exit amount");
         assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 500_000, "the burn alone does not move custody");
 
-        let burn_ref = [0x32; 32];
+        let burn_ref = last_burn_ref(&ledger);
         let fact = exit_fact(crate::bridge::ExitOutcome::Settle, 200_000, holder_id, burn_ref);
         assert_eq!(execute_ordered(&mut ledger, &[settle_tx(&relayer, &signed_exit(&fact, &sk0, &sk1), &fee)], &fee, 0).len(), 1);
         assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 300_000, "the proven settle drew the paid amount from custody exactly once");
@@ -4369,14 +4490,117 @@ mod tests {
         assert_eq!(ledger.bridged_supply(&EXIT_ASSET), 300_000);
         assert_eq!(ledger.bridged_balance(&EXIT_ASSET, &holder_id), 300_000);
 
-        // the foreign payout failed, so the exit is refunded on chain to the same holder
-        let burn_ref = [0x42; 32];
+        let burn_ref = last_burn_ref(&ledger);
         let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 200_000, holder_id, burn_ref);
         assert_eq!(execute_ordered(&mut ledger, &[settle_tx(&relayer, &signed_exit(&fact, &sk0, &sk1), &fee)], &fee, 0).len(), 1);
         assert_eq!(ledger.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET), 500_000, "the on chain refund never draws custody down");
         assert_eq!(ledger.bridged_supply(&EXIT_ASSET), 500_000, "the refund re-materialised the burned wrapped");
         assert_eq!(ledger.bridged_balance(&EXIT_ASSET, &holder_id), 500_000, "the holder is made whole after a failed payout");
         assert!(ledger.bridge_exit_settled(&burn_ref));
+    }
+
+    #[test]
+    fn a_settle_or_slash_with_no_matching_burn_is_refused_and_a_real_burn_conserves() {
+        let fee = FeeParams::devnet();
+
+        let mut forged = Ledger::new();
+        let (sk0, sk1) = seed_exit_bridge(&mut forged, 1_000_000, 10_000_000, 1_000_000, 5_000_000);
+        let relayer = keypair(800);
+        let beneficiary = [0x55u8; 32];
+        let ghost = [0xDEu8; 32];
+        assert!(
+            forged.bridge_outstanding_burn(&ghost).is_none(),
+            "no burn stands behind the fabricated ref"
+        );
+        let settle = exit_fact(crate::bridge::ExitOutcome::Settle, 500_000, beneficiary, ghost);
+        assert_eq!(
+            execute_ordered(&mut forged, &[settle_tx(&relayer, &signed_exit(&settle, &sk0, &sk1), &fee)], &fee, 0).len(),
+            0,
+            "a settle on a fabricated burn_ref draws nothing"
+        );
+        let slash = exit_fact(crate::bridge::ExitOutcome::Slash, 500_000, beneficiary, ghost);
+        assert_eq!(
+            execute_ordered(&mut forged, &[settle_tx(&relayer, &signed_exit(&slash, &sk0, &sk1), &fee)], &fee, 0).len(),
+            0,
+            "a slash on a fabricated burn_ref re-mints nothing"
+        );
+        assert_eq!(
+            forged.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET),
+            1_000_000,
+            "the fabricated exit left custody untouched"
+        );
+        assert_eq!(forged.bridged_supply(&EXIT_ASSET), 0, "the fabricated exit moved no supply");
+        assert!(!forged.bridge_exit_settled(&ghost), "the fabricated burn_ref was never consumed");
+
+        let mut settled = Ledger::new();
+        let (sk0, sk1) = seed_exit_bridge(&mut settled, 0, 10_000_000, 1_000_000, 5_000_000);
+        let relayer = keypair(801);
+        let holder = keypair(802);
+        let holder_id = address_bytes(&holder.address());
+        fund(&mut settled, &holder, 10_000 * 1_000_000);
+        let deposit = deposit_fact(holder_id, EXIT_ASSET, 500_000, [0x51; 32]);
+        assert_eq!(
+            execute_ordered(&mut settled, &[mint_tx(&relayer, &signed_artifact(&deposit, &sk0, &sk1), &fee)], &fee, 0).len(),
+            1
+        );
+        let request = crate::bridge::ExitRequest { asset_id: EXIT_ASSET, amount: 200_000, destination: [0xEE; 32] };
+        let exit = system_tx(&holder, &crate::ledger::bridge_exit_address(), request.encode(), 0, TRANSFER_METER, &fee);
+        assert_eq!(execute_ordered(&mut settled, &[exit], &fee, 0).len(), 1);
+        let burn_ref = last_burn_ref(&settled);
+        let fact = exit_fact(crate::bridge::ExitOutcome::Settle, 200_000, holder_id, burn_ref);
+        assert_eq!(
+            execute_ordered(&mut settled, &[settle_tx(&relayer, &signed_exit(&fact, &sk0, &sk1), &fee)], &fee, 0).len(),
+            1,
+            "a real burn settles"
+        );
+        assert!(
+            settled.bridge_outstanding_burn(&burn_ref).is_none(),
+            "the settle consumed the outstanding burn"
+        );
+        assert!(
+            settled.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET) >= settled.bridged_supply(&EXIT_ASSET),
+            "custody stays at or above supply after a settle"
+        );
+        assert_eq!(
+            execute_ordered(&mut settled, &[settle_tx(&relayer, &signed_exit(&fact, &sk0, &sk1), &fee)], &fee, 0).len(),
+            0,
+            "the consumed burn settles nothing a second time"
+        );
+
+        let mut slashed = Ledger::new();
+        let (sk0, sk1) = seed_exit_bridge(&mut slashed, 0, 10_000_000, 1_000_000, 5_000_000);
+        let relayer = keypair(803);
+        let holder = keypair(804);
+        let holder_id = address_bytes(&holder.address());
+        fund(&mut slashed, &holder, 10_000 * 1_000_000);
+        let deposit = deposit_fact(holder_id, EXIT_ASSET, 500_000, [0x52; 32]);
+        assert_eq!(
+            execute_ordered(&mut slashed, &[mint_tx(&relayer, &signed_artifact(&deposit, &sk0, &sk1), &fee)], &fee, 0).len(),
+            1
+        );
+        let request = crate::bridge::ExitRequest { asset_id: EXIT_ASSET, amount: 200_000, destination: [0xEE; 32] };
+        let exit = system_tx(&holder, &crate::ledger::bridge_exit_address(), request.encode(), 0, TRANSFER_METER, &fee);
+        assert_eq!(execute_ordered(&mut slashed, &[exit], &fee, 0).len(), 1);
+        let burn_ref = last_burn_ref(&slashed);
+        let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 200_000, holder_id, burn_ref);
+        assert_eq!(
+            execute_ordered(&mut slashed, &[settle_tx(&relayer, &signed_exit(&fact, &sk0, &sk1), &fee)], &fee, 0).len(),
+            1,
+            "a real burn slashes"
+        );
+        assert!(
+            slashed.bridge_outstanding_burn(&burn_ref).is_none(),
+            "the slash consumed the outstanding burn"
+        );
+        assert_eq!(
+            slashed.bridged_balance(&EXIT_ASSET, &holder_id),
+            500_000,
+            "the holder is made whole after a failed payout"
+        );
+        assert!(
+            slashed.bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET) >= slashed.bridged_supply(&EXIT_ASSET),
+            "custody stays at or above supply after a slash"
+        );
     }
 
     #[test]
@@ -4483,6 +4707,7 @@ mod tests {
         let relayer = keypair(500);
         let beneficiary = [0x55u8; 32];
         let burn_ref = [0x88u8; 32];
+        ledger.seed_outstanding_burn(&burn_ref, &EXIT_ASSET, 550_000, &beneficiary);
         let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, beneficiary, burn_ref);
         let attestation = signed_exit(&fact, &sk0, &sk1);
 
@@ -4500,9 +4725,9 @@ mod tests {
         let relayer = keypair(500);
         let beneficiary = [0x55u8; 32];
 
-        // Over the global per epoch payout cap.
         let mut over_global = Ledger::new();
         let (sk0, sk1) = seed_exit_bridge(&mut over_global, 1_000_000, 10_000_000, 1_000_000, 500_000);
+        over_global.seed_outstanding_burn(&[0x91u8; 32], &EXIT_ASSET, 550_000, &beneficiary);
         let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, beneficiary, [0x91u8; 32]);
         let att = signed_exit(&fact, &sk0, &sk1);
         assert_eq!(execute_ordered(&mut over_global, &[settle_tx(&relayer, &att, &fee)], &fee, 0).len(), 0, "a payout over the global cap is refused");
@@ -4511,6 +4736,7 @@ mod tests {
         // Over the per asset epoch payout cap.
         let mut over_asset = Ledger::new();
         let (sk0, sk1) = seed_exit_bridge(&mut over_asset, 1_000_000, 10_000_000, 500_000, 5_000_000);
+        over_asset.seed_outstanding_burn(&[0x92u8; 32], &EXIT_ASSET, 550_000, &beneficiary);
         let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, beneficiary, [0x92u8; 32]);
         let att = signed_exit(&fact, &sk0, &sk1);
         assert_eq!(execute_ordered(&mut over_asset, &[settle_tx(&relayer, &att, &fee)], &fee, 0).len(), 0, "a payout over the per asset epoch cap is refused");
@@ -4518,6 +4744,7 @@ mod tests {
         // Over the pool custody the bridge actually holds.
         let mut thin_pool = Ledger::new();
         let (sk0, sk1) = seed_exit_bridge(&mut thin_pool, 100_000, 10_000_000, 1_000_000, 5_000_000);
+        thin_pool.seed_outstanding_burn(&[0x93u8; 32], &EXIT_ASSET, 550_000, &beneficiary);
         let fact = exit_fact(crate::bridge::ExitOutcome::Slash, 550_000, beneficiary, [0x93u8; 32]);
         let att = signed_exit(&fact, &sk0, &sk1);
         assert_eq!(execute_ordered(&mut thin_pool, &[settle_tx(&relayer, &att, &fee)], &fee, 0).len(), 0, "a payout above the pool custody fails closed");
