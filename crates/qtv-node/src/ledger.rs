@@ -271,9 +271,10 @@ fn bridge_balance_key(asset_id: &[u8; 16], holder: &[u8; 32]) -> Key {
     sha3::sha3_256(&input)
 }
 
-fn bridge_seen_key(source_ref: &[u8; 32]) -> Key {
-    let mut input = Vec::with_capacity(BRIDGE_SEEN_TAG.len() + source_ref.len());
+fn bridge_seen_key(source_chain: u32, source_ref: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(BRIDGE_SEEN_TAG.len() + 4 + source_ref.len());
     input.extend_from_slice(BRIDGE_SEEN_TAG);
+    input.extend_from_slice(&source_chain.to_le_bytes());
     input.extend_from_slice(source_ref);
     sha3::sha3_256(&input)
 }
@@ -1473,12 +1474,12 @@ impl Ledger {
         self.write_leaf(stake_singleton_key(BRIDGE_EPOCH_TAG), to_bytes(&epoch));
     }
 
-    pub fn bridge_reference_seen(&self, source_ref: &[u8; 32]) -> bool {
-        matches!(self.trie.get(&bridge_seen_key(source_ref)), Some(bytes) if !bytes.is_empty())
+    pub fn bridge_reference_seen(&self, source_chain: u32, source_ref: &[u8; 32]) -> bool {
+        matches!(self.trie.get(&bridge_seen_key(source_chain, source_ref)), Some(bytes) if !bytes.is_empty())
     }
 
-    fn mark_bridge_reference(&mut self, source_ref: &[u8; 32]) {
-        self.write_leaf(bridge_seen_key(source_ref), vec![1]);
+    fn mark_bridge_reference(&mut self, source_chain: u32, source_ref: &[u8; 32]) {
+        self.write_leaf(bridge_seen_key(source_chain, source_ref), vec![1]);
     }
 
     pub fn bridge_epoch_minted(&self, asset_id: &[u8; 16], epoch: u64) -> u128 {
@@ -1504,7 +1505,7 @@ impl Ledger {
             Some(asset) => asset,
             None => return false,
         };
-        if self.bridge_reference_seen(&fact.source_ref) {
+        if self.bridge_reference_seen(fact.source_chain, &fact.source_ref) {
             return false;
         }
         let new_supply = match asset.supply.checked_add(fact.amount) {
@@ -1541,7 +1542,7 @@ impl Ledger {
                 ..asset
             },
         );
-        self.mark_bridge_reference(&fact.source_ref);
+        self.mark_bridge_reference(fact.source_chain, &fact.source_ref);
         self.set_bridge_epoch_minted(&fact.asset_id, epoch, new_minted);
         self.record_bridge_mint_event(&fact.asset_id, &fact.recipient, fact.amount);
         true
@@ -4431,7 +4432,7 @@ mod stake_state_tests {
             "the refused mint leaves the balance unsaturated"
         );
         assert!(
-            !l.bridge_reference_seen(&[0x44u8; 32]),
+            !l.bridge_reference_seen(1, &[0x44u8; 32]),
             "the refused mint leaves the reference unseen"
         );
     }
@@ -4470,9 +4471,53 @@ mod stake_state_tests {
         assert_eq!(l.bridged_balance(&asset, &holder), 0, "the refused mint credits no balance");
         assert_eq!(l.bridged_supply(&asset), 0, "the refused mint moves no supply");
         assert!(
-            !l.bridge_reference_seen(&[0x55u8; 32]),
+            !l.bridge_reference_seen(1, &[0x55u8; 32]),
             "the refused mint leaves the reference unseen"
         );
+    }
+
+    #[test]
+    fn a_shared_reference_on_two_corridors_both_mint_and_a_same_corridor_replay_is_refused() {
+        let mut l = Ledger::new();
+        let asset = [0xD6u8; 16];
+        let holder = [0xF1u8; 32];
+        let vault = [0x0Eu8; 32];
+        l.register_bridged_asset(&asset, u128::MAX, u128::MAX, false);
+        l.set_bridge_pool_vault(&vault);
+        let shared = |source_chain: u32| crate::bridge::Fact {
+            version: crate::bridge::FACT_VERSION,
+            source_chain,
+            dest_chain: 9_000,
+            route_id: 7,
+            direction: crate::bridge::Direction::Deposit,
+            nonce: 1,
+            source_ref: [0x77u8; 32],
+            asset_id: asset,
+            amount: 1_000,
+            recipient: holder,
+            finality_depth: 6,
+            observed_height: 10,
+            expiry_height: 100,
+        };
+        assert!(l.bridge_mint(&shared(1)), "the first corridor deposit mints");
+        assert!(
+            l.bridge_mint(&shared(2)),
+            "a distinct deposit on another corridor sharing the reference must mint, not lock funds"
+        );
+        assert_eq!(
+            l.bridged_balance(&asset, &holder),
+            2_000,
+            "both corridor deposits are credited"
+        );
+        assert!(!l.bridge_mint(&shared(1)), "a same corridor replay is refused");
+        assert!(!l.bridge_mint(&shared(2)), "a same corridor replay is refused");
+        assert_eq!(
+            l.bridged_balance(&asset, &holder),
+            2_000,
+            "the replays credit nothing"
+        );
+        assert!(l.bridge_reference_seen(1, &[0x77u8; 32]), "the reference is marked on corridor 1");
+        assert!(l.bridge_reference_seen(2, &[0x77u8; 32]), "and independently on corridor 2");
     }
 
     #[test]

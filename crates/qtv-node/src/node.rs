@@ -644,9 +644,9 @@ fn max_mint_artifact_bytes(ledger: &Ledger) -> usize {
     4 + attestation + 4 + stark
 }
 
-pub(crate) fn bridge_mint_source_ref(wrapper: &Wrapper) -> Option<[u8; 32]> {
+pub(crate) fn bridge_mint_source_key(wrapper: &Wrapper) -> Option<(u32, [u8; 32])> {
     crate::bridge::MintArtifact::decode(wrapper.body().call().args())
-        .map(|artifact| artifact.attestation.fact.source_ref)
+        .map(|artifact| (artifact.attestation.fact.source_chain, artifact.attestation.fact.source_ref))
 }
 
 pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_id: u64) -> bool {
@@ -656,11 +656,11 @@ pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_i
     if wrapper.body().call().args().len() > max_mint_artifact_bytes(ledger) {
         return false;
     }
-    let source_ref = match bridge_mint_source_ref(wrapper) {
-        Some(source_ref) => source_ref,
+    let (source_chain, source_ref) = match bridge_mint_source_key(wrapper) {
+        Some(key) => key,
         None => return false,
     };
-    if ledger.bridge_reference_seen(&source_ref) {
+    if ledger.bridge_reference_seen(source_chain, &source_ref) {
         return false;
     }
     let fact = match bridge_mint_fact(ledger, wrapper, chain_id) {
@@ -3633,7 +3633,7 @@ mod tests {
         );
         assert_eq!(ledger.bridged_supply(&asset), 0, "the stale mint moved no supply");
         assert!(
-            !ledger.bridge_reference_seen(&[0x81; 32]),
+            !ledger.bridge_reference_seen(1, &[0x81; 32]),
             "the refused stale mint left its source reference unseen for a timely retry"
         );
 
@@ -3671,7 +3671,7 @@ mod tests {
         assert_eq!(included.len(), 1, "the verified mint rides in the block");
         assert_eq!(ledger.bridged_balance(&asset, &recipient_id), 500_000, "the recipient holds the attested amount");
         assert_eq!(ledger.bridged_supply(&asset), 500_000, "the bridged supply rose by the attested amount");
-        assert!(ledger.bridge_reference_seen(&[0x11; 32]), "the deposit reference is marked against replay");
+        assert!(ledger.bridge_reference_seen(1, &[0x11; 32]), "the deposit reference is marked against replay");
     }
 
     #[test]
@@ -3700,7 +3700,7 @@ mod tests {
         let included = execute_ordered(&mut ledger, &[mint_tx(&relayer, &artifact, &fee)], &fee, 0);
         assert!(included.is_empty(), "a quorum signed for a sibling chain id never mints here");
         assert_eq!(ledger.bridged_supply(&asset), 0);
-        assert!(!ledger.bridge_reference_seen(&[0x12; 32]), "the refused mint leaves the reference unseen");
+        assert!(!ledger.bridge_reference_seen(1, &[0x12; 32]), "the refused mint leaves the reference unseen");
     }
 
     #[test]
@@ -3882,7 +3882,7 @@ mod tests {
         assert!(included.is_empty(), "a mint over the total cap is refused");
         assert_eq!(ledger.bridged_supply(&asset), 0, "no supply was minted over the cap");
         assert_eq!(ledger.bridged_balance(&asset, &recipient_id), 0);
-        assert!(!ledger.bridge_reference_seen(&[0x33; 32]), "a refused mint leaves the reference unseen");
+        assert!(!ledger.bridge_reference_seen(1, &[0x33; 32]), "a refused mint leaves the reference unseen");
     }
 
     #[test]
