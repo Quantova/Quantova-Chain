@@ -8,6 +8,17 @@ use qtv_crypto::ml_dsa::{self, PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
 
 use qtv_attest::params::ATTEST_CONTEXT;
 
+/// Whether a signed subject is a control plane view change vote or lock proof rather than a
+/// block proposal, marked by the reserved resource cost no block proposal carries. The cost is
+/// the trailing field of the signed block, so the mark rides inside the signature and a
+/// reporter cannot strip it to pass an honest view change off as a block double vote. A view
+/// change subject is never a slashable equivocation.
+fn subject_is_view_change(block_bytes: &[u8]) -> bool {
+    let len = block_bytes.len();
+    len >= 8
+        && block_bytes[len - 8..] == crate::consensus::VIEW_CHANGE_SUBJECT_COST.to_le_bytes()
+}
+
 fn attestation_message(
     chain_id: u64,
     height: u64,
@@ -64,6 +75,11 @@ impl Equivocation {
             return false;
         }
         if self.view_a != self.view_b {
+            return false;
+        }
+        // A view change vote or lock proof is not a block a validator voted to finalize, so a
+        // pair touching one is never a slashable double vote even when both signatures verify.
+        if subject_is_view_change(&self.block_a) || subject_is_view_change(&self.block_b) {
             return false;
         }
         let pk: [u8; PUBLIC_KEY_BYTES] = match attest_pk.try_into() {
@@ -153,6 +169,10 @@ impl EvidencePool {
         block_bytes: Vec<u8>,
         sig: Vec<u8>,
     ) -> Option<Equivocation> {
+        // A control plane view change subject is not a block vote and never attributes.
+        if subject_is_view_change(&block_bytes) {
+            return None;
+        }
         // Lower height bookkeeping can never attribute again once observation moves on, so drop it on advance; drained evidence in pending is untouched.
         if height > self.floor {
             self.floor = height;
