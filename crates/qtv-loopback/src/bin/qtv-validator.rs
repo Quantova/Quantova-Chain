@@ -28,6 +28,23 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+const MAX_BUFFERED_FRAMES: usize = 8192;
+const MAX_BUFFERED_BYTES: usize = 32 * 1024 * 1024;
+
+fn buffer_bounded(buffered: &mut Vec<(usize, Vec<u8>)>, from: usize, frame: Vec<u8>) {
+    if frame.len() > MAX_BUFFERED_BYTES {
+        return;
+    }
+    let mut total: usize = buffered.iter().map(|(_, f)| f.len()).sum();
+    while !buffered.is_empty()
+        && (buffered.len() + 1 > MAX_BUFFERED_FRAMES || total + frame.len() > MAX_BUFFERED_BYTES)
+    {
+        let (_, dropped) = buffered.remove(0);
+        total = total.saturating_sub(dropped.len());
+    }
+    buffered.push((from, frame));
+}
+
 struct Runtime {
     idx: usize,
     n: usize,
@@ -151,7 +168,7 @@ impl Runtime {
                     if let Ok(Message::Register(note)) = Message::decode(&bytes) {
                         self.node.collect_registration(*note);
                     } else {
-                        self.buffered.push((from, bytes));
+                        buffer_bounded(&mut self.buffered, from, bytes);
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -179,7 +196,7 @@ impl Runtime {
                     if let Ok(Message::Reveal(note)) = Message::decode(&bytes) {
                         self.node.collect_reveal(*note);
                     } else {
-                        self.buffered.push((from, bytes));
+                        buffer_bounded(&mut self.buffered, from, bytes);
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -255,7 +272,7 @@ impl Runtime {
                         Err(_) => continue,
                     };
                     match message_height(&message) {
-                        Some(h) if h > start_height => self.buffered.push((from, bytes)),
+                        Some(h) if h > start_height => buffer_bounded(&mut self.buffered, from, bytes),
                         Some(h) if h < start_height => {}
                         _ => self.dispatch(from, message, &selection, &online),
                     }
