@@ -959,6 +959,10 @@ impl Ledger {
             self.debit_staked(bond.amount);
             self.clear_stake_bond(&id);
             self.record_slash_event(address, bond.amount);
+            self.record_side_event(SideEvent::Slash {
+                validator: address.to_string(),
+                amount: bond.amount,
+            });
         }
         self.clear_stake_rewards(&id);
         true
@@ -1041,6 +1045,12 @@ impl Ledger {
         let mut entries = self.guardian_freeze_entries();
         for target in targets {
             self.set_frozen(target);
+            if let Some(addr) = id_bytes_to_address(target) {
+                self.record_side_event(SideEvent::GuardianFreeze {
+                    target: addr,
+                    bound,
+                });
+            }
             match entries.iter().position(|(id, _)| id == target) {
                 Some(i) => entries[i].1 = until,
                 None => entries.push((*target, until)),
@@ -1887,6 +1897,10 @@ impl Ledger {
         self.set_stake_rewards(id, &book);
         if let Some(address) = id_bytes_to_address(id) {
             self.record_reward_event(&address, paid);
+            self.record_side_event(SideEvent::Reward {
+                validator: address,
+                amount: paid,
+            });
         }
         paid
     }
@@ -2117,6 +2131,11 @@ impl Ledger {
                 for (target, amount) in &credits {
                     self.apply_balance_delta(contract, -i128::from(*amount));
                     self.apply_balance_delta(target, i128::from(*amount));
+                    self.record_side_event(SideEvent::ContractTransfer {
+                        contract: contract.to_string(),
+                        to: target.clone(),
+                        amount: *amount,
+                    });
                 }
                 for effect in &outcome.effects {
                     if let qtv_vm::interp::Effect::Event { selector, data } = effect {
@@ -2289,6 +2308,13 @@ impl Ledger {
         self.set_gov_referendum(id, &referendum);
         self.set_gov_action(id, &action);
         self.set_gov_next_id(id + 1);
+        self.record_side_event(SideEvent::GovPropose {
+            referendum: id,
+            proposer: proposer.to_string(),
+            track: track.code(),
+            action: action_kind(&action),
+            deposit,
+        });
         Some(id)
     }
 
@@ -2340,6 +2366,13 @@ impl Ledger {
                 stake,
             },
         );
+        self.record_side_event(SideEvent::GovVote {
+            referendum: referendum_id,
+            voter: voter.to_string(),
+            aye,
+            conviction: conviction.code(),
+            stake,
+        });
         true
     }
 
@@ -2363,6 +2396,12 @@ impl Ledger {
             self.set_stake_treasury(self.stake_treasury() + referendum.deposit);
         }
         self.set_gov_referendum(referendum_id, &referendum);
+        self.record_side_event(SideEvent::GovTally {
+            referendum: referendum_id,
+            status: status_kind(status),
+            aye_stake: referendum.tally.aye_stake,
+            nay_stake: referendum.tally.nay_stake,
+        });
         Some(status)
     }
 
@@ -2399,6 +2438,11 @@ impl Ledger {
         };
         self.set_gov_receipt(referendum_id, &receipt);
         self.clear_gov_action(referendum_id);
+        self.record_side_event(SideEvent::GovEnact {
+            referendum: referendum_id,
+            action: action_kind(&action),
+            proposal_hash: receipt.proposal_hash,
+        });
         Ok(())
     }
 
@@ -2412,9 +2456,20 @@ impl Ledger {
                 self.set_account(&addr, &account);
                 self.set_total_supply(supply);
                 self.record_mint_event(&addr, *amount);
+                self.record_side_event(SideEvent::Mint {
+                    to: addr,
+                    amount: *amount,
+                });
                 Ok(())
             }
-            Action::Parameter { key, value } => self.apply_parameter(key, value),
+            Action::Parameter { key, value } => {
+                self.apply_parameter(key, value)?;
+                self.record_side_event(SideEvent::Parameter {
+                    key: key.clone(),
+                    value: value.clone(),
+                });
+                Ok(())
+            }
             Action::Spend { from, to, amount } => {
                 let to_addr = id_bytes_to_address(to).ok_or(EnactError::BadAddress)?;
                 let from_id = id_from_slice(from).ok_or(EnactError::BadAddress)?;
@@ -2438,16 +2493,31 @@ impl Ledger {
                 let mut account = self.account(&to_addr);
                 account.balance = account.balance.saturating_add(*amount);
                 self.set_account(&to_addr, &account);
+                let source = if from_id == sha3::sha3_256(b"qtv/gov/grants") {
+                    "gov/grants".to_string()
+                } else {
+                    "stake/treasury".to_string()
+                };
+                self.record_side_event(SideEvent::Spend {
+                    source,
+                    to: to_addr,
+                    amount: *amount,
+                });
                 Ok(())
             }
             Action::Blacklist { target } => {
                 if let Some(id) = id_from_slice(target) {
                     self.set_gov_blacklisted(&id);
+                    if let Some(addr) = id_bytes_to_address(&id) {
+                        self.record_side_event(SideEvent::Blacklist { target: addr });
+                    }
                 }
                 Ok(())
             }
             Action::FreezeRecovery {
-                victim, seizures, ..
+                victim,
+                seizures,
+                scope,
             } => {
                 let victim_addr = id_bytes_to_address(victim).ok_or(EnactError::BadAddress)?;
                 let mut recovered = 0u64;
@@ -2458,11 +2528,22 @@ impl Ledger {
                         from.balance -= take;
                         self.set_account(&from_addr, &from);
                         recovered = recovered.saturating_add(take);
+                        self.record_side_event(SideEvent::RecoverySeizure {
+                            victim: victim_addr.clone(),
+                            from: from_addr,
+                            amount: take,
+                            scope: *scope,
+                        });
                     }
                 }
                 let mut account = self.account(&victim_addr);
                 account.balance = account.balance.saturating_add(recovered);
                 self.set_account(&victim_addr, &account);
+                self.record_side_event(SideEvent::RecoveryCredit {
+                    victim: victim_addr,
+                    amount: recovered,
+                    scope: *scope,
+                });
                 let handled: Vec<[u8; 32]> = seizures
                     .iter()
                     .filter_map(|seizure| <[u8; 32]>::try_from(seizure.from.as_slice()).ok())
@@ -2474,6 +2555,9 @@ impl Ledger {
                 for target in targets {
                     if let Some(id) = id_from_slice(target) {
                         self.set_frozen(&id);
+                        if let Some(addr) = id_bytes_to_address(&id) {
+                            self.record_side_event(SideEvent::Freeze { target: addr });
+                        }
                     }
                 }
                 Ok(())
@@ -2482,6 +2566,9 @@ impl Ledger {
                 for target in targets {
                     if let Some(id) = id_from_slice(target) {
                         self.clear_frozen(&id);
+                        if let Some(addr) = id_bytes_to_address(&id) {
+                            self.record_side_event(SideEvent::Unfreeze { target: addr });
+                        }
                     }
                 }
                 Ok(())
@@ -2506,14 +2593,25 @@ impl Ledger {
                     }
                 }
                 self.set_bridge_pool_vault(&vault_id);
+                if let Some(addr) = id_bytes_to_address(&vault_id) {
+                    self.record_side_event(SideEvent::BridgeMigration { vault: addr });
+                }
                 Ok(())
             }
-            Action::BridgeUnfreeze => self.gov_unfreeze_bridge(now),
+            Action::BridgeUnfreeze => {
+                self.gov_unfreeze_bridge(now)?;
+                self.record_side_event(SideEvent::BridgeUnfreeze);
+                Ok(())
+            }
             Action::GuardianRotate { set } => {
                 if !set.well_formed() {
                     return Err(EnactError::BadValue);
                 }
                 self.set_guardian_set(set);
+                self.record_side_event(SideEvent::GuardianRotate {
+                    size: set.members.len() as u32,
+                    threshold: set.threshold,
+                });
                 Ok(())
             }
             Action::CommitteeRotate { rotation } => {
@@ -2541,10 +2639,15 @@ impl Ledger {
                 if (rotation.threshold as usize) > operators.len() {
                     return Err(EnactError::BadValue);
                 }
+                let committee_size = operators.len() as u32;
                 self.seed_bridge_operator_set(&crate::bridge::OperatorSet::new(
                     operators,
                     rotation.threshold,
                 ));
+                self.record_side_event(SideEvent::CommitteeRotate {
+                    operators: committee_size,
+                    threshold: rotation.threshold,
+                });
                 Ok(())
             }
             Action::OperatorRevoke { operator_id } => {
@@ -2553,6 +2656,9 @@ impl Ledger {
                     return Err(EnactError::BadValue);
                 }
                 self.seed_bridge_operator_set(&set);
+                self.record_side_event(SideEvent::OperatorRevoke {
+                    operator_id: *operator_id,
+                });
                 Ok(())
             }
             Action::AssetRegister {
@@ -2565,11 +2671,18 @@ impl Ledger {
                     return Err(EnactError::BadValue);
                 }
                 self.register_bridged_asset(asset_id, *cap, *epoch_cap, *requires_stark);
+                self.record_side_event(SideEvent::AssetRegister {
+                    asset_id: *asset_id,
+                    cap: *cap,
+                    epoch_cap: *epoch_cap,
+                    requires_stark: *requires_stark,
+                });
                 Ok(())
             }
             Action::EpochAdvance => {
                 let next = self.bridge_epoch().checked_add(1).ok_or(EnactError::BadValue)?;
                 self.set_bridge_epoch(next);
+                self.record_side_event(SideEvent::EpochAdvance { epoch: next });
                 Ok(())
             }
             Action::Activate { feature, version } => {
@@ -2577,6 +2690,10 @@ impl Ledger {
                     return Err(EnactError::BadValue);
                 }
                 self.set_feature_version(feature, *version);
+                self.record_side_event(SideEvent::Activate {
+                    feature: feature.clone(),
+                    version: *version,
+                });
                 Ok(())
             }
         }
@@ -2731,6 +2848,11 @@ impl Ledger {
         );
         self.credit_staked(amount);
         self.record_bond_event(address, amount, fee);
+        self.record_side_event(SideEvent::Bond {
+            validator: address.to_string(),
+            amount,
+            fee,
+        });
         true
     }
 
@@ -2749,6 +2871,10 @@ impl Ledger {
         self.debit_staked(taken);
         if taken > 0 {
             self.record_slash_event(address, taken);
+            self.record_side_event(SideEvent::Slash {
+                validator: address.to_string(),
+                amount: taken,
+            });
         }
         if let qtv_staking::Fault::Attributable = fault {
             self.clear_stake_bond(&id);
@@ -2798,6 +2924,10 @@ impl Ledger {
         account.balance += bond.amount;
         self.set_account(address, &account);
         self.record_unbond_event(address, bond.amount);
+        self.record_side_event(SideEvent::Unbond {
+            validator: address.to_string(),
+            amount: bond.amount,
+        });
         true
     }
 }
@@ -3201,6 +3331,56 @@ mod stake_state_tests {
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         l.gov_enact(id, 3 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert_eq!(l.balance(&target), 1_000_000 * 1_000_000);
+    }
+
+    #[test]
+    fn a_governance_enactment_leaves_a_side_trace_and_no_side_event_moves_a_consensus_root() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        let proposer = gov_addr(24);
+        fund(&mut l, &proposer, 4_000_000 * 1_000_000);
+        let action = qtv_governance::Action::Mint {
+            to: [30u8; 32].to_vec(),
+            amount: 1_000_000 * 1_000_000,
+        };
+        let id = l
+            .gov_propose(&proposer, qtv_governance::Track::Mint, action, 0)
+            .unwrap();
+        let voter = gov_addr(25);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+        l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        l.gov_enact(id, 3 * 86_400 + 1, TEST_CHAIN).unwrap();
+
+        let kinds: Vec<&str> = l.side_events().iter().map(SideEvent::kind).collect();
+        assert!(kinds.contains(&"gov_propose"), "the proposal reaches the side log");
+        assert!(kinds.contains(&"gov_vote"), "the vote reaches the side log");
+        assert!(kinds.contains(&"gov_enact"), "the enactment reaches the side log");
+        assert!(kinds.contains(&"mint"), "the enacted mint reaches the side log");
+
+        let q_before = l.q_root();
+        let leaves_before: Vec<Vec<u8>> = l.block_events().iter().map(BlockEvent::encode).collect();
+        let event_root_before = qtv_block::event_root(&leaves_before);
+        let side_before = l.side_events().len();
+
+        for tag in 0..16u8 {
+            l.record_side_event(SideEvent::Freeze { target: gov_addr(tag) });
+        }
+
+        let leaves_after: Vec<Vec<u8>> = l.block_events().iter().map(BlockEvent::encode).collect();
+        assert_eq!(
+            q_before,
+            l.q_root(),
+            "recording side events must not move the state root"
+        );
+        assert_eq!(
+            event_root_before,
+            qtv_block::event_root(&leaves_after),
+            "recording side events must not move the block event root"
+        );
+        assert!(
+            l.side_events().len() > side_before,
+            "the side log carries the extra observability records"
+        );
     }
 
     #[test]
@@ -4846,6 +5026,183 @@ impl BlockEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SideEvent {
+    GovPropose {
+        referendum: u64,
+        proposer: String,
+        track: u8,
+        action: &'static str,
+        deposit: u64,
+    },
+    GovVote {
+        referendum: u64,
+        voter: String,
+        aye: bool,
+        conviction: u8,
+        stake: u64,
+    },
+    GovTally {
+        referendum: u64,
+        status: &'static str,
+        aye_stake: u128,
+        nay_stake: u128,
+    },
+    GovEnact {
+        referendum: u64,
+        action: &'static str,
+        proposal_hash: [u8; 32],
+    },
+    Mint {
+        to: String,
+        amount: u64,
+    },
+    Spend {
+        source: String,
+        to: String,
+        amount: u64,
+    },
+    Parameter {
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Blacklist {
+        target: String,
+    },
+    Freeze {
+        target: String,
+    },
+    Unfreeze {
+        target: String,
+    },
+    RecoverySeizure {
+        victim: String,
+        from: String,
+        amount: u64,
+        scope: [u8; 32],
+    },
+    RecoveryCredit {
+        victim: String,
+        amount: u64,
+        scope: [u8; 32],
+    },
+    GuardianFreeze {
+        target: String,
+        bound: u64,
+    },
+    GuardianRotate {
+        size: u32,
+        threshold: u32,
+    },
+    CommitteeRotate {
+        operators: u32,
+        threshold: u32,
+    },
+    OperatorRevoke {
+        operator_id: u32,
+    },
+    AssetRegister {
+        asset_id: [u8; 16],
+        cap: u128,
+        epoch_cap: u128,
+        requires_stark: bool,
+    },
+    EpochAdvance {
+        epoch: u64,
+    },
+    Activate {
+        feature: Vec<u8>,
+        version: u64,
+    },
+    BridgeMigration {
+        vault: String,
+    },
+    BridgeUnfreeze,
+    Bond {
+        validator: String,
+        amount: u64,
+        fee: u64,
+    },
+    Unbond {
+        validator: String,
+        amount: u64,
+    },
+    Slash {
+        validator: String,
+        amount: u64,
+    },
+    Reward {
+        validator: String,
+        amount: u64,
+    },
+    ContractTransfer {
+        contract: String,
+        to: String,
+        amount: u64,
+    },
+}
+
+impl SideEvent {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SideEvent::GovPropose { .. } => "gov_propose",
+            SideEvent::GovVote { .. } => "gov_vote",
+            SideEvent::GovTally { .. } => "gov_tally",
+            SideEvent::GovEnact { .. } => "gov_enact",
+            SideEvent::Mint { .. } => "mint",
+            SideEvent::Spend { .. } => "spend",
+            SideEvent::Parameter { .. } => "parameter",
+            SideEvent::Blacklist { .. } => "blacklist",
+            SideEvent::Freeze { .. } => "freeze",
+            SideEvent::Unfreeze { .. } => "unfreeze",
+            SideEvent::RecoverySeizure { .. } => "recovery_seizure",
+            SideEvent::RecoveryCredit { .. } => "recovery_credit",
+            SideEvent::GuardianFreeze { .. } => "guardian_freeze",
+            SideEvent::GuardianRotate { .. } => "guardian_rotate",
+            SideEvent::CommitteeRotate { .. } => "committee_rotate",
+            SideEvent::OperatorRevoke { .. } => "operator_revoke",
+            SideEvent::AssetRegister { .. } => "asset_register",
+            SideEvent::EpochAdvance { .. } => "epoch_advance",
+            SideEvent::Activate { .. } => "activate",
+            SideEvent::BridgeMigration { .. } => "bridge_migration",
+            SideEvent::BridgeUnfreeze => "bridge_unfreeze",
+            SideEvent::Bond { .. } => "bond",
+            SideEvent::Unbond { .. } => "unbond",
+            SideEvent::Slash { .. } => "slash",
+            SideEvent::Reward { .. } => "reward",
+            SideEvent::ContractTransfer { .. } => "contract_transfer",
+        }
+    }
+}
+
+fn action_kind(action: &Action) -> &'static str {
+    match action {
+        Action::Activate { .. } => "activate",
+        Action::Mint { .. } => "mint",
+        Action::BridgeMigration { .. } => "bridge_migration",
+        Action::BridgeUnfreeze => "bridge_unfreeze",
+        Action::GuardianRotate { .. } => "guardian_rotate",
+        Action::CommitteeRotate { .. } => "committee_rotate",
+        Action::AssetRegister { .. } => "asset_register",
+        Action::EpochAdvance => "epoch_advance",
+        Action::OperatorRevoke { .. } => "operator_revoke",
+        Action::FreezeRecovery { .. } => "freeze_recovery",
+        Action::Blacklist { .. } => "blacklist",
+        Action::Freeze { .. } => "freeze",
+        Action::Parameter { .. } => "parameter",
+        Action::Spend { .. } => "spend",
+        Action::Unfreeze { .. } => "unfreeze",
+    }
+}
+
+fn status_kind(status: Status) -> &'static str {
+    match status {
+        Status::Deciding => "deciding",
+        Status::Approved => "approved",
+        Status::Rejected => "rejected",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BurnInclusion {
     pub event_index: u64,
     pub leaf: Vec<u8>,
@@ -4869,6 +5226,7 @@ pub fn bridge_burn_leaf_ref(data: &[u8]) -> Option<[u8; 32]> {
 pub struct Ledger {
     trie: Trie,
     block_events: Vec<BlockEvent>,
+    side_events: Vec<SideEvent>,
     round_proposer: Option<String>,
     execution_height: u64,
     // An undo log of prior leaf images, present only while a transition applies under
@@ -4883,6 +5241,7 @@ impl Ledger {
         Ledger {
             trie: Trie::new(),
             block_events: Vec::new(),
+            side_events: Vec::new(),
             round_proposer: None,
             execution_height: 0,
             journal: None,
@@ -4894,6 +5253,7 @@ impl Ledger {
         Ledger {
             trie,
             block_events: Vec::new(),
+            side_events: Vec::new(),
             round_proposer: None,
             execution_height: 0,
             journal: None,
@@ -4934,6 +5294,7 @@ impl Ledger {
         F: FnOnce(&mut Ledger) -> bool,
     {
         let events_mark = self.block_events.len();
+        let side_mark = self.side_events.len();
         let restore = self.journal.take();
         self.journal = Some(Vec::new());
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
@@ -4951,16 +5312,26 @@ impl Ledger {
                 }
             }
             self.block_events.truncate(events_mark);
+            self.side_events.truncate(side_mark);
         }
         committed
     }
 
     pub fn clear_block_events(&mut self) {
         self.block_events.clear();
+        self.side_events.clear();
     }
 
     pub fn block_events(&self) -> &[BlockEvent] {
         &self.block_events
+    }
+
+    pub fn side_events(&self) -> &[SideEvent] {
+        &self.side_events
+    }
+
+    fn record_side_event(&mut self, event: SideEvent) {
+        self.side_events.push(event);
     }
 
     pub fn prove_bridge_burn(&self, burn_ref: &[u8; 32]) -> Option<BurnInclusion> {

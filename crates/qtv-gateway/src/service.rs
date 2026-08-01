@@ -5,6 +5,7 @@
 use qtv_devnet::wire::wrapper_from_bytes;
 use qtv_devnet::DevNode;
 use qtv_node::fee::FeeParams;
+use qtv_node::ledger::SideEvent;
 use qtv_node::mempool::{Admitted, Reject};
 use qtv_tx::Wrapper;
 
@@ -38,6 +39,7 @@ pub enum Request {
     Storage(String),
     Supply,
     Events(u64),
+    SideEvents(u64),
     FinalizedHead,
     BurnBlock(u64),
     BurnHeightsAfter(u64),
@@ -113,6 +115,13 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
                 .ok_or_else(|| ClientError::bad("bad_request", "get_events needs a height"))?;
             Ok(Request::Events(height))
         }
+        "get_side_events" => {
+            let height = body
+                .get("height")
+                .and_then(Json::as_u64)
+                .ok_or_else(|| ClientError::bad("bad_request", "get_side_events needs a height"))?;
+            Ok(Request::SideEvents(height))
+        }
         "finalized_head" => Ok(Request::FinalizedHead),
         "burn_block" => {
             let height = body
@@ -159,6 +168,7 @@ pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result
         Request::Container(address) => container(node, &address),
         Request::Storage(address) => storage(node, &address),
         Request::Events(height) => Ok(events(node, height)),
+        Request::SideEvents(height) => Ok(side_events(node, height)),
         Request::FinalizedHead => Ok(finalized_head(node)),
         Request::BurnBlock(height) => burn_block(node, height),
         Request::BurnHeightsAfter(cursor) => Ok(burn_heights_after(node, cursor)),
@@ -444,6 +454,209 @@ fn events(node: &DevNode, height: u64) -> Json {
         ("count", Json::Int(items.len() as u64)),
         ("events", Json::Array(items)),
     ])
+}
+
+fn side_events(node: &DevNode, height: u64) -> Json {
+    let items: Vec<Json> = node
+        .side_events_at(height)
+        .iter()
+        .enumerate()
+        .map(|(index, event)| side_event_json(index as u64, event))
+        .collect();
+    object(vec![
+        ("height", Json::Int(height)),
+        ("count", Json::Int(items.len() as u64)),
+        ("events", Json::Array(items)),
+    ])
+}
+
+fn amount_str(amount: u128) -> Json {
+    Json::str(amount.to_string())
+}
+
+fn side_event_json(index: u64, event: &SideEvent) -> Json {
+    let mut fields: Vec<(&str, Json)> = vec![
+        ("index", Json::Int(index)),
+        ("kind", Json::str(event.kind())),
+        ("actor", Json::str("")),
+        ("target", Json::str("")),
+        ("amount", Json::str("0")),
+        ("ref", Json::Int(0)),
+        ("aux", Json::Int(0)),
+    ];
+    let set = |fields: &mut Vec<(&str, Json)>, key: &str, value: Json| {
+        if let Some(slot) = fields.iter_mut().find(|(k, _)| *k == key) {
+            slot.1 = value;
+        }
+    };
+    match event {
+        SideEvent::GovPropose {
+            referendum,
+            proposer,
+            track,
+            action,
+            deposit,
+        } => {
+            set(&mut fields, "actor", Json::str(proposer));
+            set(&mut fields, "amount", amount_str(*deposit as u128));
+            set(&mut fields, "ref", Json::Int(*referendum));
+            set(&mut fields, "aux", Json::Int(*track as u64));
+            fields.push(("action", Json::str(*action)));
+        }
+        SideEvent::GovVote {
+            referendum,
+            voter,
+            aye,
+            conviction,
+            stake,
+        } => {
+            set(&mut fields, "actor", Json::str(voter));
+            set(&mut fields, "amount", amount_str(*stake as u128));
+            set(&mut fields, "ref", Json::Int(*referendum));
+            set(&mut fields, "aux", Json::Int(*conviction as u64));
+            fields.push(("aye", Json::Bool(*aye)));
+        }
+        SideEvent::GovTally {
+            referendum,
+            status,
+            aye_stake,
+            nay_stake,
+        } => {
+            set(&mut fields, "ref", Json::Int(*referendum));
+            set(&mut fields, "amount", amount_str(*aye_stake));
+            fields.push(("status", Json::str(*status)));
+            fields.push(("aye_stake", amount_str(*aye_stake)));
+            fields.push(("nay_stake", amount_str(*nay_stake)));
+        }
+        SideEvent::GovEnact {
+            referendum,
+            action,
+            proposal_hash,
+        } => {
+            set(&mut fields, "ref", Json::Int(*referendum));
+            fields.push(("action", Json::str(*action)));
+            fields.push(("proposal_hash", Json::str(crate::json::to_hex(proposal_hash))));
+        }
+        SideEvent::Mint { to, amount } => {
+            set(&mut fields, "target", Json::str(to));
+            set(&mut fields, "amount", amount_str(*amount as u128));
+        }
+        SideEvent::Spend { source, to, amount } => {
+            set(&mut fields, "actor", Json::str(source));
+            set(&mut fields, "target", Json::str(to));
+            set(&mut fields, "amount", amount_str(*amount as u128));
+        }
+        SideEvent::Parameter { key, value } => {
+            fields.push(("key", Json::str(crate::json::to_hex(key))));
+            fields.push(("value", Json::str(crate::json::to_hex(value))));
+        }
+        SideEvent::Blacklist { target } => {
+            set(&mut fields, "target", Json::str(target));
+        }
+        SideEvent::Freeze { target } => {
+            set(&mut fields, "target", Json::str(target));
+        }
+        SideEvent::Unfreeze { target } => {
+            set(&mut fields, "target", Json::str(target));
+        }
+        SideEvent::RecoverySeizure {
+            victim,
+            from,
+            amount,
+            scope,
+        } => {
+            set(&mut fields, "actor", Json::str(from));
+            set(&mut fields, "target", Json::str(victim));
+            set(&mut fields, "amount", amount_str(*amount as u128));
+            fields.push(("scope", Json::str(crate::json::to_hex(scope))));
+        }
+        SideEvent::RecoveryCredit {
+            victim,
+            amount,
+            scope,
+        } => {
+            set(&mut fields, "target", Json::str(victim));
+            set(&mut fields, "amount", amount_str(*amount as u128));
+            fields.push(("scope", Json::str(crate::json::to_hex(scope))));
+        }
+        SideEvent::GuardianFreeze { target, bound } => {
+            set(&mut fields, "target", Json::str(target));
+            set(&mut fields, "aux", Json::Int(*bound));
+        }
+        SideEvent::GuardianRotate { size, threshold } => {
+            set(&mut fields, "aux", Json::Int(*threshold as u64));
+            fields.push(("size", Json::Int(*size as u64)));
+            fields.push(("threshold", Json::Int(*threshold as u64)));
+        }
+        SideEvent::CommitteeRotate {
+            operators,
+            threshold,
+        } => {
+            set(&mut fields, "aux", Json::Int(*threshold as u64));
+            fields.push(("operators", Json::Int(*operators as u64)));
+            fields.push(("threshold", Json::Int(*threshold as u64)));
+        }
+        SideEvent::OperatorRevoke { operator_id } => {
+            set(&mut fields, "aux", Json::Int(*operator_id as u64));
+            fields.push(("operator_id", Json::Int(*operator_id as u64)));
+        }
+        SideEvent::AssetRegister {
+            asset_id,
+            cap,
+            epoch_cap,
+            requires_stark,
+        } => {
+            set(&mut fields, "amount", amount_str(*cap));
+            fields.push(("asset_id", Json::str(crate::json::to_hex(asset_id))));
+            fields.push(("cap", amount_str(*cap)));
+            fields.push(("epoch_cap", amount_str(*epoch_cap)));
+            fields.push(("requires_stark", Json::Bool(*requires_stark)));
+        }
+        SideEvent::EpochAdvance { epoch } => {
+            set(&mut fields, "aux", Json::Int(*epoch));
+            fields.push(("epoch", Json::Int(*epoch)));
+        }
+        SideEvent::Activate { feature, version } => {
+            set(&mut fields, "aux", Json::Int(*version));
+            fields.push(("feature", Json::str(crate::json::to_hex(feature))));
+            fields.push(("version", Json::Int(*version)));
+        }
+        SideEvent::BridgeMigration { vault } => {
+            set(&mut fields, "target", Json::str(vault));
+        }
+        SideEvent::BridgeUnfreeze => {}
+        SideEvent::Bond {
+            validator,
+            amount,
+            fee,
+        } => {
+            set(&mut fields, "actor", Json::str(validator));
+            set(&mut fields, "amount", amount_str(*amount as u128));
+            fields.push(("fee", amount_str(*fee as u128)));
+        }
+        SideEvent::Unbond { validator, amount } => {
+            set(&mut fields, "actor", Json::str(validator));
+            set(&mut fields, "amount", amount_str(*amount as u128));
+        }
+        SideEvent::Slash { validator, amount } => {
+            set(&mut fields, "actor", Json::str(validator));
+            set(&mut fields, "amount", amount_str(*amount as u128));
+        }
+        SideEvent::Reward { validator, amount } => {
+            set(&mut fields, "actor", Json::str(validator));
+            set(&mut fields, "amount", amount_str(*amount as u128));
+        }
+        SideEvent::ContractTransfer {
+            contract,
+            to,
+            amount,
+        } => {
+            set(&mut fields, "actor", Json::str(contract));
+            set(&mut fields, "target", Json::str(to));
+            set(&mut fields, "amount", amount_str(*amount as u128));
+        }
+    }
+    object(fields)
 }
 
 fn container(node: &DevNode, address: &str) -> Result<Json, ClientError> {
