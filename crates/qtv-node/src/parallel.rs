@@ -170,7 +170,9 @@ pub fn execute_parallel(
     let bridge_settle_address = crate::ledger::bridge_settle_address();
     let round_proposer = ledger.round_proposer().map(str::to_string);
     let grants_address = crate::ledger::grants_address();
-    ledger.bridge_expire(day.saturating_mul(86_400));
+    let now_seconds = day.saturating_mul(86_400);
+    ledger.bridge_expire(now_seconds);
+    ledger.guardian_expire(now_seconds);
     if candidates.iter().any(|wrapper| {
         let (sender, target) = access(wrapper);
         round_proposer.as_deref() == Some(sender)
@@ -789,6 +791,54 @@ mod tests {
                 included_ids(&ordered_included),
                 included_ids(&parallel_included),
                 "included set differs at {threads} threads"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lapsed_guardian_freeze_expires_identically_on_both_paths() {
+        let fee = FeeParams::devnet();
+        let (mut base, keys) = population(8, 1_000_000);
+
+        let m1 = [201u8; 32];
+        let m2 = [202u8; 32];
+        base.set_guardian_set(&qtv_governance::GuardianSet::new(vec![m1, m2], 2));
+        let target = [77u8; 32];
+        assert!(
+            base.guardian_freeze(0, &[target], &[m1, m2], 0),
+            "the caucus arms a freeze on the target"
+        );
+        let frozen = qtv_idfmt::render_address(&target).unwrap();
+        assert!(base.is_frozen(&frozen), "the target starts frozen");
+
+        let block: Vec<Wrapper> = (0..4)
+            .map(|i| transfer(&keys[i], &keys[4 + i].address(), 1_000, 0, &fee))
+            .collect();
+        assert_eq!(
+            plan_layers(&block).len(),
+            1,
+            "the straddling block is all independent plain transfers so it stays on the parallel path"
+        );
+
+        let day = 8;
+        let mut ordered = base.clone();
+        execute_ordered(&mut ordered, &block, &fee, day);
+        assert!(
+            !ordered.is_frozen(&frozen),
+            "the ordered path clears the freeze once its window has lapsed"
+        );
+
+        for threads in [2usize, 4, 8, 16] {
+            let mut parallel = base.clone();
+            execute_parallel(&mut parallel, &block, &fee, threads, day);
+            assert!(
+                !parallel.is_frozen(&frozen),
+                "the parallel path leaves the lapsed freeze in place at {threads} threads"
+            );
+            assert_eq!(
+                ordered.q_root(),
+                parallel.q_root(),
+                "a lapsed guardian freeze forks parallel from serial at {threads} threads"
             );
         }
     }
