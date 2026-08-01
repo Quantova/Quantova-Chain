@@ -18,7 +18,7 @@ use qtv_node::evidence::{Equivocation, EvidencePool};
 use qtv_node::watermark::SignGuard;
 use qtv_node::fee::FeeParams;
 use qtv_node::ledger::{
-    account_key, evidence_address, registration_address, Account, BlockEvent, Ledger,
+    account_key, evidence_address, registration_address, Account, BlockEvent, Ledger, SideEvent,
     EVENT_BRIDGE_BURN, NATIVE_EVENT_SOURCE,
 };
 use qtv_node::mempool::{Admitted, Mempool, Reject};
@@ -230,6 +230,7 @@ pub struct DevNode {
     slashed: Vec<u64>,
     tx_index: HashMap<String, Height>,
     events_by_height: HashMap<Height, Vec<BlockEvent>>,
+    side_events_by_height: HashMap<Height, Vec<SideEvent>>,
     block_messages: HashMap<u64, Vec<u8>>,
     epoch_roots: HashMap<u64, Root>,
     epoch_notes: HashMap<u64, RegisterNote>,
@@ -287,6 +288,7 @@ impl DevNode {
             slashed: Vec::new(),
             tx_index: HashMap::new(),
             events_by_height: HashMap::new(),
+            side_events_by_height: HashMap::new(),
             block_messages: HashMap::new(),
             epoch_roots: HashMap::new(),
             epoch_notes: HashMap::new(),
@@ -883,6 +885,10 @@ impl DevNode {
         if !block_events.is_empty() {
             self.events_by_height.insert(self.height, block_events);
         }
+        let side_events = self.ledger.side_events().to_vec();
+        if !side_events.is_empty() {
+            self.side_events_by_height.insert(self.height, side_events);
+        }
         let attesters = certificate.attesters();
         let cert_slot = crate::wire::certificate_to_bytes(&certificate);
         let chain_block = ChainBlock::new(staged.header, cert_slot, staged.body);
@@ -1411,6 +1417,11 @@ impl DevNode {
         let _ = self.burn_archive.append(entry);
     }
 
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn seed_side_events(&mut self, height: Height, events: Vec<SideEvent>) {
+        self.side_events_by_height.insert(height, events);
+    }
+
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -1523,6 +1534,10 @@ impl DevNode {
         self.events_by_height.get(&height).cloned().unwrap_or_default()
     }
 
+    pub fn side_events_at(&self, height: Height) -> Vec<SideEvent> {
+        self.side_events_by_height.get(&height).cloned().unwrap_or_default()
+    }
+
     pub fn block_at_height(&self, height: Height) -> Option<ChainBlock> {
         self.serve_blocks(height, height).into_iter().next()
     }
@@ -1609,6 +1624,10 @@ impl DevNode {
         let block_events = self.ledger.block_events().to_vec();
         if !block_events.is_empty() {
             self.events_by_height.insert(self.height, block_events);
+        }
+        let side_events = self.ledger.side_events().to_vec();
+        if !side_events.is_empty() {
+            self.side_events_by_height.insert(self.height, side_events);
         }
         self.persist(&block).map_err(|_| SyncError::Io)?;
         self.archive_burn_block(&block);
