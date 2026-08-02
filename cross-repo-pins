@@ -5,12 +5,12 @@
 # The signing edge qtv-crypto is anchored to an immutable commit, not a tag, so it has no tag to
 # drift and is out of this gate's scope. It is pinned by rev in every crate manifest, recorded in
 # the committed lockfile, and its source org is gated in deny.toml. For the record it is
-# Q-Crypto at 7ac1ed92287e8edf2a96f6cff7f9f19281744a9d, the same rev the SDKs pin.
+# Q-Crypto at 33c7e9395ad23f07019909470d319211213e904f, the same rev the SDKs pin.
 #
 # QRC-CONSENSUS is likewise anchored to an immutable commit rather than a tag, so it is out of the
 # tag gate's scope. It is pinned by rev in every crate manifest and recorded in the committed
-# lockfile. For the record it is QRC-CONSENSUS at 3d57d5251de1dcb0690c102a3a28678aea33bd6c.
+# lockfile. For the record it is QRC-CONSENSUS at f49af4ec21feb9ae983c53d2c9b352c677c06fcb.
 #
 # QVM is now anchored to an immutable commit rather than a tag as well, carrying the effects memory
 # bound and the access list verification bound. It is pinned by rev in the qtv-node manifest and
-# recorded in the committed lockfile. For the record it is QVM at 1fb2934171a082eb55badf904155cbabaf6ed7fb.
+# recorded in the committed lockfile. For the record it is QVM at 94213d37df4bee940cac3a0a5468ccca42a125b6.
