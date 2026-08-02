@@ -25,6 +25,7 @@ const TAG_VIEW_CHANGE: u8 = 8;
 const TAG_CODED_PROPOSAL: u8 = 9;
 const TAG_REVEAL: u8 = 10;
 const TAG_REGISTER: u8 = 11;
+const TAG_PREVOTE: u8 = 12;
 
 const PARENT_GENESIS: u8 = 0;
 const PARENT_VALUE: u8 = 1;
@@ -78,8 +79,7 @@ pub struct ViewChange {
     pub lock_view: u64,
     pub locked: Option<LockedBlock>,
     pub att: Attestation,
-    // The signer's own attestation for the locked block: proof of the lock, not a claim.
-    pub lock_att: Option<Attestation>,
+    pub polka: Option<Certificate>,
 }
 
 /// A validator's own sortition reveal for a height, its height, author id, and
@@ -109,6 +109,7 @@ pub enum Message {
     Proposal(Proposal),
     CodedProposal(Box<CodedProposal>),
     Attest(Box<Attestation>),
+    Prevote(Box<Attestation>),
     Peers(Vec<PeerEntry>),
     Status(u64),
     GetBlocks { from: u64, to: u64 },
@@ -170,6 +171,10 @@ impl Message {
             Message::Attest(attestation) => {
                 encoder.put_tag(TAG_ATTEST);
                 encode_attestation(&mut encoder, attestation);
+            }
+            Message::Prevote(prevote) => {
+                encoder.put_tag(TAG_PREVOTE);
+                encode_attestation(&mut encoder, prevote);
             }
             Message::Peers(peers) => {
                 encoder.put_tag(TAG_PEERS);
@@ -255,6 +260,7 @@ impl Message {
                 Message::CodedProposal(Box::new(decode_coded_proposal(&mut decoder)?))
             }
             TAG_ATTEST => Message::Attest(Box::new(decode_attestation(&mut decoder)?)),
+            TAG_PREVOTE => Message::Prevote(Box::new(decode_attestation(&mut decoder)?)),
             TAG_PEERS => {
                 let count = decoder.get_u64()?;
                 let mut peers =
@@ -458,10 +464,10 @@ fn encode_view_change(encoder: &mut Encoder, record: &ViewChange) {
         None => encoder.put_u8(0),
     }
     encode_attestation(encoder, &record.att);
-    match &record.lock_att {
-        Some(att) => {
+    match &record.polka {
+        Some(polka) => {
             encoder.put_u8(1);
-            encode_attestation(encoder, att);
+            encode_certificate(encoder, polka);
         }
         None => encoder.put_u8(0),
     }
@@ -486,9 +492,9 @@ fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeErr
         other => return Err(DecodeError::BadParent(other)),
     };
     let att = decode_attestation(decoder)?;
-    let lock_att = match decoder.get_u8()? {
+    let polka = match decoder.get_u8()? {
         0 => None,
-        1 => Some(decode_attestation(decoder)?),
+        1 => Some(decode_certificate(decoder)?),
         other => return Err(DecodeError::BadParent(other)),
     };
     Ok(ViewChange {
@@ -497,8 +503,27 @@ fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeErr
         lock_view,
         locked,
         att,
-        lock_att,
+        polka,
     })
+}
+
+fn encode_certificate(encoder: &mut Encoder, certificate: &Certificate) {
+    encode_envelope(encoder, &certificate.envelope);
+    encoder.put_u64(certificate.attestations.len() as u64);
+    for attestation in &certificate.attestations {
+        encode_attestation(encoder, attestation);
+    }
+}
+
+fn decode_certificate(decoder: &mut Decoder<'_>) -> Result<Certificate, DecodeError> {
+    let envelope = decode_envelope(decoder)?;
+    let count = decoder.get_u64()?;
+    let mut attestations =
+        Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_ATTESTATION)?);
+    for _ in 0..count {
+        attestations.push(decode_attestation(decoder)?);
+    }
+    Ok(Certificate::new(envelope, attestations))
 }
 
 fn encode_coded_proposal(encoder: &mut Encoder, coded: &CodedProposal) {

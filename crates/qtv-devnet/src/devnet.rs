@@ -466,8 +466,8 @@ impl<S: Read + Write> Devnet<S> {
         }
         if let Some(proposal) = self.nodes[i].build_justified_proposal(&selection, view) {
             self.originate_proposal(i, proposal, active)?;
-            if let Some(attestation) = self.nodes[i].attest_staged() {
-                self.originate(i, &Message::Attest(Box::new(attestation)), active)?;
+            for message in self.nodes[i].prevote_staged() {
+                self.originate(i, &message, active)?;
             }
         }
         Ok(())
@@ -568,6 +568,13 @@ impl<S: Read + Write> Devnet<S> {
                     }
                     Message::CodedProposal(coded) => {
                         self.deliver_coded_proposal(to, *coded, ceiling, active)?
+                    }
+                    Message::Prevote(prevote) => {
+                        let selection = self.nodes[to].select()?;
+                        for message in self.nodes[to].on_prevote(&selection, *prevote) {
+                            self.originate(to, &message, active)?;
+                        }
+                        self.settle(to, ceiling, active)?;
                     }
                     Message::Attest(attestation) => {
                         self.nodes[to].on_attestation(*attestation);
