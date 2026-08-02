@@ -1266,7 +1266,7 @@ impl DevNode {
     }
 
     pub fn view_sync_target(&self, selection: &Selection) -> Option<View> {
-        let blocking = (selection.expected - selection.tau + 1) as usize;
+        let blocking = view_sync_blocking(selection.expected, selection.members.len(), selection.tau);
         let mut views: Vec<View> = self.view_changes.iter().map(|r| r.target_view).collect();
         views.sort_unstable();
         views.dedup();
@@ -1758,6 +1758,11 @@ fn registration_transaction(note: &RegisterNote, chain_id: u64) -> Wrapper {
     Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new())
 }
 
+fn view_sync_blocking(expected: u64, members: usize, tau: u64) -> usize {
+    let committee = expected.max(members as u64);
+    (committee.saturating_sub(tau) + 1) as usize
+}
+
 fn view_change_subject(
     height: Height,
     target_view: View,
@@ -1865,5 +1870,29 @@ mod tests {
         let ceiling = serve_ceiling(0, to);
         assert_eq!(ceiling, to, "a request at the window edge was clamped");
         assert_eq!(span(0, ceiling), MAX_SERVE_BLOCKS);
+    }
+
+    #[test]
+    fn view_sync_blocking_is_underflow_safe_when_tau_exceeds_expected() {
+        assert_eq!(
+            view_sync_blocking(500, 500, 334),
+            167,
+            "no over draw measures the blocking set against the expected size"
+        );
+        assert_eq!(
+            view_sync_blocking(500, 650, 434),
+            217,
+            "an over draw measures the blocking set against the realized committee"
+        );
+        assert_eq!(
+            view_sync_blocking(500, 750, 501),
+            250,
+            "a threshold above the expected size must not underflow"
+        );
+        assert_eq!(
+            view_sync_blocking(10, 10, 100),
+            1,
+            "a threshold above the whole committee saturates to one"
+        );
     }
 }
