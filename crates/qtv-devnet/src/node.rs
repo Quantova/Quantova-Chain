@@ -1836,7 +1836,7 @@ fn serve_ceiling(from: Height, to: Height) -> Height {
 
 #[cfg(test)]
 mod tests {
-    use super::{serve_ceiling, Height, MAX_SERVE_BLOCKS};
+    use super::{serve_ceiling, view_sync_blocking, Height, MAX_SERVE_BLOCKS};
 
     fn span(from: Height, ceiling: Height) -> u64 {
         ceiling - from + 1
