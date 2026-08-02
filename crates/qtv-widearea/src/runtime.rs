@@ -230,8 +230,8 @@ impl Runtime {
         }
         if let Some(proposal) = self.node.build_justified_proposal(selection, view) {
             self.emit(Message::Proposal(proposal));
-            if let Some(attestation) = self.node.attest_staged() {
-                self.emit(Message::Attest(Box::new(attestation)));
+            for message in self.node.prevote_staged() {
+                self.emit(message);
             }
         }
     }
@@ -255,6 +255,14 @@ impl Runtime {
                 let verify_start = Instant::now();
                 let out = self.node.on_proposal(selection, proposer, proposal);
                 self.phase.verify += verify_start.elapsed();
+                for message in out {
+                    self.emit(message);
+                }
+            }
+            Message::Prevote(prevote) => {
+                let aggregate_start = Instant::now();
+                let out = self.node.on_prevote(selection, *prevote);
+                self.phase.aggregate += aggregate_start.elapsed();
                 for message in out {
                     self.emit(message);
                 }
