@@ -24,6 +24,7 @@ pub fn account_seed(master_seed: &[u8; MASTER_SEED_LEN], scheme: u8, index: u64)
     input.extend_from_slice(&index.to_le_bytes());
     let mut seed = [0u8; SEED_LEN];
     sha3::shake256(&input, &mut seed);
+    input.zeroize();
     seed
 }
 
@@ -43,7 +44,11 @@ pub fn hash_keypair(
     sk_seed.copy_from_slice(&material[..HASH_SEED_LEN]);
     sk_prf.copy_from_slice(&material[HASH_SEED_LEN..2 * HASH_SEED_LEN]);
     pk_seed.copy_from_slice(&material[2 * HASH_SEED_LEN..]);
-    slh_dsa::keygen(&sk_seed, &sk_prf, &pk_seed)
+    let keypair = slh_dsa::keygen(&sk_seed, &sk_prf, &pk_seed);
+    material.zeroize();
+    sk_seed.zeroize();
+    sk_prf.zeroize();
+    keypair
 }
 
 fn address_hash(scheme: u8, public_key: &[u8]) -> [u8; 32] {
