@@ -1062,7 +1062,7 @@ impl DevNode {
 
     /// The lock binding the next proposal: the block clearing the quorum-intersection floor at the highest view.
     fn justified_lock(&self, selection: &Selection, records: &[ViewChange]) -> Option<LockedBlock> {
-        let floor = (2 * selection.tau).saturating_sub(selection.expected).max(1);
+        let floor = justified_lock_floor(selection.expected, selection.members.len(), selection.tau);
         safe_value(records, floor)
     }
 
@@ -1763,6 +1763,11 @@ fn view_sync_blocking(expected: u64, members: usize, tau: u64) -> usize {
     (committee.saturating_sub(tau) + 1) as usize
 }
 
+fn justified_lock_floor(expected: u64, members: usize, tau: u64) -> u64 {
+    let committee = expected.max(members as u64);
+    (2 * tau).saturating_sub(committee).max(1)
+}
+
 fn view_change_subject(
     height: Height,
     target_view: View,
@@ -1836,7 +1841,7 @@ fn serve_ceiling(from: Height, to: Height) -> Height {
 
 #[cfg(test)]
 mod tests {
-    use super::{serve_ceiling, view_sync_blocking, Height, MAX_SERVE_BLOCKS};
+    use super::{justified_lock_floor, serve_ceiling, view_sync_blocking, Height, MAX_SERVE_BLOCKS};
 
     fn span(from: Height, ceiling: Height) -> u64 {
         ceiling - from + 1
@@ -1893,6 +1898,36 @@ mod tests {
             view_sync_blocking(10, 10, 100),
             1,
             "a threshold above the whole committee saturates to one"
+        );
+    }
+
+    #[test]
+    fn justified_lock_floor_tracks_the_realized_committee_on_an_over_draw() {
+        assert_eq!(
+            justified_lock_floor(500, 500, 334),
+            168,
+            "no over draw measures the lock floor against the expected size"
+        );
+        let (expected, members, tau) = (500u64, 650usize, 434u64);
+        let intersection = 2 * tau - members as u64;
+        assert_eq!(
+            justified_lock_floor(expected, members, tau),
+            intersection,
+            "an over draw must measure the lock floor against the realized committee"
+        );
+        assert!(
+            justified_lock_floor(expected, members, tau) <= intersection,
+            "the lock floor must not exceed the commit and view change quorum intersection"
+        );
+        assert_eq!(
+            justified_lock_floor(500, 750, 501),
+            252,
+            "a threshold above the expected size keeps the floor on the realized committee"
+        );
+        assert_eq!(
+            justified_lock_floor(10, 10, 3),
+            1,
+            "a small threshold relative to the committee saturates the floor to one"
         );
     }
 }
