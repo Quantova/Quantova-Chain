@@ -116,6 +116,11 @@ impl Runtime {
                     self.emit(message);
                 }
             }
+            Message::Prevote(prevote) => {
+                for message in self.node.on_prevote(selection, *prevote) {
+                    self.emit(message);
+                }
+            }
             Message::Attest(attestation) => self.node.on_attestation(*attestation),
             Message::ViewChange(record) => self.node.collect_view_change(selection, *record),
             Message::Reveal(note) => self.node.collect_reveal(*note),
