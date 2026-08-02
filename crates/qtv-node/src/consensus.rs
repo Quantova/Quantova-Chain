@@ -445,7 +445,7 @@ impl Consensus {
         let commitment = CommitteeCommitment::from_member_keys(slot, member_keys, self.budget);
         let leader = view.elect_leader(&committee, beacon, slot)?.id;
         let expected = qtv_sampler::sortition::expected_committee(&view.weights(), self.budget);
-        let tau = qtv_sampler::params::finality_threshold(expected);
+        let tau = qtv_sampler::params::finality_threshold(expected.max(committee.len() as u64));
         let reveals = committee.reveals();
         Some(Selection {
             commitment,
@@ -721,6 +721,63 @@ mod tests {
         assert!(
             !(cert_a.is_some() && cert_b.is_some()),
             "two conflicting blocks must never both finalise"
+        );
+    }
+
+    #[test]
+    fn tau_tracks_the_realized_draw_when_the_committee_over_draws() {
+        let validators: Vec<ConsensusValidator> = (0..650u64)
+            .map(|i| ConsensusValidator::online(i + 1, qtv_bft::params::VALIDATOR_STAKE_QTOV))
+            .collect();
+        let consensus = consensus_for(&validators);
+        let sim = Sim::new(&validators);
+        let beacon = genesis_beacon();
+        let mut over_drawn = None;
+        for slot in 0..8u64 {
+            let published = sim.published(&consensus, &beacon, slot);
+            let selection = consensus.select(&beacon, slot, &published).expect("committee");
+            if selection.members.len() as u64 > selection.expected {
+                over_drawn = Some(selection);
+                break;
+            }
+        }
+        let selection = over_drawn.expect("an over drawn slot within the sweep");
+        let drawn = selection.members.len() as u64;
+        assert_eq!(
+            selection.tau,
+            qtv_sampler::params::finality_threshold(drawn),
+            "the threshold must track the realized entitled draw when it over draws"
+        );
+        assert!(
+            selection.tau > qtv_sampler::params::finality_threshold(selection.expected),
+            "an over draw must raise the threshold above the expected size floor"
+        );
+        assert!(
+            drawn + drawn / 3 < 2 * selection.tau,
+            "the raised threshold leaves no room for two conflicting certificates at a third adversary"
+        );
+    }
+
+    #[test]
+    fn tau_holds_the_expected_floor_when_the_committee_does_not_over_draw() {
+        let validators = secrets(&[true, true, true, true]);
+        let consensus = consensus_for(&validators);
+        let sim = Sim::new(&validators);
+        let beacon = genesis_beacon();
+        let full = sim.published(&consensus, &beacon, 1);
+        let minority: Vec<PublishedReveal> =
+            full.iter().cloned().filter(|r| r.id == 1 || r.id == 2).collect();
+        let by_all = consensus.select(&beacon, 1, &full).expect("committee");
+        let by_minority = consensus.select(&beacon, 1, &minority).expect("committee");
+        assert!(by_all.members.len() as u64 <= by_all.expected);
+        assert_eq!(
+            by_all.tau,
+            qtv_sampler::params::finality_threshold(by_all.expected),
+            "a committee that does not over draw keeps the expected size threshold"
+        );
+        assert_eq!(
+            by_minority.tau, by_all.tau,
+            "a suppressed subset cannot lower the threshold below the expected floor"
         );
     }
 
