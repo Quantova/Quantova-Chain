@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 
-use qtv_attest::Attestation;
+use qtv_attest::{Attestation, Certificate};
 use qtv_block::{event_root, transaction_root, Block as ChainBlock, Header};
 use qtv_codec::{to_bytes, Decoder};
 use qtv_net::{Identity, PeerId};
@@ -207,6 +207,13 @@ struct Staged {
     justification: Vec<ViewChange>,
 }
 
+struct Lock {
+    view: View,
+    value: [u8; 32],
+    block: LockedBlock,
+    polka: Certificate,
+}
+
 pub struct DevNode {
     id: u64,
     identity: Identity,
@@ -227,7 +234,9 @@ pub struct DevNode {
     burn_archive: BurnArchive,
     outbox: Vec<Wrapper>,
     staged: Option<Staged>,
+    lock: Option<Lock>,
     round_atts: Vec<Attestation>,
+    prevotes: Vec<Attestation>,
     future_props: Vec<Proposal>,
     view_changes: Vec<ViewChange>,
     silent: bool,
@@ -307,7 +316,9 @@ impl DevNode {
             burn_archive,
             outbox: Vec::new(),
             staged: None,
+            lock: None,
             round_atts: Vec::new(),
+            prevotes: Vec::new(),
             future_props: Vec::new(),
             view_changes: Vec::new(),
             silent: false,
@@ -880,16 +891,6 @@ impl DevNode {
             .own_attestation(self.height, self.slot(), self.view, staged.block, &self.beacon))
     }
 
-    /// The node's attestation over the staged block, guarded by the anti double sign
-    /// watermark. It is absent when nothing is staged or when the watermark refuses to
-    /// sign the height, which sets a fatal halt.
-    fn attest_guarded(&mut self) -> Option<Attestation> {
-        if !self.guard_height() {
-            return None;
-        }
-        self.attest().ok()
-    }
-
     pub fn finalize(
         &mut self,
         selection: &Selection,
@@ -939,7 +940,9 @@ impl DevNode {
         }
         self.height += 1;
         self.view = 0;
+        self.lock = None;
         self.round_atts.clear();
+        self.prevotes.clear();
         self.future_props.clear();
         self.view_changes.clear();
         *self.selection_cache.borrow_mut() = None;
@@ -976,10 +979,7 @@ impl DevNode {
         }
         let stage_is_current = matches!(&self.staged, Some(staged) if staged.view == self.view);
         if stage_is_current {
-            if let Some(attestation) = self.attest_guarded() {
-                self.record_attestation(&attestation);
-                messages.push(Message::Attest(Box::new(attestation)));
-            }
+            messages.extend(self.prevote_staged());
         }
         messages
     }
@@ -1009,13 +1009,7 @@ impl DevNode {
         if self.accept_proposal(selection, &proposal).is_err() {
             return Vec::new();
         }
-        match self.attest_guarded() {
-            Some(attestation) => {
-                self.record_attestation(&attestation);
-                vec![Message::Attest(Box::new(attestation))]
-            }
-            None => Vec::new(),
-        }
+        self.prevote_staged()
     }
 
     fn on_justified_proposal(&mut self, selection: &Selection, proposal: Proposal) -> Vec<Message> {
@@ -1028,8 +1022,9 @@ impl DevNode {
             return Vec::new();
         };
         let proposed_value = header_value(&proposal.header.hash());
-        match self.justified_lock(selection, &records) {
-            Some(locked) => {
+        let high = self.justified_lock(selection, &records);
+        match &high {
+            Some((_, locked)) => {
                 if header_value(&locked.header.hash()) != proposed_value {
                     return Vec::new();
                 }
@@ -1038,6 +1033,13 @@ impl DevNode {
                 if *proposal.header.proposer() != self.validator_address(leader_for(selection, view)) {
                     return Vec::new();
                 }
+            }
+        }
+        if let Some(lock) = &self.lock {
+            if lock.value != proposed_value
+                && !matches!(&high, Some((polka_view, _)) if *polka_view >= lock.view)
+            {
+                return Vec::new();
             }
         }
         if self
@@ -1051,40 +1053,143 @@ impl DevNode {
         }
         self.view = view;
         self.future_props.clear();
-        match self.attest_guarded() {
-            Some(attestation) => {
-                self.record_attestation(&attestation);
-                vec![Message::Attest(Box::new(attestation))]
-            }
-            None => Vec::new(),
-        }
+        self.prevote_staged()
     }
 
-    /// The lock binding the next proposal: the block clearing the quorum-intersection floor at the highest view.
-    fn justified_lock(&self, selection: &Selection, records: &[ViewChange]) -> Option<LockedBlock> {
-        let floor = justified_lock_floor(selection.expected, selection.members.len(), selection.tau);
-        safe_value(records, floor)
+    fn justified_lock(&self, selection: &Selection, records: &[ViewChange]) -> Option<(View, LockedBlock)> {
+        let mut best: Option<(View, LockedBlock)> = None;
+        for record in records {
+            if let (Some(block), Some(polka)) = (&record.locked, &record.polka) {
+                if self.polka_backs(selection, record.lock_view, block, polka)
+                    && best.as_ref().map_or(true, |(view, _)| record.lock_view > *view)
+                {
+                    best = Some((record.lock_view, block.clone()));
+                }
+            }
+        }
+        best
+    }
+
+    fn polka_backs(
+        &self,
+        selection: &Selection,
+        lock_view: View,
+        block: &LockedBlock,
+        polka: &Certificate,
+    ) -> bool {
+        let value = header_value(&block.header.hash());
+        let subject = prevote_subject(self.height, lock_view, value);
+        polka.envelope.block == subject
+            && polka.attestations.iter().all(|att| att.view == lock_view)
+            && self.consensus.verify(polka, selection, &self.beacon)
+    }
+
+    pub fn prevote_staged(&mut self) -> Vec<Message> {
+        if self.fatal.is_some() {
+            return Vec::new();
+        }
+        let Some(staged) = self.staged.as_ref() else {
+            return Vec::new();
+        };
+        let value = header_value(&staged.header.hash());
+        let subject = prevote_subject(self.height, staged.view, value);
+        let prevote =
+            self.consensus
+                .own_attestation(self.height, self.slot(), staged.view, subject, &self.beacon);
+        self.record_prevote(&prevote);
+        let mut out = vec![Message::Prevote(Box::new(prevote))];
+        if let Ok(selection) = self.select() {
+            out.extend(self.form_polka_and_precommit(&selection));
+        }
+        out
+    }
+
+    pub fn on_prevote(&mut self, selection: &Selection, prevote: Attestation) -> Vec<Message> {
+        if prevote.height != self.height {
+            return Vec::new();
+        }
+        self.record_prevote(&prevote);
+        self.form_polka_and_precommit(selection)
+    }
+
+    fn form_polka_and_precommit(&mut self, selection: &Selection) -> Vec<Message> {
+        let (view, value, block) = match self.staged.as_ref() {
+            Some(staged) => (
+                staged.view,
+                header_value(&staged.header.hash()),
+                LockedBlock {
+                    header: staged.header.clone(),
+                    body: staged.body.clone(),
+                },
+            ),
+            None => return Vec::new(),
+        };
+        if matches!(&self.lock, Some(lock) if lock.view >= view) {
+            return Vec::new();
+        }
+        let subject = prevote_subject(self.height, view, value);
+        let prevotes: Vec<Attestation> = self
+            .prevotes
+            .iter()
+            .filter(|p| p.view == view && p.block == subject)
+            .cloned()
+            .collect();
+        if (prevotes.len() as u64) < selection.tau {
+            return Vec::new();
+        }
+        let Some(polka) = self.consensus.finalize(
+            selection,
+            self.height,
+            self.slot(),
+            subject,
+            &self.beacon,
+            &prevotes,
+        ) else {
+            return Vec::new();
+        };
+        self.lock = Some(Lock {
+            view,
+            value,
+            block,
+            polka,
+        });
+        self.precommit_staged()
+    }
+
+    fn precommit_staged(&mut self) -> Vec<Message> {
+        if !self.guard_height() {
+            return Vec::new();
+        }
+        let Ok(attestation) = self.attest() else {
+            return Vec::new();
+        };
+        self.record_attestation(&attestation);
+        vec![Message::Attest(Box::new(attestation))]
+    }
+
+    fn record_prevote(&mut self, prevote: &Attestation) {
+        let seen = self
+            .prevotes
+            .iter()
+            .any(|p| p.from == prevote.from && p.view == prevote.view && p.block == prevote.block);
+        if !seen {
+            if self.prevotes.len() >= MAX_ROUND_ATTESTATIONS {
+                self.prevotes.remove(0);
+            }
+            self.prevotes.push(prevote.clone());
+        }
     }
 
     pub fn make_view_change(&mut self, target_view: View) -> ViewChange {
         let _ = self.guard_height();
-        let (lock_view, locked_value, has_lock, locked, lock_att) = match &self.staged {
-            Some(staged) => {
-                let value = header_value(&staged.header.hash());
-                let block = LockedBlock {
-                    header: staged.header.clone(),
-                    body: staged.body.clone(),
-                };
-                // The node's own attestation for its locked block: proof of the lock, not a claim.
-                let proof = self.consensus.own_attestation(
-                    self.height,
-                    self.slot(),
-                    staged.view,
-                    staged.block,
-                    &self.beacon,
-                );
-                (staged.view, value, true, Some(block), Some(proof))
-            }
+        let (lock_view, locked_value, has_lock, locked, polka) = match &self.lock {
+            Some(lock) => (
+                lock.view,
+                lock.value,
+                true,
+                Some(lock.block.clone()),
+                Some(lock.polka.clone()),
+            ),
             None => (0, [0u8; 32], false, None, None),
         };
         let subject =
@@ -1098,7 +1203,7 @@ impl DevNode {
             lock_view,
             locked,
             att,
-            lock_att,
+            polka,
         }
     }
 
@@ -1132,6 +1237,9 @@ impl DevNode {
             Some(block) => (true, header_value(&block.header.hash()), record.lock_view),
             None => (false, [0u8; 32], 0),
         };
+        if has_lock && record.lock_view > record.target_view {
+            return false;
+        }
         let subject = view_change_subject(
             record.height,
             record.target_view,
@@ -1157,24 +1265,10 @@ impl DevNode {
         ) {
             return false;
         }
-        // A lock must carry the signer's own attestation for it, so no peer can claim a lock it never cast.
-        match (&record.locked, &record.lock_att) {
+        match (&record.locked, &record.polka) {
             (None, None) => {}
-            (Some(_), Some(proof)) => {
-                let ok = proof.from == record.att.from
-                    && proof.height == record.height
-                    && proof.slot == self.consensus.slot_for(record.height)
-                    && proof.view == record.lock_view
-                    && proof.block.val == locked_value
-                    && proof.signature_verifies(self.consensus.chain_id(), &member.attest_pk)
-                    && proof.is_entitled(
-                        &member.root,
-                        &self.beacon,
-                        member.weight,
-                        selection.commitment.total_weight,
-                        selection.commitment.budget,
-                    );
-                if !ok {
+            (Some(block), Some(polka)) => {
+                if !self.polka_backs(selection, record.lock_view, block, polka) {
                     return false;
                 }
             }
@@ -1217,8 +1311,11 @@ impl DevNode {
         view: View,
     ) -> Option<Proposal> {
         let records = self.justified_records(selection, view)?;
-        let proposal = match self.justified_lock(selection, &records) {
-            Some(locked) => {
+        let bound = self
+            .justified_lock(selection, &records)
+            .or_else(|| self.lock.as_ref().map(|lock| (lock.view, lock.block.clone())));
+        let proposal = match bound {
+            Some((_, locked)) => {
                 self.stage_from(&locked.header, &locked.body, view).ok()?;
                 Proposal {
                     view,
@@ -1259,11 +1356,6 @@ impl DevNode {
         }
     }
 
-    pub fn attest_staged(&mut self) -> Option<Attestation> {
-        let attestation = self.attest_guarded()?;
-        self.record_attestation(&attestation);
-        Some(attestation)
-    }
 
     pub fn view_sync_target(&self, selection: &Selection) -> Option<View> {
         let blocking = view_sync_blocking(selection.expected, selection.members.len(), selection.tau);
@@ -1722,7 +1814,9 @@ impl DevNode {
         self.height += 1;
         self.view = 0;
         self.staged = None;
+        self.lock = None;
         self.round_atts.clear();
+        self.prevotes.clear();
         self.future_props.clear();
         self.view_changes.clear();
         *self.selection_cache.borrow_mut() = None;
@@ -1763,9 +1857,19 @@ fn view_sync_blocking(expected: u64, members: usize, tau: u64) -> usize {
     (committee.saturating_sub(tau) + 1) as usize
 }
 
-fn justified_lock_floor(expected: u64, members: usize, tau: u64) -> u64 {
-    let committee = expected.max(members as u64);
-    (2 * tau).saturating_sub(committee).max(1)
+fn prevote_subject(height: Height, view: View, value: [u8; 32]) -> ConsensusBlock {
+    let mut buf = Vec::with_capacity(18 + 8 * 2 + 32);
+    buf.extend_from_slice(b"QTV-DEVNET-PREVOTE");
+    buf.extend_from_slice(&height.to_le_bytes());
+    buf.extend_from_slice(&view.to_le_bytes());
+    buf.extend_from_slice(&value);
+    let commitment = qtv_bft::hash::digest_256(&buf);
+    ConsensusBlock::with_cost(
+        height,
+        commitment,
+        Parent::Genesis,
+        qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST,
+    )
 }
 
 fn view_change_subject(
@@ -1793,39 +1897,6 @@ fn view_change_subject(
     )
 }
 
-/// The safe value binding the next proposal: the block clearing the quorum-intersection floor at the highest view.
-fn safe_value(records: &[ViewChange], floor: u64) -> Option<LockedBlock> {
-    let mut groups: Vec<([u8; 32], View, Vec<u64>)> = Vec::new();
-    for record in records {
-        let Some(proof) = record.lock_att.as_ref() else {
-            continue;
-        };
-        let value = proof.block.val;
-        let view = proof.view;
-        match groups.iter_mut().find(|(v, w, _)| *v == value && *w == view) {
-            Some(entry) => {
-                if !entry.2.contains(&proof.from) {
-                    entry.2.push(proof.from);
-                }
-            }
-            None => groups.push((value, view, vec![proof.from])),
-        }
-    }
-    let value = groups
-        .into_iter()
-        .filter(|(_, _, attesters)| attesters.len() as u64 >= floor)
-        .map(|(value, view, _)| (view, value))
-        .max_by_key(|(view, _)| *view)
-        .map(|(_, value)| value)?;
-    records.iter().find_map(|record| {
-        record
-            .locked
-            .as_ref()
-            .filter(|locked| header_value(&locked.header.hash()) == value)
-            .cloned()
-    })
-}
-
 fn decode_head(bytes: &[u8]) -> Result<(Header, qtv_attest::Certificate), RoundError> {
     let mut decoder = Decoder::new(bytes);
     let header = Header::decode(&mut decoder).map_err(|_| RoundError::Decode)?;
@@ -1841,7 +1912,7 @@ fn serve_ceiling(from: Height, to: Height) -> Height {
 
 #[cfg(test)]
 mod tests {
-    use super::{justified_lock_floor, serve_ceiling, view_sync_blocking, Height, MAX_SERVE_BLOCKS};
+    use super::{serve_ceiling, view_sync_blocking, Height, MAX_SERVE_BLOCKS};
 
     fn span(from: Height, ceiling: Height) -> u64 {
         ceiling - from + 1
@@ -1901,33 +1972,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn justified_lock_floor_tracks_the_realized_committee_on_an_over_draw() {
-        assert_eq!(
-            justified_lock_floor(500, 500, 334),
-            168,
-            "no over draw measures the lock floor against the expected size"
-        );
-        let (expected, members, tau) = (500u64, 650usize, 434u64);
-        let intersection = 2 * tau - members as u64;
-        assert_eq!(
-            justified_lock_floor(expected, members, tau),
-            intersection,
-            "an over draw must measure the lock floor against the realized committee"
-        );
-        assert!(
-            justified_lock_floor(expected, members, tau) <= intersection,
-            "the lock floor must not exceed the commit and view change quorum intersection"
-        );
-        assert_eq!(
-            justified_lock_floor(500, 750, 501),
-            252,
-            "a threshold above the expected size keeps the floor on the realized committee"
-        );
-        assert_eq!(
-            justified_lock_floor(10, 10, 3),
-            1,
-            "a small threshold relative to the committee saturates the floor to one"
-        );
-    }
 }
