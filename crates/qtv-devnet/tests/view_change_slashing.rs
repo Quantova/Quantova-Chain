@@ -57,26 +57,43 @@ fn an_honest_view_change_is_not_a_slashable_equivocation() {
         .expect("a non leader member");
     let victim_id = config.nodes[victim_idx].id;
 
-    // The view zero leader proposes a block; the victim attests it and locks on it at view
-    // zero, without leaving view zero.
     let proposal = nodes[leader0_idx].build_proposal(&selection);
-    let out = nodes[victim_idx].on_proposal(&selection, leader0, proposal);
-    assert!(!out.is_empty(), "the victim attested and locked the proposal");
+    let out = nodes[victim_idx].on_proposal(&selection, leader0, proposal.clone());
+    let victim_prevote = out
+        .into_iter()
+        .find_map(|m| match m {
+            qtv_devnet::wire::Message::Prevote(att) => Some(*att),
+            _ => None,
+        })
+        .expect("the victim prevotes the proposal");
+    let mut polka = vec![victim_prevote.clone()];
+    for i in 0..nodes.len() {
+        if i == victim_idx {
+            continue;
+        }
+        if let Some(qtv_devnet::wire::Message::Prevote(att)) =
+            nodes[i].on_proposal(&selection, leader0, proposal.clone()).into_iter().next()
+        {
+            polka.push(*att);
+        }
+    }
+    for prevote in &polka {
+        nodes[victim_idx].on_prevote(&selection, prevote.clone());
+    }
     assert_eq!(nodes[victim_idx].staged_view(), Some(0), "locked at view zero");
 
-    // The victim broadcasts a view change to a higher view. It carries the view change vote
-    // and the lock proof, both signed by the victim at the same height.
     let record = nodes[victim_idx].make_view_change(2);
-    let lock_att = record.lock_att.clone().expect("the view change carries the lock proof");
+    assert!(record.polka.is_some(), "the view change carries the polka");
+    let lock_att = victim_prevote;
     let vote = record.att.clone();
 
     assert_eq!(
         vote.view, lock_att.view,
-        "the view change vote and the lock proof share the view the victim locked in"
+        "the view change vote and the prevote share the view the victim locked in"
     );
     assert_ne!(
         vote.block, lock_att.block,
-        "the view change subject and the locked block are two different subjects"
+        "the view change subject and the prevote subject are two different subjects"
     );
 
     // A hostile reporter lifts the two signatures out of the one honest view change message
