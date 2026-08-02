@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "qtv-attest"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=3d57d5251de1dcb0690c102a3a28678aea33bd6c#3d57d5251de1dcb0690c102a3a28678aea33bd6c"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=f49af4ec21feb9ae983c53d2c9b352c677c06fcb#f49af4ec21feb9ae983c53d2c9b352c677c06fcb"
 dependencies = [
  "qtv-bft",
  "qtv-crypto",
@@ -24,7 +24,7 @@ dependencies = [
 [[package]]
 name = "qtv-bft"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=3d57d5251de1dcb0690c102a3a28678aea33bd6c#3d57d5251de1dcb0690c102a3a28678aea33bd6c"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=f49af4ec21feb9ae983c53d2c9b352c677c06fcb#f49af4ec21feb9ae983c53d2c9b352c677c06fcb"
 dependencies = [
  "qtv-crypto",
 ]
@@ -46,7 +46,7 @@ version = "0.1.0"
 [[package]]
 name = "qtv-crypto"
 version = "0.3.0"
-source = "git+https://github.com/Quantova/Q-Crypto.git?rev=7ac1ed92287e8edf2a96f6cff7f9f19281744a9d#7ac1ed92287e8edf2a96f6cff7f9f19281744a9d"
+source = "git+https://github.com/Quantova/Q-Crypto.git?rev=33c7e9395ad23f07019909470d319211213e904f#33c7e9395ad23f07019909470d319211213e904f"
 
 [[package]]
 name = "qtv-daemon"
@@ -166,7 +166,7 @@ dependencies = [
 [[package]]
 name = "qtv-sampler"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=3d57d5251de1dcb0690c102a3a28678aea33bd6c#3d57d5251de1dcb0690c102a3a28678aea33bd6c"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=f49af4ec21feb9ae983c53d2c9b352c677c06fcb#f49af4ec21feb9ae983c53d2c9b352c677c06fcb"
 dependencies = [
  "qtv-crypto",
 ]
@@ -210,7 +210,7 @@ dependencies = [
 [[package]]
 name = "qtv-vm"
 version = "0.2.0"
-source = "git+https://github.com/Quantova/QVM.git?rev=1fb2934171a082eb55badf904155cbabaf6ed7fb#1fb2934171a082eb55badf904155cbabaf6ed7fb"
+source = "git+https://github.com/Quantova/QVM.git?rev=94213d37df4bee940cac3a0a5468ccca42a125b6#94213d37df4bee940cac3a0a5468ccca42a125b6"
 dependencies = [
  "qtv-crypto",
 ]
