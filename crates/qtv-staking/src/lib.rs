@@ -223,6 +223,15 @@ impl StakeLedger {
         if self.banned.contains(&id) {
             return false;
         }
+        if let Some(existing) = self.bonds.get_mut(&id) {
+            return match existing.amount.checked_add(amount) {
+                Some(total) => {
+                    existing.amount = total;
+                    true
+                }
+                None => false,
+            };
+        }
         match Bond::new(amount, day) {
             Some(bond) => {
                 self.bonds.insert(id, bond);
