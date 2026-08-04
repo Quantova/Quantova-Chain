@@ -125,11 +125,13 @@ pub fn derive_with_scheme(master_seed: &[u8; MASTER_SEED_LEN], scheme: u8, index
     let seed = account_seed(master_seed, scheme, index);
     let public_key = match scheme {
         SCHEME_LATTICE => {
-            let (public_key, _expanded) = ml_dsa::keygen(&seed);
+            let (public_key, mut expanded) = ml_dsa::keygen(&seed);
+            expanded.zeroize();
             public_key.to_vec()
         }
         SCHEME_HASH => {
-            let (_secret, public_key) = hash_keypair(&seed);
+            let (mut secret, public_key) = hash_keypair(&seed);
+            secret.zeroize();
             public_key.to_vec()
         }
         #[cfg(feature = "fn-dsa")]
