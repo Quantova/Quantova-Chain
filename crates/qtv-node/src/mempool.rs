@@ -524,6 +524,9 @@ impl Mempool {
             if self.ids.contains(&id) {
                 continue;
             }
+            if !canonical_address(wrapper.body().sender()) {
+                continue;
+            }
             if crate::node::is_bridge_mint(&wrapper) {
                 if self.duplicate_mint(&wrapper) {
                     continue;
