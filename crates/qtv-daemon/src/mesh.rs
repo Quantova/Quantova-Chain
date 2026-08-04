@@ -102,9 +102,18 @@ pub fn build_mesh(
                 Err(_) => thread::sleep(Duration::from_millis(20)),
             }
         };
-        let mut channel =
-            Channel::connect_pinned_with_timeout(stream, identity, &peer, HANDSHAKE_TIMEOUT)
-                .expect("initiator handshake");
+        let mut channel = match Channel::connect_pinned_with_timeout(
+            stream,
+            identity,
+            &peer,
+            HANDSHAKE_TIMEOUT,
+        ) {
+            Ok(channel) => channel,
+            Err(_) => {
+                log(&format!("could not handshake peer {}, dropping it", q + 1));
+                continue;
+            }
+        };
         if channel.send(&hello).is_err() {
             log(&format!("could not greet peer {}, dropping it", q + 1));
             continue;
