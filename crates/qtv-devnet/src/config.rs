@@ -8,7 +8,7 @@ use qtv_node::consensus::ValidatorRegistration;
 use qtv_node::fee::FeeParams;
 use qtv_node::node::{Genesis, GenesisAccount, ValidatorSpec};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NodeConfig {
     pub id: u64,
     pub stake: u64,
@@ -21,6 +21,20 @@ pub struct NodeConfig {
     /// node so it can stand up the whole set. It is never derived from the id and never
     /// published; only the commitments it derives to are.
     pub secret: [u8; 32],
+}
+
+impl std::fmt::Debug for NodeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeConfig")
+            .field("id", &self.id)
+            .field("stake", &self.stake)
+            .field("online", &self.online)
+            .field("store_dir", &self.store_dir)
+            .field("bootstrap", &self.bootstrap)
+            .field("address", &self.address)
+            .field("secret", &"[redacted]")
+            .finish()
+    }
 }
 
 impl NodeConfig {
