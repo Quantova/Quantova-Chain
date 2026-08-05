@@ -449,8 +449,8 @@ fn main() {
         } else {
             (None, Duration::ZERO)
         };
-        match rt.drive_height(batch).expect("a measured height drives") {
-            HeightOutcome::Final { elapsed, txs } if txs > 0 => {
+        match rt.drive_height(batch) {
+            Ok(HeightOutcome::Final { elapsed, txs }) if txs > 0 => {
                 sign_wall += sign_dt;
                 consensus_wall += elapsed;
                 per_block_ms.push(elapsed.as_secs_f64() * 1000.0);
