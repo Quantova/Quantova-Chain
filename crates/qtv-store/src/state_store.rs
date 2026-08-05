@@ -148,7 +148,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// Record a deletion so a removed key is absent after recovery, not resurrected with an empty value. Durable at the height's commit, like put_account.
+    /// Record a deletion so a removed key is absent after recovery.
     pub fn delete_account(&mut self, key: Key) -> io::Result<()> {
         let record = StateRecord::Delete { key };
         self.log.append(&to_bytes(&record))?;
@@ -337,7 +337,6 @@ mod tests {
             both.insert(key(1), account(0, 100));
             both.insert(key(2), account(0, 200));
             store.commit(1, both.root()).unwrap();
-            // Height two removes key(1).
             store.delete_account(key(1)).unwrap();
             store.commit(2, removed_root).unwrap();
         }
