@@ -398,7 +398,10 @@ impl DevNode {
         let (supply_key, supply_value) = self.ledger.seed_supply(supply);
         self.state_store.put_account(supply_key, supply_value)?;
         for (key, value) in self.ledger.take_dirty_entries() {
-            self.state_store.put_account(key, value)?;
+            match value {
+                Some(value) => self.state_store.put_account(key, value)?,
+                None => self.state_store.delete_account(key)?,
+            }
         }
         // Genesis has no block; its committed state marks height zero.
         self.state_store.commit(GENESIS_COMMIT_HEIGHT, self.ledger.q_root())?;
@@ -616,15 +619,17 @@ impl DevNode {
             .ok_or(RoundError::Decode)?
             .to_vec();
         let (header, certificate) = decode_head(&bytes)?;
-        // Refuse to resume when the committed state root does not match the head block.
+        // Refuse to resume when the committed state root does not match the head block,
+        // including when the reloaded trie itself does not recompute to that root.
         let block_root = *header.q_root();
         if self.state_store.head() != Some(block_root)
             || self.state_store.committed_height() != Some(head)
+            || self.ledger.q_root() != block_root
         {
             return Err(RoundError::StateRootMismatch {
                 height: head,
                 block_root,
-                state_root: self.state_store.head(),
+                state_root: Some(self.ledger.q_root()),
             });
         }
         self.parent_header_hash = header.hash();
@@ -1522,7 +1527,10 @@ impl DevNode {
         }
         // Write state effects and the block, then the commit marker; the block is synced before the marker.
         for (key, value) in self.ledger.take_dirty_entries() {
-            self.state_store.put_account(key, value)?;
+            match value {
+                Some(value) => self.state_store.put_account(key, value)?,
+                None => self.state_store.delete_account(key)?,
+            }
         }
         self.block_store.put_block(block)?;
         self.block_store.sync()?;
