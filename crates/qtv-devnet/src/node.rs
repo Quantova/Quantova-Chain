@@ -90,6 +90,8 @@ const GENESIS_COMMIT_HEIGHT: Height = 0;
 
 const MAX_ROUND_ATTESTATIONS: usize = 8192;
 
+const MAX_ATTESTATIONS_PER_SENDER: usize = 64;
+
 const MAX_FUTURE_PROPOSALS: usize = 256;
 
 const MAX_VIEW_CHANGES_PER_SENDER: usize = 64;
@@ -1113,7 +1115,9 @@ impl DevNode {
         if prevote.height != self.height {
             return Vec::new();
         }
-        self.record_prevote(&prevote);
+        if self.verify_attestation(selection, &prevote) {
+            self.record_prevote(&prevote);
+        }
         self.form_polka_and_precommit(selection)
     }
 
@@ -1177,12 +1181,17 @@ impl DevNode {
             .prevotes
             .iter()
             .any(|p| p.from == prevote.from && p.view == prevote.view && p.block == prevote.block);
-        if !seen {
-            if self.prevotes.len() >= MAX_ROUND_ATTESTATIONS {
-                self.prevotes.remove(0);
-            }
-            self.prevotes.push(prevote.clone());
+        if seen {
+            return;
         }
+        let from_count = self.prevotes.iter().filter(|p| p.from == prevote.from).count();
+        if from_count >= MAX_ATTESTATIONS_PER_SENDER {
+            return;
+        }
+        if self.prevotes.len() >= MAX_ROUND_ATTESTATIONS {
+            self.prevotes.remove(0);
+        }
+        self.prevotes.push(prevote.clone());
     }
 
     pub fn make_view_change(&mut self, target_view: View) -> ViewChange {
@@ -1232,6 +1241,25 @@ impl DevNode {
             return;
         }
         self.view_changes.push(record);
+    }
+
+    fn verify_attestation(&self, selection: &Selection, att: &Attestation) -> bool {
+        let Some(member) = selection.commitment.member(att.from) else {
+            return false;
+        };
+        if att.height != self.height || att.slot != self.consensus.slot_for(self.height) {
+            return false;
+        }
+        if !att.signature_verifies(self.consensus.chain_id(), &member.attest_pk) {
+            return false;
+        }
+        att.is_entitled(
+            &member.root,
+            &self.beacon,
+            member.weight,
+            selection.commitment.total_weight,
+            selection.commitment.budget,
+        )
     }
 
     fn verify_view_change(&self, selection: &Selection, record: &ViewChange) -> bool {
@@ -1400,8 +1428,14 @@ impl DevNode {
     }
 
     pub fn on_attestation(&mut self, attestation: Attestation) {
-        if attestation.height == self.height {
-            self.record_attestation(&attestation);
+        if attestation.height != self.height {
+            return;
+        }
+        self.watch_for_equivocation(&attestation);
+        if let Ok(selection) = self.select() {
+            if self.verify_attestation(&selection, &attestation) {
+                self.record_attestation(&attestation);
+            }
         }
     }
 
@@ -1442,17 +1476,25 @@ impl DevNode {
     }
 
     fn record_attestation(&mut self, attestation: &Attestation) {
-        self.watch_for_equivocation(attestation);
         let seen = self
             .round_atts
             .iter()
             .any(|a| a.from == attestation.from && a.block == attestation.block);
-        if !seen {
-            if self.round_atts.len() >= MAX_ROUND_ATTESTATIONS {
-                self.round_atts.remove(0);
-            }
-            self.round_atts.push(attestation.clone());
+        if seen {
+            return;
         }
+        let from_count = self
+            .round_atts
+            .iter()
+            .filter(|a| a.from == attestation.from)
+            .count();
+        if from_count >= MAX_ATTESTATIONS_PER_SENDER {
+            return;
+        }
+        if self.round_atts.len() >= MAX_ROUND_ATTESTATIONS {
+            self.round_atts.remove(0);
+        }
+        self.round_atts.push(attestation.clone());
     }
 
     /// Feed an observed attestation to the evidence pool, keyed by the signer's bond
