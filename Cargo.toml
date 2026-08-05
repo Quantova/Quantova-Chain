@@ -15,6 +15,7 @@ panic = "unwind"
 
 [profile.release]
 panic = "unwind"
+overflow-checks = true
 
 # The hash based verifiable random function in qtv-crypto is heavy without
 # optimization, and the node drives it once per validator per height. Optimize
