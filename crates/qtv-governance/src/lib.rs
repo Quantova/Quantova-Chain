@@ -231,20 +231,22 @@ pub struct Tally {
 impl Tally {
     pub fn record(&mut self, aye: bool, stake: u64) {
         if aye {
-            self.aye_stake += stake as u128;
+            self.aye_stake = self.aye_stake.saturating_add(stake as u128);
         } else {
-            self.nay_stake += stake as u128;
+            self.nay_stake = self.nay_stake.saturating_add(stake as u128);
         }
     }
 
     pub fn turnout(&self) -> u128 {
-        self.aye_stake + self.nay_stake
+        self.aye_stake.saturating_add(self.nay_stake)
     }
 
     pub fn approved(&self, electorate_stake: u128) -> bool {
         electorate_stake > 0
-            && self.turnout() * BPS_DENOM >= electorate_stake * PARTICIPATION_FLOOR_BPS
-            && self.aye_stake * BPS_DENOM >= electorate_stake * THRESHOLD_BPS
+            && self.turnout().saturating_mul(BPS_DENOM)
+                >= electorate_stake.saturating_mul(PARTICIPATION_FLOOR_BPS)
+            && self.aye_stake.saturating_mul(BPS_DENOM)
+                >= electorate_stake.saturating_mul(THRESHOLD_BPS)
     }
 }
 
