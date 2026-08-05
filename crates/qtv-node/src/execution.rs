@@ -126,7 +126,8 @@ fn read_slots(bytes: &[u8], pos: &mut usize) -> Option<Vec<u64>> {
     if count > MAX_SLOTS_PER_LIST {
         return None;
     }
-    let mut slots = Vec::with_capacity(count);
+    let available = bytes.len().saturating_sub(*pos) / 8;
+    let mut slots = Vec::with_capacity(count.min(available));
     for _ in 0..count {
         slots.push(read_be_u64(bytes, pos)?);
     }
