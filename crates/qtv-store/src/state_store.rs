@@ -13,6 +13,7 @@ use crate::log::{frame_len, Log};
 
 const TAG_ENTRY: u8 = 1;
 const TAG_COMMIT: u8 = 2;
+const TAG_DELETE: u8 = 3;
 
 fn put_fixed(encoder: &mut Encoder, value: &[u8; 32]) {
     for &byte in value.iter() {
@@ -31,6 +32,7 @@ fn get_fixed(decoder: &mut Decoder<'_>) -> Result<[u8; 32], Error> {
 enum StateRecord {
     Entry { key: Key, value: Vec<u8> },
     Commit { height: u64, root: Hash },
+    Delete { key: Key },
 }
 
 impl Encode for StateRecord {
@@ -45,6 +47,10 @@ impl Encode for StateRecord {
                 encoder.put_tag(TAG_COMMIT);
                 encoder.put_u64(*height);
                 put_fixed(encoder, root);
+            }
+            StateRecord::Delete { key } => {
+                encoder.put_tag(TAG_DELETE);
+                put_fixed(encoder, key);
             }
         }
     }
@@ -62,6 +68,10 @@ impl Decode for StateRecord {
                 let height = decoder.get_u64()?;
                 let root = get_fixed(decoder)?;
                 Ok(StateRecord::Commit { height, root })
+            }
+            TAG_DELETE => {
+                let key = get_fixed(decoder)?;
+                Ok(StateRecord::Delete { key })
             }
             tag => Err(Error::UnknownTag { tag }),
         }
@@ -89,18 +99,28 @@ impl StateStore {
         // Every frame the log returned is whole and checksum verified, so their
         // sizes account for the entire file on disk.
         let total_len: u64 = frames.iter().map(|frame| frame_len(frame.len())).sum();
-        let mut pending: Vec<(Key, Vec<u8>)> = Vec::new();
+        let mut pending: Vec<(Key, Option<Vec<u8>>)> = Vec::new();
         let mut committed_len: u64 = 0;
         let mut offset: u64 = 0;
         for frame in &frames {
             offset += frame_len(frame.len());
             match qtv_codec::from_bytes(frame) {
                 Ok(StateRecord::Entry { key, value }) => {
-                    pending.push((key, value));
+                    pending.push((key, Some(value)));
+                }
+                Ok(StateRecord::Delete { key }) => {
+                    pending.push((key, None));
                 }
                 Ok(StateRecord::Commit { height, root }) => {
                     for (key, value) in pending.drain(..) {
-                        store.entries.insert(key, value);
+                        match value {
+                            Some(value) => {
+                                store.entries.insert(key, value);
+                            }
+                            None => {
+                                store.entries.remove(&key);
+                            }
+                        }
                     }
                     store.head = Some(root);
                     store.committed_height = Some(height);
@@ -125,6 +145,14 @@ impl StateStore {
         };
         self.log.append(&to_bytes(&record))?;
         self.entries.insert(key, value);
+        Ok(())
+    }
+
+    /// Record a deletion so a removed key is absent after recovery, not resurrected with an empty value. Durable at the height's commit, like put_account.
+    pub fn delete_account(&mut self, key: Key) -> io::Result<()> {
+        let record = StateRecord::Delete { key };
+        self.log.append(&to_bytes(&record))?;
+        self.entries.remove(&key);
         Ok(())
     }
 
@@ -292,6 +320,36 @@ mod tests {
         let store = StateStore::open(&path).unwrap();
         assert_eq!(store.len(), 1);
         assert_eq!(store.account(&key(1)), Some(account(1, 250).as_slice()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_deleted_key_stays_absent_across_a_reopen_under_the_absent_slot_root() {
+        let path = temp_path("delete-reopen");
+        let mut removed = Trie::new();
+        removed.insert(key(2), account(0, 200));
+        let removed_root = removed.root();
+        {
+            let mut store = StateStore::open(&path).unwrap();
+            store.put_account(key(1), account(0, 100)).unwrap();
+            store.put_account(key(2), account(0, 200)).unwrap();
+            let mut both = Trie::new();
+            both.insert(key(1), account(0, 100));
+            both.insert(key(2), account(0, 200));
+            store.commit(1, both.root()).unwrap();
+            // Height two removes key(1).
+            store.delete_account(key(1)).unwrap();
+            store.commit(2, removed_root).unwrap();
+        }
+        let store = StateStore::open(&path).unwrap();
+        assert_eq!(store.committed_height(), Some(2));
+        assert_eq!(store.account(&key(1)), None);
+        assert_eq!(store.len(), 1);
+        assert_eq!(
+            store.load_trie().root(),
+            removed_root,
+            "a deleted key must reopen absent, not resurrected with an empty value"
+        );
         std::fs::remove_file(&path).ok();
     }
 

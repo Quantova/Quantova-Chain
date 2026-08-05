@@ -887,12 +887,12 @@ impl Ledger {
         vec![(state_key(&address), to_bytes(&account))]
     }
 
-    pub fn take_dirty_entries(&mut self) -> Vec<(Key, Vec<u8>)> {
+    pub fn take_dirty_entries(&mut self) -> Vec<(Key, Option<Vec<u8>>)> {
         self.trie
             .take_persist_dirty()
             .into_iter()
             .map(|key| {
-                let value = self.trie.get(&key).map(|v| v.to_vec()).unwrap_or_default();
+                let value = self.trie.get(&key).map(|v| v.to_vec());
                 (key, value)
             })
             .collect()
