@@ -478,20 +478,29 @@ pub fn build_mesh(
     let identity_acc = identity.clone();
     let up_ids: Vec<bool> = up.to_vec();
     let acceptor = thread::spawn(move || {
-        for _ in 0..up_peers {
-            let (stream, _) = listener.accept().expect("accept an inbound peer connection");
-            let channel = Channel::accept(stream, &identity_acc).expect("responder handshake");
+        let mut accepted = 0usize;
+        while accepted < up_peers {
+            let stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(_) => continue,
+            };
+            let channel = match Channel::accept(stream, &identity_acc) {
+                Ok(channel) => channel,
+                Err(_) => continue,
+            };
             let peer = channel.peer_id().clone();
-            let from = (0..n)
-                .find(|&q| {
-                    q != idx
-                        && up_ids.get(q).copied().unwrap_or(false)
-                        && node_peer_id(q as u64 + 1) == peer
-                })
-                .expect("the inbound peer is a known up validator");
-            accepted_tx
-                .send((from, channel))
-                .expect("hand the accepted channel to the main thread");
+            let from = match (0..n).find(|&q| {
+                q != idx
+                    && up_ids.get(q).copied().unwrap_or(false)
+                    && node_peer_id(q as u64 + 1) == peer
+            }) {
+                Some(from) => from,
+                None => continue,
+            };
+            if accepted_tx.send((from, channel)).is_err() {
+                break;
+            }
+            accepted += 1;
         }
     });
 
