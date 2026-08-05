@@ -761,6 +761,29 @@ mod tests {
     }
 
     #[test]
+    fn the_message_decoder_never_panics_on_hostile_bytes() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut rng = || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        for tag in 0u16..=255 {
+            for _ in 0..800 {
+                let len = (rng() % 2500) as usize;
+                let mut buf = Vec::with_capacity(len + 1);
+                buf.push(tag as u8);
+                for _ in 0..len {
+                    buf.push((rng() & 0xff) as u8);
+                }
+                let _ = Message::decode(&buf);
+            }
+        }
+    }
+
+    #[test]
     fn bounded_capacity_rejects_a_count_that_overruns_the_remaining_bytes() {
         assert!(matches!(
             bounded_capacity(0, u64::MAX, MIN_WRAPPER),

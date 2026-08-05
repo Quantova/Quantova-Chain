@@ -621,8 +621,6 @@ impl DevNode {
             .ok_or(RoundError::Decode)?
             .to_vec();
         let (header, certificate) = decode_head(&bytes)?;
-        // Refuse to resume when the committed state root does not match the head block,
-        // including when the reloaded trie itself does not recompute to that root.
         let block_root = *header.q_root();
         if self.state_store.head() != Some(block_root)
             || self.state_store.committed_height() != Some(head)
