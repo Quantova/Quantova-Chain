@@ -39,6 +39,7 @@ const MIN_CHAIN_BLOCK: usize = 16;
 const MIN_PEER: usize = 16;
 const MIN_ATTESTATION: usize = 32;
 const MIN_SIBLING: usize = 8;
+const MAX_CREDENTIAL_SIBLINGS: u64 = 64;
 
 fn bounded_capacity(remaining: usize, count: u64, min_element: usize) -> Result<usize, DecodeError> {
     let ceiling = (remaining / min_element.max(1)) as u64;
@@ -436,6 +437,9 @@ fn decode_credential(decoder: &mut Decoder<'_>) -> Result<Credential, DecodeErro
     let position = decoder.get_u64()?;
     let preimage: [u8; PREIMAGE_BYTES] = read_fixed(decoder)?;
     let count = decoder.get_u64()?;
+    if count > MAX_CREDENTIAL_SIBLINGS {
+        return Err(DecodeError::BadLength);
+    }
     let mut siblings = Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_SIBLING)?);
     for _ in 0..count {
         let sibling: [u8; NODE_BYTES] = read_fixed(decoder)?;
@@ -775,6 +779,25 @@ mod tests {
             bounded_capacity(1_000_000_000, 100_000, MIN_SIBLING).unwrap(),
             PREALLOC_LIMIT
         );
+    }
+
+    #[test]
+    fn a_credential_with_more_siblings_than_the_cap_is_rejected() {
+        let credential = Credential {
+            position: 0,
+            preimage: [0u8; PREIMAGE_BYTES],
+            path: MerklePath {
+                siblings: vec![[0u8; NODE_BYTES]; MAX_CREDENTIAL_SIBLINGS as usize + 1],
+            },
+        };
+        let mut encoder = Encoder::new();
+        encode_credential(&mut encoder, &credential);
+        let bytes = encoder.into_bytes();
+        let mut decoder = Decoder::new(&bytes);
+        assert!(matches!(
+            decode_credential(&mut decoder),
+            Err(DecodeError::BadLength)
+        ));
     }
 
     #[test]
