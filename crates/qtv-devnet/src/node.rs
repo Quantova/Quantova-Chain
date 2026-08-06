@@ -1744,6 +1744,18 @@ impl DevNode {
         self.mempool.candidates()
     }
 
+    pub fn pending_count(&self) -> usize {
+        self.mempool.pending_len()
+    }
+
+    pub fn pending_transaction(&self, tx_id: &str) -> Option<Wrapper> {
+        self.mempool.find_pending(tx_id)
+    }
+
+    pub fn pending_snapshot(&self, limit: usize) -> Vec<Wrapper> {
+        self.mempool.top_candidates(limit)
+    }
+
     pub fn events_at(&self, height: Height) -> Vec<BlockEvent> {
         self.events_by_height.get(&height).cloned().unwrap_or_default()
     }
