@@ -4880,6 +4880,65 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn a_random_walk_of_bridge_mints_keeps_supply_equal_to_custody_and_within_cap() {
+        let mut st = 0x0123_4567_89ab_cdefu64;
+        let mut rng = || {
+            st = st.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = st;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        let mut l = Ledger::new();
+        let vault = [0x0Fu8; 32];
+        l.set_bridge_pool_vault(&vault);
+        let assets = [[0xa1u8; 16], [0xa2u8; 16], [0xa3u8; 16]];
+        let mut expected: std::collections::BTreeMap<[u8; 16], u128> = Default::default();
+        for a in &assets {
+            l.register_bridged_asset(a, 50_000, u128::MAX, false);
+            expected.insert(*a, 0);
+        }
+        let mut nonce = 0u64;
+        for _ in 0..4000 {
+            let a = assets[(rng() % 3) as usize];
+            let amt = (rng() % 400) as u128;
+            if amt > 0 {
+                nonce += 1;
+                let mut sref = [0u8; 32];
+                sref[..8].copy_from_slice(&nonce.to_le_bytes());
+                let minted = l.bridge_mint(&crate::bridge::Fact {
+                    version: crate::bridge::FACT_VERSION,
+                    source_chain: 1,
+                    dest_chain: 9_000,
+                    route_id: 7,
+                    direction: crate::bridge::Direction::Deposit,
+                    nonce,
+                    source_ref: sref,
+                    asset_id: a,
+                    amount: amt,
+                    recipient: [0xEEu8; 32],
+                    finality_depth: 6,
+                    observed_height: 10,
+                    expiry_height: 1_000_000,
+                });
+                if minted {
+                    *expected.get_mut(&a).expect("registered asset") += amt;
+                }
+            }
+            for a in &assets {
+                let supply = l.bridged_supply(a);
+                assert_eq!(supply, expected[a], "supply drifted from the sum of admitted mints");
+                assert_eq!(
+                    supply,
+                    l.bridge_vault_custody(&vault, a),
+                    "supply is not backed one for one by custody"
+                );
+                assert!(supply <= 50_000, "supply exceeded the per-asset cap");
+            }
+        }
+    }
+
+    #[test]
     fn a_shared_reference_on_two_corridors_both_mint_and_a_same_corridor_replay_is_refused() {
         let mut l = Ledger::new();
         let asset = [0xD6u8; 16];
