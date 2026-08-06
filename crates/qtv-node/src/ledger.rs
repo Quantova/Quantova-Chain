@@ -4806,6 +4806,64 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn a_seeded_outstanding_burn_resolves_by_settle_xor_slash_and_never_twice() {
+        let mut st = 0x0fed_cba9_8765_4321u64;
+        let mut rng = || {
+            st = st.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = st;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        let mut l = Ledger::new();
+        let vault = [0x0Fu8; 32];
+        let asset = [0xa1u8; 16];
+        let beneficiary = [0x22u8; 32];
+        l.seed_bridge_pool_vault(&vault);
+        l.seed_bridge_exits_enabled(true);
+        l.seed_bridge_payout_cap(u128::MAX);
+        l.register_bridged_asset(&asset, u128::MAX, u128::MAX, false);
+        l.seed_bridge_vault_custody(&vault, &asset, u128::MAX / 4);
+        for i in 0..600u64 {
+            let mut burn_ref = [0u8; 32];
+            burn_ref[..8].copy_from_slice(&i.to_le_bytes());
+            let amount = 100u128;
+            l.seed_outstanding_burn(&burn_ref, &asset, amount, &beneficiary);
+            let settle = crate::bridge::ExitFact {
+                version: crate::bridge::EXIT_FACT_VERSION,
+                corridor: 1,
+                dest_chain: 9_000,
+                asset_id: asset,
+                amount,
+                beneficiary,
+                burn_ref,
+                outcome: crate::bridge::ExitOutcome::Settle,
+            };
+            let slash = crate::bridge::ExitFact {
+                version: crate::bridge::EXIT_FACT_VERSION,
+                corridor: 1,
+                dest_chain: 9_000,
+                asset_id: asset,
+                amount,
+                beneficiary,
+                burn_ref,
+                outcome: crate::bridge::ExitOutcome::Slash,
+            };
+            let (first, second) = if rng() % 2 == 0 {
+                (l.bridge_settle(&settle), l.bridge_slash(&slash))
+            } else {
+                (l.bridge_slash(&slash), l.bridge_settle(&settle))
+            };
+            assert!(first, "the first resolution of a fresh burn succeeds");
+            assert!(
+                !second,
+                "a burn already resolved by settle or slash cannot be resolved a second time"
+            );
+            assert!(l.bridge_exit_settled(&burn_ref), "the resolved burn is marked settled");
+        }
+    }
+
+    #[test]
     fn a_mint_credit_that_would_overflow_the_holder_balance_is_refused_not_saturated() {
         let mut l = Ledger::new();
         let asset = [0xC4u8; 16];
