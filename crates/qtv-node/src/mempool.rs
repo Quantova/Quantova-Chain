@@ -222,6 +222,14 @@ fn is_feeless(wrapper: &Wrapper) -> bool {
         || crate::node::is_bridge_guardian(wrapper)
 }
 
+fn candidate_order(a: &Wrapper, b: &Wrapper) -> std::cmp::Ordering {
+    b.body()
+        .fee()
+        .cmp(&a.body().fee())
+        .then_with(|| a.body().sender().cmp(b.body().sender()))
+        .then_with(|| a.body().nonce().cmp(&b.body().nonce()))
+}
+
 #[derive(Debug, Clone)]
 pub struct Mempool {
     pending: Vec<Wrapper>,
@@ -598,14 +606,30 @@ impl Mempool {
 
     pub fn candidates(&self) -> Vec<Wrapper> {
         let mut ordered = self.pending.clone();
-        ordered.sort_by(|a, b| {
-            b.body()
-                .fee()
-                .cmp(&a.body().fee())
-                .then_with(|| a.body().sender().cmp(b.body().sender()))
-                .then_with(|| a.body().nonce().cmp(&b.body().nonce()))
-        });
+        ordered.sort_by(candidate_order);
         ordered
+    }
+
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn find_pending(&self, id: &str) -> Option<Wrapper> {
+        if !self.ids.contains(id) {
+            return None;
+        }
+        self.pending.iter().find(|w| w.id() == id).cloned()
+    }
+
+    pub fn top_candidates(&self, limit: usize) -> Vec<Wrapper> {
+        if self.pending.len() <= limit {
+            return self.candidates();
+        }
+        let mut refs: Vec<&Wrapper> = self.pending.iter().collect();
+        refs.select_nth_unstable_by(limit, |a, b| candidate_order(a, b));
+        refs.truncate(limit);
+        refs.sort_by(|a, b| candidate_order(a, b));
+        refs.into_iter().cloned().collect()
     }
 
     pub fn remove_included(&mut self, ids: &[String]) {
@@ -1178,6 +1202,43 @@ mod tests {
         let ordered = pool.candidates();
         assert_eq!(ordered[0].id(), high.id());
         assert_eq!(ordered[1].id(), low.id());
+    }
+
+    #[test]
+    fn top_candidates_matches_the_sorted_prefix_and_find_pending_locates_by_id() {
+        let params = FeeParams::devnet();
+        let base = u128::from(params.transfer_fee());
+        let carol = keypair(99);
+        let mut ledger = Ledger::new();
+        let mut pool = Mempool::new();
+        let mut submitted = Vec::new();
+        for i in 0..12u64 {
+            let sender = keypair(i);
+            fund(&mut ledger, &sender, 10_000);
+            let tx = signed_transfer(&sender, &carol.address(), 100, 0, base + u128::from(i));
+            pool.admit(tx.clone(), &ledger, &params).unwrap();
+            submitted.push(tx);
+        }
+        assert_eq!(pool.pending_len(), 12, "every admitted tx is pending");
+        let full = ids(&pool.candidates());
+        for k in [1usize, 5, 11, 12, 20] {
+            assert_eq!(
+                ids(&pool.top_candidates(k)),
+                full[..k.min(full.len())].to_vec(),
+                "top_candidates({k}) equals the sorted prefix of candidates()"
+            );
+        }
+        let target = &submitted[7];
+        assert_eq!(
+            pool.find_pending(&target.id()).map(|w| w.id()),
+            Some(target.id()),
+            "find_pending returns the pending tx by id"
+        );
+        assert_eq!(
+            pool.find_pending("QTX1notinthepool"),
+            None,
+            "find_pending returns None for an id that is not pending"
+        );
     }
 
     fn ids(txs: &[Wrapper]) -> Vec<String> {
