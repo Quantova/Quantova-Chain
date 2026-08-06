@@ -434,36 +434,66 @@ fn account(node: &DevNode, address: &str) -> Result<Json, ClientError> {
     ]))
 }
 
+struct SystemAddrs {
+    deploy: String,
+    bridge_mint: String,
+    bridge_exit: String,
+    bridge_settle: String,
+    bridge_guardian: String,
+    registration: String,
+    key_register: String,
+    evidence: String,
+    governance: String,
+}
+
+fn system_addrs() -> &'static SystemAddrs {
+    static CACHE: std::sync::OnceLock<SystemAddrs> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        use qtv_node::ledger as l;
+        SystemAddrs {
+            deploy: l::vm_deploy_address(),
+            bridge_mint: l::bridge_mint_address(),
+            bridge_exit: l::bridge_exit_address(),
+            bridge_settle: l::bridge_settle_address(),
+            bridge_guardian: l::bridge_guardian_address(),
+            registration: l::registration_address(),
+            key_register: l::key_register_address(),
+            evidence: l::evidence_address(),
+            governance: l::gov_system_address(),
+        }
+    })
+}
+
 fn tx_kind(node: &DevNode, sender: &str, target: &str, nonce: u64) -> (&'static str, Option<String>) {
-    use qtv_node::ledger as l;
-    if target == l::vm_deploy_address() {
-        return ("deploy", l::contract_address(sender, nonce));
+    let s = system_addrs();
+    if target == s.deploy {
+        return ("deploy", qtv_node::ledger::contract_address(sender, nonce));
     }
     if node.ledger().is_contract(target) {
         return ("call", None);
     }
-    if target == l::bridge_mint_address() {
+    if target == s.bridge_mint {
         return ("bridge_mint", None);
     }
-    if target == l::bridge_exit_address() {
+    if target == s.bridge_exit {
         return ("bridge_exit", None);
     }
-    if target == l::bridge_settle_address() {
+    if target == s.bridge_settle {
         return ("bridge_settle", None);
     }
-    if target == l::bridge_guardian_address() {
+    if target == s.bridge_guardian {
         return ("bridge_guardian", None);
     }
-    if target == l::registration_address() {
+    if target == s.registration {
         return ("register", None);
     }
-    if target == l::key_register_address() {
+    if target == s.key_register {
         return ("key_register", None);
     }
-    if target == l::evidence_address() {
+    if target == s.evidence {
         return ("evidence", None);
     }
-    if target == l::gov_system_address() {
+    if target == s.governance {
         return ("governance", None);
     }
     ("transfer", None)
@@ -511,12 +541,8 @@ fn transaction(node: &DevNode, tx_id: &str) -> Json {
             ("tx_id", Json::str(tx_id)),
             ("status", Json::str("pending")),
         ];
-        if let Some(wrapper) = node
-            .pending_transactions()
-            .iter()
-            .find(|w| w.id() == tx_id)
-        {
-            fields.extend(tx_fields(node, wrapper));
+        if let Some(wrapper) = node.pending_transaction(tx_id) {
+            fields.extend(tx_fields(node, &wrapper));
         }
         object(fields)
     } else {
@@ -531,11 +557,10 @@ fn transaction(node: &DevNode, tx_id: &str) -> Json {
 const MAX_LIST_ITEMS: usize = 1_000;
 
 fn pending(node: &DevNode) -> Json {
-    let all = node.pending_transactions();
-    let total = all.len();
-    let items: Vec<Json> = all
+    let total = node.pending_count();
+    let top = node.pending_snapshot(MAX_LIST_ITEMS);
+    let items: Vec<Json> = top
         .iter()
-        .take(MAX_LIST_ITEMS)
         .map(|wrapper| {
             let mut fields = vec![("tx_id", Json::str(wrapper.id()))];
             fields.extend(tx_fields(node, wrapper));
