@@ -37,6 +37,7 @@ pub enum Request {
     Pending,
     Container(String),
     Storage(String),
+    StorageAt { address: String, keys: Vec<[u8; 32]> },
     Supply,
     Events(u64),
     SideEvents(u64),
@@ -111,6 +112,10 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
         "supply" => Ok(Request::Supply),
         "get_container" => Ok(Request::Container(string_field(body, "address")?)),
         "get_storage" => Ok(Request::Storage(string_field(body, "address")?)),
+        "get_storage_at" => Ok(Request::StorageAt {
+            address: string_field(body, "address")?,
+            keys: key_list(body)?,
+        }),
         "get_events" => {
             let height = body
                 .get("height")
@@ -163,6 +168,58 @@ fn string_field(body: &Json, key: &str) -> Result<String, ClientError> {
         .ok_or_else(|| ClientError::bad("bad_request", format!("missing string field {key}")))
 }
 
+const MAX_STORAGE_KEYS: usize = 64;
+
+fn key_list(body: &Json) -> Result<Vec<[u8; 32]>, ClientError> {
+    let array = body
+        .get("keys")
+        .and_then(Json::as_array)
+        .ok_or_else(|| ClientError::bad("bad_request", "get_storage_at needs a keys array"))?;
+    if array.len() > MAX_STORAGE_KEYS {
+        return Err(ClientError::bad(
+            "bad_request",
+            format!("at most {MAX_STORAGE_KEYS} keys per request"),
+        ));
+    }
+    let mut keys = Vec::with_capacity(array.len());
+    for item in array {
+        let hex = item
+            .as_str()
+            .ok_or_else(|| ClientError::bad("bad_request", "a storage key is not a hex string"))?;
+        let bytes = crate::json::from_hex(hex)
+            .map_err(|e| ClientError::bad("bad_request", format!("a storage key is not hex, {e}")))?;
+        let key: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| ClientError::bad("bad_request", "a storage key is not thirty two bytes"))?;
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+fn storage_at(node: &DevNode, address: &str, keys: &[[u8; 32]]) -> Result<Json, ClientError> {
+    if qtv_idfmt::parse_address(address).is_err() {
+        return Err(ClientError::bad("bad_address", "the address is not a q1 address"));
+    }
+    let all = node.ledger().contract_storage_at(address);
+    let slots: Vec<Json> = keys
+        .iter()
+        .filter_map(|key| {
+            all.get(key).map(|value| {
+                let slot_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+                object(vec![
+                    ("slot", Json::str(slot_hex)),
+                    ("value", Json::str(value.to_string())),
+                ])
+            })
+        })
+        .collect();
+    Ok(object(vec![
+        ("address", Json::str(address)),
+        ("slots", Json::Array(slots)),
+    ]))
+}
+
 fn hex_bytes<const N: usize>(body: &Json, key: &str) -> Result<[u8; N], ClientError> {
     let hex = string_field(body, key)?;
     let bytes = crate::json::from_hex(&hex)
@@ -195,6 +252,7 @@ pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result
         Request::Supply => Ok(supply(node)),
         Request::Container(address) => container(node, &address),
         Request::Storage(address) => storage(node, &address),
+        Request::StorageAt { address, keys } => storage_at(node, &address, &keys),
         Request::Events(height) => Ok(events(node, height)),
         Request::SideEvents(height) => Ok(side_events(node, height)),
         Request::FinalizedHead => Ok(finalized_head(node)),
@@ -1014,4 +1072,49 @@ fn block(node: &DevNode, selector: BlockSelector) -> Result<Json, ClientError> {
         ),
         ("tx_ids", Json::Array(tx_ids)),
     ]))
+}
+
+#[cfg(test)]
+mod storage_at_tests {
+    use super::*;
+
+    #[test]
+    fn get_storage_at_parses_the_address_and_the_thirty_two_byte_keys() {
+        let key = "11".repeat(32);
+        let body = crate::json::parse(&format!("{{\"address\":\"q1abc\",\"keys\":[\"{key}\"]}}"))
+            .expect("the body parses");
+        let request = match build_request("get_storage_at", &body) {
+            Ok(request) => request,
+            Err(e) => panic!("the request parses: {}", e.message),
+        };
+        match request {
+            Request::StorageAt { address, keys } => {
+                assert_eq!(address, "q1abc", "the address is read");
+                assert_eq!(keys, vec![[0x11u8; 32]], "the key decodes to thirty two bytes");
+            }
+            _ => panic!("get_storage_at parses to a StorageAt request"),
+        }
+    }
+
+    #[test]
+    fn get_storage_at_refuses_a_key_that_is_not_thirty_two_bytes() {
+        let body = crate::json::parse("{\"address\":\"q1abc\",\"keys\":[\"1122\"]}")
+            .expect("the body parses");
+        assert!(
+            build_request("get_storage_at", &body).is_err(),
+            "a short key is refused rather than truncated or padded"
+        );
+    }
+
+    #[test]
+    fn get_storage_at_caps_the_number_of_keys() {
+        let one = format!("\"{}\"", "11".repeat(32));
+        let many = std::iter::repeat(one).take(MAX_STORAGE_KEYS + 1).collect::<Vec<_>>().join(",");
+        let body = crate::json::parse(&format!("{{\"address\":\"q1abc\",\"keys\":[{many}]}}"))
+            .expect("the body parses");
+        assert!(
+            build_request("get_storage_at", &body).is_err(),
+            "a request over the key cap is refused"
+        );
+    }
 }
