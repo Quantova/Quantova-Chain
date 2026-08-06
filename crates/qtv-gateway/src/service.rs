@@ -434,12 +434,50 @@ fn account(node: &DevNode, address: &str) -> Result<Json, ClientError> {
     ]))
 }
 
-fn tx_fields(wrapper: &Wrapper) -> Vec<(&'static str, Json)> {
+fn tx_kind(node: &DevNode, sender: &str, target: &str, nonce: u64) -> (&'static str, Option<String>) {
+    use qtv_node::ledger as l;
+    if target == l::vm_deploy_address() {
+        return ("deploy", l::contract_address(sender, nonce));
+    }
+    if node.ledger().is_contract(target) {
+        return ("call", None);
+    }
+    if target == l::bridge_mint_address() {
+        return ("bridge_mint", None);
+    }
+    if target == l::bridge_exit_address() {
+        return ("bridge_exit", None);
+    }
+    if target == l::bridge_settle_address() {
+        return ("bridge_settle", None);
+    }
+    if target == l::bridge_guardian_address() {
+        return ("bridge_guardian", None);
+    }
+    if target == l::registration_address() {
+        return ("register", None);
+    }
+    if target == l::key_register_address() {
+        return ("key_register", None);
+    }
+    if target == l::evidence_address() {
+        return ("evidence", None);
+    }
+    if target == l::gov_system_address() {
+        return ("governance", None);
+    }
+    ("transfer", None)
+}
+
+fn tx_fields(node: &DevNode, wrapper: &Wrapper) -> Vec<(&'static str, Json)> {
     let body = wrapper.body();
+    let target = body.call().target();
     let amount = qtv_node::execution::transfer_amount(body.call()).unwrap_or(0);
-    vec![
+    let (kind, contract) = tx_kind(node, body.sender(), target, body.nonce());
+    let mut fields = vec![
         ("from", Json::str(body.sender())),
-        ("to", Json::str(body.call().target())),
+        ("to", Json::str(target)),
+        ("kind", Json::str(kind)),
         ("value", Json::str(amount.to_string())),
         ("fee", Json::str(body.fee().to_string())),
         ("nonce", Json::Int(body.nonce())),
@@ -447,7 +485,11 @@ fn tx_fields(wrapper: &Wrapper) -> Vec<(&'static str, Json)> {
         ("scheme", Json::Int(u64::from(wrapper.scheme()))),
         ("signature", Json::str(crate::json::to_hex(wrapper.signature()))),
         ("raw", Json::str(crate::json::to_hex(&qtv_codec::to_bytes(wrapper)))),
-    ]
+    ];
+    if let Some(contract) = contract {
+        fields.push(("contract", Json::str(contract)));
+    }
+    fields
 }
 
 fn transaction(node: &DevNode, tx_id: &str) -> Json {
@@ -460,7 +502,7 @@ fn transaction(node: &DevNode, tx_id: &str) -> Json {
         if let Some(block) = node.block_at_height(height) {
             fields.push(("block", Json::str(block.id())));
             if let Some(wrapper) = block.body().iter().find(|w| w.id() == tx_id) {
-                fields.extend(tx_fields(wrapper));
+                fields.extend(tx_fields(node, wrapper));
             }
         }
         object(fields)
@@ -474,7 +516,7 @@ fn transaction(node: &DevNode, tx_id: &str) -> Json {
             .iter()
             .find(|w| w.id() == tx_id)
         {
-            fields.extend(tx_fields(wrapper));
+            fields.extend(tx_fields(node, wrapper));
         }
         object(fields)
     } else {
@@ -496,7 +538,7 @@ fn pending(node: &DevNode) -> Json {
         .take(MAX_LIST_ITEMS)
         .map(|wrapper| {
             let mut fields = vec![("tx_id", Json::str(wrapper.id()))];
-            fields.extend(tx_fields(wrapper));
+            fields.extend(tx_fields(node, wrapper));
             object(fields)
         })
         .collect();
