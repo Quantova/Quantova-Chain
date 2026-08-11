@@ -1,6 +1,8 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+#![forbid(unsafe_code)]
+
 use qtv_codec::{Decode, Decoder, Encode, Encoder, Error};
 use std::collections::{BTreeMap, BTreeSet};
 
