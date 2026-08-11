@@ -3,7 +3,7 @@
 
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -48,8 +48,13 @@ impl SignGuard {
         bytes[0..8].copy_from_slice(&height.to_le_bytes());
         bytes[8..16].copy_from_slice(&view.to_le_bytes());
         let temp = self.path.with_extension("tmp");
-        fs::write(&temp, bytes)?;
+        let mut file = fs::File::create(&temp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
         fs::rename(&temp, &self.path)?;
+        if let Some(dir) = self.path.parent() {
+            let _ = fs::File::open(dir).and_then(|d| d.sync_all());
+        }
         Ok(())
     }
 }
