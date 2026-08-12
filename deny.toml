@@ -30,7 +30,7 @@ unmaintained = "workspace"
 
 [licenses]
 version = 2
-allow = ["Apache-2.0", "MIT", "NCSA", "BSD-3-Clause", "ISC", "Unicode-3.0", "Unicode-DFS-2016", "Zlib"]
+allow = ["Apache-2.0", "MIT"]
 confidence-threshold = 0.9
 
 [sources]
