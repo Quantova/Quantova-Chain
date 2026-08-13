@@ -19,15 +19,15 @@ pub const DOMAIN_TX: &[u8] = b"quantova.transaction.v1";
 
 pub const LOCAL_CHAIN_NAME: &str = "Q-dev-net-1";
 
-pub const TESTNET_CHAIN_NAME: &str = "Q3";
+pub const TESTNET_CHAIN_NAME: &str = "Q-test-net-1";
 
-pub const MAINNET_CHAIN_NAME: &str = "Q1";
+pub const MAINNET_CHAIN_NAME: &str = "Q-main-net-1";
 
 pub const LOCAL_CHAIN_ID: u64 = 13749533161254861464;
 
-pub const TESTNET_CHAIN_ID: u64 = 5952149448724926767;
+pub const TESTNET_CHAIN_ID: u64 = 4032652574364075694;
 
-pub const MAINNET_CHAIN_ID: u64 = 2238953961710868005;
+pub const MAINNET_CHAIN_ID: u64 = 5296651311193914109;
 
 pub fn chain_id_from_name(name: &str) -> u64 {
     let digest = sha3::sha3_256(name.as_bytes());
