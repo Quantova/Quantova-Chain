@@ -118,8 +118,14 @@ impl Driver {
             return;
         };
         for call in calls {
-            let result = qtv_gateway::handle(context, &mut self.node, call.request);
-            let _ = call.reply.send(result);
+            let request = call.request;
+            let node = &mut self.node;
+            let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                qtv_gateway::handle(context, node, request)
+            }));
+            if let Ok(result) = served {
+                let _ = call.reply.send(result);
+            }
         }
     }
 
