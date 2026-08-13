@@ -2375,6 +2375,13 @@ impl Ledger {
         if account.balance < stake {
             return false;
         }
+        // Governance is stake weighted: gov_conclude measures the quorum against total_staked, so a
+        // ballot may carry at most the voter's own bonded stake. Without this cap a non staker clears
+        // the staked electorate with liquid balance and captures Mint/FreezeRecovery/Blacklist.
+        let bonded = self.staked_weight(voter) as u128 * qtv_staking::NATIVE_UNIT as u128;
+        if u128::from(stake) > bonded {
+            return false;
+        }
         account.balance -= stake;
         self.set_account(voter, &account);
         let mut lock = self.gov_lock(&voter_id).unwrap_or(Lock { amount: 0, until: 0 });
@@ -3108,7 +3115,7 @@ mod stake_state_tests {
     #[test]
     fn a_deposit_returns_when_the_bar_is_met_and_a_missed_deposit_is_forfeit() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(21), 10_000 * 1_000_000);
         let proposer = gov_addr(20);
         fund(&mut l, &proposer, 2_250_000 * 1_000_000);
         let action = qtv_governance::Action::Parameter {
@@ -3147,7 +3154,7 @@ mod stake_state_tests {
     #[test]
     fn governance_enacts_a_parameter_change_that_sets_the_reward_price() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(23), 10_000 * 1_000_000);
         let proposer = gov_addr(22);
         fund(&mut l, &proposer, 2_250_000 * 1_000_000);
         let action = qtv_governance::Action::Parameter {
@@ -3211,7 +3218,7 @@ mod stake_state_tests {
     #[test]
     fn a_governance_vote_activates_a_dormant_feature_without_a_fork() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(41), 10_000 * 1_000_000);
         let proposer = gov_addr(40);
         fund(&mut l, &proposer, 2_250_000 * 1_000_000);
         let voter = gov_addr(41);
@@ -3253,7 +3260,7 @@ mod stake_state_tests {
     #[test]
     fn a_parameter_change_is_only_enactable_through_the_chain_upgrade_track() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(32), 10_000 * 1_000_000);
         let proposer = gov_addr(31);
         fund(&mut l, &proposer, 2_250_000 * 1_000_000);
         let action = qtv_governance::Action::Parameter {
@@ -3291,7 +3298,7 @@ mod stake_state_tests {
     #[test]
     fn a_freeze_reaches_an_ordinary_or_bonded_account_but_never_a_reserved_pot() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(99), 5_000 * 1_000_000);
         let bond_before = l.stake_bond(&[99u8; 32]).unwrap().amount;
         let proposer = gov_addr(40);
         fund(&mut l, &proposer, 400_000 * 1_000_000);
@@ -3299,6 +3306,7 @@ mod stake_state_tests {
         let bonded = gov_addr(99);
         let voter = gov_addr(42);
         fund(&mut l, &voter, 20_000 * 1_000_000);
+        l.seed_validator_bond(&voter, 5_000 * 1_000_000);
 
         let hit = l
             .gov_propose(
@@ -3346,7 +3354,7 @@ mod stake_state_tests {
     #[test]
     fn governance_mints_uncapped_to_the_target_on_the_mint_track() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(25), 10_000 * 1_000_000);
         let proposer = gov_addr(24);
         fund(&mut l, &proposer, 4_000_000 * 1_000_000);
         let target = gov_addr(30);
@@ -3367,7 +3375,7 @@ mod stake_state_tests {
     #[test]
     fn a_governance_enactment_leaves_a_side_trace_and_no_side_event_moves_a_consensus_root() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(25), 10_000 * 1_000_000);
         let proposer = gov_addr(24);
         fund(&mut l, &proposer, 4_000_000 * 1_000_000);
         let action = qtv_governance::Action::Mint {
@@ -3499,6 +3507,7 @@ mod stake_state_tests {
             .unwrap();
         let solo = gov_addr(81);
         fund(&mut l, &solo, 10_000 * 1_000_000);
+        l.seed_validator_bond(&solo, 2_000 * 1_000_000);
         assert!(l.gov_vote(&solo, lone, true, qtv_governance::Conviction::Liquid, 2_000 * 1_000_000, 0));
         assert!(
             l.gov_referendum(lone).unwrap().tally.approved(l.gov_total_locked()),
@@ -3513,7 +3522,7 @@ mod stake_state_tests {
         let real = l
             .gov_propose(&proposer, qtv_governance::Track::ChainUpgrade, action(), 0)
             .unwrap();
-        let backer = gov_addr(82);
+        let backer = gov_addr(90);
         fund(&mut l, &backer, 6_000_000 * 1_000_000);
         assert!(l.gov_vote(&backer, real, true, qtv_governance::Conviction::Liquid, 5_000_000 * 1_000_000, 0));
         assert_eq!(l.gov_conclude(real, close), Some(qtv_governance::Status::Approved));
@@ -3522,7 +3531,7 @@ mod stake_state_tests {
     #[test]
     fn a_guardian_caucus_freezes_ahead_of_a_vote_and_a_vote_reverses_it() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(62), 10_000 * 1_000_000);
         l.set_guardian_set(&qtv_governance::GuardianSet::new(
             vec![[201u8; 32], [202u8; 32], [203u8; 32]],
             2,
@@ -3561,7 +3570,7 @@ mod stake_state_tests {
     #[test]
     fn a_consumed_guardian_freeze_act_cannot_be_replayed_past_a_vote() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(72), 10_000 * 1_000_000);
         l.set_guardian_set(&qtv_governance::GuardianSet::new(
             vec![[201u8; 32], [202u8; 32], [203u8; 32]],
             2,
@@ -3665,7 +3674,7 @@ mod stake_state_tests {
     #[test]
     fn a_passed_vote_pays_out_of_the_keyless_pots_and_nothing_else_can() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(51), 10_000 * 1_000_000);
         let proposer = gov_addr(50);
         fund(&mut l, &proposer, 4_000_000 * 1_000_000);
         let voter = gov_addr(51);
@@ -3759,6 +3768,7 @@ mod stake_state_tests {
             .unwrap();
         let voter = gov_addr(27);
         fund(&mut l, &voter, 10_000 * 1_000_000);
+        l.seed_validator_bond(&voter, 5_000 * 1_000_000);
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         l.gov_enact(id, 6 * 3_600 + 1, TEST_CHAIN).unwrap();
 
@@ -3769,7 +3779,7 @@ mod stake_state_tests {
             2_000 * 1_000_000,
             "the recovery never confiscates the consensus bond"
         );
-        assert_eq!(l.total_staked(), 2_000 * 1_000_000);
+        assert_eq!(l.total_staked(), 7_000 * 1_000_000);
     }
 
     #[test]
@@ -3786,6 +3796,7 @@ mod stake_state_tests {
             .unwrap();
         let voter = gov_addr(29);
         fund(&mut l, &voter, 10_000 * 1_000_000);
+        l.seed_validator_bond(&voter, 4_000 * 1_000_000);
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Year, 4_000 * 1_000_000, 0);
         assert_eq!(l.balance(&voter), 6_000 * 1_000_000);
         assert_eq!(l.gov_release(&voter, 100), 0);
@@ -4317,7 +4328,7 @@ mod stake_state_tests {
     #[test]
     fn a_governance_early_unfreeze_slashes_the_bond_to_the_treasury() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(85), 10_000 * 1_000_000);
         let bond = qtv_governance::BRIDGE_FREEZE_BOND;
         let freezer = gov_addr(83);
         fund(&mut l, &freezer, 390_000 * 1_000_000);
@@ -4352,7 +4363,7 @@ mod stake_state_tests {
     #[test]
     fn a_governance_early_unfreeze_needs_a_frozen_bridge() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(87), 10_000 * 1_000_000);
         let proposer = gov_addr(86);
         fund(&mut l, &proposer, 1_500_000 * 1_000_000);
         let voter = gov_addr(87);
@@ -4377,7 +4388,7 @@ mod stake_state_tests {
     #[test]
     fn only_a_vote_rotates_the_guardian_set_and_a_malformed_set_is_refused() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(89), 10_000 * 1_000_000);
         l.set_guardian_set(&qtv_governance::GuardianSet::new(
             vec![[1u8; 32], [2u8; 32], [3u8; 32]],
             2,
@@ -4428,7 +4439,7 @@ mod stake_state_tests {
     #[test]
     fn only_a_vote_rotates_the_committee_and_a_key_without_a_pop_is_refused() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(91), 10_000 * 1_000_000);
         let proposer = gov_addr(90);
         fund(&mut l, &proposer, 4_000_000 * 1_000_000);
         let voter = gov_addr(91);
@@ -4499,7 +4510,7 @@ mod stake_state_tests {
     #[test]
     fn a_committee_rotation_refuses_a_shared_key_and_a_thin_threshold() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(95), 10_000 * 1_000_000);
         let proposer = gov_addr(94);
         fund(&mut l, &proposer, 4_000_000 * 1_000_000);
         let voter = gov_addr(95);
@@ -4549,7 +4560,7 @@ mod stake_state_tests {
     #[test]
     fn a_vote_advances_the_bridge_epoch_and_registers_an_asset() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(93), 10_000 * 1_000_000);
         let proposer = gov_addr(92);
         fund(&mut l, &proposer, 3_000_000 * 1_000_000);
         let voter = gov_addr(93);
@@ -4594,7 +4605,7 @@ mod stake_state_tests {
     #[test]
     fn a_bridge_migration_needs_a_frozen_bridge_and_records_the_new_vault() {
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(81), 10_000 * 1_000_000);
         let proposer = gov_addr(80);
         fund(&mut l, &proposer, 1_500_000 * 1_000_000);
         let voter = gov_addr(81);
@@ -4655,7 +4666,7 @@ mod stake_state_tests {
         }
 
         let mut l = Ledger::new();
-        l.seed_validator_bond(&gov_addr(99), 10_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(97), 10_000 * 1_000_000);
         let proposer = gov_addr(96);
         fund(&mut l, &proposer, 3_000_000 * 1_000_000);
         let voter = gov_addr(97);
