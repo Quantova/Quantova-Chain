@@ -118,8 +118,18 @@ impl Driver {
             return;
         };
         for call in calls {
-            let result = qtv_gateway::handle(context, &mut self.node, call.request);
-            let _ = call.reply.send(result);
+            let request = call.request;
+            let node = &mut self.node;
+            // Serve on the consensus thread, but firewall a handler panic so it cannot unwind the thread
+            // and halt block production. RPC handlers touch only the local mempool buffer, never the
+            // committed state trie, so swallowing a panic keeps the node producing without corrupting
+            // consensus state; the caller sees a dropped reply and times out.
+            let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                qtv_gateway::handle(context, node, request)
+            }));
+            if let Ok(result) = served {
+                let _ = call.reply.send(result);
+            }
         }
     }
 
