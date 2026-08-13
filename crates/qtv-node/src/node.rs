@@ -2600,11 +2600,11 @@ mod tests {
     fn a_governance_transaction_drives_a_referendum_through_the_executor() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
-        ledger.seed_validator_bond(&qtv_idfmt::render_address(&[201u8; 32]).unwrap(), 10_000 * 1_000_000);
         let proposer = keypair(100);
         let voter = keypair(101);
         fund(&mut ledger, &proposer, 2_260_000 * 1_000_000);
         fund(&mut ledger, &voter, 10_000 * 1_000_000);
+        ledger.seed_validator_bond(&voter.address(), 10_000 * 1_000_000);
 
         let propose = gov_call_tx(&proposer, propose_price_args(70_000_000), 0, &fee);
         let vote = gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee);
@@ -2630,7 +2630,6 @@ mod tests {
     fn a_governance_blacklist_stops_the_address_from_transacting() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
-        ledger.seed_validator_bond(&qtv_idfmt::render_address(&[201u8; 32]).unwrap(), 10_000 * 1_000_000);
         let proposer = keypair(112);
         let voter = keypair(113);
         let hostile = keypair(114);
@@ -2639,6 +2638,7 @@ mod tests {
         fund(&mut ledger, &voter, 10_000 * 1_000_000);
         fund(&mut ledger, &hostile, 10_000 * 1_000_000);
         fund(&mut ledger, &peer, 10_000 * 1_000_000);
+        ledger.seed_validator_bond(&voter.address(), 10_000 * 1_000_000);
 
         let target = qtv_idfmt::parse_address(&hostile.address()).unwrap();
         let action = Action::Blacklist { target };
@@ -2675,7 +2675,6 @@ mod tests {
     fn a_governance_freeze_stops_a_sender_but_still_lets_it_receive() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
-        ledger.seed_validator_bond(&qtv_idfmt::render_address(&[201u8; 32]).unwrap(), 10_000 * 1_000_000);
         let proposer = keypair(140);
         let voter = keypair(141);
         let hostile = keypair(142);
@@ -2684,6 +2683,7 @@ mod tests {
         fund(&mut ledger, &voter, 10_000 * 1_000_000);
         fund(&mut ledger, &hostile, 10_000 * 1_000_000);
         fund(&mut ledger, &peer, 10_000 * 1_000_000);
+        ledger.seed_validator_bond(&voter.address(), 10_000 * 1_000_000);
 
         let target = qtv_idfmt::parse_address(&hostile.address()).unwrap();
         let action = Action::Freeze { targets: vec![target] };
@@ -2757,13 +2757,13 @@ mod tests {
     fn a_blacklisted_sender_is_refused_for_every_operation_not_only_a_transfer() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
-        ledger.seed_validator_bond(&qtv_idfmt::render_address(&[201u8; 32]).unwrap(), 10_000 * 1_000_000);
         let proposer = keypair(130);
         let voter = keypair(131);
         let hostile = keypair(132);
         fund(&mut ledger, &proposer, 400_000 * 1_000_000);
         fund(&mut ledger, &voter, 10_000 * 1_000_000);
         fund(&mut ledger, &hostile, 10_000 * 1_000_000);
+        ledger.seed_validator_bond(&voter.address(), 10_000 * 1_000_000);
 
         let target = qtv_idfmt::parse_address(&hostile.address()).unwrap();
         let action = Action::Blacklist { target };
