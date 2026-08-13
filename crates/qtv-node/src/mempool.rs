@@ -770,9 +770,6 @@ mod tests {
 
     #[test]
     fn a_user_registration_transaction_is_refused_from_the_mempool() {
-        // Registration records are proposer-injected epoch notes. A user-submitted tx to the reserved
-        // registration target rides the free executor lane paying no fee and bumping no nonce, so the
-        // mempool must refuse it up front instead of admitting it as a paying transfer.
         let params = FeeParams::devnet();
         let alice = keypair(1);
         let mut ledger = Ledger::new();
