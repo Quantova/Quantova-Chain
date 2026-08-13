@@ -2375,9 +2375,6 @@ impl Ledger {
         if account.balance < stake {
             return false;
         }
-        // Governance is stake weighted: gov_conclude measures the quorum against total_staked, so a
-        // ballot may carry at most the voter's own bonded stake. Without this cap a non staker clears
-        // the staked electorate with liquid balance and captures Mint/FreezeRecovery/Blacklist.
         let bonded = self.staked_weight(voter) as u128 * qtv_staking::NATIVE_UNIT as u128;
         if u128::from(stake) > bonded {
             return false;

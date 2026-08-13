@@ -491,9 +491,6 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_registration(&wrapper) {
-            // Registration records are proposer-injected epoch-root notes, never mempool-admitted. One
-            // admitted here rides the free executor lane, paying no fee and bumping no nonce, so it would
-            // replay every block and, bidding the ceiling fee, outrank paying traffic for zero cost.
             return Err(Reject::BadCall);
         } else {
             validate(&wrapper, ledger, fee_params)?;
@@ -591,7 +588,6 @@ impl Mempool {
                 crate::node::bridge_exit_admissible(ledger, &wrapper, &account, fee_params, verified[index])
                     .is_some()
             } else if crate::node::is_registration(&wrapper) {
-                // Proposer-injected epoch notes only; a mempool-admitted one rides the free lane.
                 false
             } else {
                 validate_verified(&wrapper, ledger, fee_params, verified[index]).is_ok()
