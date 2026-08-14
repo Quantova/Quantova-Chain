@@ -187,11 +187,12 @@ fn piece_weight(shard: &Shard, proof: &ShardProof) -> usize {
 }
 
 fn entry_weight(pending: &Pending) -> usize {
-    pending
-        .pieces
-        .iter()
-        .map(|(shard, proof)| piece_weight(shard, proof))
-        .sum()
+    pending.overhead
+        + pending
+            .pieces
+            .iter()
+            .map(|(shard, proof)| piece_weight(shard, proof))
+            .sum::<usize>()
 }
 
 #[derive(Clone)]
@@ -217,6 +218,7 @@ struct Pending {
     commitment: Commitment,
     justification: Vec<ViewChange>,
     pieces: Vec<(Shard, ShardProof)>,
+    overhead: usize,
 }
 
 impl ProposalAssembler {
@@ -265,17 +267,22 @@ impl ProposalAssembler {
             shard,
             proof,
         } = coded;
-        if !self.pending.contains_key(&key) && self.pending.len() >= MAX_PENDING_PROPOSALS {
+        let is_new = !self.pending.contains_key(&key);
+        if is_new && self.pending.len() >= MAX_PENDING_PROPOSALS {
             self.evict_lowest_pending();
         }
         {
-            let entry = self.pending.entry(key).or_insert_with(|| Pending {
-                height,
-                view,
-                header: header.clone(),
-                commitment: commitment.clone(),
-                justification,
-                pieces: Vec::new(),
+            let entry = self.pending.entry(key).or_insert_with(|| {
+                let overhead = crate::wire::coded_overhead(&header, &commitment, &justification);
+                Pending {
+                    height,
+                    view,
+                    header: header.clone(),
+                    commitment: commitment.clone(),
+                    justification,
+                    pieces: Vec::new(),
+                    overhead,
+                }
             });
             if entry.commitment != commitment {
                 return None;
@@ -284,9 +291,20 @@ impl ProposalAssembler {
                 return None;
             }
         }
-        let weight = piece_weight(&shard, &proof);
+        let overhead = if is_new { self.pending[&key].overhead } else { 0 };
+        let weight = piece_weight(&shard, &proof) + overhead;
+        // a piece that can never fit is refused before it evicts anyone, so one oversized frame cannot flush the buffer
+        if weight > self.max_bytes {
+            if is_new {
+                self.pending.remove(&key);
+            }
+            return None;
+        }
         self.evict_until_fits(weight, &key);
         if self.bytes + weight > self.max_bytes {
+            if is_new {
+                self.pending.remove(&key);
+            }
             return None;
         }
         let Some(entry) = self.pending.get_mut(&key) else {
@@ -770,5 +788,82 @@ mod tests {
                 "a {mib} MiB payload gave a {shard_len} byte shard, too close to the record bound"
             );
         }
+    }
+
+    fn heavy_justification() -> Vec<ViewChange> {
+        use crate::wire::LockedBlock;
+        use qtv_attest::{Attestation, Block, Parent};
+        use qtv_crypto::ml_dsa::SIGNATURE_BYTES;
+        use qtv_sampler::onetime::{MerklePath, PREIMAGE_BYTES};
+        use qtv_sampler::sortition::Credential;
+
+        // a locked block body that dwarfs a single shard piece, unverified and stored as is
+        let block = sample_block(400);
+        let locked = LockedBlock {
+            header: block.header().clone(),
+            body: block.body().to_vec(),
+        };
+        let att = Attestation {
+            from: 0,
+            height: 1,
+            slot: 0,
+            view: 0,
+            block: Block::new(1, [0u8; 32], Parent::Genesis),
+            membership: Credential {
+                position: 0,
+                preimage: [0u8; PREIMAGE_BYTES],
+                path: MerklePath {
+                    siblings: Vec::new(),
+                },
+            },
+            sig: [0u8; SIGNATURE_BYTES],
+        };
+        vec![ViewChange {
+            height: 1,
+            target_view: 1,
+            lock_view: 0,
+            locked: Some(locked),
+            att,
+            polka: None,
+        }]
+    }
+
+    #[test]
+    fn the_byte_ceiling_charges_the_stored_justification_not_just_the_shard() {
+        let proposal = sample_proposal(48, 0);
+        let shards = code_proposal(&proposal).expect("code the proposal");
+        let base = shards[0].clone();
+        let piece = super::piece_weight(&base.shard, &base.proof);
+        assert!(base.commitment.k > 1, "a lone shard must not complete");
+
+        let heavy = heavy_justification();
+        let jbytes = crate::wire::coded_overhead(&base.header, &base.commitment, &heavy);
+        assert!(jbytes > piece * 8, "the justification must dominate a shard piece");
+
+        // room for one heavy entry plus a few bare pieces, so an uncounted justification blows the ceiling
+        let budget = jbytes + piece * 4;
+        let mut assembler = ProposalAssembler::with_byte_budget(budget);
+        for view in 0..48u64 {
+            let mut coded = base.clone();
+            coded.view = view;
+            coded.justification = heavy.clone();
+            let _ = assembler.admit(coded);
+        }
+        let retained: usize = assembler
+            .pending
+            .values()
+            .map(|p| {
+                crate::wire::coded_overhead(&p.header, &p.commitment, &p.justification)
+                    + p.pieces
+                        .iter()
+                        .map(|(s, pr)| super::piece_weight(s, pr))
+                        .sum::<usize>()
+            })
+            .sum();
+        assert!(
+            retained <= budget,
+            "the assembler retained {retained} bytes past the {budget} byte ceiling"
+        );
+        assert!(assembler.buffered_bytes() <= budget);
     }
 }
