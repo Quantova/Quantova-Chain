@@ -180,11 +180,33 @@ const MAX_PENDING_PROPOSALS: usize = 256;
 
 const MAX_DONE_KEYS: usize = 4_096;
 
-#[derive(Clone, Default)]
+const MAX_ASSEMBLER_BYTES: usize = 128 * 1024 * 1024;
+
+fn piece_weight(shard: &Shard, proof: &ShardProof) -> usize {
+    shard.bytes.len() + proof.siblings.len() * DIGEST_LEN
+}
+
+fn entry_weight(pending: &Pending) -> usize {
+    pending
+        .pieces
+        .iter()
+        .map(|(shard, proof)| piece_weight(shard, proof))
+        .sum()
+}
+
+#[derive(Clone)]
 pub struct ProposalAssembler {
     pending: HashMap<ProposalKey, Pending>,
     done: HashMap<ProposalKey, u64>,
     horizon: u64,
+    bytes: usize,
+    max_bytes: usize,
+}
+
+impl Default for ProposalAssembler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Clone)]
@@ -199,7 +221,26 @@ struct Pending {
 
 impl ProposalAssembler {
     pub fn new() -> Self {
-        Self::default()
+        ProposalAssembler {
+            pending: HashMap::new(),
+            done: HashMap::new(),
+            horizon: 0,
+            bytes: 0,
+            max_bytes: MAX_ASSEMBLER_BYTES,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_byte_budget(max_bytes: usize) -> Self {
+        ProposalAssembler {
+            max_bytes,
+            ..Self::new()
+        }
+    }
+
+    #[cfg(test)]
+    fn buffered_bytes(&self) -> usize {
+        self.bytes
     }
 
     pub fn admit(&mut self, coded: CodedProposal) -> Option<Result<Proposal, CodedError>> {
@@ -227,20 +268,31 @@ impl ProposalAssembler {
         if !self.pending.contains_key(&key) && self.pending.len() >= MAX_PENDING_PROPOSALS {
             self.evict_lowest_pending();
         }
-        let entry = self.pending.entry(key).or_insert_with(|| Pending {
-            height,
-            view,
-            header: header.clone(),
-            commitment: commitment.clone(),
-            justification,
-            pieces: Vec::new(),
-        });
-        if entry.commitment != commitment {
+        {
+            let entry = self.pending.entry(key).or_insert_with(|| Pending {
+                height,
+                view,
+                header: header.clone(),
+                commitment: commitment.clone(),
+                justification,
+                pieces: Vec::new(),
+            });
+            if entry.commitment != commitment {
+                return None;
+            }
+            if entry.pieces.iter().any(|(s, _)| s.index == shard.index) {
+                return None;
+            }
+        }
+        let weight = piece_weight(&shard, &proof);
+        self.evict_until_fits(weight, &key);
+        if self.bytes + weight > self.max_bytes {
             return None;
         }
-        if entry.pieces.iter().any(|(s, _)| s.index == shard.index) {
+        let Some(entry) = self.pending.get_mut(&key) else {
             return None;
-        }
+        };
+        self.bytes += weight;
         entry.pieces.push((shard, proof));
         if entry.pieces.len() < entry.commitment.k {
             return None;
@@ -250,6 +302,7 @@ impl ProposalAssembler {
             .pending
             .remove(&key)
             .expect("the pending proposal was just present");
+        self.bytes = self.bytes.saturating_sub(entry_weight(&pending));
         if !self.done.contains_key(&key) && self.done.len() >= MAX_DONE_KEYS {
             self.evict_lowest_done();
         }
@@ -277,6 +330,7 @@ impl ProposalAssembler {
         let floor = height.saturating_sub(2);
         self.pending.retain(|_, p| p.height >= floor);
         self.done.retain(|_, &mut h| h >= floor);
+        self.bytes = self.pending.values().map(entry_weight).sum();
     }
 
     fn evict_lowest_pending(&mut self) {
@@ -286,7 +340,28 @@ impl ProposalAssembler {
             .min_by_key(|(_, p)| p.height)
             .map(|(key, _)| *key)
         {
-            self.pending.remove(&key);
+            if let Some(pending) = self.pending.remove(&key) {
+                self.bytes = self.bytes.saturating_sub(entry_weight(&pending));
+            }
+        }
+    }
+
+    fn evict_until_fits(&mut self, weight: usize, keep: &ProposalKey) {
+        while self.bytes + weight > self.max_bytes {
+            let victim = self
+                .pending
+                .iter()
+                .filter(|(key, _)| *key != keep)
+                .min_by_key(|(_, p)| p.height)
+                .map(|(key, _)| *key);
+            match victim {
+                Some(key) => {
+                    if let Some(pending) = self.pending.remove(&key) {
+                        self.bytes = self.bytes.saturating_sub(entry_weight(&pending));
+                    }
+                }
+                None => break,
+            }
         }
     }
 
@@ -622,6 +697,35 @@ mod tests {
         assert!(
             matches!(outcome, Some(Err(_))),
             "a header that did not match the coded block was not refused"
+        );
+    }
+
+    #[test]
+    fn the_assembler_bounds_total_shard_bytes_under_a_distinct_key_flood() {
+        let proposal = sample_proposal(48, 0);
+        let shards = code_proposal(&proposal).expect("code the proposal");
+        let one = shards[0].clone();
+        let piece = super::piece_weight(&one.shard, &one.proof);
+        assert!(piece > 0, "a shard carries bytes");
+
+        assert!(one.commitment.k > 1, "the shard must not complete on its own");
+        let budget = piece * 4 + piece / 2;
+        let mut assembler = ProposalAssembler::with_byte_budget(budget);
+        for view in 0..256u64 {
+            let mut coded = shards[0].clone();
+            coded.view = view;
+            let admitted = assembler.admit(coded);
+            assert!(admitted.is_none(), "a lone shard never completes a k>1 proposal");
+            assert!(
+                assembler.buffered_bytes() <= budget,
+                "held bytes {} breached the ceiling {budget} at view {view}",
+                assembler.buffered_bytes()
+            );
+        }
+        assert!(
+            assembler.pending.len() <= budget / piece + 1,
+            "the entry count tracks the byte ceiling, got {}",
+            assembler.pending.len()
         );
     }
 
