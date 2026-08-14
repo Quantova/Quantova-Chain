@@ -2425,6 +2425,8 @@ impl Ledger {
                 let mut account = self.account(&addr);
                 account.balance = account.balance.saturating_add(referendum.deposit);
                 self.set_account(&addr, &account);
+            } else {
+                self.set_stake_treasury(self.stake_treasury() + referendum.deposit);
             }
         } else {
             self.set_stake_treasury(self.stake_treasury() + referendum.deposit);
