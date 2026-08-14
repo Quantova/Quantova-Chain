@@ -222,10 +222,11 @@ fn is_feeless(wrapper: &Wrapper) -> bool {
         || crate::node::is_bridge_guardian(wrapper)
 }
 
-fn candidate_order(a: &Wrapper, b: &Wrapper) -> std::cmp::Ordering {
+fn candidate_order(a: &Wrapper, b: &Wrapper, ceiling: u128) -> std::cmp::Ordering {
     b.body()
         .fee()
-        .cmp(&a.body().fee())
+        .min(ceiling)
+        .cmp(&a.body().fee().min(ceiling))
         .then_with(|| a.body().sender().cmp(b.body().sender()))
         .then_with(|| a.body().nonce().cmp(&b.body().nonce()))
 }
@@ -240,6 +241,9 @@ pub struct Mempool {
     reserve: usize,
     feeless_cap: usize,
     feeless_admits: usize,
+    // The capped fee actually charged bounds inclusion and eviction ranking, so a bid above the
+    // ceiling buys no priority it never pays for. Refreshed from the fee params on every admit.
+    ceiling: u128,
 }
 
 impl Default for Mempool {
@@ -266,6 +270,7 @@ impl Mempool {
             reserve: reserve.min(cap.saturating_sub(1)),
             feeless_cap: DEFAULT_FEELESS_ADMITS_PER_WINDOW,
             feeless_admits: 0,
+            ceiling: u128::MAX,
         }
     }
 
@@ -277,13 +282,17 @@ impl Mempool {
         wrapper
     }
 
+    fn effective_fee(&self, wrapper: &Wrapper) -> u128 {
+        wrapper.body().fee().min(self.ceiling)
+    }
+
     fn lowest_fee_normal(&self) -> Option<(usize, u128)> {
         self.pending
             .iter()
             .enumerate()
             .filter(|(_, w)| !is_priority(w))
-            .min_by(|a, b| a.1.body().fee().cmp(&b.1.body().fee()))
-            .map(|(index, w)| (index, w.body().fee()))
+            .min_by(|a, b| self.effective_fee(a.1).cmp(&self.effective_fee(b.1)))
+            .map(|(index, w)| (index, self.effective_fee(w)))
     }
 
     fn lowest_fee_priority(&self) -> Option<(usize, u128)> {
@@ -291,8 +300,8 @@ impl Mempool {
             .iter()
             .enumerate()
             .filter(|(_, w)| is_priority(w))
-            .min_by(|a, b| a.1.body().fee().cmp(&b.1.body().fee()))
-            .map(|(index, w)| (index, w.body().fee()))
+            .min_by(|a, b| self.effective_fee(a.1).cmp(&self.effective_fee(b.1)))
+            .map(|(index, w)| (index, self.effective_fee(w)))
     }
 
     fn duplicate_mint(&self, incoming: &Wrapper) -> bool {
@@ -366,7 +375,7 @@ impl Mempool {
                 return Ok(());
             }
             match self.lowest_fee_priority() {
-                Some((index, fee)) if fee < incoming.body().fee() => {
+                Some((index, fee)) if fee < self.effective_fee(incoming) => {
                     self.remove_at(index);
                     Ok(())
                 }
@@ -378,7 +387,7 @@ impl Mempool {
                 return Ok(());
             }
             match self.lowest_fee_normal() {
-                Some((index, fee)) if fee < incoming.body().fee() => {
+                Some((index, fee)) if fee < self.effective_fee(incoming) => {
                     self.remove_at(index);
                     Ok(())
                 }
@@ -408,6 +417,7 @@ impl Mempool {
         if !chain_ok(&wrapper, fee_params) {
             return Err(Reject::WrongChain);
         }
+        self.ceiling = u128::from(fee_params.ceiling_fee());
         let id = wrapper.id();
         if self.ids.contains(&id) {
             return Ok(Admitted::Known);
@@ -525,6 +535,7 @@ impl Mempool {
         verify_cores: usize,
     ) -> Vec<Wrapper> {
         let verified = verify_signatures(ledger, &batch, verify_cores);
+        self.ceiling = u128::from(fee_params.ceiling_fee());
         let mut admitted = Vec::new();
         for (index, wrapper) in batch.into_iter().enumerate() {
             if !chain_ok(&wrapper, fee_params) {
@@ -610,7 +621,7 @@ impl Mempool {
 
     pub fn candidates(&self) -> Vec<Wrapper> {
         let mut ordered = self.pending.clone();
-        ordered.sort_by(candidate_order);
+        ordered.sort_by(|a, b| candidate_order(a, b, self.ceiling));
         ordered
     }
 
@@ -630,9 +641,9 @@ impl Mempool {
             return self.candidates();
         }
         let mut refs: Vec<&Wrapper> = self.pending.iter().collect();
-        refs.select_nth_unstable_by(limit, |a, b| candidate_order(a, b));
+        refs.select_nth_unstable_by(limit, |a, b| candidate_order(a, b, self.ceiling));
         refs.truncate(limit);
-        refs.sort_by(|a, b| candidate_order(a, b));
+        refs.sort_by(|a, b| candidate_order(a, b, self.ceiling));
         refs.into_iter().cloned().collect()
     }
 
@@ -669,6 +680,35 @@ mod tests {
         let call = transfer_call(to, amount);
         let body = Body::new(from.address(), nonce, TRANSFER_METER, fee, call);
         sign(from, &body)
+    }
+
+    #[test]
+    fn a_bid_above_the_ceiling_buys_no_eviction_power() {
+        let params = FeeParams::devnet();
+        let ceiling = u128::from(params.ceiling_fee());
+        let mut ledger = Ledger::new();
+        // A single normal slot, so admitting a second normal transaction forces an eviction test.
+        let mut pool = Mempool::with_limits(1, 100, 0);
+
+        let alice = keypair(1);
+        fund(&mut ledger, &alice, 1_000_000_000);
+        let at_ceiling = signed_transfer(&alice, &keypair(9).address(), 100, 0, ceiling);
+        assert!(matches!(
+            pool.admit(at_ceiling, &ledger, &params),
+            Ok(Admitted::Fresh)
+        ));
+
+        // Bob bids far above the ceiling. His charge is capped at the ceiling, so his effective fee
+        // ties Alice's and he must not be able to evict her at the same real cost.
+        let bob = keypair(2);
+        fund(&mut ledger, &bob, 1_000_000_000);
+        let above_ceiling = signed_transfer(&bob, &keypair(9).address(), 100, 0, u128::MAX);
+        assert_eq!(
+            pool.admit(above_ceiling, &ledger, &params),
+            Err(Reject::PoolFull),
+            "a fee above the ceiling wins no priority it never pays for"
+        );
+        assert_eq!(pool.pending_len(), 1, "the ceiling fee transaction stays");
     }
 
     #[test]
