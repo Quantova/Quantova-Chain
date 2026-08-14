@@ -1,0 +1,10 @@
+# Copyright 2026 Quantova Inc
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "qtv-wipe"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "In stack secret memory wiping. A volatile write followed by a compiler fence clears a byte buffer so the optimizer cannot elide the wipe, keeping a seed or a secret key out of freed memory. It carries the one justified unsafe block for that write and no dependency beyond the standard library, so the safe chain crates that forbid unsafe reach the wipe through this crate rather than an outside one."
