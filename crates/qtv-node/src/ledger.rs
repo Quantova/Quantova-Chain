@@ -1902,6 +1902,9 @@ impl Ledger {
         if qtv_staking::in_blackout(now_day, self.stake_mainnet_start()) {
             return 0;
         }
+        if self.is_stake_banned(id) || self.is_gov_blacklisted(id) {
+            return 0;
+        }
         let stake = match self.stake_bond(id) {
             Some(bond) => bond.amount,
             None => return 0,
@@ -3853,6 +3856,19 @@ mod stake_state_tests {
         assert_eq!(l.balance(&addr), emission);
         assert_eq!(l.claim_reward(&addr, 400 + 365), 0);
         assert_eq!(l.claimable_reward(&addr, 400 + 365 + 1_000), 0);
+    }
+
+    #[test]
+    fn a_gov_blacklisted_validator_accrues_nothing_and_does_not_drain_the_pool() {
+        let mut l = Ledger::new();
+        let id = [77u8; 32];
+        let addr = qtv_idfmt::render_address(&id).unwrap();
+        l.seed_stake_pool(700_000 * 1_000_000);
+        l.seed_validator_bond(&addr, 2_000 * 1_000_000);
+        l.set_stake_mainnet_start(0);
+        l.set_gov_blacklisted(&id);
+        assert_eq!(l.accrue_reward(&addr, 400), 0);
+        assert_eq!(l.stake_pool(), 700_000 * 1_000_000);
     }
 
     #[test]
