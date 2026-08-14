@@ -170,7 +170,7 @@ impl Encode for RewardBook {
 impl Decode for RewardBook {
     fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
         let count = u64::decode(decoder)?;
-        let mut tranches = Vec::with_capacity(count as usize);
+        let mut tranches = Vec::new();
         for _ in 0..count {
             tranches.push(qtv_staking::RewardTranche::decode(decoder)?);
         }
