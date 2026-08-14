@@ -3554,6 +3554,48 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn collapsing_the_live_electorate_after_a_minority_vote_does_not_lower_the_bar() {
+        let mut l = Ledger::new();
+        let whale = gov_addr(70);
+        l.seed_validator_bond(&whale, 10_000_000 * 1_000_000);
+        let action = qtv_governance::Action::Parameter {
+            key: b"price".to_vec(),
+            value: 70_000_000u128.to_le_bytes().to_vec(),
+        };
+        let proposer = gov_addr(71);
+        fund(&mut l, &proposer, 5_000_000 * 1_000_000);
+        let id = l
+            .gov_propose(&proposer, qtv_governance::Track::ChainUpgrade, action, 0)
+            .unwrap();
+
+        let attacker = gov_addr(72);
+        fund(&mut l, &attacker, 3_000_000 * 1_000_000);
+        l.seed_validator_bond(&attacker, 3_000_000 * 1_000_000);
+        assert!(l.gov_vote(
+            &attacker,
+            id,
+            true,
+            qtv_governance::Conviction::Liquid,
+            3_000_000 * 1_000_000,
+            0
+        ));
+
+        l.slash_stake(&whale, qtv_staking::Fault::Attributable);
+        assert!(l.total_staked() <= 3_000_000 * 1_000_000, "the live stake collapsed");
+        assert!(
+            l.gov_referendum(id).unwrap().tally.approved(u128::from(l.total_staked())),
+            "against the collapsed live electorate the minority would have carried"
+        );
+
+        let close = 14 * 86_400 + 1;
+        assert_eq!(
+            l.gov_conclude(id, close),
+            Some(qtv_governance::Status::Rejected),
+            "the max of the propose snapshot and the live total keeps the bar at the larger electorate"
+        );
+    }
+
+    #[test]
     fn a_guardian_caucus_freezes_ahead_of_a_vote_and_a_vote_reverses_it() {
         let mut l = Ledger::new();
         l.seed_validator_bond(&gov_addr(62), 10_000 * 1_000_000);
@@ -3902,17 +3944,14 @@ mod stake_state_tests {
         l.seed_stake_pool(700_000 * 1_000_000);
         l.seed_validator_bond(&addr, 2_000 * 1_000_000);
 
-        // Nothing pays before mainnet starts; the whole first year is a blackout.
         assert_eq!(l.accrue_reward(&addr, 400), 0);
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000);
 
         l.set_stake_mainnet_start(0);
-        // A sole staker past the blackout earns the whole emergent session emission, no rate needed.
         let emission = qtv_staking::SESSION_EMISSION;
         assert_eq!(l.accrue_reward(&addr, 400), emission);
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000 - emission);
 
-        // The reward is locked for twelve months, then fully claimable in one go.
         assert_eq!(l.claimable_reward(&addr, 400 + 364), 0);
         assert_eq!(l.claimable_reward(&addr, 400 + 365), emission);
         assert_eq!(l.claim_reward(&addr, 400 + 365), emission);
@@ -3944,7 +3983,6 @@ mod stake_state_tests {
         let emission = qtv_staking::SESSION_EMISSION;
         assert_eq!(l.accrue_reward(&addr, 400), emission);
 
-        // Accrual pays a locked tranche, not a spendable balance; only a reward event marks it.
         assert_eq!(l.balance(&addr), 0);
         let after_accrual: Vec<&str> = l.side_events().iter().map(SideEvent::kind).collect();
         assert!(after_accrual.contains(&"reward"));
@@ -3971,12 +4009,10 @@ mod stake_state_tests {
             other => panic!("expected a reward_claim, got {other:?}"),
         }
 
-        // The claim records no committed block event, so the header event root is unmoved by it.
         let leaves_after: Vec<Vec<u8>> = l.block_events().iter().map(BlockEvent::encode).collect();
         assert_eq!(l.block_events().len(), committed_before);
         assert_eq!(event_root_before, qtv_block::event_root(&leaves_after));
 
-        // Recording further side events touches neither the state root nor the event root.
         let q_fixed = l.q_root();
         for tag in 0..8u8 {
             l.record_side_event(SideEvent::Freeze { target: gov_addr(tag) });
@@ -3988,7 +4024,6 @@ mod stake_state_tests {
 
     #[test]
     fn a_slash_side_event_names_its_supply_disposition_and_the_field_stays_off_every_root() {
-        // A validator-set slash burns the bond and lowers the money supply.
         let mut burn = Ledger::new();
         let v1 = qtv_idfmt::render_address(&[31u8; 32]).unwrap();
         burn.credit_supply(5_000 * 1_000_000);
@@ -4017,7 +4052,6 @@ mod stake_state_tests {
             other => panic!("expected a slash, got {other:?}"),
         }
 
-        // A staking slash moves the taken amount into the treasury, leaving the supply untouched.
         let mut treasury = Ledger::new();
         let v2 = qtv_idfmt::render_address(&[31u8; 32]).unwrap();
         treasury.credit_supply(5_000 * 1_000_000);
@@ -4048,8 +4082,6 @@ mod stake_state_tests {
             other => panic!("expected a slash, got {other:?}"),
         }
 
-        // Both paths slash the same address and amount, so the committed QSLH leaf is byte-identical:
-        // the supply disposition rides only the node-local side event, never a committed root.
         assert_eq!(
             burn_leaf, treasury_leaf,
             "the disposition never enters the committed slash event",
@@ -4112,8 +4144,6 @@ mod stake_state_tests {
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000);
 
         l.settle_session(546, 5);
-        // Past the blackout the sole validator accrues the whole emergent session emission, which is
-        // then fully claimable twelve months later.
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000 - qtv_staking::SESSION_EMISSION);
         assert_eq!(l.claimable_reward(&v, 546 + 365), qtv_staking::SESSION_EMISSION);
     }
@@ -4829,7 +4859,6 @@ mod stake_state_tests {
         let holder = [0xEEu8; 32];
         l.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
 
-        // the mint predates any vault, so supply exists but no vault records custody
         assert!(l.bridge_mint(&crate::bridge::Fact {
             version: crate::bridge::FACT_VERSION,
             source_chain: 1,
@@ -4873,7 +4902,6 @@ mod stake_state_tests {
         assert_eq!(l.bridge_vault_custody(&vault, &asset), 0);
         assert_eq!(l.bridged_supply(&asset), 1_000, "the refused settle moves no supply");
 
-        // a refund slash cannot re-issue wrapped beyond the custody backing it
         l.seed_outstanding_burn(&[0x08u8; 32], &asset, 500, &holder);
         let slash = crate::bridge::ExitFact {
             version: crate::bridge::EXIT_FACT_VERSION,
@@ -5391,36 +5419,20 @@ mod stake_state_tests {
     }
 }
 
-/// The source marker a native economic event carries in the block event log. Contract
-/// effects carry their contract address in this field, so a native transition carries this
-/// reserved marker instead and an indexer separates the native economy from contract
-/// effects by it, then reads the kind from the selector. Native events record into the same
-/// log the contract effects use, so the header event root covers the native economy with no
-/// change to the event root function.
 pub const NATIVE_EVENT_SOURCE: &str = "qtv/native";
 
-/// A slash that removed the amount from the money supply.
 pub const SLASH_DISPOSITION_BURN: &str = "burn";
-/// A slash that moved the amount from the bond into the treasury, supply unchanged.
 pub const SLASH_DISPOSITION_TREASURY: &str = "treasury";
 
-/// A plain value send that moved an amount and paid a fee.
 pub const EVENT_TRANSFER: [u8; 4] = *b"QXFR";
-/// A stake bond that locked an amount into a validator bond.
 pub const EVENT_BOND: [u8; 4] = *b"QBND";
-/// A stake unbond that returned a withdrawn bond to a spendable balance.
 pub const EVENT_UNBOND: [u8; 4] = *b"QUBD";
-/// A slash that removed an amount from a validator bond.
 pub const EVENT_SLASH: [u8; 4] = *b"QSLH";
-/// A mint that raised the supply and credited a target.
 pub const EVENT_MINT: [u8; 4] = *b"QMNT";
-/// A staking reward the pool paid out to a validator.
 pub const EVENT_REWARD: [u8; 4] = *b"QRWD";
 pub const EVENT_BRIDGE_MINT: [u8; 4] = *b"QBMT";
 pub const EVENT_BRIDGE_BURN: [u8; 4] = *b"QBBN";
-// exit settled against a proven foreign payout, no chain side move
 pub const EVENT_BRIDGE_SETTLE: [u8; 4] = *b"QBSE";
-// exit slashed after the window, beneficiary paid from the pool custody
 pub const EVENT_BRIDGE_SLASH: [u8; 4] = *b"QBSL";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5439,10 +5451,6 @@ impl BlockEvent {
         encoder.into_bytes()
     }
 
-    /// A native economic event, shaped exactly like a contract effect event so the existing
-    /// event root function covers it unchanged. The reserved native source stands in for the
-    /// contract address, the kind selector names the transition, and the data holds the
-    /// parties and amount.
     pub fn native(kind: [u8; 4], data: Vec<u8>) -> Self {
         BlockEvent {
             contract: NATIVE_EVENT_SOURCE.to_string(),
@@ -5691,10 +5699,6 @@ pub struct Ledger {
     side_events: Vec<SideEvent>,
     round_proposer: Option<String>,
     execution_height: u64,
-    // An undo log of prior leaf images, present only while a transition applies under
-    // apply_atomic. Every leaf write records its prior value here so a fault partway through
-    // a transition rolls the leaves back to the pre transition image. It is an internal
-    // mechanism only and never enters the state root, the block encoding, or the wire.
     journal: Option<Vec<(Key, Option<Vec<u8>>)>>,
 }
 
@@ -5722,9 +5726,6 @@ impl Ledger {
         }
     }
 
-    /// Write a leaf, recording its prior image in the undo log when a transition is applying
-    /// under apply_atomic. Every leaf mutation in the native path funnels through here so a
-    /// faulted transition can be rolled back to exactly the state it began in.
     fn write_leaf(&mut self, key: Key, value: Vec<u8>) {
         if self.journal.is_some() {
             let prior = self.trie.get(&key).map(|bytes| bytes.to_vec());
@@ -5734,8 +5735,6 @@ impl Ledger {
         trie.insert(key, value);
     }
 
-    /// Erase a leaf, recording its prior image in the undo log when a transition is applying
-    /// under apply_atomic. Returns whether a leaf was present, matching the trie.
     fn erase_leaf(&mut self, key: &Key) -> bool {
         if self.journal.is_some() {
             let prior = self.trie.get(key).map(|bytes| bytes.to_vec());
@@ -5745,12 +5744,6 @@ impl Ledger {
         trie.remove(key)
     }
 
-    /// Apply a native transition as an all or nothing unit. A panic partway through leaves no
-    /// partial write: the undo log restores every touched leaf to its pre transition image and
-    /// any events the transition recorded are dropped, matching the atomic rollback the VM
-    /// path already has for a faulted call. A clean rejection returns false with no writes,
-    /// exactly as the hand ordered check before write path already intends. This is an
-    /// internal firewall only and moves neither the state root nor the block encoding.
     pub(crate) fn apply_atomic<F>(&mut self, f: F) -> bool
     where
         F: FnOnce(&mut Ledger) -> bool,
@@ -5818,8 +5811,6 @@ impl Ledger {
         self.block_events.push(BlockEvent::native(kind, data));
     }
 
-    /// Record a plain value send into the block event log. The apply path drives this at the
-    /// point a transfer moves an amount, so the header event root follows every native send.
     pub(crate) fn record_transfer_event(&mut self, from: &str, to: &str, amount: u64, fee: u64) {
         let mut encoder = Encoder::new();
         encoder.put_bytes(from.as_bytes());
@@ -5963,9 +5954,6 @@ impl Ledger {
             .expect("a state root is the fixed digest length")
     }
 
-    /// The number of state bytes an address occupies, its account record plus any contract
-    /// code and storage held under it. The rent exempt deposit is proportional to it, so a
-    /// larger footprint costs proportionally more to keep permanently.
     pub fn account_footprint(&self, address: &str) -> usize {
         let mut bytes = to_bytes(&self.account(address)).len();
         if let Some(id) = address_id(address) {
@@ -5977,9 +5965,6 @@ impl Ledger {
         bytes
     }
 
-    /// The refundable storage deposit an address must hold to be rent exempt. It is
-    /// proportional to the address's state footprint. An address holding at least this much
-    /// is never rent charged and its deposit stays its own, withdrawable in full.
     pub fn rent_exempt_minimum(&self, address: &str) -> u64 {
         rent_exempt_minimum_for(self.account_footprint(address))
     }
@@ -5988,10 +5973,6 @@ impl Ledger {
         self.balance(address) >= self.rent_exempt_minimum(address)
     }
 
-    /// Charge rent to an address that holds less than its rent exempt deposit, proportional
-    /// to its footprint and the periods elapsed, never more than its balance. A rent exempt
-    /// address is untouched. An address the charge empties is reaped, freeing its slot. The
-    /// rent is burned from supply, so a reaped address returns nothing to anyone.
     pub fn charge_rent(&mut self, address: &str, periods: u64) -> u64 {
         let footprint = self.account_footprint(address);
         let mut account = self.account(address);
@@ -6014,9 +5995,6 @@ impl Ledger {
         charged
     }
 
-    /// Reap an empty address, removing its account record and any contract code and storage
-    /// from the trie so the slot frees. A funded address and a reserved system pot are never
-    /// reaped. Reaping credits no one.
     pub fn reap(&mut self, address: &str) -> bool {
         let account = self.account(address);
         if account.balance != 0 {
