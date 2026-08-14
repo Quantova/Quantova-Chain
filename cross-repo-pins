@@ -15,4 +15,4 @@
 #
 # QVM is now anchored to an immutable commit rather than a tag as well, carrying the effects memory
 # bound and the access list verification bound. It is pinned by rev in the qtv-node manifest and
-# recorded in the committed lockfile. For the record it is QVM at 94213d37df4bee940cac3a0a5468ccca42a125b6.
+# recorded in the committed lockfile. For the record it is QVM at 36329536940a917669e356535a459dbdf4db2463.
