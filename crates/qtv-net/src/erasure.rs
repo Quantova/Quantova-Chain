@@ -233,6 +233,9 @@ pub fn encode(data: &[u8], k: usize, n: usize) -> Result<Coded, Error> {
 }
 
 pub fn reconstruct(commitment: &Commitment, shards: &[Shard]) -> Result<Vec<u8>, Error> {
+    if commitment.k == 0 || commitment.n < commitment.k || commitment.n > MAX_SHARDS {
+        return Err(Error::Parameters);
+    }
     let k = commitment.k;
     let mut indices: Vec<usize> = Vec::with_capacity(k);
     let mut rows: Vec<&[u8]> = Vec::with_capacity(k);
@@ -552,5 +555,26 @@ mod tests {
         assert_eq!(encode(&[1, 2, 3], 0, 4).err(), Some(Error::Parameters));
         assert_eq!(encode(&[1, 2, 3], 4, 3).err(), Some(Error::Parameters));
         assert_eq!(encode(&[1, 2, 3], 4, 300).err(), Some(Error::Parameters));
+    }
+
+    #[test]
+    fn reconstruct_fails_closed_on_an_unbounded_commitment() {
+        let hostile = Commitment {
+            root: [0u8; DIGEST_LEN],
+            k: usize::MAX,
+            n: usize::MAX,
+            shard_len: 1,
+            data_len: 1,
+        };
+        assert_eq!(reconstruct(&hostile, &[]), Err(Error::Parameters));
+
+        let over_cap = Commitment {
+            root: [0u8; DIGEST_LEN],
+            k: 2,
+            n: MAX_SHARDS + 1,
+            shard_len: 1,
+            data_len: 1,
+        };
+        assert_eq!(reconstruct(&over_cap, &[]), Err(Error::Parameters));
     }
 }
