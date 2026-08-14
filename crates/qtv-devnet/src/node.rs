@@ -1330,6 +1330,12 @@ impl DevNode {
         records: &[ViewChange],
         view: View,
     ) -> Option<Vec<ViewChange>> {
+        // A justification carries at most one view change per committee member, so a set larger
+        // than the committee cannot be valid. Reject it before verifying any signature, so a
+        // padded set cannot amplify the per record lattice verify into a consensus thread stall.
+        if records.len() > selection.commitment.len() {
+            return None;
+        }
         let mut seen: Vec<u64> = Vec::new();
         let mut valid: Vec<ViewChange> = Vec::new();
         for record in records {
@@ -1445,9 +1451,12 @@ impl DevNode {
         if attestation.height != self.height {
             return;
         }
-        self.watch_for_equivocation(&attestation);
         if let Ok(selection) = self.select() {
             if self.verify_attestation(&selection, &attestation) {
+                // Watch only a verified attestation. A genuine equivocator's two conflicting
+                // attestations are each validly signed, so both still reach the detector, while a
+                // garbage signed attestation can no longer seed a false entry for someone else's id.
+                self.watch_for_equivocation(&attestation);
                 self.record_attestation(&attestation);
             }
         }
