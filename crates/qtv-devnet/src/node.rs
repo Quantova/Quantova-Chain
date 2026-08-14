@@ -173,6 +173,9 @@ pub enum Fatal {
         finalized: [u8; 32],
         conflicting: [u8; 32],
     },
+    PersistFailed {
+        height: Height,
+    },
 }
 
 pub struct FinalizedBlock {
@@ -915,6 +918,11 @@ impl DevNode {
             .ok_or(RoundError::NotFinalized)?;
         let staged = self.staged.take().expect("the staged block is present");
         self.observe_finality(self.height, block.val);
+        if self.fatal.is_some() {
+            // observe_finality just recorded a conflicting finalization for this height. Stop before
+            // the conflicting state reaches the ledger or the disk. The driver halts on the fatal.
+            return Err(RoundError::NotFinalized);
+        }
 
         self.ledger = staged.ledger;
         let block_events = self.ledger.block_events().to_vec();
@@ -928,7 +936,15 @@ impl DevNode {
         let attesters = certificate.attesters();
         let cert_slot = crate::wire::certificate_to_bytes(&certificate);
         let chain_block = ChainBlock::new(staged.header, cert_slot, staged.body);
-        self.persist(&chain_block)?;
+        if let Err(err) = self.persist(&chain_block) {
+            // The block did not reach the disk, so the committed height now trails this in memory
+            // height. Halt cleanly with a clear reason rather than run on advanced but uncommitted
+            // state. A restart reconciles the ledger back to the last committed height.
+            self.fatal = Some(Fatal::PersistFailed {
+                height: self.height,
+            });
+            return Err(err);
+        }
         self.archive_burn_block(&chain_block);
 
         self.beacon = self
