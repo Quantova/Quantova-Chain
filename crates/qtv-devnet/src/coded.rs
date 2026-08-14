@@ -293,7 +293,6 @@ impl ProposalAssembler {
         }
         let overhead = if is_new { self.pending[&key].overhead } else { 0 };
         let weight = piece_weight(&shard, &proof) + overhead;
-        // a piece that can never fit is refused before it evicts anyone, so one oversized frame cannot flush the buffer
         if weight > self.max_bytes {
             if is_new {
                 self.pending.remove(&key);
@@ -797,7 +796,6 @@ mod tests {
         use qtv_sampler::onetime::{MerklePath, PREIMAGE_BYTES};
         use qtv_sampler::sortition::Credential;
 
-        // a locked block body that dwarfs a single shard piece, unverified and stored as is
         let block = sample_block(400);
         let locked = LockedBlock {
             header: block.header().clone(),
@@ -840,7 +838,6 @@ mod tests {
         let jbytes = crate::wire::coded_overhead(&base.header, &base.commitment, &heavy);
         assert!(jbytes > piece * 8, "the justification must dominate a shard piece");
 
-        // room for one heavy entry plus a few bare pieces, so an uncounted justification blows the ceiling
         let budget = jbytes + piece * 4;
         let mut assembler = ProposalAssembler::with_byte_budget(budget);
         for view in 0..48u64 {
