@@ -443,6 +443,7 @@ const GOV_GUARDIAN_EPOCH_TAG: &[u8] = b"qtv/gov/guardian/epoch";
 const GOV_GUARDIAN_FREEZE_TARGETS_TAG: &[u8] = b"qtv/gov/guardian/freeze/targets";
 const GUARDIAN_FREEZE_WINDOW_SECONDS: u64 = 7 * 86_400;
 const GOV_RECEIPT_TAG: &[u8] = b"qtv/gov/receipt/";
+const GOV_ELECTORATE_TAG: &[u8] = b"qtv/gov/electorate/";
 
 const BRIDGE_FREEZE_TAG: &[u8] = b"qtv/bridge/freeze";
 const BRIDGE_LAST_LIFT_TAG: &[u8] = b"qtv/bridge/lastlift";
@@ -497,6 +498,13 @@ fn gov_referendum_key(id: u64) -> Key {
 fn gov_action_key(id: u64) -> Key {
     let mut input = Vec::with_capacity(GOV_ACTION_TAG.len() + 8);
     input.extend_from_slice(GOV_ACTION_TAG);
+    input.extend_from_slice(&id.to_le_bytes());
+    sha3::sha3_256(&input)
+}
+
+fn gov_electorate_key(id: u64) -> Key {
+    let mut input = Vec::with_capacity(GOV_ELECTORATE_TAG.len() + 8);
+    input.extend_from_slice(GOV_ELECTORATE_TAG);
     input.extend_from_slice(&id.to_le_bytes());
     sha3::sha3_256(&input)
 }
@@ -2268,6 +2276,17 @@ impl Ledger {
         self.write_leaf(gov_action_key(id), Vec::new());
     }
 
+    fn gov_electorate(&self, id: u64) -> Option<u64> {
+        self.trie
+            .get(&gov_electorate_key(id))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical electorate snapshot"))
+    }
+
+    fn set_gov_electorate(&mut self, id: u64, amount: u64) {
+        self.write_leaf(gov_electorate_key(id), to_bytes(&amount));
+    }
+
     pub fn gov_receipt(&self, id: u64) -> Option<EnactmentReceipt> {
         self.trie
             .get(&gov_receipt_key(id))
@@ -2337,6 +2356,7 @@ impl Ledger {
         let referendum = Referendum::open(id, track, proposer_id.to_vec(), now);
         self.set_gov_referendum(id, &referendum);
         self.set_gov_action(id, &action);
+        self.set_gov_electorate(id, self.total_staked());
         self.set_gov_next_id(id + 1);
         self.record_side_event(SideEvent::GovPropose {
             referendum: id,
@@ -2415,7 +2435,8 @@ impl Ledger {
         if referendum.status != Status::Deciding {
             return Some(referendum.status);
         }
-        let electorate = u128::from(self.total_staked());
+        let live = self.total_staked();
+        let electorate = u128::from(self.gov_electorate(referendum_id).unwrap_or(live).max(live));
         let status = referendum.resolve(now, electorate);
         if status == Status::Deciding {
             return Some(status);
@@ -3564,6 +3585,41 @@ mod stake_state_tests {
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         l.gov_enact(id, 2 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert!(!l.is_frozen(&target), "the full vote reversed the emergency freeze");
+    }
+
+    #[test]
+    fn a_voter_cannot_shrink_the_electorate_by_unbonding_after_a_vote() {
+        let mut l = Ledger::new();
+        let attacker = gov_addr(1);
+        fund(&mut l, &attacker, 3_000_000 * 1_000_000);
+        l.seed_validator_bond(&attacker, 30_000 * 1_000_000);
+        l.seed_validator_bond(&gov_addr(2), 70_000 * 1_000_000);
+
+        let action = qtv_governance::Action::Parameter {
+            key: b"price".to_vec(),
+            value: 70_000_000u128.to_le_bytes().to_vec(),
+        };
+        let id = l
+            .gov_propose(&attacker, qtv_governance::Track::ChainUpgrade, action, 0)
+            .unwrap();
+        assert!(l.gov_vote(
+            &attacker,
+            id,
+            true,
+            qtv_governance::Conviction::Liquid,
+            30_000 * 1_000_000,
+            0
+        ));
+
+        assert!(l.request_stake_exit(&attacker, 90));
+        assert!(l.withdraw_stake(&attacker, 111));
+        assert_eq!(l.total_staked(), 70_000 * 1_000_000);
+
+        assert_eq!(
+            l.gov_conclude(id, 200 * 86_400),
+            Some(qtv_governance::Status::Rejected),
+            "a post vote unbond must not shrink the electorate into an approval"
+        );
     }
 
     #[test]
