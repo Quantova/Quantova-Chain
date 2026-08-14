@@ -63,6 +63,22 @@ impl<T: Zeroize> core::ops::DerefMut for Zeroizing<T> {
     }
 }
 
+impl<T: Zeroize + Clone> Clone for Zeroizing<T> {
+    fn clone(&self) -> Self {
+        Zeroizing {
+            value: self.value.clone(),
+        }
+    }
+}
+
+impl<T: Zeroize + PartialEq> PartialEq for Zeroizing<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl<T: Zeroize + Eq> Eq for Zeroizing<T> {}
+
 impl<T: Zeroize> core::fmt::Debug for Zeroizing<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("Zeroizing(redacted)")
