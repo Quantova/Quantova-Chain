@@ -5,7 +5,7 @@
 #![forbid(unsafe_code)]
 
 use qtv_crypto::{ml_dsa, sha3, slh_dsa};
-use zeroize::Zeroize;
+use qtv_wipe::Zeroize;
 
 pub const SCHEME_LATTICE: u8 = 1;
 

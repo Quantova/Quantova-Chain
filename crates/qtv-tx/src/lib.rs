@@ -7,7 +7,7 @@
 use qtv_account::Account;
 use qtv_codec::{to_bytes, Encode, Encoder};
 use qtv_crypto::{ml_dsa, sha3, slh_dsa};
-use zeroize::Zeroizing;
+use qtv_wipe::Zeroizing;
 
 pub const SCHEME_LATTICE: u8 = qtv_account::SCHEME_LATTICE;
 
