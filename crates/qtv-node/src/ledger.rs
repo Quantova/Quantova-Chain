@@ -55,7 +55,12 @@ impl Decode for Account {
 }
 
 const ACCOUNT_TAG: &[u8] = b"qtv/account/";
-const ACCOUNT_UNPARSED_TAG: &[u8] = b"qtv/account/unparsed/";
+const ACCOUNT_UNPARSED_TAG: &[u8] = b"qtv/account-unparsed/";
+const _: () = assert!(
+    ACCOUNT_TAG.len() <= ACCOUNT_UNPARSED_TAG.len()
+        && ACCOUNT_TAG[ACCOUNT_TAG.len() - 1] != ACCOUNT_UNPARSED_TAG[ACCOUNT_TAG.len() - 1],
+    "the unparsed account tag must not nest under the parsed account tag"
+);
 
 pub(crate) fn state_key(address: &str) -> Key {
     match qtv_idfmt::parse_address(address) {
@@ -6050,6 +6055,34 @@ mod tests {
         let ledger = Ledger::new();
         assert_eq!(ledger.account(&address(0)), Account::default());
         assert_eq!(ledger.balance(&address(0)), 0);
+    }
+
+    #[test]
+    fn a_canonical_address_never_shares_a_leaf_with_the_unparsed_fallback() {
+        let tail = b"hello-not-an-address!!!";
+        assert_eq!(tail.len(), 23);
+        let mut payload = Vec::with_capacity(32);
+        payload.extend_from_slice(b"unparsed/");
+        payload.extend_from_slice(tail);
+        assert_eq!(payload.len(), qtv_idfmt::DIGEST_LEN);
+
+        let canonical = qtv_idfmt::render_address(&payload).expect("a full payload renders");
+        assert_eq!(
+            qtv_idfmt::parse_address(&canonical).ok().as_deref(),
+            Some(payload.as_slice()),
+            "the crafted address is canonical and round trips"
+        );
+        let fallback = std::str::from_utf8(tail).expect("valid text");
+        assert!(
+            qtv_idfmt::parse_address(fallback).is_err(),
+            "the fallback string is not a parseable address"
+        );
+
+        assert_ne!(
+            state_key(&canonical),
+            state_key(fallback),
+            "a canonical account and an unparsed fallback share a state leaf"
+        );
     }
 
     #[test]
