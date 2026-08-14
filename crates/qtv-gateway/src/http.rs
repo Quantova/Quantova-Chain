@@ -221,19 +221,23 @@ fn handle_connection(mut stream: TcpStream, requests: Sender<GatewayCall>) -> Io
         return write_error(&mut stream, 413, "too_large", "the request body is too large");
     }
 
-    let mut body = vec![0u8; content_length];
-    let mut filled = 0usize;
-    while filled < content_length {
+    // Grow the buffer only as bytes actually arrive rather than pre-sizing to the declared
+    // Content-Length, so a tiny request cannot force a full MAX_BODY zeroed allocation it never
+    // fills. The initial capacity is capped, and the loop still stops at content_length.
+    let mut body = Vec::with_capacity(content_length.min(64 * 1024));
+    let mut chunk = [0u8; 8192];
+    while body.len() < content_length {
         if Instant::now() >= deadline {
             return write_error(&mut stream, 408, "timeout", "the request body did not arrive in time");
         }
-        match reader.read(&mut body[filled..]) {
+        let want = (content_length - body.len()).min(chunk.len());
+        match reader.read(&mut chunk[..want]) {
             Ok(0) => break,
-            Ok(n) => filled += n,
+            Ok(n) => body.extend_from_slice(&chunk[..n]),
             Err(e) => return Err(e),
         }
     }
-    if filled < content_length {
+    if body.len() < content_length {
         return write_error(&mut stream, 400, "bad_request", "the request body was shorter than declared");
     }
     let body_text = String::from_utf8_lossy(&body);
