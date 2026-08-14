@@ -477,6 +477,21 @@ fn encode_view_change(encoder: &mut Encoder, record: &ViewChange) {
     }
 }
 
+pub(crate) fn coded_overhead(
+    header: &Header,
+    commitment: &Commitment,
+    justification: &[ViewChange],
+) -> usize {
+    let mut encoder = Encoder::new();
+    header.encode(&mut encoder);
+    encode_commitment(&mut encoder, commitment);
+    encoder.put_u64(justification.len() as u64);
+    for record in justification {
+        encode_view_change(&mut encoder, record);
+    }
+    encoder.into_bytes().len()
+}
+
 fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeError> {
     let height = decoder.get_u64()?;
     let target_view = decoder.get_u64()?;
