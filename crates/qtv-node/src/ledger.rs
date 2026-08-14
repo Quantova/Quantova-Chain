@@ -855,11 +855,8 @@ impl Ledger {
         }
         let mut account = self.account(address);
         let updated = i128::from(account.balance) + delta;
-        account.balance = if updated < 0 {
-            0
-        } else {
-            u64::try_from(updated).unwrap_or(u64::MAX)
-        };
+        assert!(updated >= 0, "balance delta underflows the account");
+        account.balance = u64::try_from(updated).expect("balance delta overflows a u64 balance");
         self.set_account(address, &account);
     }
 
