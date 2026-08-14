@@ -28,30 +28,42 @@ impl Zeroize for Vec<u8> {
     }
 }
 
-pub struct Zeroizing<T: AsMut<[u8]>> {
+impl Zeroize for String {
+    fn zeroize(&mut self) {
+        unsafe { self.as_mut_vec() }.zeroize();
+    }
+}
+
+pub struct Zeroizing<T: Zeroize> {
     value: T,
 }
 
-impl<T: AsMut<[u8]>> Zeroizing<T> {
+impl<T: Zeroize> Zeroizing<T> {
     pub fn new(value: T) -> Self {
         Zeroizing { value }
     }
 }
 
-impl<T: AsMut<[u8]>> Drop for Zeroizing<T> {
+impl<T: Zeroize> Drop for Zeroizing<T> {
     fn drop(&mut self) {
-        self.value.as_mut().zeroize();
+        self.value.zeroize();
     }
 }
 
-impl<T: AsMut<[u8]>> core::ops::Deref for Zeroizing<T> {
+impl<T: Zeroize> core::ops::Deref for Zeroizing<T> {
     type Target = T;
     fn deref(&self) -> &T {
         &self.value
     }
 }
 
-impl<T: AsMut<[u8]>> core::fmt::Debug for Zeroizing<T> {
+impl<T: Zeroize> core::ops::DerefMut for Zeroizing<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+}
+
+impl<T: Zeroize> core::fmt::Debug for Zeroizing<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("Zeroizing(redacted)")
     }
@@ -76,9 +88,17 @@ mod tests {
     }
 
     #[test]
-    fn a_wrapper_exposes_the_inner_bytes() {
-        let holder = Zeroizing::new([9u8; 16]);
-        assert_eq!(&holder[..], &[9u8; 16][..]);
+    fn a_string_clears_every_byte() {
+        let mut secret = "correct horse battery staple".to_string();
+        secret.zeroize();
+        assert!(secret.as_bytes().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn a_wrapper_exposes_and_fills_the_inner_bytes() {
+        let mut holder = Zeroizing::new([0u8; 4]);
+        holder.copy_from_slice(&[1, 2, 3, 4]);
+        assert_eq!(&holder[..], &[1u8, 2, 3, 4][..]);
     }
 
     #[test]
