@@ -78,6 +78,10 @@ pub fn execute_transfer(
     memory[..32].copy_from_slice(&sender_key);
     memory[32..].copy_from_slice(&recipient_key);
 
+    // This is the one fixed, trusted transfer program, so it takes the manifest free interpreter
+    // path. That path does not enforce declared slot isolation, so attacker supplied container
+    // bytecode must never reach here. Every deployed container runs through execute_contract_call,
+    // which sets a manifest and enforces storage isolation.
     let outcome = Interpreter::new(&code, &consts, meter_limit)
         .with_storage(storage)
         .with_memory(&memory)
