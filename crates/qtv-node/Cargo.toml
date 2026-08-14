@@ -25,7 +25,7 @@ qtv-state = { path = "../qtv-state" }
 qtv-staking = { path = "../qtv-staking" }
 qtv-governance = { path = "../qtv-governance" }
 qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "33c7e9395ad23f07019909470d319211213e904f" }
-qtv-vm = { git = "https://github.com/Quantova/QVM.git", rev = "94213d37df4bee940cac3a0a5468ccca42a125b6" }
+qtv-vm = { git = "https://github.com/Quantova/QVM.git", rev = "36329536940a917669e356535a459dbdf4db2463" }
 qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "e3eedc9d2562014c168e96db71bdde6766f4a4ce" }
 qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "e3eedc9d2562014c168e96db71bdde6766f4a4ce" }
 qtv-attest = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "e3eedc9d2562014c168e96db71bdde6766f4a4ce" }
