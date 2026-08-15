@@ -275,11 +275,7 @@ pub fn verify(wrapper: &Wrapper, public_key: &[u8]) -> bool {
             slh_dsa::verify(public_key, &digest, &wrapper.signature, &[])
         }
         #[cfg(feature = "fn-dsa")]
-        SCHEME_FALCON => {
-            #[allow(unused_imports)]
-            use qtv_crypto::fn_dsa;
-            unimplemented!("fn_dsa verification is gated until the standard is final")
-        }
+        SCHEME_FALCON => false,
         _ => false,
     }
 }
