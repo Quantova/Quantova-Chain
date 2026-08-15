@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const NATIVE_UNIT: u128 = 1_000_000;
 pub const MIN_STAKE: u64 = 2_000 * NATIVE_UNIT as u64;
 pub const STAKING_POOL: u64 = 685_714 * NATIVE_UNIT as u64;
+pub const MAX_SUPPLY: u64 = 4_571_429 * NATIVE_UNIT as u64;
 
 // The staking reward emission per session. The pool above is distributed pro rata by stake at the
 // founder preference rate of about 57,143 QTOV a year, roughly two sessions a year, so about 28,571 QTOV
