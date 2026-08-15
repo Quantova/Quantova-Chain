@@ -1455,12 +1455,9 @@ impl DevNode {
         if attestation.height != self.height {
             return;
         }
+        self.watch_for_equivocation(&attestation);
         if let Ok(selection) = self.select() {
             if self.verify_attestation(&selection, &attestation) {
-                // Watch only a verified attestation. A genuine equivocator's two conflicting
-                // attestations are each validly signed, so both still reach the detector, while a
-                // garbage signed attestation can no longer seed a false entry for someone else's id.
-                self.watch_for_equivocation(&attestation);
                 self.record_attestation(&attestation);
             }
         }
@@ -1530,20 +1527,23 @@ impl DevNode {
     /// different block is turned into attributable evidence a block can carry. A conflicting
     /// attestation in a higher signed view is a justified vote change and is never attributed.
     fn watch_for_equivocation(&mut self, attestation: &Attestation) {
-        let Some(offender) = self
-            .base_roster
-            .iter()
-            .find(|r| r.id == attestation.from)
-            .map(|r| r.bond_address.clone())
-        else {
+        let chain_id = self.consensus.chain_id();
+        let Some(offender) = self.base_roster.iter().find_map(|r| {
+            if r.id == attestation.from
+                && attestation.signature_verifies(chain_id, &r.attest_pk)
+            {
+                Some(r.bond_address.clone())
+            } else {
+                None
+            }
+        }) else {
             return;
         };
-        let view = attestation.view;
         self.evidence_pool.observe(
             &offender,
             attestation.height,
             attestation.slot,
-            view,
+            attestation.view,
             attestation.block.to_bytes(),
             attestation.sig.to_vec(),
         );
