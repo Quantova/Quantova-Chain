@@ -2527,6 +2527,9 @@ impl Ledger {
                 let mut account = self.account(&addr);
                 account.balance = account.balance.checked_add(*amount).ok_or(EnactError::Overflow)?;
                 let supply = self.total_supply().checked_add(*amount).ok_or(EnactError::Overflow)?;
+                if supply > qtv_staking::MAX_SUPPLY {
+                    return Err(EnactError::BadValue);
+                }
                 self.set_account(&addr, &account);
                 self.set_total_supply(supply);
                 self.record_mint_event(&addr, *amount);
@@ -5330,6 +5333,29 @@ mod stake_state_tests {
         let mut decoder = Decoder::new(&events[0].data);
         assert_eq!(decoder.get_bytes().unwrap(), target.as_bytes());
         assert_eq!(decoder.get_u64().unwrap(), 5_000);
+    }
+
+    #[test]
+    fn a_mint_is_capped_at_the_published_supply() {
+        let mut l = Ledger::new();
+        l.credit_supply(qtv_staking::MAX_SUPPLY - 1_000);
+        l.execute_action(
+            &Action::Mint { to: [63u8; 32].to_vec(), amount: 1_000 },
+            0,
+            TEST_CHAIN,
+        )
+        .expect("a mint up to the published ceiling is allowed");
+        assert_eq!(l.total_supply(), qtv_staking::MAX_SUPPLY);
+        assert_eq!(
+            l.execute_action(
+                &Action::Mint { to: [63u8; 32].to_vec(), amount: 1 },
+                0,
+                TEST_CHAIN,
+            ),
+            Err(EnactError::BadValue),
+            "a mint past the published ceiling is refused"
+        );
+        assert_eq!(l.total_supply(), qtv_staking::MAX_SUPPLY, "the refused mint left the supply at the cap");
     }
 
     #[test]
