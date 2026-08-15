@@ -975,6 +975,10 @@ impl Ledger {
                 disposition: SLASH_DISPOSITION_BURN,
             });
         }
+        let forfeited = self.stake_rewards_outstanding(&id);
+        if forfeited > 0 {
+            self.debit_supply(forfeited);
+        }
         self.clear_stake_rewards(&id);
         true
     }
@@ -1902,6 +1906,14 @@ impl Ledger {
 
     fn clear_stake_rewards(&mut self, id: &[u8; 32]) {
         self.write_leaf(stake_rewards_key(id), Vec::new());
+    }
+
+    fn stake_rewards_outstanding(&self, id: &[u8; 32]) -> u64 {
+        self.stake_rewards(id)
+            .tranches
+            .iter()
+            .map(|tranche| tranche.amount.saturating_sub(tranche.claimed))
+            .sum()
     }
 
     pub fn accrue_reward(&mut self, address: &str, now_day: u64) -> u64 {
@@ -2942,6 +2954,10 @@ impl Ledger {
         if let qtv_staking::Fault::Attributable = fault {
             self.clear_stake_bond(&id);
             self.set_stake_banned(&id);
+            let forfeited = self.stake_rewards_outstanding(&id);
+            if forfeited > 0 {
+                self.set_stake_treasury(self.stake_treasury() + forfeited);
+            }
             self.clear_stake_rewards(&id);
         } else {
             self.set_stake_bond(
@@ -4104,6 +4120,48 @@ mod stake_state_tests {
         assert_eq!(l.claimable_reward(&addr, 400 + 365), 0);
         assert_eq!(l.claim_reward(&addr, 400 + 365), 0);
         assert_eq!(l.balance(&addr), 0);
+    }
+
+    #[test]
+    fn a_slash_disposes_the_forfeited_reward_and_conserves_supply() {
+        let emission = qtv_staking::SESSION_EMISSION;
+        let pool = 700_000 * 1_000_000;
+        let bond = 2_000 * 1_000_000;
+
+        let mut burn = Ledger::new();
+        let v1 = qtv_idfmt::render_address(&[19u8; 32]).unwrap();
+        burn.credit_supply(pool + bond);
+        burn.seed_stake_pool(pool);
+        burn.seed_validator_bond(&v1, bond);
+        burn.set_stake_mainnet_start(0);
+        assert_eq!(burn.accrue_reward(&v1, 400), emission);
+        let supply_before = burn.total_supply();
+        assert!(burn.slash_validator(&v1));
+        assert_eq!(
+            burn.total_supply(),
+            supply_before - bond - emission,
+            "a burn slash removes the bond and the forfeited reward from the supply",
+        );
+
+        let mut treasury = Ledger::new();
+        let v2 = qtv_idfmt::render_address(&[20u8; 32]).unwrap();
+        treasury.credit_supply(pool + bond);
+        treasury.seed_stake_pool(pool);
+        treasury.seed_validator_bond(&v2, bond);
+        treasury.set_stake_mainnet_start(0);
+        assert_eq!(treasury.accrue_reward(&v2, 400), emission);
+        let supply_held = treasury.total_supply();
+        assert_eq!(treasury.slash_stake(&v2, qtv_staking::Fault::Attributable), bond);
+        assert_eq!(
+            treasury.total_supply(),
+            supply_held,
+            "a treasury slash leaves the supply fixed",
+        );
+        assert_eq!(
+            treasury.stake_treasury(),
+            bond + emission,
+            "the treasury absorbs the bond and the forfeited reward",
+        );
     }
 
     #[test]
