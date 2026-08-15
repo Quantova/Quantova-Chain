@@ -42,6 +42,9 @@ impl Sealer {
         if plaintext.len() > MAX_RECORD_PLAINTEXT {
             return Err(Error::Handshake("record plaintext exceeds the size bound"));
         }
+        if self.sequence == u64::MAX {
+            return Err(Error::Handshake("record sequence exhausted"));
+        }
         let nonce = record_nonce(&self.iv, self.sequence);
         let aad = self.sequence.to_be_bytes();
         let (ciphertext, tag) = chacha20poly1305::seal(&self.key, &nonce, &aad, plaintext);
