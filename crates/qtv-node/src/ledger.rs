@@ -975,6 +975,10 @@ impl Ledger {
                 disposition: SLASH_DISPOSITION_BURN,
             });
         }
+        let forfeited = self.stake_rewards_outstanding(&id);
+        if forfeited > 0 {
+            self.debit_supply(forfeited);
+        }
         self.clear_stake_rewards(&id);
         true
     }
@@ -1904,6 +1908,14 @@ impl Ledger {
         self.write_leaf(stake_rewards_key(id), Vec::new());
     }
 
+    fn stake_rewards_outstanding(&self, id: &[u8; 32]) -> u64 {
+        self.stake_rewards(id)
+            .tranches
+            .iter()
+            .map(|tranche| tranche.amount.saturating_sub(tranche.claimed))
+            .sum()
+    }
+
     pub fn accrue_reward(&mut self, address: &str, now_day: u64) -> u64 {
         match address_id(address) {
             Some(id) => self.accrue_reward_by_id(&id, now_day),
@@ -2515,6 +2527,9 @@ impl Ledger {
                 let mut account = self.account(&addr);
                 account.balance = account.balance.checked_add(*amount).ok_or(EnactError::Overflow)?;
                 let supply = self.total_supply().checked_add(*amount).ok_or(EnactError::Overflow)?;
+                if supply > qtv_staking::MAX_SUPPLY {
+                    return Err(EnactError::BadValue);
+                }
                 self.set_account(&addr, &account);
                 self.set_total_supply(supply);
                 self.record_mint_event(&addr, *amount);
@@ -2699,6 +2714,9 @@ impl Ledger {
                     operators.push((claim.operator_id, claim.public_key.clone()));
                 }
                 if (rotation.threshold as usize) > operators.len() {
+                    return Err(EnactError::BadValue);
+                }
+                if (rotation.threshold as usize) * 3 < operators.len() * 2 {
                     return Err(EnactError::BadValue);
                 }
                 let committee_size = operators.len() as u32;
@@ -2942,6 +2960,10 @@ impl Ledger {
         if let qtv_staking::Fault::Attributable = fault {
             self.clear_stake_bond(&id);
             self.set_stake_banned(&id);
+            let forfeited = self.stake_rewards_outstanding(&id);
+            if forfeited > 0 {
+                self.set_stake_treasury(self.stake_treasury() + forfeited);
+            }
             self.clear_stake_rewards(&id);
         } else {
             self.set_stake_bond(
@@ -4107,6 +4129,48 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn a_slash_disposes_the_forfeited_reward_and_conserves_supply() {
+        let emission = qtv_staking::SESSION_EMISSION;
+        let pool = 700_000 * 1_000_000;
+        let bond = 2_000 * 1_000_000;
+
+        let mut burn = Ledger::new();
+        let v1 = qtv_idfmt::render_address(&[19u8; 32]).unwrap();
+        burn.credit_supply(pool + bond);
+        burn.seed_stake_pool(pool);
+        burn.seed_validator_bond(&v1, bond);
+        burn.set_stake_mainnet_start(0);
+        assert_eq!(burn.accrue_reward(&v1, 400), emission);
+        let supply_before = burn.total_supply();
+        assert!(burn.slash_validator(&v1));
+        assert_eq!(
+            burn.total_supply(),
+            supply_before - bond - emission,
+            "a burn slash removes the bond and the forfeited reward from the supply",
+        );
+
+        let mut treasury = Ledger::new();
+        let v2 = qtv_idfmt::render_address(&[20u8; 32]).unwrap();
+        treasury.credit_supply(pool + bond);
+        treasury.seed_stake_pool(pool);
+        treasury.seed_validator_bond(&v2, bond);
+        treasury.set_stake_mainnet_start(0);
+        assert_eq!(treasury.accrue_reward(&v2, 400), emission);
+        let supply_held = treasury.total_supply();
+        assert_eq!(treasury.slash_stake(&v2, qtv_staking::Fault::Attributable), bond);
+        assert_eq!(
+            treasury.total_supply(),
+            supply_held,
+            "a treasury slash leaves the supply fixed",
+        );
+        assert_eq!(
+            treasury.stake_treasury(),
+            bond + emission,
+            "the treasury absorbs the bond and the forfeited reward",
+        );
+    }
+
+    #[test]
     fn a_gov_blacklisted_validator_cannot_claim_accrued_rewards() {
         let mut l = Ledger::new();
         let addr = qtv_idfmt::render_address(&[17u8; 32]).unwrap();
@@ -4658,6 +4722,44 @@ mod stake_state_tests {
             "a committee needs a threshold of at least two"
         );
         assert!(l.bridge_operator_set().is_none(), "the thin threshold rotation left the bridge inert");
+    }
+
+    #[test]
+    fn a_committee_rotation_refuses_a_sub_supermajority_threshold() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(91), 10_000 * 1_000_000);
+        let proposer = gov_addr(90);
+        fund(&mut l, &proposer, 4_000_000 * 1_000_000);
+        let voter = gov_addr(91);
+        fund(&mut l, &voter, 30_000 * 1_000_000);
+
+        let below = qtv_governance::CommitteeRotation {
+            operators: vec![
+                operator_claim(1, 0),
+                operator_claim(2, 1),
+                operator_claim(3, 2),
+                operator_claim(4, 3),
+            ],
+            threshold: 2,
+        };
+        let weak = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::CommitteeRotate { rotation: below },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, weak, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        assert_eq!(
+            l.gov_enact(weak, 5 * 86_400 + 1, TEST_CHAIN),
+            Err(EnactError::BadValue),
+            "a committee threshold below a two thirds supermajority is refused"
+        );
+        assert!(
+            l.bridge_operator_set().is_none(),
+            "the sub supermajority rotation left the bridge inert"
+        );
     }
 
     #[test]
@@ -5231,6 +5333,29 @@ mod stake_state_tests {
         let mut decoder = Decoder::new(&events[0].data);
         assert_eq!(decoder.get_bytes().unwrap(), target.as_bytes());
         assert_eq!(decoder.get_u64().unwrap(), 5_000);
+    }
+
+    #[test]
+    fn a_mint_is_capped_at_the_published_supply() {
+        let mut l = Ledger::new();
+        l.credit_supply(qtv_staking::MAX_SUPPLY - 1_000);
+        l.execute_action(
+            &Action::Mint { to: [63u8; 32].to_vec(), amount: 1_000 },
+            0,
+            TEST_CHAIN,
+        )
+        .expect("a mint up to the published ceiling is allowed");
+        assert_eq!(l.total_supply(), qtv_staking::MAX_SUPPLY);
+        assert_eq!(
+            l.execute_action(
+                &Action::Mint { to: [63u8; 32].to_vec(), amount: 1 },
+                0,
+                TEST_CHAIN,
+            ),
+            Err(EnactError::BadValue),
+            "a mint past the published ceiling is refused"
+        );
+        assert_eq!(l.total_supply(), qtv_staking::MAX_SUPPLY, "the refused mint left the supply at the cap");
     }
 
     #[test]
