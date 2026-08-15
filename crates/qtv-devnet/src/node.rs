@@ -77,11 +77,15 @@ pub fn node_peer_id(id: u64) -> PeerId {
 
 pub fn leader_for(selection: &Selection, view: View) -> u64 {
     let members = &selection.members;
+    if members.is_empty() {
+        return selection.leader;
+    }
     let base = members
         .iter()
         .position(|&id| id == selection.leader)
         .unwrap_or(0);
-    members[(base + view as usize) % members.len()]
+    let offset = (view % members.len() as u64) as usize;
+    members[(base + offset) % members.len()]
 }
 
 /// The committed height recorded for genesis state. Genesis has no block of its
