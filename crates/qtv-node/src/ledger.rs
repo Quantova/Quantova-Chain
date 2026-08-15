@@ -2713,6 +2713,9 @@ impl Ledger {
                 if (rotation.threshold as usize) > operators.len() {
                     return Err(EnactError::BadValue);
                 }
+                if (rotation.threshold as usize) * 3 < operators.len() * 2 {
+                    return Err(EnactError::BadValue);
+                }
                 let committee_size = operators.len() as u32;
                 self.seed_bridge_operator_set(&crate::bridge::OperatorSet::new(
                     operators,
@@ -4716,6 +4719,44 @@ mod stake_state_tests {
             "a committee needs a threshold of at least two"
         );
         assert!(l.bridge_operator_set().is_none(), "the thin threshold rotation left the bridge inert");
+    }
+
+    #[test]
+    fn a_committee_rotation_refuses_a_sub_supermajority_threshold() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(91), 10_000 * 1_000_000);
+        let proposer = gov_addr(90);
+        fund(&mut l, &proposer, 4_000_000 * 1_000_000);
+        let voter = gov_addr(91);
+        fund(&mut l, &voter, 30_000 * 1_000_000);
+
+        let below = qtv_governance::CommitteeRotation {
+            operators: vec![
+                operator_claim(1, 0),
+                operator_claim(2, 1),
+                operator_claim(3, 2),
+                operator_claim(4, 3),
+            ],
+            threshold: 2,
+        };
+        let weak = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::CommitteeRotate { rotation: below },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, weak, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        assert_eq!(
+            l.gov_enact(weak, 5 * 86_400 + 1, TEST_CHAIN),
+            Err(EnactError::BadValue),
+            "a committee threshold below a two thirds supermajority is refused"
+        );
+        assert!(
+            l.bridge_operator_set().is_none(),
+            "the sub supermajority rotation left the bridge inert"
+        );
     }
 
     #[test]
