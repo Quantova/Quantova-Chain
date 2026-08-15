@@ -444,7 +444,16 @@ impl Consensus {
             .collect();
         let commitment = CommitteeCommitment::from_member_keys(slot, member_keys, self.budget);
         let leader = view.elect_leader(&committee, beacon, slot)?.id;
-        let expected = qtv_sampler::sortition::expected_committee(&view.weights(), self.budget);
+        let weights = view.weights();
+        let total: u128 = weights.iter().map(|&w| w as u128).fold(0u128, u128::saturating_add);
+        let saturated = total > 0
+            && weights
+                .iter()
+                .all(|&w| w == 0 || (self.budget as u128).saturating_mul(w as u128) >= total);
+        if !saturated {
+            return None;
+        }
+        let expected = qtv_sampler::sortition::expected_committee(&weights, self.budget);
         let tau = qtv_sampler::params::finality_threshold(expected.max(committee.len() as u64));
         let reveals = committee.reveals();
         Some(Selection {
@@ -725,37 +734,20 @@ mod tests {
     }
 
     #[test]
-    fn tau_tracks_the_realized_draw_when_the_committee_over_draws() {
+    fn a_subsampling_committee_refuses_to_select() {
         let validators: Vec<ConsensusValidator> = (0..650u64)
             .map(|i| ConsensusValidator::online(i + 1, qtv_bft::params::VALIDATOR_STAKE_QTOV))
             .collect();
         let consensus = consensus_for(&validators);
         let sim = Sim::new(&validators);
         let beacon = genesis_beacon();
-        let mut over_drawn = None;
         for slot in 0..8u64 {
             let published = sim.published(&consensus, &beacon, slot);
-            let selection = consensus.select(&beacon, slot, &published).expect("committee");
-            if selection.members.len() as u64 > selection.expected {
-                over_drawn = Some(selection);
-                break;
-            }
+            assert!(
+                consensus.select(&beacon, slot, &published).is_none(),
+                "a subsampling committee cannot bound its true draw from the collected reveals, so it refuses to select rather than finalise on a suppressible count"
+            );
         }
-        let selection = over_drawn.expect("an over drawn slot within the sweep");
-        let drawn = selection.members.len() as u64;
-        assert_eq!(
-            selection.tau,
-            qtv_sampler::params::finality_threshold(drawn),
-            "the threshold must track the realized entitled draw when it over draws"
-        );
-        assert!(
-            selection.tau > qtv_sampler::params::finality_threshold(selection.expected),
-            "an over draw must raise the threshold above the expected size floor"
-        );
-        assert!(
-            drawn + drawn / 3 < 2 * selection.tau,
-            "the raised threshold leaves no room for two conflicting certificates at a third adversary"
-        );
     }
 
     #[test]
