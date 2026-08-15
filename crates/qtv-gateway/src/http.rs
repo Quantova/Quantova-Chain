@@ -124,6 +124,10 @@ impl Limiter {
 }
 
 pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>, allow: Vec<IpAddr>) {
+    let loopback_only = listener
+        .local_addr()
+        .map(|addr| addr.ip().is_loopback())
+        .unwrap_or(false);
     thread::spawn(move || {
         let limiter = Arc::new(Limiter::default());
         for stream in listener.incoming() {
@@ -139,39 +143,43 @@ pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>, allow: Vec<Ip
                 let _ = write_error(&mut stream, 403, "forbidden", "this address may not reach the rpc");
                 continue;
             }
-            match limiter.try_admit(ip, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, Instant::now()) {
-                Admit::Ok => {}
-                Admit::TotalFull => {
-                    stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
-                    let _ = write_error(&mut stream, 503, "busy", "the gateway is at its connection limit");
-                    continue;
-                }
-                Admit::IpFull => {
-                    stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
-                    let _ = write_error(
-                        &mut stream,
-                        429,
-                        "too_many",
-                        "too many open connections from this address",
-                    );
-                    continue;
-                }
-                Admit::RateLimited => {
-                    stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
-                    let _ = write_error(
-                        &mut stream,
-                        429,
-                        "rate_limited",
-                        "too many requests from this address, slow down",
-                    );
-                    continue;
+            if !loopback_only {
+                match limiter.try_admit(ip, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, Instant::now()) {
+                    Admit::Ok => {}
+                    Admit::TotalFull => {
+                        stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
+                        let _ = write_error(&mut stream, 503, "busy", "the gateway is at its connection limit");
+                        continue;
+                    }
+                    Admit::IpFull => {
+                        stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
+                        let _ = write_error(
+                            &mut stream,
+                            429,
+                            "too_many",
+                            "too many open connections from this address",
+                        );
+                        continue;
+                    }
+                    Admit::RateLimited => {
+                        stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
+                        let _ = write_error(
+                            &mut stream,
+                            429,
+                            "rate_limited",
+                            "too many requests from this address, slow down",
+                        );
+                        continue;
+                    }
                 }
             }
             let requests = requests.clone();
             let limiter = limiter.clone();
             thread::spawn(move || {
                 let _ = handle_connection(stream, requests);
-                limiter.release(ip);
+                if !loopback_only {
+                    limiter.release(ip);
+                }
             });
         }
     });
