@@ -62,7 +62,10 @@ pub fn build_mesh(
         while registered < up_peers {
             let (stream, _) = match listener.accept() {
                 Ok(pair) => pair,
-                Err(_) => continue,
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
             };
             let channel = match Channel::accept_with_timeout(stream, &identity_acc, HANDSHAKE_TIMEOUT)
             {
