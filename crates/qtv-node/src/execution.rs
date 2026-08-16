@@ -151,12 +151,18 @@ pub fn decode_container(bytes: &[u8]) -> Option<qtv_vm::container::Container> {
     let code = bytes.get(pos..code_end)?.to_vec();
     pos = code_end;
     let consts_len = read_be_u32(bytes, &mut pos)?;
-    let mut consts = Vec::new();
+    if consts_len as usize > qtv_vm::container::MAX_CONSTS {
+        return None;
+    }
+    let mut consts = Vec::with_capacity((consts_len as usize).min(bytes.len().saturating_sub(pos) / 8));
     for _ in 0..consts_len {
         consts.push(read_be_u64(bytes, &mut pos)?);
     }
     let entries_len = read_be_u32(bytes, &mut pos)?;
-    let mut entries = Vec::new();
+    if entries_len as usize > qtv_vm::container::MAX_ENTRIES {
+        return None;
+    }
+    let mut entries = Vec::with_capacity((entries_len as usize).min(bytes.len().saturating_sub(pos) / 24));
     for _ in 0..entries_len {
         let sel_end = pos.checked_add(SELECTOR_BYTES)?;
         let mut selector = [0u8; SELECTOR_BYTES];

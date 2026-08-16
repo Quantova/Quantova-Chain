@@ -2101,6 +2101,9 @@ impl Ledger {
     pub fn deploy_contract(&mut self, deployer: &str, nonce: u64, code: &[u8]) -> Option<String> {
         let container = crate::execution::decode_container(code)?;
         container.verify().ok()?;
+        if container.canonical_bytes().as_slice() != code {
+            return None;
+        }
         let contract = contract_address(deployer, nonce)?;
         let id = address_id(&contract)?;
         self.set_contract_code(&id, code);
