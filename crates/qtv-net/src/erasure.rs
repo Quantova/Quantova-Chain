@@ -136,11 +136,14 @@ impl Coded {
         &self.shards
     }
 
-    pub fn shard(&self, index: usize) -> &Shard {
-        &self.shards[index]
+    pub fn shard(&self, index: usize) -> Option<&Shard> {
+        self.shards.get(index)
     }
 
-    pub fn proof(&self, index: usize) -> ShardProof {
+    pub fn proof(&self, index: usize) -> Option<ShardProof> {
+        if index >= self.shards.len() {
+            return None;
+        }
         let mut siblings = Vec::new();
         let mut pos = index;
         for level in &self.tree {
@@ -155,7 +158,7 @@ impl Coded {
             siblings.push(sibling);
             pos /= 2;
         }
-        ShardProof { siblings }
+        Some(ShardProof { siblings })
     }
 }
 
@@ -260,7 +263,7 @@ pub fn reconstruct(commitment: &Commitment, shards: &[Shard]) -> Result<Vec<u8>,
     let inverse = invert(matrix, k)?;
 
     let shard_len = commitment.shard_len;
-    let mut data = Vec::with_capacity(k * shard_len);
+    let mut data = Vec::with_capacity(k.saturating_mul(shard_len));
     for out_row in inverse.iter().take(k) {
         data.extend_from_slice(&combine(out_row, &rows, shard_len));
     }
@@ -448,7 +451,7 @@ mod tests {
                     for d in (c + 1)..n {
                         let chosen = [a, b, c, d]
                             .iter()
-                            .map(|&i| coded.shard(i).clone())
+                            .map(|&i| coded.shard(i).unwrap().clone())
                             .collect::<Vec<_>>();
                         let out = reconstruct(&commitment, &chosen).expect("reconstruct");
                         assert_eq!(out, data, "subset {a}{b}{c}{d} did not reconstruct");
@@ -476,7 +479,7 @@ mod tests {
         let n = 32;
         let coded = encode(&data, k, n).expect("encode");
         let picks = [1, 3, 4, 7, 8, 11, 12, 15, 17, 19, 20, 23, 24, 27, 28, 31];
-        let chosen: Vec<Shard> = picks.iter().map(|&i| coded.shard(i).clone()).collect();
+        let chosen: Vec<Shard> = picks.iter().map(|&i| coded.shard(i).unwrap().clone()).collect();
         let out = reconstruct(coded.commitment(), &chosen).expect("reconstruct");
         assert_eq!(out, data);
     }
@@ -488,7 +491,7 @@ mod tests {
         let commitment = coded.commitment();
         for i in 0..commitment.n {
             assert!(
-                commitment.verify_shard(coded.shard(i), &coded.proof(i)),
+                commitment.verify_shard(coded.shard(i).unwrap(), &coded.proof(i).unwrap()),
                 "shard {i} did not verify"
             );
         }
@@ -500,18 +503,18 @@ mod tests {
         let coded = encode(&data, 8, 12).expect("encode");
         let commitment = coded.commitment();
 
-        let mut corrupt = coded.shard(3).clone();
+        let mut corrupt = coded.shard(3).unwrap().clone();
         corrupt.bytes[0] ^= 1;
-        assert!(!commitment.verify_shard(&corrupt, &coded.proof(3)));
+        assert!(!commitment.verify_shard(&corrupt, &coded.proof(3).unwrap()));
 
-        let mut misplaced = coded.shard(3).clone();
+        let mut misplaced = coded.shard(3).unwrap().clone();
         misplaced.index = 5;
-        assert!(!commitment.verify_shard(&misplaced, &coded.proof(3)));
-        assert!(!commitment.verify_shard(&misplaced, &coded.proof(5)));
+        assert!(!commitment.verify_shard(&misplaced, &coded.proof(3).unwrap()));
+        assert!(!commitment.verify_shard(&misplaced, &coded.proof(5).unwrap()));
 
-        let mut short = coded.shard(3).clone();
+        let mut short = coded.shard(3).unwrap().clone();
         short.bytes.pop();
-        assert!(!commitment.verify_shard(&short, &coded.proof(3)));
+        assert!(!commitment.verify_shard(&short, &coded.proof(3).unwrap()));
     }
 
     #[test]
@@ -542,10 +545,10 @@ mod tests {
         let few: Vec<Shard> = coded.shards().iter().take(3).cloned().collect();
         assert_eq!(reconstruct(commitment, &few), Err(Error::ShardSet));
         let repeated = vec![
-            coded.shard(0).clone(),
-            coded.shard(0).clone(),
-            coded.shard(1).clone(),
-            coded.shard(2).clone(),
+            coded.shard(0).unwrap().clone(),
+            coded.shard(0).unwrap().clone(),
+            coded.shard(1).unwrap().clone(),
+            coded.shard(2).unwrap().clone(),
         ];
         assert_eq!(reconstruct(commitment, &repeated), Err(Error::ShardSet));
     }
