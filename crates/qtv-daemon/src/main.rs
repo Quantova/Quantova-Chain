@@ -2,6 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 
+#[cfg(panic = "abort")]
+compile_error!(
+    "quantovad must be built with panic=unwind: the virtual machine contains a panicking post \
+     quantum primitive behind a catch_unwind so an adversarial signature maps to a fault rather \
+     than aborting the validator, and abort would turn that into a remote consensus halt"
+);
+
 mod config;
 mod driver;
 mod genesis;
