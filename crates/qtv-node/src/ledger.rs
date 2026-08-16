@@ -2766,7 +2766,7 @@ impl Ledger {
                 Ok(())
             }
             Action::Activate { feature, version } => {
-                if feature.is_empty() {
+                if feature.is_empty() || *version <= self.feature_version(feature) {
                     return Err(EnactError::BadValue);
                 }
                 self.set_feature_version(feature, *version);
@@ -3285,6 +3285,33 @@ mod stake_state_tests {
         // the same binary now runs the feature because the vote raised its version, no fork
         assert!(l.feature_active(b"parallel_state"));
         assert_eq!(l.feature_version(b"parallel_state"), 2);
+
+        // a later vote can only raise the version; a downgrade or a version that turns it off is refused
+        assert_eq!(
+            l.execute_action(
+                &qtv_governance::Action::Activate {
+                    feature: b"parallel_state".to_vec(),
+                    version: 1,
+                },
+                14 * 86_400 + 1,
+                TEST_CHAIN,
+            ),
+            Err(EnactError::BadValue),
+            "a feature version cannot be lowered by a passed vote"
+        );
+        assert_eq!(
+            l.execute_action(
+                &qtv_governance::Action::Activate {
+                    feature: b"parallel_state".to_vec(),
+                    version: 0,
+                },
+                14 * 86_400 + 1,
+                TEST_CHAIN,
+            ),
+            Err(EnactError::BadValue),
+            "a passed vote cannot deactivate a feature by setting version zero"
+        );
+        assert_eq!(l.feature_version(b"parallel_state"), 2, "the version stays at its raised value");
     }
 
     #[test]
