@@ -91,11 +91,14 @@ fn reject_wrong_prefix() {
 }
 
 #[test]
-fn reject_short_address_payload() {
-    let raw = pattern(31);
+fn reject_non_thirty_two_address_payload() {
     assert_eq!(
-        render_address(&raw),
-        Err(Error::TooShort { min: 32, got: 31 })
+        render_address(&pattern(31)),
+        Err(Error::BadLength { expected: 32, got: 31 })
+    );
+    assert_eq!(
+        render_address(&pattern(33)),
+        Err(Error::BadLength { expected: 32, got: 33 })
     );
 }
 

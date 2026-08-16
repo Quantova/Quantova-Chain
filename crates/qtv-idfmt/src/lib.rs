@@ -17,6 +17,8 @@ pub const HRP_PROOF: &str = "QPF";
 pub const KEY_FLOOR: usize = 32;
 pub const DIGEST_LEN: usize = 32;
 
+const MAX_ENCODED: usize = 128;
+
 const CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 const BECH32M_CONST: u32 = 734539939;
 const GENERATOR: [u32; 5] = [
@@ -154,6 +156,12 @@ fn render(hrp: &str, payload: &[u8]) -> String {
 }
 
 fn decode(text: &str) -> Result<(String, Vec<u8>), Error> {
+    if text.len() > MAX_ENCODED {
+        return Err(Error::BadLength {
+            expected: MAX_ENCODED,
+            got: text.len(),
+        });
+    }
     let has_lower = text.bytes().any(|b| b.is_ascii_lowercase());
     let has_upper = text.bytes().any(|b| b.is_ascii_uppercase());
     if has_lower && has_upper {
@@ -258,7 +266,7 @@ macro_rules! digest_family {
     };
 }
 
-key_family!(
+digest_family!(
     render_address,
     parse_address,
     HRP_ADDRESS,
