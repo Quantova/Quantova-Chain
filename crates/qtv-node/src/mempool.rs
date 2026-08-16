@@ -332,6 +332,12 @@ impl Mempool {
         })
     }
 
+    fn has_pending_from_sender_nonce(&self, sender: &str, nonce: u64) -> bool {
+        self.pending
+            .iter()
+            .any(|w| w.body().sender() == sender && w.body().nonce() == nonce)
+    }
+
     fn has_capacity(&self, incoming: &Wrapper) -> bool {
         let sender = incoming.body().sender();
         let sender_count = self
@@ -520,6 +526,9 @@ impl Mempool {
         } else if crate::node::is_registration(&wrapper) {
             return Err(Reject::BadCall);
         } else {
+            if self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce()) {
+                return Err(Reject::SenderQueueFull);
+            }
             validate(&wrapper, ledger, fee_params)?;
         }
         // Charge the feeless window only now the call is admissible, so a malformed call cannot spend it.
@@ -622,7 +631,8 @@ impl Mempool {
             } else if crate::node::is_registration(&wrapper) {
                 false
             } else {
-                validate_verified(&wrapper, ledger, fee_params, verified[index]).is_ok()
+                !self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce())
+                    && validate_verified(&wrapper, ledger, fee_params, verified[index]).is_ok()
             };
             if !admissible {
                 continue;
@@ -1081,16 +1091,17 @@ mod tests {
         let spammer = keypair(0);
         let recipient = keypair(1);
         fund(&mut ledger, &spammer, 10_000_000);
-        for amount in 0..3u64 {
-            let tx = signed_transfer(&spammer, &recipient.address(), 100 + amount, 0, fee);
-            assert!(pool.admit(tx, &ledger, &params).is_ok());
+        let first = signed_transfer(&spammer, &recipient.address(), 100, 0, fee);
+        assert!(pool.admit(first, &ledger, &params).is_ok());
+        for amount in 1..8u64 {
+            let flood = signed_transfer(&spammer, &recipient.address(), 100 + amount, 0, fee);
+            assert_eq!(
+                pool.admit(flood, &ledger, &params),
+                Err(Reject::SenderQueueFull),
+                "a sender cannot queue a second transfer at the same nonce"
+            );
         }
-        let over = signed_transfer(&spammer, &recipient.address(), 999, 0, fee);
-        assert_eq!(
-            pool.admit(over, &ledger, &params),
-            Err(Reject::SenderQueueFull)
-        );
-        assert_eq!(pool.len(), 3);
+        assert_eq!(pool.len(), 1);
     }
 
     #[test]
