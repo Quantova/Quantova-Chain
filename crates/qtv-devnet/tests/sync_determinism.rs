@@ -11,12 +11,12 @@ use qtv_node::node::GenesisAccount;
 
 use qtv_devnet::Devnet;
 
-use support::{config, encoded_chain, transfer, unique_base, user};
+use support::{config, header_chain, transfer, unique_base, user};
 
 /// Run one fixed catch up schedule: four nodes finalize two heights, the last
 /// falls offline for a stretch, then rejoins and catches up by verified sync.
 /// Return the synced node's chain and a peer's chain, byte encoded.
-fn run(tag: &str) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+fn run(tag: &str) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
     let base = unique_base(tag);
     let params = FeeParams::devnet();
     let alice = user(0);
@@ -41,8 +41,8 @@ fn run(tag: &str) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     devnet.sync().expect("catch up sync");
 
     (
-        encoded_chain(devnet.node(lagging)),
-        encoded_chain(devnet.node(0)),
+        header_chain(devnet.node(lagging)),
+        header_chain(devnet.node(0)),
     )
 }
 

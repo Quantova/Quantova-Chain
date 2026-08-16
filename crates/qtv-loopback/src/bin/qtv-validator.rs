@@ -96,7 +96,6 @@ impl Runtime {
         from: usize,
         message: Message,
         selection: &qtv_node::consensus::Selection,
-        online: &[u64],
     ) {
         match message {
             Message::Tx(transaction) => self.node.admit_gossiped(transaction),
@@ -133,16 +132,12 @@ impl Runtime {
             | Message::GetBlocks { .. }
             | Message::Blocks(_) => {}
         }
-        let _ = self.settle(selection, online);
+        let _ = self.settle(selection);
         let _ = from;
     }
 
-    fn settle(
-        &mut self,
-        selection: &qtv_node::consensus::Selection,
-        online: &[u64],
-    ) -> Result<bool, String> {
-        if !self.node.has_attestations_from(online) {
+    fn settle(&mut self, selection: &qtv_node::consensus::Selection) -> Result<bool, String> {
+        if !self.node.has_finality_threshold(selection.tau) {
             return Ok(false);
         }
         self.node
@@ -215,7 +210,6 @@ impl Runtime {
         self.disseminate_registrations();
         self.disseminate_reveals();
         let selection = self.node.select().map_err(|e| format!("select: {e:?}"))?;
-        let online: Vec<u64> = selection.members.clone();
         let i_lead = leader_for(&selection, self.node.view()) == self.node.id();
 
         let start = Instant::now();
@@ -229,7 +223,7 @@ impl Runtime {
             .collect();
         for (from, bytes) in ready {
             if let Ok(message) = Message::decode(&bytes) {
-                self.dispatch(from, message, &selection, &online);
+                self.dispatch(from, message, &selection);
             }
         }
 
@@ -260,7 +254,7 @@ impl Runtime {
                 for message in messages {
                     self.emit(message);
                 }
-                let _ = self.settle(&selection, &online)?;
+                let _ = self.settle(&selection)?;
                 entered = true;
             }
 
@@ -279,7 +273,7 @@ impl Runtime {
                     match message_height(&message) {
                         Some(h) if h > start_height => buffer_bounded(&mut self.buffered, from, bytes),
                         Some(h) if h < start_height => {}
-                        _ => self.dispatch(from, message, &selection, &online),
+                        _ => self.dispatch(from, message, &selection),
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -464,11 +458,11 @@ fn main() {
         }
     }
 
-    let encoded: Vec<Vec<u8>> = rt.node.chain().iter().map(|b| b.encoded()).collect();
-    let digest = chain_digest(&encoded);
-    let blockhashes = encoded
+    let header_hashes: Vec<[u8; 32]> = rt.node.chain().iter().map(|b| b.header_hash()).collect();
+    let digest = chain_digest(&header_hashes.iter().map(|h| h.to_vec()).collect::<Vec<_>>());
+    let blockhashes = header_hashes
         .iter()
-        .map(|b| hex(&qtv_devnet::wire::gossip_id(b)))
+        .map(|h| hex(h))
         .collect::<Vec<_>>()
         .join(",");
     let perblock = per_block_ms

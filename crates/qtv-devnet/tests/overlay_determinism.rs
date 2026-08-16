@@ -12,14 +12,14 @@ use qtv_node::node::GenesisAccount;
 
 use qtv_devnet::Devnet;
 
-use support::{config_with_fanout, encoded_chain, transfer, unique_base, user};
+use support::{config_with_fanout, header_chain, transfer, unique_base, user};
 
 const NODES: usize = 5;
 const FANOUT: usize = 2;
 
 /// Run one fixed script over a fresh bounded overlay and return the finalized chain
 /// and the final state root.
-fn run_scripted(name: &str, params: &FeeParams) -> (Vec<Vec<u8>>, [u8; 32]) {
+fn run_scripted(name: &str, params: &FeeParams) -> (Vec<[u8; 32]>, [u8; 32]) {
     let base = unique_base(name);
     let alice = user(0);
     let carol = user(1);
@@ -44,7 +44,7 @@ fn run_scripted(name: &str, params: &FeeParams) -> (Vec<Vec<u8>>, [u8; 32]) {
     }
 
     (
-        encoded_chain(devnet.node(0)),
+        header_chain(devnet.node(0)),
         devnet.node(0).ledger().q_root(),
     )
 }

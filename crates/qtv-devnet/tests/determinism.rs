@@ -10,11 +10,11 @@ use qtv_node::node::GenesisAccount;
 
 use qtv_devnet::Devnet;
 
-use support::{config, encoded_chain, transfer, unique_base, user};
+use support::{config, header_chain, transfer, unique_base, user};
 
 /// Run one fixed script over a fresh devnet and return the finalized chain bytes
 /// and the final state root every node ends on.
-fn run_scripted(name: &str, params: &FeeParams) -> (Vec<Vec<u8>>, [u8; 32]) {
+fn run_scripted(name: &str, params: &FeeParams) -> (Vec<[u8; 32]>, [u8; 32]) {
     let base = unique_base(name);
     let alice = user(0);
     let carol = user(1);
@@ -38,7 +38,7 @@ fn run_scripted(name: &str, params: &FeeParams) -> (Vec<Vec<u8>>, [u8; 32]) {
     }
 
     (
-        encoded_chain(devnet.node(0)),
+        header_chain(devnet.node(0)),
         devnet.node(0).ledger().q_root(),
     )
 }

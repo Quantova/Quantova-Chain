@@ -11,7 +11,7 @@ use qtv_devnet::config::{DevnetConfig, NodeConfig};
 use qtv_devnet::Devnet;
 use qtv_node::fee::FeeParams;
 
-use support::{encoded_chain, unique_base, GENESIS_TIME, VALIDATOR_STAKE};
+use support::{header_chain, unique_base, GENESIS_TIME, VALIDATOR_STAKE};
 
 fn config_with_slots(base: &std::path::Path, online: &[bool], slots: u64) -> DevnetConfig {
     let count = online.len();
@@ -95,13 +95,13 @@ fn a_node_restarting_within_an_epoch_rebuilds_peers_rotated_roots_from_the_chain
     for _ in 0..3u64 {
         devnet.step().expect("the restarted node keeps finalising within the epoch");
     }
-    let restarted_tail = encoded_chain(devnet.node(index));
-    let peer_tail: Vec<Vec<u8>> = devnet
+    let restarted_tail = header_chain(devnet.node(index));
+    let peer_tail: Vec<[u8; 32]> = devnet
         .node(0)
         .chain()
         .iter()
         .skip((height_before - 1) as usize)
-        .map(|block| block.encoded())
+        .map(|block| block.header_hash())
         .collect();
     assert_eq!(
         restarted_tail, peer_tail,

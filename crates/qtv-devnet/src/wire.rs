@@ -8,6 +8,7 @@ use qtv_codec::{Decoder, Encode, Encoder, Error as CodecError};
 use qtv_crypto::ml_dsa::{Signature, SIGNATURE_BYTES};
 use qtv_crypto::sha3::sha3_256;
 use qtv_net::erasure::{Commitment, Shard, ShardProof, DIGEST_LEN};
+use qtv_sampler::committee::PublishedReveal;
 use qtv_sampler::onetime::{MerklePath, Root, NODE_BYTES, PREIMAGE_BYTES};
 use qtv_sampler::sortition::Credential;
 use qtv_tx::{Body, Call, Wrapper};
@@ -40,6 +41,8 @@ const MIN_PEER: usize = 16;
 const MIN_ATTESTATION: usize = 32;
 const MIN_SIBLING: usize = 8;
 const MAX_CREDENTIAL_SIBLINGS: u64 = 64;
+const MIN_REVEAL: usize = 32;
+const MAX_COMMITTEE_REVEALS: u64 = 4096;
 
 fn bounded_capacity(remaining: usize, count: u64, min_element: usize) -> Result<usize, DecodeError> {
     let ceiling = (remaining / min_element.max(1)) as u64;
@@ -452,6 +455,28 @@ fn decode_credential(decoder: &mut Decoder<'_>) -> Result<Credential, DecodeErro
     })
 }
 
+fn encode_committee_reveals(encoder: &mut Encoder, reveals: &[PublishedReveal]) {
+    encoder.put_u64(reveals.len() as u64);
+    for reveal in reveals {
+        encoder.put_u64(reveal.id);
+        encode_credential(encoder, &reveal.credential);
+    }
+}
+
+fn decode_committee_reveals(decoder: &mut Decoder<'_>) -> Result<Vec<PublishedReveal>, DecodeError> {
+    let count = decoder.get_u64()?;
+    if count > MAX_COMMITTEE_REVEALS {
+        return Err(DecodeError::BadLength);
+    }
+    let mut reveals = Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_REVEAL)?);
+    for _ in 0..count {
+        let id = decoder.get_u64()?;
+        let credential = decode_credential(decoder)?;
+        reveals.push(PublishedReveal::new(id, credential));
+    }
+    Ok(reveals)
+}
+
 fn encode_view_change(encoder: &mut Encoder, record: &ViewChange) {
     encoder.put_u64(record.height);
     encoder.put_u64(record.target_view);
@@ -532,6 +557,7 @@ fn encode_certificate(encoder: &mut Encoder, certificate: &Certificate) {
     for attestation in &certificate.attestations {
         encode_attestation(encoder, attestation);
     }
+    encode_committee_reveals(encoder, &certificate.committee_reveals);
 }
 
 fn decode_certificate(decoder: &mut Decoder<'_>) -> Result<Certificate, DecodeError> {
@@ -542,7 +568,8 @@ fn decode_certificate(decoder: &mut Decoder<'_>) -> Result<Certificate, DecodeEr
     for _ in 0..count {
         attestations.push(decode_attestation(decoder)?);
     }
-    Ok(Certificate::new(envelope, attestations))
+    let committee_reveals = decode_committee_reveals(decoder)?;
+    Ok(Certificate::new(envelope, attestations).with_committee_reveals(committee_reveals))
 }
 
 fn encode_coded_proposal(encoder: &mut Encoder, coded: &CodedProposal) {
@@ -677,6 +704,7 @@ pub fn certificate_to_bytes(certificate: &Certificate) -> Vec<u8> {
     for attestation in &certificate.attestations {
         encode_attestation(&mut encoder, attestation);
     }
+    encode_committee_reveals(&mut encoder, &certificate.committee_reveals);
     encoder.into_bytes()
 }
 
@@ -694,7 +722,8 @@ pub fn certificate_from_bytes(bytes: &[u8]) -> Result<Certificate, DecodeError> 
             for _ in 0..count {
                 attestations.push(decode_attestation(&mut decoder)?);
             }
-            Certificate::new(envelope, attestations)
+            let committee_reveals = decode_committee_reveals(&mut decoder)?;
+            Certificate::new(envelope, attestations).with_committee_reveals(committee_reveals)
         }
         stage => return Err(DecodeError::BadStage(stage)),
     };

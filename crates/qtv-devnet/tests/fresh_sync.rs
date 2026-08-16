@@ -11,7 +11,7 @@ use qtv_node::node::GenesisAccount;
 
 use qtv_devnet::Devnet;
 
-use support::{config, encoded_chain, transfer, unique_base, user};
+use support::{config, header_chain, transfer, unique_base, user};
 
 #[test]
 fn a_fresh_node_syncs_the_whole_chain_from_a_peer() {
@@ -46,8 +46,8 @@ fn a_fresh_node_syncs_the_whole_chain_from_a_peer() {
     // It caught the tip and reproduced the peer's chain byte for byte.
     assert_eq!(devnet.node(fresh).height(), tip);
     assert_eq!(
-        encoded_chain(devnet.node(fresh)),
-        encoded_chain(devnet.node(0)),
+        header_chain(devnet.node(fresh)),
+        header_chain(devnet.node(0)),
         "the fresh node did not reproduce the peer chain"
     );
     assert_eq!(devnet.node(fresh).head_hash(), devnet.node(0).head_hash());

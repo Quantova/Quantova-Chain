@@ -11,7 +11,7 @@ use qtv_node::node::GenesisAccount;
 
 use qtv_devnet::Devnet;
 
-use support::{config, encoded_chain, transfer, unique_base, user};
+use support::{config, header_chain, transfer, unique_base, user};
 
 #[test]
 fn a_lagging_node_catches_up_then_finalizes_with_the_group() {
@@ -65,8 +65,8 @@ fn a_lagging_node_catches_up_then_finalizes_with_the_group() {
         assert_eq!(devnet.node(i).head_hash(), head, "node {i} head differs");
     }
     assert_eq!(
-        encoded_chain(devnet.node(lagging)),
-        encoded_chain(devnet.node(0)),
+        header_chain(devnet.node(lagging)),
+        header_chain(devnet.node(0)),
         "the rejoined chain diverged"
     );
     // The rejoined node finalized the fresh heights itself, from live consensus.

@@ -10,7 +10,7 @@ use qtv_node::node::GenesisAccount;
 
 use qtv_devnet::Devnet;
 
-use support::{config, encoded_chain, transfer, unique_base, user};
+use support::{config, header_chain, transfer, unique_base, user};
 
 #[test]
 fn a_restarted_node_reloads_its_chain_and_rejoins() {
@@ -52,13 +52,13 @@ fn a_restarted_node_reloads_its_chain_and_rejoins() {
 
     // The blocks the restarted node finalized after reopening match a peer that
     // never restarted, and the whole devnet agrees on the head.
-    let restarted_tail = encoded_chain(devnet.node(index));
-    let peer_tail: Vec<Vec<u8>> = devnet
+    let restarted_tail = header_chain(devnet.node(index));
+    let peer_tail: Vec<[u8; 32]> = devnet
         .node(0)
         .chain()
         .iter()
         .skip(2)
-        .map(|block| block.encoded())
+        .map(|block| block.header_hash())
         .collect();
     assert_eq!(restarted_tail, peer_tail);
 

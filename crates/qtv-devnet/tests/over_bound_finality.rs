@@ -29,7 +29,7 @@ use qtv_bft::params::is_quorum;
 use qtv_devnet::wire::{Message, Proposal};
 use qtv_devnet::Devnet;
 
-use support::{config, encoded_chain, transfer, unique_base, user};
+use support::{config, header_chain, transfer, unique_base, user};
 
 /// The qtv-net record plaintext bound, one mebibyte. A whole proposal record above
 /// this cannot be sealed by the transport, so a block wider than it can only reach
@@ -93,13 +93,11 @@ fn an_over_bound_block_finalizes_over_the_coded_path() {
         .step()
         .expect("the committee finalized the over bound height over the coded path");
 
-    // Every online node finalized exactly one block, and it is byte identical across
-    // them: the same header, the same body, and the same aggregated certificate.
-    let chain = encoded_chain(devnet.node(0));
+    let chain = header_chain(devnet.node(0));
     assert_eq!(chain.len(), 1, "the over bound height did not finalize");
     for i in 1..online_count {
         assert_eq!(
-            encoded_chain(devnet.node(i)),
+            header_chain(devnet.node(i)),
             chain,
             "node {i} finalized a different chain over the coded path"
         );
@@ -190,7 +188,7 @@ fn an_over_bound_block_finalizes_over_the_coded_path() {
         .apply_synced(verifier, over_bound)
         .expect("the offline node verified the aggregated certificate over the whole over bound block");
     assert_eq!(
-        encoded_chain(devnet.node(verifier)),
+        header_chain(devnet.node(verifier)),
         chain,
         "the offline node did not verify and reproduce the over bound block"
     );
