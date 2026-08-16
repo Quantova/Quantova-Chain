@@ -81,8 +81,8 @@ impl CodedBlock {
         self.coded.commitment().n
     }
 
-    pub fn piece(&self, index: usize) -> (Shard, ShardProof) {
-        (self.coded.shard(index).clone(), self.coded.proof(index))
+    pub fn piece(&self, index: usize) -> Option<(Shard, ShardProof)> {
+        Some((self.coded.shard(index)?.clone(), self.coded.proof(index)?))
     }
 }
 
@@ -160,7 +160,7 @@ pub fn code_proposal(proposal: &Proposal) -> Result<Vec<CodedProposal>, CodedErr
     let commitment = coded.commitment().clone();
     let mut shards = Vec::with_capacity(coded.shard_count());
     for index in 0..coded.shard_count() {
-        let (shard, proof) = coded.piece(index);
+        let (shard, proof) = coded.piece(index).expect("index is within shard_count");
         shards.push(CodedProposal {
             view: proposal.view,
             header: proposal.header.clone(),
@@ -454,7 +454,7 @@ pub fn per_node_bandwidth(coded: &CodedBlock, whole_block_len: usize, nodes: usi
     let commitment_len = encode_commitment(coded.commitment()).len();
     let mut shard_bytes = 0;
     for index in 0..held.min(n) {
-        let (shard, proof) = coded.piece(index);
+        let (shard, proof) = coded.piece(index).expect("index is within shard_count");
         shard_bytes += encode_piece(&shard, &proof).len();
     }
     Bandwidth {
@@ -498,7 +498,7 @@ mod tests {
     fn a_coded_block_reconstructs_and_verifies_against_the_header() {
         let block = sample_block(64);
         let coded = code_block(&block, 16, 32).expect("code");
-        let pieces: Vec<(Shard, ShardProof)> = (16..32).map(|i| coded.piece(i)).collect();
+        let pieces: Vec<(Shard, ShardProof)> = (16..32).map(|i| coded.piece(i).unwrap()).collect();
         let out = reconstruct_block(
             coded.header(),
             &coded.header_hash(),
@@ -514,7 +514,7 @@ mod tests {
         let block = sample_block(50);
         let coded = code_block(&block, 16, 32).expect("code");
         let picks = [0, 2, 5, 6, 9, 10, 13, 14, 18, 21, 22, 25, 26, 29, 30, 31];
-        let pieces: Vec<(Shard, ShardProof)> = picks.iter().map(|&i| coded.piece(i)).collect();
+        let pieces: Vec<(Shard, ShardProof)> = picks.iter().map(|&i| coded.piece(i).unwrap()).collect();
         let out = reconstruct_block(
             coded.header(),
             &coded.header_hash(),
@@ -530,13 +530,13 @@ mod tests {
         let block = sample_block(40);
         let coded = code_block(&block, 16, 32).expect("code");
 
-        let (mut shard, proof) = coded.piece(3);
+        let (mut shard, proof) = coded.piece(3).unwrap();
         shard.bytes[0] ^= 255;
         assert!(!coded.commitment().verify_shard(&shard, &proof));
 
         let mut pieces: Vec<(Shard, ShardProof)> = vec![(shard, proof)];
         for i in (0..32).filter(|&i| i != 3).take(16) {
-            pieces.push(coded.piece(i));
+            pieces.push(coded.piece(i).unwrap());
         }
         let out = reconstruct_block(
             coded.header(),
@@ -552,7 +552,7 @@ mod tests {
     fn a_block_reconstructed_under_the_wrong_header_is_refused() {
         let block = sample_block(32);
         let coded = code_block(&block, 16, 32).expect("code");
-        let pieces: Vec<(Shard, ShardProof)> = (0..16).map(|i| coded.piece(i)).collect();
+        let pieces: Vec<(Shard, ShardProof)> = (0..16).map(|i| coded.piece(i).unwrap()).collect();
 
         let other = sample_block(33);
         let result = reconstruct_block(
