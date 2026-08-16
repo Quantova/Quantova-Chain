@@ -6,7 +6,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use qtv_devnet::wire::gossip_id;
 use qtv_devnet::Devnet;
 
 use qtv_loopback::stats::Distribution;
@@ -30,10 +29,6 @@ fn shell(program: &str, args: &[&str], fallback: &str) -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| fallback.to_string())
-}
-
-fn block_hashes(encoded: &[Vec<u8>]) -> Vec<String> {
-    encoded.iter().map(|b| hex(&gossip_id(b))).collect()
 }
 
 struct RunResult {
@@ -113,7 +108,12 @@ fn run_serial(
         heights += 1;
     }
 
-    let encoded: Vec<Vec<u8>> = devnet.node(0).chain().iter().map(|b| b.encoded()).collect();
+    let header_hashes: Vec<String> = devnet
+        .node(0)
+        .chain()
+        .iter()
+        .map(|b| hex(&b.header_hash()))
+        .collect();
     let _ = std::fs::remove_dir_all(&base);
     RunResult {
         per_block_ms,
@@ -122,7 +122,7 @@ fn run_serial(
         sign_ms: sign_wall.as_secs_f64() * 1000.0,
         committee,
         heights,
-        block_hashes: block_hashes(&encoded),
+        block_hashes: header_hashes,
         stalled,
     }
 }
