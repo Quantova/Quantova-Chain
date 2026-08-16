@@ -90,7 +90,7 @@ fn erasure_coding_cuts_the_per_node_block_download() {
 
     // The block reconstructs byte for byte from a subset of k shards and verifies
     // against the header, so the saving rests on genuine reconstruction.
-    let pieces: Vec<_> = (N - K..N).map(|i| coded.piece(i)).collect();
+    let pieces: Vec<_> = (N - K..N).map(|i| coded.piece(i).expect("index within shard_count")).collect();
     let rebuilt = reconstruct_block(
         coded.header(),
         &coded.header_hash(),
