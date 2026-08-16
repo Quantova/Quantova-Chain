@@ -279,9 +279,10 @@ impl Parser {
             self.next();
         }
         let text: String = self.chars[start..self.pos].iter().collect();
+        let shown: String = text.chars().take(32).collect();
         text.parse::<u64>()
             .map(Json::Int)
-            .map_err(|_| format!("'{text}' is not a whole number the wire accepts"))
+            .map_err(|_| format!("'{shown}' is not a whole number the wire accepts"))
     }
 
     fn boolean(&mut self) -> Result<Json, String> {

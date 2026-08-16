@@ -14,7 +14,7 @@ use crate::json::{self, object, Json};
 use crate::service::build_request;
 use crate::GatewayCall;
 
-const MAX_BODY: usize = 2 * 1024 * 1024;
+const MAX_BODY: usize = 1024 * 1024;
 
 const MAX_HEAD: usize = 16 * 1024;
 
@@ -176,7 +176,9 @@ pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>, allow: Vec<Ip
             let requests = requests.clone();
             let limiter = limiter.clone();
             thread::spawn(move || {
-                let _ = handle_connection(stream, requests);
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = handle_connection(stream, requests);
+                }));
                 if !loopback_only {
                     limiter.release(ip);
                 }
@@ -248,7 +250,9 @@ fn handle_connection(mut stream: TcpStream, requests: Sender<GatewayCall>) -> Io
     if body.len() < content_length {
         return write_error(&mut stream, 400, "bad_request", "the request body was shorter than declared");
     }
-    let body_text = String::from_utf8_lossy(&body);
+    let Ok(body_text) = std::str::from_utf8(&body) else {
+        return write_error(&mut stream, 400, "bad_request", "the request body is not valid UTF-8");
+    };
 
     let Some(method) = path.strip_prefix("/v1/") else {
         return write_error(&mut stream, 404, "unknown_method", "methods live under /v1/");
@@ -257,7 +261,7 @@ fn handle_connection(mut stream: TcpStream, requests: Sender<GatewayCall>) -> Io
     let parsed = if body_text.trim().is_empty() {
         Json::Object(Vec::new())
     } else {
-        match json::parse(&body_text) {
+        match json::parse(body_text) {
             Ok(value) => value,
             Err(e) => {
                 return write_error(&mut stream, 400, "bad_request", &format!("the body is not JSON, {e}"))
