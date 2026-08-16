@@ -13,12 +13,12 @@ use qtv_node::node::GenesisAccount;
 
 use qtv_devnet::Devnet;
 
-use support::{config, encoded_chain, transfer, unique_base, user};
+use support::{config, header_chain, transfer, unique_base, user};
 
 /// Run one fixed view change script over a fresh devnet: silence the view zero
 /// leader so the height finalizes only through the view change, then return the
 /// finalized chain bytes and the state root.
-fn run_view_change(name: &str, params: &FeeParams) -> (Vec<Vec<u8>>, [u8; 32]) {
+fn run_view_change(name: &str, params: &FeeParams) -> (Vec<[u8; 32]>, [u8; 32]) {
     let base = unique_base(name);
     let alice = user(0);
     let bob = user(1);
@@ -35,7 +35,7 @@ fn run_view_change(name: &str, params: &FeeParams) -> (Vec<Vec<u8>>, [u8; 32]) {
     devnet.step().expect("finalized through the view change");
 
     (
-        encoded_chain(devnet.node(0)),
+        header_chain(devnet.node(0)),
         devnet.node(0).ledger().q_root(),
     )
 }

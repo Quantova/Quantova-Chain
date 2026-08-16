@@ -12,7 +12,7 @@ use qtv_node::node::GenesisAccount;
 
 use qtv_devnet::{Devnet, Network};
 
-use support::{config, encoded_chain, transfer, unique_base, user};
+use support::{config, header_chain, transfer, unique_base, user};
 
 #[test]
 fn no_two_nodes_finalize_different_blocks_at_a_height() {
@@ -53,10 +53,10 @@ fn no_two_nodes_finalize_different_blocks_at_a_height() {
 
     // Safety: at every height, every node holds the identical finalized block and
     // certificate, so no two nodes finalized different blocks at one height.
-    let reference = encoded_chain(devnet.node(0));
+    let reference = header_chain(devnet.node(0));
     assert_eq!(reference.len(), heights as usize);
     for i in 1..devnet.len() {
-        let chain = encoded_chain(devnet.node(i));
+        let chain = header_chain(devnet.node(i));
         assert_eq!(chain.len(), reference.len());
         for (height, (block, expected)) in chain.iter().zip(&reference).enumerate() {
             assert_eq!(

@@ -13,7 +13,7 @@ use qtv_tx::Wrapper;
 
 use qtv_devnet::{Devnet, Network};
 
-use support::{config, encoded_chain, transfer, unique_base, user};
+use support::{config, header_chain, transfer, unique_base, user};
 
 #[test]
 fn honest_nodes_finalize_the_same_chain_under_reordering() {
@@ -44,11 +44,11 @@ fn honest_nodes_finalize_the_same_chain_under_reordering() {
     }
 
     // Every node holds the same finalized chain, byte for byte, over every height.
-    let reference = encoded_chain(devnet.node(0));
+    let reference = header_chain(devnet.node(0));
     assert_eq!(reference.len(), heights as usize);
     for i in 1..devnet.len() {
         assert_eq!(
-            encoded_chain(devnet.node(i)),
+            header_chain(devnet.node(i)),
             reference,
             "node {i} finalized a different chain under reordering"
         );

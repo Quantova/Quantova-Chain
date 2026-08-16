@@ -295,8 +295,7 @@ impl Runtime {
     }
 
     fn settle(&mut self, selection: &Selection) -> bool {
-        let online = self.online(selection);
-        if !self.node.has_attestations_from(&online) {
+        if !self.node.has_finality_threshold(selection.tau) {
             return false;
         }
         let finalise_start = Instant::now();

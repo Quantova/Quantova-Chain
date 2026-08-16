@@ -923,6 +923,15 @@ impl DevNode {
                 attestations,
             )
             .ok_or(RoundError::NotFinalized)?;
+        let member_ids: std::collections::HashSet<_> =
+            selection.commitment.members.iter().map(|m| m.id).collect();
+        let committee_reveals: Vec<_> = self
+            .reveals
+            .iter()
+            .filter(|r| member_ids.contains(&r.id))
+            .cloned()
+            .collect();
+        let certificate = certificate.with_committee_reveals(committee_reveals);
         let staged = self.staged.take().expect("the staged block is present");
         self.observe_finality(self.height, block.val);
         if self.fatal.is_some() {
@@ -1485,15 +1494,17 @@ impl DevNode {
         Some(self.future_props.remove(pos))
     }
 
-    pub fn has_attestations_from(&self, signers: &[u64]) -> bool {
+    pub fn has_finality_threshold(&self, tau: u64) -> bool {
         let Some(staged) = &self.staged else {
             return false;
         };
-        signers.iter().all(|signer| {
-            self.round_atts
-                .iter()
-                .any(|a| a.from == *signer && a.block == staged.block)
-        })
+        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for attestation in &self.round_atts {
+            if attestation.block == staged.block {
+                seen.insert(attestation.from);
+            }
+        }
+        seen.len() as u64 >= tau
     }
 
     pub fn try_finalize(&mut self, selection: &Selection) -> Result<bool, RoundError> {
@@ -1691,11 +1702,15 @@ impl DevNode {
     ) -> Option<Selection> {
         let target = certificate.envelope.committee;
         let slot = self.consensus.slot_for(height);
-        let mut reveals: Vec<PublishedReveal> = certificate
-            .attestations
-            .iter()
-            .map(|att| PublishedReveal::new(att.from, att.membership.clone()))
-            .collect();
+        let mut reveals: Vec<PublishedReveal> = if certificate.committee_reveals.is_empty() {
+            certificate
+                .attestations
+                .iter()
+                .map(|att| PublishedReveal::new(att.from, att.membership.clone()))
+                .collect()
+        } else {
+            certificate.committee_reveals.clone()
+        };
         if let Some(selection) = self.consensus.select(&self.beacon, slot, &reveals) {
             if selection.commitment.digest() == target {
                 return Some(selection);

@@ -183,12 +183,11 @@ fn main() {
         }
     }
 
-    let encoded: Vec<Vec<u8>> = rt.node.chain().iter().map(|b| b.encoded()).collect();
-    let chainhash = hex(&chain_digest(&encoded));
-    let block_hashes = encoded
-        .iter()
-        .map(|b| hex(&qtv_devnet::wire::gossip_id(b)))
-        .collect::<Vec<_>>();
+    let header_hashes: Vec<[u8; 32]> = rt.node.chain().iter().map(|b| b.header_hash()).collect();
+    let chainhash = hex(&chain_digest(
+        &header_hashes.iter().map(|h| h.to_vec()).collect::<Vec<_>>(),
+    ));
+    let block_hashes = header_hashes.iter().map(|h| hex(h)).collect::<Vec<_>>();
 
     let report = RunReport {
         idx,

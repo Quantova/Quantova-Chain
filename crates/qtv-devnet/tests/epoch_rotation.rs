@@ -10,7 +10,7 @@ use qtv_devnet::config::{DevnetConfig, NodeConfig};
 use qtv_devnet::Devnet;
 use qtv_node::fee::FeeParams;
 
-use support::{encoded_chain, unique_base, GENESIS_TIME, VALIDATOR_STAKE};
+use support::{header_chain, unique_base, GENESIS_TIME, VALIDATOR_STAKE};
 
 fn config_with_slots(base: &std::path::Path, online: &[bool], slots: u64) -> DevnetConfig {
     let count = online.len();
@@ -83,12 +83,12 @@ fn the_running_devnet_rotates_keys_across_epochs_and_finalises_past_the_fixed_ce
 
     // The keys rotated across at least two epoch boundaries, and every node landed on
     // the identical finalised chain, so the rotation is agreed and not a local artifact.
-    let reference = encoded_chain(devnet.node(0));
+    let reference = header_chain(devnet.node(0));
     assert_eq!(reference.len() as u64, target, "not every height finalised");
     for i in 0..devnet.len() {
         assert!(devnet.node(i).epoch() >= 2, "node {i} did not rotate across two epochs");
         assert_eq!(
-            encoded_chain(devnet.node(i)),
+            header_chain(devnet.node(i)),
             reference,
             "node {i} finalised a different chain than node zero across the rotation",
         );

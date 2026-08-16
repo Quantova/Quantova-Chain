@@ -13,7 +13,7 @@ use qtv_node::node::GenesisAccount;
 
 use qtv_devnet::Devnet;
 
-use support::{config_with_fanout, encoded_chain, transfer, unique_base, user};
+use support::{config_with_fanout, header_chain, transfer, unique_base, user};
 
 /// The number of nodes, large enough that a small fanout is below a full mesh.
 const NODES: usize = 5;
@@ -22,7 +22,7 @@ const FANOUT: usize = 2;
 
 /// Run one fixed script over a fresh devnet at the given fanout and return the
 /// finalized chain, the final state root, and the largest neighbor count.
-fn run(name: &str, fanout: usize) -> (Vec<Vec<u8>>, [u8; 32], usize) {
+fn run(name: &str, fanout: usize) -> (Vec<[u8; 32]>, [u8; 32], usize) {
     let base = unique_base(name);
     let params = FeeParams::devnet();
     let alice = user(0);
@@ -42,11 +42,11 @@ fn run(name: &str, fanout: usize) -> (Vec<Vec<u8>>, [u8; 32], usize) {
         devnet.step().expect("finalized over the overlay");
     }
 
-    let chain = encoded_chain(devnet.node(0));
+    let chain = header_chain(devnet.node(0));
     // Every node holds the same finalized chain, byte for byte.
     for i in 1..devnet.len() {
         assert_eq!(
-            encoded_chain(devnet.node(i)),
+            header_chain(devnet.node(i)),
             chain,
             "node {i} finalized a different chain over the overlay"
         );

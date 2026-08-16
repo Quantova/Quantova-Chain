@@ -475,13 +475,7 @@ impl<S: Read + Write> Devnet<S> {
 
     fn settle(&mut self, i: usize, ceiling: Height, active: &[usize]) -> Result<(), RoundError> {
         let selection = self.nodes[i].select()?;
-        let online: Vec<u64> = selection
-            .members
-            .iter()
-            .copied()
-            .filter(|&id| self.index_of(id).is_some_and(|idx| self.active[idx]))
-            .collect();
-        if !self.nodes[i].has_attestations_from(&online) {
+        if !self.nodes[i].has_finality_threshold(selection.tau) {
             return Ok(());
         }
         if self.nodes[i].try_finalize(&selection)? && self.nodes[i].height() < ceiling {

@@ -11,7 +11,7 @@ use qtv_node::node::GenesisAccount;
 
 use qtv_devnet::Devnet;
 
-use support::{config, encoded_chain, transfer, unique_base, user};
+use support::{config, transfer, unique_base, user};
 
 #[test]
 fn a_node_that_missed_a_stretch_catches_up_and_matches() {
@@ -59,9 +59,12 @@ fn a_node_that_missed_a_stretch_catches_up_and_matches() {
     // It reached the group height, and the whole chain it holds is byte identical to
     // a peer that never left.
     assert_eq!(devnet.node(lagging).height(), tip);
+    let lagging_headers: Vec<[u8; 32]> =
+        devnet.node(lagging).chain().iter().map(|b| b.header_hash()).collect();
+    let leader_headers: Vec<[u8; 32]> =
+        devnet.node(0).chain().iter().map(|b| b.header_hash()).collect();
     assert_eq!(
-        encoded_chain(devnet.node(lagging)),
-        encoded_chain(devnet.node(0)),
+        lagging_headers, leader_headers,
         "the synced chain diverged from the peer that never left"
     );
     assert_eq!(devnet.node(lagging).head_hash(), devnet.node(0).head_hash());

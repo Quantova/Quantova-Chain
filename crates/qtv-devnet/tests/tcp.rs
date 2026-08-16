@@ -17,7 +17,7 @@ use qtv_node::node::GenesisAccount;
 use qtv_devnet::node::node_identity;
 use qtv_devnet::{Devnet, Mesh};
 
-use support::{config, encoded_chain, transfer, unique_base, user};
+use support::{config, header_chain, transfer, unique_base, user};
 
 /// Stand up a full mesh over localhost TCP, one pinned channel per pair.
 fn tcp_mesh(identities: &[Identity]) -> Mesh<TcpStream> {
@@ -62,11 +62,11 @@ fn the_devnet_reaches_finality_over_localhost_tcp() {
     devnet.submit(0, tx).expect("admitted");
     devnet.step().expect("finalized over tcp");
 
-    let reference = encoded_chain(devnet.node(0));
+    let reference = header_chain(devnet.node(0));
     assert_eq!(reference.len(), 1);
     for i in 1..devnet.len() {
         assert_eq!(
-            encoded_chain(devnet.node(i)),
+            header_chain(devnet.node(i)),
             reference,
             "node {i} finalized a different block over tcp"
         );

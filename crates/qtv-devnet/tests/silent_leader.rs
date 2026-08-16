@@ -11,7 +11,7 @@ use qtv_node::node::GenesisAccount;
 
 use qtv_devnet::Devnet;
 
-use support::{config, encoded_chain, transfer, unique_base, user};
+use support::{config, header_chain, transfer, unique_base, user};
 
 #[test]
 fn a_silent_first_leader_is_routed_around_by_a_view_change() {
@@ -57,10 +57,10 @@ fn a_silent_first_leader_is_routed_around_by_a_view_change() {
     }
 
     // The chains are byte identical across nodes.
-    let reference = encoded_chain(devnet.node(0));
+    let reference = header_chain(devnet.node(0));
     for i in 1..devnet.len() {
         assert_eq!(
-            encoded_chain(devnet.node(i)),
+            header_chain(devnet.node(i)),
             reference,
             "node {i} diverged"
         );

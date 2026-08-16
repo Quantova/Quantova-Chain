@@ -13,7 +13,7 @@ use qtv_devnet::node::DevNode;
 use qtv_devnet::wire::RevealNote;
 use qtv_devnet::Devnet;
 
-use support::{config, encoded_chain, transfer, unique_base, user};
+use support::{config, header_chain, transfer, unique_base, user};
 
 fn open_nodes(config: &DevnetConfig) -> Vec<DevNode> {
     config
@@ -86,16 +86,16 @@ fn a_multi_node_run_holding_only_own_secrets_finalises() {
         devnet.step().expect("the committee finalised the height from published reveals");
     }
 
-    let reference = encoded_chain(devnet.node(0));
+    let reference = header_chain(devnet.node(0));
     assert_eq!(reference.len(), heights as usize);
     for i in 0..devnet.len() {
         assert_eq!(
-            encoded_chain(devnet.node(i)),
+            header_chain(devnet.node(i)),
             reference,
             "node {i} finalised a different chain"
         );
         for finalized in devnet.node(i).chain() {
-            assert_eq!(finalized.attesters, vec![1, 2, 3, 4]);
+            assert!(finalized.attesters.len() >= 3, "at least a two thirds quorum attested"); assert!(finalized.attesters.iter().all(|a| [1u64, 2, 3, 4].contains(a)), "every attester is a committee member");
         }
     }
     assert_eq!(devnet.node(0).ledger().balance(&bob.address()), heights * 1_000);

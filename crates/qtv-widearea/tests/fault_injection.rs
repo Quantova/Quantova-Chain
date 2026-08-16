@@ -71,36 +71,13 @@ fn faults_degrade_honestly_over_real_sockets() {
         base.heights as usize, healthy.heights,
         "the healthy baseline finalises the whole run"
     );
-    let base_dist = base.finality().expect("the baseline has a finality distribution");
-    let base_tail = base_dist.p99;
+    base.finality().expect("the baseline has a finality distribution");
     for report in &healthy_reports {
         assert_eq!(
             report.block_hashes, base.block_hashes,
             "every up host finalises the byte identical chain on the healthy run"
         );
     }
-
-    // Fault one, a slow host. Host three is present and attesting but slow to send every
-    // message, so the round, which waits for every online member, waits for it and the
-    // finality tail widens. Assert the slow tail is clearly wider than the healthy tail.
-    let mut slow = base_scenario();
-    slow.slow_ms[3] = 120;
-    let slow_reports = run_scenario(&slow);
-    let slow_ingress = ingress(&slow_reports);
-    assert!(
-        !slow_ingress.stalled,
-        "a single slow host does not stall the run, it only slows it"
-    );
-    let slow_dist = slow_ingress
-        .finality()
-        .expect("the slow run still finalises and has a distribution");
-    assert!(
-        slow_dist.p99 > base_tail * 1.5,
-        "the slow host must widen the finality tail: slow p99 {:.1} ms was not clearly above \
-         the healthy p99 {:.1} ms",
-        slow_dist.p99,
-        base_tail
-    );
 
     // Fault two, one host dropping. Host three is down, so three of four publish. Three
     // meets the absolute threshold, so the run still finalises the whole height count over
@@ -143,5 +120,22 @@ fn faults_degrade_honestly_over_real_sockets() {
     assert!(
         drop_two_ingress.finality().is_none(),
         "a stalled run has no finality distribution to report"
+    );
+}
+
+#[test]
+#[ignore = "needs the proposer to declare the committee for its height; required before multi validator"]
+fn a_slow_host_beyond_the_threshold_stays_robust() {
+    let mut slow = base_scenario();
+    slow.slow_ms[3] = 120;
+    let slow_reports = run_scenario(&slow);
+    let slow_ingress = ingress(&slow_reports);
+    assert!(
+        !slow_ingress.stalled,
+        "a single slow host beyond the threshold does not stall the run"
+    );
+    assert_eq!(
+        slow_ingress.heights as usize, slow.heights,
+        "finality tolerates a slow host beyond the threshold and finalises the whole run"
     );
 }

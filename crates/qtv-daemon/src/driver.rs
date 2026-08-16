@@ -380,8 +380,7 @@ impl Driver {
     }
 
     fn settle(&mut self, selection: &Selection) {
-        let online = self.online(selection);
-        if !self.node.has_attestations_from(&online) {
+        if !self.node.has_finality_threshold(selection.tau) {
             return;
         }
         let _ = self.node.try_finalize(selection);
@@ -413,14 +412,6 @@ impl Driver {
         }
     }
 
-    fn online(&self, selection: &Selection) -> Vec<u64> {
-        selection
-            .members
-            .iter()
-            .copied()
-            .filter(|&id| self.up.get((id - 1) as usize).copied().unwrap_or(false))
-            .collect()
-    }
 
     fn emit(&mut self, message: Message) {
         match message {

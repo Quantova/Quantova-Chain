@@ -117,3 +117,7 @@ pub fn transfer(from: &Account, to: &str, amount: u64, nonce: u64, params: &FeeP
 pub fn encoded_chain(node: &DevNode) -> Vec<Vec<u8>> {
     node.chain().iter().map(|block| block.encoded()).collect()
 }
+
+pub fn header_chain(node: &DevNode) -> Vec<[u8; 32]> {
+    node.chain().iter().map(|block| block.header_hash()).collect()
+}

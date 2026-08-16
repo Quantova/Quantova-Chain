@@ -11,7 +11,7 @@ use qtv_node::node::GenesisAccount;
 
 use qtv_devnet::Devnet;
 
-use support::{config, encoded_chain, unique_base, user};
+use support::{config, header_chain, unique_base, user};
 
 #[test]
 fn a_split_finalizes_nothing_and_heals_to_one_branch() {
@@ -59,11 +59,11 @@ fn a_split_finalizes_nothing_and_heals_to_one_branch() {
 
     // Every node finalized exactly one block, and it is byte identical across nodes,
     // so no two nodes hold a different finalized block at height one.
-    let reference = encoded_chain(devnet.node(0));
+    let reference = header_chain(devnet.node(0));
     assert_eq!(reference.len(), 1, "height one did not finalize once");
     for i in 1..devnet.len() {
         assert_eq!(
-            encoded_chain(devnet.node(i)),
+            header_chain(devnet.node(i)),
             reference,
             "node {i} converged on a different branch"
         );

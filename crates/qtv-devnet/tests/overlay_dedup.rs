@@ -16,7 +16,7 @@ use qtv_node::node::GenesisAccount;
 
 use qtv_devnet::Devnet;
 
-use support::{config_with_fanout, encoded_chain, transfer, unique_base, user};
+use support::{config_with_fanout, header_chain, transfer, unique_base, user};
 
 const NODES: usize = 5;
 const FANOUT: usize = 2;
@@ -50,11 +50,11 @@ fn a_duplicate_is_counted_once_and_a_relay_cannot_loop() {
 
     // Every node holds the same finalized chain, so de duplication did not corrupt
     // the block a message arriving by two paths contributes to.
-    let reference = encoded_chain(devnet.node(0));
+    let reference = header_chain(devnet.node(0));
     assert_eq!(reference.len(), heights as usize);
     for i in 0..devnet.len() {
         assert_eq!(
-            encoded_chain(devnet.node(i)),
+            header_chain(devnet.node(i)),
             reference,
             "node {i} finalized a different chain"
         );

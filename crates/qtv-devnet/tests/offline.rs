@@ -11,7 +11,7 @@ use qtv_node::node::GenesisAccount;
 
 use qtv_devnet::Devnet;
 
-use support::{config, encoded_chain, transfer, unique_base, user};
+use support::{config, header_chain, transfer, unique_base, user};
 
 #[test]
 fn an_offline_node_does_not_stall_a_supermajority_and_is_never_slashed() {
@@ -70,10 +70,10 @@ fn an_offline_node_does_not_stall_a_supermajority_and_is_never_slashed() {
     // The online nodes agree byte for byte, none attests for the offline node, and
     // none slashes it.
     let online: Vec<usize> = (0..devnet.len()).filter(|&i| i != offline_index).collect();
-    let reference = encoded_chain(devnet.node(online[0]));
+    let reference = header_chain(devnet.node(online[0]));
     for &i in &online {
         assert_eq!(
-            encoded_chain(devnet.node(i)),
+            header_chain(devnet.node(i)),
             reference,
             "an online node diverged"
         );
