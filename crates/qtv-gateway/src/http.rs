@@ -95,7 +95,7 @@ impl LimiterInner {
 
 impl Limiter {
     fn try_admit(&self, ip: IpAddr, total_cap: usize, per_ip_cap: usize, now: Instant) -> Admit {
-        let mut inner = self.inner.lock().expect("the gateway limiter lock is not poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if !inner.spend_rate_token(ip, now) {
             return Admit::RateLimited;
         }
@@ -112,7 +112,7 @@ impl Limiter {
     }
 
     fn release(&self, ip: IpAddr) {
-        let mut inner = self.inner.lock().expect("the gateway limiter lock is not poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(count) = inner.per_ip.get_mut(&ip) {
             *count -= 1;
             if *count == 0 {
