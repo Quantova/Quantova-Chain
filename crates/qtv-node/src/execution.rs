@@ -33,6 +33,8 @@ HALT";
 
 pub const TRANSFER_METER: u64 = 1_210;
 
+pub const CODE_ACCESS_BYTE_METER: u64 = 1;
+
 pub fn transfer_call(recipient: &str, amount: u64) -> Call {
     let mut encoder = Encoder::new();
     encoder.put_u64(amount);
@@ -190,6 +192,10 @@ pub fn execute_contract_call(
     memory: &[u8],
     meter_limit: u64,
 ) -> Result<ContractOutcome, ExecError> {
+    let access_cost = (container_bytes.len() as u64).saturating_mul(CODE_ACCESS_BYTE_METER);
+    let vm_limit = meter_limit
+        .checked_sub(access_cost)
+        .ok_or(ExecError::MeterExhausted)?;
     let container = decode_container(container_bytes).ok_or(ExecError::BadContainer)?;
     // Validate the selector exists, then dispatch every entry under its storage manifest, including the
     // first entry at code offset zero. Routing offset zero through Interpreter::new would leave the
@@ -198,7 +204,7 @@ pub fn execute_contract_call(
     container
         .entry_offset(&selector)
         .ok_or(ExecError::BadContainer)?;
-    let interpreter = Interpreter::for_entry(&container, selector, meter_limit)
+    let interpreter = Interpreter::for_entry(&container, selector, vm_limit)
         .map_err(|_| ExecError::BadContainer)?;
     let outcome = interpreter
         .with_storage(storage)
@@ -212,7 +218,7 @@ pub fn execute_contract_call(
     Ok(ContractOutcome {
         storage: outcome.storage,
         effects: outcome.effects,
-        meter_used: outcome.meter_used,
+        meter_used: outcome.meter_used.saturating_add(access_cost),
     })
 }
 
@@ -277,6 +283,57 @@ mod tests {
                 .unwrap_err(),
             ExecError::BadContainer
         );
+    }
+
+    #[test]
+    fn a_call_pays_for_the_container_it_loads() {
+        use qtv_vm::container::{Container, Entry, StateAccess};
+        let mut source = String::new();
+        for _ in 0..2048 {
+            source.push_str("NOP\n");
+        }
+        source.push_str("HALT");
+        let code = qtv_vm::asm::assemble(&source).expect("the program assembles");
+        let selector = [5u8, 6, 7, 8];
+        let container = Container::new(
+            code,
+            vec![],
+            vec![Entry {
+                selector,
+                offset: 0,
+                access: StateAccess {
+                    reads: vec![],
+                    writes: vec![],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
+            }],
+        );
+        let bytes = container.canonical_bytes();
+        let access = bytes.len() as u64 * CODE_ACCESS_BYTE_METER;
+        assert!(access > TRANSFER_METER, "the container must exceed the floor meter");
+
+        assert_eq!(
+            execute_contract_call(
+                &bytes,
+                selector,
+                std::collections::BTreeMap::new(),
+                &[],
+                access - 1,
+            )
+            .unwrap_err(),
+            ExecError::MeterExhausted
+        );
+
+        let out = execute_contract_call(
+            &bytes,
+            selector,
+            std::collections::BTreeMap::new(),
+            &[],
+            100_000,
+        )
+        .expect("the call halts");
+        assert!(out.meter_used >= access);
     }
 
     #[test]
