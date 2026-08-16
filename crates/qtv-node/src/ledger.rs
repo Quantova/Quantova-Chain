@@ -2649,25 +2649,31 @@ impl Ledger {
                 Ok(())
             }
             Action::Freeze { targets } => {
+                let mut handled: Vec<[u8; 32]> = Vec::new();
                 for target in targets {
                     if let Some(id) = id_from_slice(target) {
                         self.set_frozen(&id);
+                        handled.push(id);
                         if let Some(addr) = id_bytes_to_address(&id) {
                             self.record_side_event(SideEvent::Freeze { target: addr });
                         }
                     }
                 }
+                self.guardian_freeze_forget(&handled);
                 Ok(())
             }
             Action::Unfreeze { targets } => {
+                let mut handled: Vec<[u8; 32]> = Vec::new();
                 for target in targets {
                     if let Some(id) = id_from_slice(target) {
                         self.clear_frozen(&id);
+                        handled.push(id);
                         if let Some(addr) = id_bytes_to_address(&id) {
                             self.record_side_event(SideEvent::Unfreeze { target: addr });
                         }
                     }
                 }
+                self.guardian_freeze_forget(&handled);
                 Ok(())
             }
             Action::BridgeMigration { vault } => {
@@ -3701,6 +3707,41 @@ mod stake_state_tests {
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         l.gov_enact(id, 2 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert!(!l.is_frozen(&target), "the full vote reversed the emergency freeze");
+    }
+
+    #[test]
+    fn a_governance_freeze_survives_the_guardian_windows_expiry() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(62), 10_000 * 1_000_000);
+        l.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![[201u8; 32], [202u8; 32], [203u8; 32]],
+            2,
+        ));
+
+        let target_id = [60u8; 32];
+        let target = qtv_idfmt::render_address(&target_id).unwrap();
+
+        assert!(l.guardian_freeze(0, &[target_id], &[[201u8; 32], [202u8; 32]], 0));
+        assert!(l.is_frozen(&target));
+
+        let proposer = gov_addr(61);
+        fund(&mut l, &proposer, 400_000 * 1_000_000);
+        let voter = gov_addr(62);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+        let id = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BlacklistKill,
+                qtv_governance::Action::Freeze { targets: vec![target_id.to_vec()] },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        l.gov_enact(id, 2 * 86_400 + 1, TEST_CHAIN).unwrap();
+        assert!(l.is_frozen(&target));
+
+        l.guardian_expire(100 * 86_400);
+        assert!(l.is_frozen(&target), "the governance freeze outlives the guardian window");
     }
 
     #[test]
