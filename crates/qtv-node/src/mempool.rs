@@ -215,6 +215,8 @@ pub fn is_priority(wrapper: &Wrapper) -> bool {
 
 pub const DEFAULT_FEELESS_ADMITS_PER_WINDOW: usize = 128;
 
+pub const DEFAULT_FEELESS_ATTEMPTS_PER_WINDOW: usize = 512;
+
 fn is_feeless(wrapper: &Wrapper) -> bool {
     crate::node::is_bridge_mint(wrapper)
         || crate::node::is_bridge_settle(wrapper)
@@ -241,6 +243,8 @@ pub struct Mempool {
     reserve: usize,
     feeless_cap: usize,
     feeless_admits: usize,
+    feeless_attempts_cap: usize,
+    feeless_attempts: usize,
     // The capped fee actually charged bounds inclusion and eviction ranking, so a bid above the
     // ceiling buys no priority it never pays for. Refreshed from the fee params on every admit.
     ceiling: u128,
@@ -270,6 +274,8 @@ impl Mempool {
             reserve: reserve.min(cap.saturating_sub(1)),
             feeless_cap: DEFAULT_FEELESS_ADMITS_PER_WINDOW,
             feeless_admits: 0,
+            feeless_attempts_cap: DEFAULT_FEELESS_ATTEMPTS_PER_WINDOW,
+            feeless_attempts: 0,
             ceiling: u128::MAX,
         }
     }
@@ -354,6 +360,14 @@ impl Mempool {
     // Whether the feeless window has room, without spending it, to reject before the admissibility check.
     fn feeless_has_room(&self) -> bool {
         self.feeless_admits < self.feeless_cap
+    }
+
+    fn charge_feeless_attempt(&mut self) -> bool {
+        if self.feeless_attempts >= self.feeless_attempts_cap {
+            return false;
+        }
+        self.feeless_attempts += 1;
+        true
     }
 
     fn make_room(&mut self, incoming: &Wrapper) -> Result<(), Reject> {
@@ -451,6 +465,9 @@ impl Mempool {
                 return Err(Reject::PoolFull);
             }
             if !self.feeless_has_room() {
+                return Err(Reject::RateLimited);
+            }
+            if !self.charge_feeless_attempt() {
                 return Err(Reject::RateLimited);
             }
         }
@@ -569,7 +586,11 @@ impl Mempool {
                 }
             }
             // Gate a feeless call before the admissibility check; charged only after it proves admissible.
-            if is_feeless(&wrapper) && (!self.has_capacity(&wrapper) || !self.feeless_has_room()) {
+            if is_feeless(&wrapper)
+                && (!self.has_capacity(&wrapper)
+                    || !self.feeless_has_room()
+                    || !self.charge_feeless_attempt())
+            {
                 continue;
             }
             let admissible = if crate::node::is_vm_op(ledger, &wrapper) {
@@ -654,6 +675,7 @@ impl Mempool {
             self.ids.remove(id);
         }
         self.feeless_admits = 0;
+        self.feeless_attempts = 0;
     }
 }
 
