@@ -246,13 +246,11 @@ impl Driver {
                 break;
             }
             match self.inbound.recv_timeout(TICK) {
-                Ok((_, bytes)) => {
-                    if let Ok(Message::Register(note)) = Message::decode(&bytes) {
-                        self.node.collect_registration(*note);
-                    } else {
-                        self.buffered.push(bytes);
-                    }
-                }
+                Ok((_, bytes)) => match Message::decode(&bytes) {
+                    Ok(Message::Register(note)) => self.node.collect_registration(*note),
+                    Ok(_) => self.buffered.push(bytes),
+                    Err(_) => {}
+                },
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -278,13 +276,11 @@ impl Driver {
                 break;
             }
             match self.inbound.recv_timeout(TICK) {
-                Ok((_, bytes)) => {
-                    if let Ok(Message::Reveal(note)) = Message::decode(&bytes) {
-                        self.node.collect_reveal(*note);
-                    } else {
-                        self.buffered.push(bytes);
-                    }
-                }
+                Ok((_, bytes)) => match Message::decode(&bytes) {
+                    Ok(Message::Reveal(note)) => self.node.collect_reveal(*note),
+                    Ok(_) => self.buffered.push(bytes),
+                    Err(_) => {}
+                },
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
