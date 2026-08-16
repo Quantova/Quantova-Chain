@@ -296,9 +296,11 @@ fn bridged_supply(node: &DevNode, asset_id: &[u8; 16]) -> Json {
 }
 
 fn genesis_accounts(node: &DevNode) -> Json {
-    let accounts: Vec<Json> = node
-        .genesis_accounts()
+    let all = node.genesis_accounts();
+    let total = all.len();
+    let accounts: Vec<Json> = all
         .iter()
+        .take(MAX_LIST_ITEMS)
         .map(|account| {
             object(vec![
                 ("address", Json::str(&account.address)),
@@ -308,7 +310,9 @@ fn genesis_accounts(node: &DevNode) -> Json {
         })
         .collect();
     object(vec![
-        ("count", Json::Int(accounts.len() as u64)),
+        ("count", Json::Int(total as u64)),
+        ("returned", Json::Int(accounts.len() as u64)),
+        ("truncated", Json::Bool(total > accounts.len())),
         ("supply_quon", Json::str(node.genesis_supply().to_string())),
         ("accounts", Json::Array(accounts)),
     ])
@@ -617,17 +621,24 @@ fn transaction(node: &DevNode, tx_id: &str) -> Json {
 // Cap list entries per RPC response, so a large mempool or contract cannot build a huge string on the consensus thread.
 const MAX_LIST_ITEMS: usize = 1_000;
 
+const MAX_LIST_RESPONSE_BYTES: usize = 512 * 1024;
+
 fn pending(node: &DevNode) -> Json {
     let total = node.pending_count();
     let top = node.pending_snapshot(MAX_LIST_ITEMS);
-    let items: Vec<Json> = top
-        .iter()
-        .map(|wrapper| {
-            let mut fields = vec![("tx_id", Json::str(wrapper.id()))];
-            fields.extend(tx_fields(node, wrapper));
-            object(fields)
-        })
-        .collect();
+    let mut items: Vec<Json> = Vec::new();
+    let mut budget = MAX_LIST_RESPONSE_BYTES;
+    for wrapper in &top {
+        let mut fields = vec![("tx_id", Json::str(wrapper.id()))];
+        fields.extend(tx_fields(node, wrapper));
+        let item = object(fields);
+        let size = item.render().len();
+        if size > budget && !items.is_empty() {
+            break;
+        }
+        budget = budget.saturating_sub(size);
+        items.push(item);
+    }
     object(vec![
         ("count", Json::Int(total as u64)),
         ("returned", Json::Int(items.len() as u64)),
