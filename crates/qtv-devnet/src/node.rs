@@ -754,6 +754,7 @@ impl DevNode {
         let mut ledger = self.ledger.clone();
         ledger.clear_block_events();
         ledger.set_round_proposer(&proposer);
+        ledger.set_execution_height(height);
         let included = execute_ordered(&mut ledger, &candidates, &self.fee_params, day_of_height(height));
         let event_leaves: Vec<Vec<u8>> = ledger.block_events().iter().map(BlockEvent::encode).collect();
         let mut header = Header::new(
@@ -811,12 +812,14 @@ impl DevNode {
         if header.height() != self.height
             || *header.parent_hash() != self.parent_header_hash
             || header.beacon_seed() != self.beacon.seed()
+            || header.time() != self.genesis_time + header.height() * qtv_bft::params::SLOT_MS
         {
             return Err(RoundError::ProposalRejected);
         }
         let mut ledger = self.ledger.clone();
         ledger.clear_block_events();
         ledger.set_round_proposer(header.proposer());
+        ledger.set_execution_height(header.height());
         let included = execute_ordered(&mut ledger, body, &self.fee_params, day_of_height(header.height()));
         let event_leaves: Vec<Vec<u8>> = ledger.block_events().iter().map(BlockEvent::encode).collect();
         if included.len() != body.len()
@@ -1872,6 +1875,7 @@ impl DevNode {
         let mut ledger = self.ledger.clone();
         ledger.clear_block_events();
         ledger.set_round_proposer(header.proposer());
+        ledger.set_execution_height(header.height());
         let included = execute_ordered(&mut ledger, block.body(), &self.fee_params, day_of_height(header.height()));
         let event_leaves: Vec<Vec<u8>> = ledger.block_events().iter().map(BlockEvent::encode).collect();
         if included.len() != block.body().len()
