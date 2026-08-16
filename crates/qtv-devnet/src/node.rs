@@ -1240,7 +1240,7 @@ impl DevNode {
     }
 
     pub fn collect_view_change(&mut self, selection: &Selection, record: ViewChange) {
-        if record.height != self.height || !self.verify_view_change(selection, &record) {
+        if record.height != self.height || !self.verify_view_change_att(selection, &record) {
             return;
         }
         let seen = self
@@ -1256,6 +1256,9 @@ impl DevNode {
             .filter(|r| r.att.from == record.att.from)
             .count();
         if from_count >= MAX_VIEW_CHANGES_PER_SENDER {
+            return;
+        }
+        if !self.verify_view_change_polka(selection, &record) {
             return;
         }
         self.view_changes.push(record);
@@ -1281,6 +1284,11 @@ impl DevNode {
     }
 
     fn verify_view_change(&self, selection: &Selection, record: &ViewChange) -> bool {
+        self.verify_view_change_att(selection, record)
+            && self.verify_view_change_polka(selection, record)
+    }
+
+    fn verify_view_change_att(&self, selection: &Selection, record: &ViewChange) -> bool {
         let Some(member) = selection.commitment.member(record.att.from) else {
             return false;
         };
@@ -1307,25 +1315,23 @@ impl DevNode {
         if !record.att.signature_verifies(self.consensus.chain_id(), &member.attest_pk) {
             return false;
         }
-        if !record.att.is_entitled(
+        record.att.is_entitled(
             &member.root,
             &self.beacon,
             member.weight,
             selection.commitment.total_weight,
             selection.commitment.budget,
-        ) {
-            return false;
-        }
+        )
+    }
+
+    fn verify_view_change_polka(&self, selection: &Selection, record: &ViewChange) -> bool {
         match (&record.locked, &record.polka) {
-            (None, None) => {}
+            (None, None) => true,
             (Some(block), Some(polka)) => {
-                if !self.polka_backs(selection, record.lock_view, block, polka) {
-                    return false;
-                }
+                self.polka_backs(selection, record.lock_view, block, polka)
             }
-            _ => return false,
+            _ => false,
         }
-        true
     }
 
     fn valid_justification(
