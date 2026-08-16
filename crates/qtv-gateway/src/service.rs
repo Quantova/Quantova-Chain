@@ -201,7 +201,10 @@ fn storage_at(node: &DevNode, address: &str, keys: &[[u8; 32]]) -> Result<Json, 
     if qtv_idfmt::parse_address(address).is_err() {
         return Err(ClientError::bad("bad_address", "the address is not a q1 address"));
     }
-    let all = node.ledger().contract_storage_at(address);
+    let all = node
+        .ledger()
+        .contract_storage_at_capped(address)
+        .ok_or_else(|| ClientError::bad("storage_too_large", "the contract storage is too large to serve over rpc"))?;
     let slots: Vec<Json> = keys
         .iter()
         .filter_map(|key| {
@@ -940,7 +943,10 @@ fn storage(node: &DevNode, address: &str) -> Result<Json, ClientError> {
     if qtv_idfmt::parse_address(address).is_err() {
         return Err(ClientError::bad("bad_address", "the address is not a q1 address"));
     }
-    let all = node.ledger().contract_storage_at(address);
+    let all = node
+        .ledger()
+        .contract_storage_at_capped(address)
+        .ok_or_else(|| ClientError::bad("storage_too_large", "the contract storage is too large to serve over rpc"))?;
     let total = all.len();
     let slots: Vec<Json> = all
         .into_iter()

@@ -624,6 +624,8 @@ fn encode_storage(storage: &std::collections::BTreeMap<StorageKey, u64>) -> Vec<
     encoder.into_bytes()
 }
 
+const MAX_RPC_STORAGE_BYTES: usize = 512 * 1024;
+
 fn decode_storage(bytes: &[u8]) -> std::collections::BTreeMap<StorageKey, u64> {
     let mut decoder = qtv_codec::Decoder::new(bytes);
     let mut storage = std::collections::BTreeMap::new();
@@ -2084,6 +2086,21 @@ impl Ledger {
         match address_id(address) {
             Some(id) => self.contract_storage(&id),
             None => std::collections::BTreeMap::new(),
+        }
+    }
+
+    pub fn contract_storage_at_capped(
+        &self,
+        address: &str,
+    ) -> Option<std::collections::BTreeMap<StorageKey, u64>> {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return Some(std::collections::BTreeMap::new()),
+        };
+        match self.trie.get(&contract_store_key(&id)) {
+            Some(bytes) if bytes.len() > MAX_RPC_STORAGE_BYTES => None,
+            Some(bytes) if !bytes.is_empty() => Some(decode_storage(bytes)),
+            _ => Some(std::collections::BTreeMap::new()),
         }
     }
 
