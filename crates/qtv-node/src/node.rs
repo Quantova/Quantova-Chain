@@ -914,6 +914,7 @@ fn dispatch_vm(
                 now_seconds,
                 meter,
                 value,
+                None,
                 fee_params.chain_id,
             );
         }
@@ -928,6 +929,7 @@ fn dispatch_vm(
                 now_seconds,
                 meter,
                 value,
+                None,
                 fee_params.chain_id,
             );
         }

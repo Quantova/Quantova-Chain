@@ -248,6 +248,9 @@ impl Decode for OutstandingBurn {
 
 const BRIDGE_ASSET_TAG: &[u8] = b"qtv/bridge/asset/";
 const BRIDGE_BALANCE_TAG: &[u8] = b"qtv/bridge/bal/";
+const ASSET_BALANCE_TAG: &[u8] = b"qtv/asset/bal/";
+const ASSET_SUPPLY_TAG: &[u8] = b"qtv/asset/supply/";
+const ASSET_ID_DOMAIN: &[u8] = b"qtv/asset/id/v1";
 const BRIDGE_SEEN_TAG: &[u8] = b"qtv/bridge/seen/";
 const BRIDGE_EPOCHMINT_TAG: &[u8] = b"qtv/bridge/epochmint/";
 const BRIDGE_OPERATORS_TAG: &[u8] = b"qtv/bridge/operators";
@@ -274,6 +277,31 @@ fn bridge_balance_key(asset_id: &[u8; 16], holder: &[u8; 32]) -> Key {
     input.extend_from_slice(asset_id);
     input.extend_from_slice(holder);
     sha3::sha3_256(&input)
+}
+
+fn asset_balance_key(asset_id: &[u8; 16], holder: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(ASSET_BALANCE_TAG.len() + asset_id.len() + holder.len());
+    input.extend_from_slice(ASSET_BALANCE_TAG);
+    input.extend_from_slice(asset_id);
+    input.extend_from_slice(holder);
+    sha3::sha3_256(&input)
+}
+
+fn asset_supply_key(asset_id: &[u8; 16]) -> Key {
+    let mut input = Vec::with_capacity(ASSET_SUPPLY_TAG.len() + asset_id.len());
+    input.extend_from_slice(ASSET_SUPPLY_TAG);
+    input.extend_from_slice(asset_id);
+    sha3::sha3_256(&input)
+}
+
+pub fn asset_id_of(issuer: &[u8; 32]) -> [u8; 16] {
+    let mut input = Vec::with_capacity(ASSET_ID_DOMAIN.len() + issuer.len());
+    input.extend_from_slice(ASSET_ID_DOMAIN);
+    input.extend_from_slice(issuer);
+    let digest = sha3::sha3_256(&input);
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&digest[..16]);
+    id
 }
 
 fn bridge_seen_key(source_chain: u32, source_ref: &[u8; 32]) -> Key {
@@ -1422,6 +1450,62 @@ impl Ledger {
         self.write_leaf(bridge_balance_key(asset_id, holder), to_bytes(&amount));
     }
 
+    pub fn asset_balance(&self, asset_id: &[u8; 16], holder: &[u8; 32]) -> u128 {
+        self.trie
+            .get(&asset_balance_key(asset_id, holder))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical asset balance"))
+            .unwrap_or(0)
+    }
+
+    fn set_asset_balance(&mut self, asset_id: &[u8; 16], holder: &[u8; 32], amount: u128) {
+        self.write_leaf(asset_balance_key(asset_id, holder), to_bytes(&amount));
+    }
+
+    pub fn asset_supply(&self, asset_id: &[u8; 16]) -> u128 {
+        self.trie
+            .get(&asset_supply_key(asset_id))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical asset supply"))
+            .unwrap_or(0)
+    }
+
+    fn set_asset_supply(&mut self, asset_id: &[u8; 16], supply: u128) {
+        self.write_leaf(asset_supply_key(asset_id), to_bytes(&supply));
+    }
+
+    fn credit_asset(&mut self, asset_id: &[u8; 16], holder: &[u8; 32], amount: u128) -> bool {
+        let updated = match self.asset_balance(asset_id, holder).checked_add(amount) {
+            Some(sum) => sum,
+            None => return false,
+        };
+        self.set_asset_balance(asset_id, holder, updated);
+        true
+    }
+
+    fn debit_asset(&mut self, asset_id: &[u8; 16], holder: &[u8; 32], amount: u128) -> bool {
+        let current = self.asset_balance(asset_id, holder);
+        let updated = match current.checked_sub(amount) {
+            Some(rest) => rest,
+            None => return false,
+        };
+        self.set_asset_balance(asset_id, holder, updated);
+        true
+    }
+
+    pub fn issue_asset(&mut self, issuer: &[u8; 32], holder: &[u8; 32], amount: u128) -> Option<[u8; 16]> {
+        let asset_id = asset_id_of(issuer);
+        if self.asset_supply(&asset_id) != 0 {
+            return None;
+        }
+        if amount == 0 {
+            return None;
+        }
+        self.set_asset_supply(&asset_id, amount);
+        self.set_asset_balance(&asset_id, holder, amount);
+        Some(asset_id)
+    }
+
     #[cfg(test)]
     pub(crate) fn seed_outstanding_burn(
         &mut self,
@@ -2151,6 +2235,7 @@ impl Ledger {
         now_seconds: u64,
         meter: u64,
         value: u64,
+        in_asset: Option<[u8; 32]>,
         chain_id: u64,
     ) -> bool {
         let contract_id = match address_id(contract) {
@@ -2161,13 +2246,26 @@ impl Ledger {
             Some(code) => code,
             None => return false,
         };
-        if value > 0 && self.balance(caller) < value {
-            return false;
+        let caller_id = address_id(caller).unwrap_or([0u8; 32]);
+        // An asset is named at the surface by its issuer address. The ledger derives the internal id.
+        let in_asset_id = in_asset.map(|issuer| asset_id_of(&issuer));
+        if value > 0 {
+            match in_asset_id {
+                None => {
+                    if self.balance(caller) < value {
+                        return false;
+                    }
+                }
+                Some(asset) => {
+                    if self.asset_balance(&asset, &caller_id) < u128::from(value) {
+                        return false;
+                    }
+                }
+            }
         }
         let storage = self.contract_storage(&contract_id);
         let mut memory = vec![0u8; user_memory.len().max(CONTRACT_CONTEXT_BYTES)];
         memory[..user_memory.len()].copy_from_slice(user_memory);
-        let caller_id = address_id(caller).unwrap_or([0u8; 32]);
         memory[0..32].copy_from_slice(&caller_id);
         memory[32..64].copy_from_slice(&contract_id);
         memory[64..72].copy_from_slice(&now_seconds.to_be_bytes());
@@ -2177,33 +2275,79 @@ impl Ledger {
         memory[72..80].copy_from_slice(&chain_id.to_be_bytes());
         match crate::execution::execute_contract_call(&code, selector, storage, &memory, meter) {
             Ok(outcome) => {
-                let mut credits: Vec<(String, u64)> = Vec::new();
-                let mut total_sent: u64 = 0;
+                let mut native_credits: Vec<(String, u64)> = Vec::new();
+                let mut native_sent: u64 = 0;
+                let mut asset_credits: Vec<([u8; 16], [u8; 32], u128)> = Vec::new();
+                let mut asset_sent: std::collections::BTreeMap<[u8; 16], u128> =
+                    std::collections::BTreeMap::new();
                 for effect in &outcome.effects {
                     if let qtv_vm::interp::Effect::Transfer { to, amount } = effect {
-                        let target = match id_bytes_to_address(to) {
-                            Some(address) => address,
-                            None => return false,
-                        };
-                        total_sent = match total_sent.checked_add(*amount) {
-                            Some(sum) => sum,
-                            None => return false,
-                        };
-                        credits.push((target, *amount));
+                        if to.len() == 32 {
+                            let target = match id_bytes_to_address(to) {
+                                Some(address) => address,
+                                None => return false,
+                            };
+                            native_sent = match native_sent.checked_add(*amount) {
+                                Some(sum) => sum,
+                                None => return false,
+                            };
+                            native_credits.push((target, *amount));
+                        } else if to.len() == 64 {
+                            let mut issuer = [0u8; 32];
+                            issuer.copy_from_slice(&to[..32]);
+                            let mut holder = [0u8; 32];
+                            holder.copy_from_slice(&to[32..64]);
+                            let asset = asset_id_of(&issuer);
+                            let moved = u128::from(*amount);
+                            let running = asset_sent.entry(asset).or_insert(0);
+                            *running = match running.checked_add(moved) {
+                                Some(sum) => sum,
+                                None => return false,
+                            };
+                            asset_credits.push((asset, holder, moved));
+                        } else {
+                            return false;
+                        }
                     }
                 }
-                let funded = match self.balance(contract).checked_add(value) {
+                let native_in = if in_asset_id.is_none() { value } else { 0 };
+                let native_funded = match self.balance(contract).checked_add(native_in) {
                     Some(funded) => funded,
                     None => return false,
                 };
-                if funded < total_sent {
+                if native_funded < native_sent {
                     return false;
                 }
-                if value > 0 {
-                    self.apply_balance_delta(caller, -i128::from(value));
-                    self.apply_balance_delta(contract, i128::from(value));
+                for (asset, sent) in &asset_sent {
+                    let asset_in = match in_asset_id {
+                        Some(a) if a == *asset => u128::from(value),
+                        _ => 0,
+                    };
+                    let funded = match self.asset_balance(asset, &contract_id).checked_add(asset_in) {
+                        Some(funded) => funded,
+                        None => return false,
+                    };
+                    if funded < *sent {
+                        return false;
+                    }
                 }
-                for (target, amount) in &credits {
+                if value > 0 {
+                    match in_asset_id {
+                        None => {
+                            self.apply_balance_delta(caller, -i128::from(value));
+                            self.apply_balance_delta(contract, i128::from(value));
+                        }
+                        Some(asset) => {
+                            if !self.debit_asset(&asset, &caller_id, u128::from(value)) {
+                                return false;
+                            }
+                            if !self.credit_asset(&asset, &contract_id, u128::from(value)) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                for (target, amount) in &native_credits {
                     self.apply_balance_delta(contract, -i128::from(*amount));
                     self.apply_balance_delta(target, i128::from(*amount));
                     self.record_side_event(SideEvent::ContractTransfer {
@@ -2211,6 +2355,14 @@ impl Ledger {
                         to: target.clone(),
                         amount: *amount,
                     });
+                }
+                for (asset, holder, amount) in &asset_credits {
+                    if !self.debit_asset(asset, &contract_id, *amount) {
+                        return false;
+                    }
+                    if !self.credit_asset(asset, holder, *amount) {
+                        return false;
+                    }
                 }
                 for effect in &outcome.effects {
                     if let qtv_vm::interp::Effect::Event { selector, data } = effect {
@@ -3104,7 +3256,7 @@ mod stake_state_tests {
         l.set_contract_code(&contract_id, &container.canonical_bytes());
 
         let caller = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
-        assert!(l.call_contract(&caller, &contract, selector, &[], 0, 100_000, 0, 0));
+        assert!(l.call_contract(&caller, &contract, selector, &[], 0, 100_000, 0, None, 0));
         let expected = u64::from_be_bytes([9u8; 8]);
         assert_eq!(
             l.contract_storage(&contract_id).get(&qtv_vm::abi::scalar_key(0)),
@@ -3112,7 +3264,122 @@ mod stake_state_tests {
         );
 
         let empty = qtv_idfmt::render_address(&[71u8; 32]).unwrap();
-        assert!(!l.call_contract(&caller, &empty, selector, &[], 0, 100_000, 0, 0));
+        assert!(!l.call_contract(&caller, &empty, selector, &[], 0, 100_000, 0, None, 0));
+    }
+
+    fn asset_sender_container(selector: [u8; 4]) -> qtv_vm::container::Container {
+        let code = qtv_vm::asm::assemble("LDI r1, 80\nLDI r2, 64\nLDI r3, 40\nSEND r1, r2, r3\nHALT")
+            .expect("the program assembles");
+        qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
+            }],
+        )
+    }
+
+    #[test]
+    fn a_contract_swaps_one_asset_in_for_another_out_and_both_conserve() {
+        // The pool holds asset B and, when called, pays a fixed amount of asset B to the caller, whose
+        // thirty two byte id the payload places right after the thirty two byte issuer address that
+        // names the asset. The caller carries asset A in through the call value. One atomic call, two
+        // assets, each conserved.
+        let selector = [1u8, 2, 3, 4];
+        let mut l = Ledger::new();
+        let contract_id = [70u8; 32];
+        let contract = qtv_idfmt::render_address(&contract_id).unwrap();
+        l.set_contract_code(&contract_id, &asset_sender_container(selector).canonical_bytes());
+
+        let caller_id = [9u8; 32];
+        let caller = qtv_idfmt::render_address(&caller_id).unwrap();
+        let issuer_a = [0xA1u8; 32];
+        let issuer_b = [0xB2u8; 32];
+        let asset_a = asset_id_of(&issuer_a);
+        let asset_b = asset_id_of(&issuer_b);
+        l.set_asset_balance(&asset_a, &caller_id, 50);
+        l.set_asset_balance(&asset_b, &contract_id, 100);
+
+        let mut payload = vec![0u8; 80];
+        payload.extend_from_slice(&issuer_b);
+        payload.extend_from_slice(&caller_id);
+
+        assert!(l.call_contract(&caller, &contract, selector, &payload, 0, 1_000_000, 10, Some(issuer_a), 0));
+
+        assert_eq!(l.asset_balance(&asset_a, &caller_id), 40);
+        assert_eq!(l.asset_balance(&asset_a, &contract_id), 10);
+        assert_eq!(l.asset_balance(&asset_b, &contract_id), 60);
+        assert_eq!(l.asset_balance(&asset_b, &caller_id), 40);
+        assert_eq!(l.asset_balance(&asset_a, &caller_id) + l.asset_balance(&asset_a, &contract_id), 50);
+        assert_eq!(l.asset_balance(&asset_b, &caller_id) + l.asset_balance(&asset_b, &contract_id), 100);
+    }
+
+    #[test]
+    fn a_contract_cannot_send_more_of_an_asset_than_it_holds() {
+        let selector = [1u8, 2, 3, 4];
+        let mut l = Ledger::new();
+        let contract_id = [70u8; 32];
+        let contract = qtv_idfmt::render_address(&contract_id).unwrap();
+        l.set_contract_code(&contract_id, &asset_sender_container(selector).canonical_bytes());
+
+        let caller_id = [9u8; 32];
+        let caller = qtv_idfmt::render_address(&caller_id).unwrap();
+        let issuer_b = [0xB2u8; 32];
+        let asset_b = asset_id_of(&issuer_b);
+        l.set_asset_balance(&asset_b, &contract_id, 30);
+
+        let mut payload = vec![0u8; 80];
+        payload.extend_from_slice(&issuer_b);
+        payload.extend_from_slice(&caller_id);
+
+        assert!(!l.call_contract(&caller, &contract, selector, &payload, 0, 1_000_000, 0, None, 0));
+        assert_eq!(l.asset_balance(&asset_b, &contract_id), 30);
+        assert_eq!(l.asset_balance(&asset_b, &caller_id), 0);
+    }
+
+    #[test]
+    fn a_call_that_carries_an_asset_the_caller_lacks_is_refused() {
+        let selector = [1u8, 2, 3, 4];
+        let mut l = Ledger::new();
+        let contract_id = [70u8; 32];
+        let contract = qtv_idfmt::render_address(&contract_id).unwrap();
+        l.set_contract_code(&contract_id, &asset_sender_container(selector).canonical_bytes());
+        let issuer_b = [0xB2u8; 32];
+        let asset_b = asset_id_of(&issuer_b);
+        l.set_asset_balance(&asset_b, &contract_id, 100);
+
+        let caller_id = [9u8; 32];
+        let caller = qtv_idfmt::render_address(&caller_id).unwrap();
+        let issuer_a = [0xA1u8; 32];
+        let asset_a = asset_id_of(&issuer_a);
+
+        let mut payload = vec![0u8; 80];
+        payload.extend_from_slice(&issuer_b);
+        payload.extend_from_slice(&caller_id);
+
+        assert!(!l.call_contract(&caller, &contract, selector, &payload, 0, 1_000_000, 5, Some(issuer_a), 0));
+        assert_eq!(l.asset_balance(&asset_a, &contract_id), 0);
+        assert_eq!(l.asset_balance(&asset_b, &contract_id), 100);
+    }
+
+    #[test]
+    fn issue_asset_sets_supply_once_and_rejects_reissue_and_zero() {
+        let mut l = Ledger::new();
+        let issuer = [3u8; 32];
+        let holder = [4u8; 32];
+        let id = l.issue_asset(&issuer, &holder, 1_000).expect("first issuance succeeds");
+        assert_eq!(id, asset_id_of(&issuer));
+        assert_eq!(l.asset_supply(&id), 1_000);
+        assert_eq!(l.asset_balance(&id, &holder), 1_000);
+        assert!(l.issue_asset(&issuer, &holder, 1).is_none(), "an asset id issues only once");
+        assert!(l.issue_asset(&[7u8; 32], &holder, 0).is_none(), "a zero supply is not an issuance");
     }
 
     #[test]
@@ -3154,14 +3421,14 @@ mod stake_state_tests {
         let c1 = qtv_idfmt::render_address(&p1).unwrap();
         let c2 = qtv_idfmt::render_address(&p2).unwrap();
 
-        assert!(l.call_contract(&c1, &contract, selector, &[], 0, 100_000, 0, 0));
+        assert!(l.call_contract(&c1, &contract, selector, &[], 0, 100_000, 0, None, 0));
         let seen1 = *l.contract_storage(&contract_id).get(&qtv_vm::abi::scalar_key(0)).unwrap();
         assert_eq!(
             l.contract_storage(&contract_id).get(&qtv_vm::abi::scalar_key(1)),
             Some(&u64::from_be_bytes([70u8; 8]))
         );
 
-        assert!(l.call_contract(&c2, &contract, selector, &[], 0, 100_000, 0, 0));
+        assert!(l.call_contract(&c2, &contract, selector, &[], 0, 100_000, 0, None, 0));
         let seen2 = *l.contract_storage(&contract_id).get(&qtv_vm::abi::scalar_key(0)).unwrap();
 
         assert_eq!(seen1, u64::from_be_bytes([0xA1u8; 8]));
