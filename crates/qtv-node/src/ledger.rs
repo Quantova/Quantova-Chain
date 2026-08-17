@@ -251,6 +251,10 @@ const BRIDGE_BALANCE_TAG: &[u8] = b"qtv/bridge/bal/";
 const ASSET_BALANCE_TAG: &[u8] = b"qtv/asset/bal/";
 const ASSET_SUPPLY_TAG: &[u8] = b"qtv/asset/supply/";
 const ASSET_ID_DOMAIN: &[u8] = b"qtv/asset/id/v1";
+// A contract mints its own asset by emitting an event under this reserved selector, carrying the
+// thirty two byte holder followed by an eight byte amount. The credit always lands on the emitting
+// contract's own asset, so no contract can ever mint another's.
+const ASSET_MINT_SELECTOR: [u8; 4] = *b"MINT";
 const BRIDGE_SEEN_TAG: &[u8] = b"qtv/bridge/seen/";
 const BRIDGE_EPOCHMINT_TAG: &[u8] = b"qtv/bridge/epochmint/";
 const BRIDGE_OPERATORS_TAG: &[u8] = b"qtv/bridge/operators";
@@ -1506,6 +1510,24 @@ impl Ledger {
         Some(asset_id)
     }
 
+    /// Mint more of the issuer's own asset to a holder, growing its supply. The issuer is always the
+    /// contract that requested the mint, so the credit can only ever land on that contract's asset.
+    pub fn mint_asset(&mut self, issuer: &[u8; 32], holder: &[u8; 32], amount: u128) -> bool {
+        if amount == 0 {
+            return false;
+        }
+        let asset_id = asset_id_of(issuer);
+        let supply = match self.asset_supply(&asset_id).checked_add(amount) {
+            Some(supply) => supply,
+            None => return false,
+        };
+        if !self.credit_asset(&asset_id, holder, amount) {
+            return false;
+        }
+        self.set_asset_supply(&asset_id, supply);
+        true
+    }
+
     #[cfg(test)]
     pub(crate) fn seed_outstanding_burn(
         &mut self,
@@ -2366,6 +2388,13 @@ impl Ledger {
                 }
                 for effect in &outcome.effects {
                     if let qtv_vm::interp::Effect::Event { selector, data } = effect {
+                        if *selector == ASSET_MINT_SELECTOR && data.len() >= 40 {
+                            let mut holder = [0u8; 32];
+                            holder.copy_from_slice(&data[..32]);
+                            let amount = u64::from_be_bytes(data[32..40].try_into().unwrap());
+                            self.mint_asset(&contract_id, &holder, u128::from(amount));
+                            continue;
+                        }
                         self.block_events.push(BlockEvent {
                             contract: contract.to_string(),
                             selector: *selector,
@@ -3367,6 +3396,47 @@ mod stake_state_tests {
         assert!(!l.call_contract(&caller, &contract, selector, &payload, 0, 1_000_000, 5, Some(issuer_a), 0));
         assert_eq!(l.asset_balance(&asset_a, &contract_id), 0);
         assert_eq!(l.asset_balance(&asset_b, &contract_id), 100);
+    }
+
+    #[test]
+    fn a_contract_mints_its_own_asset_to_a_holder_and_grows_supply() {
+        // The program emits an event under the reserved MINT selector, its data the thirty two byte
+        // holder followed by an eight byte big endian amount, placed by the payload at offset eighty.
+        let mint_selector: u64 = u32::from_be_bytes(*b"MINT") as u64;
+        let code = qtv_vm::asm::assemble(&format!(
+            "LDI r1, 80\nLDI r2, 40\nLDI r3, {mint_selector}\nEMIT r1, r2, r3\nHALT"
+        ))
+        .expect("the program assembles");
+        let selector = [1u8, 2, 3, 4];
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
+            }],
+        );
+        let mut l = Ledger::new();
+        let contract_id = [70u8; 32];
+        let contract = qtv_idfmt::render_address(&contract_id).unwrap();
+        l.set_contract_code(&contract_id, &container.canonical_bytes());
+
+        let caller = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
+        let holder = [0xCCu8; 32];
+        let mut payload = vec![0u8; 80];
+        payload.extend_from_slice(&holder);
+        payload.extend_from_slice(&40u64.to_be_bytes());
+
+        assert!(l.call_contract(&caller, &contract, selector, &payload, 0, 1_000_000, 0, None, 0));
+        let asset = asset_id_of(&contract_id);
+        assert_eq!(l.asset_balance(&asset, &holder), 40);
+        assert_eq!(l.asset_supply(&asset), 40);
     }
 
     #[test]
