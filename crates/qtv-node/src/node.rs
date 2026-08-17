@@ -887,7 +887,11 @@ fn dispatch_vm(
     let charged = u64::try_from(wrapper.body().fee().min(u128::from(fee_params.ceiling_fee())))
         .unwrap_or_else(|_| fee_params.ceiling_fee());
     let value = wrapper.body().value();
-    if account.balance < charged.saturating_add(value) {
+    let in_asset = wrapper.body().in_asset();
+    // When the call carries an asset, `value` is an amount of that asset, not QTOV, so the QTOV balance
+    // only has to cover the fee here. The asset itself is checked and moved inside call_contract.
+    let native_debit = if in_asset.is_none() { value } else { 0 };
+    if account.balance < charged.saturating_add(native_debit) {
         return false;
     }
     let target = wrapper.body().call().target().to_string();
@@ -914,7 +918,7 @@ fn dispatch_vm(
                 now_seconds,
                 meter,
                 value,
-                None,
+                in_asset,
                 fee_params.chain_id,
             );
         }
@@ -929,7 +933,7 @@ fn dispatch_vm(
                 now_seconds,
                 meter,
                 value,
-                None,
+                in_asset,
                 fee_params.chain_id,
             );
         }

@@ -384,9 +384,19 @@ fn decode_wrapper(decoder: &mut Decoder<'_>) -> Result<Wrapper, DecodeError> {
     let args = decoder.get_bytes()?.to_vec();
     let value = decoder.get_u64()?;
     let chain_id = decoder.get_u64()?;
+    let in_asset = decoder.get_bytes()?;
+    let in_asset = match in_asset.len() {
+        0 => None,
+        32 => {
+            let mut issuer = [0u8; 32];
+            issuer.copy_from_slice(in_asset);
+            Some(issuer)
+        }
+        _ => return Err(DecodeError::BadLength),
+    };
     let scheme = decoder.get_u8()?;
     let signature = decoder.get_bytes()?.to_vec();
-    let body = Body::with_context(
+    let mut body = Body::with_context(
         sender,
         nonce,
         meter_limit,
@@ -395,6 +405,9 @@ fn decode_wrapper(decoder: &mut Decoder<'_>) -> Result<Wrapper, DecodeError> {
         value,
         chain_id,
     );
+    if let Some(issuer) = in_asset {
+        body = body.carrying(issuer);
+    }
     Ok(Wrapper::new(body, scheme, signature))
 }
 
