@@ -144,6 +144,44 @@ fn the_chain_id_is_bound_into_the_signature() {
 }
 
 #[test]
+fn a_carried_asset_is_bound_into_the_signature() {
+    let account = derive(&master(), 0);
+    let target = derive(&master(), 1);
+    let issuer = derive(&master(), 2);
+    let mut issuer32 = [0u8; 32];
+    issuer32.copy_from_slice(&qtv_idfmt::parse_address(&issuer.address()).unwrap());
+    let call = Call::new(target.address(), vec![1, 2, 3, 4]);
+    let body = Body::with_context(
+        account.address(),
+        7,
+        21_000,
+        1_000_000,
+        call.clone(),
+        500,
+        qtv_tx::LOCAL_CHAIN_ID,
+    )
+    .carrying(issuer32);
+    let wrapper = sign(&account, &body);
+    assert!(verify(&wrapper, account.public_key()));
+    assert_eq!(wrapper.body().in_asset(), Some(issuer32));
+
+    let plain = Body::with_context(
+        account.address(),
+        7,
+        21_000,
+        1_000_000,
+        call,
+        500,
+        qtv_tx::LOCAL_CHAIN_ID,
+    );
+    let forged = Wrapper::new(plain, wrapper.scheme(), wrapper.signature().to_vec());
+    assert!(
+        !verify(&forged, account.public_key()),
+        "dropping the carried asset does not authenticate the same body"
+    );
+}
+
+#[test]
 fn body_encoding_is_byte_identical() {
     let body = sample_body();
     let first = qtv_codec::to_bytes(&body);
@@ -277,7 +315,7 @@ fn the_body_reproduces_the_qcore_js_transfer_vector() {
         0,
         qtv_tx::LOCAL_CHAIN_ID,
     );
-    let want = "20000000000000008c705c118414c1e32a977ca4ee36fc3f2888b67ec031596abf4ac70e5f5a14f00300000000000000085200000000000040420f000000000000000000000000002000000000000000ba83f436d6f46e181c3bae40ba4ffedb0f62e67cde1a0c558f459b996229593b0400000000000000deadbeef000000000000000098ba0ce08f27d0be";
+    let want = "20000000000000008c705c118414c1e32a977ca4ee36fc3f2888b67ec031596abf4ac70e5f5a14f00300000000000000085200000000000040420f000000000000000000000000002000000000000000ba83f436d6f46e181c3bae40ba4ffedb0f62e67cde1a0c558f459b996229593b0400000000000000deadbeef000000000000000098ba0ce08f27d0be0000000000000000";
     assert_eq!(hex(&qtv_codec::to_bytes(&body)), want);
 }
 
@@ -300,6 +338,6 @@ fn the_signed_transaction_reproduces_the_qcore_js_payable_vector() {
     assert!(verify(&wrapper, sender.public_key()));
     assert_eq!(
         wrapper.id(),
-        "QTX1XJ7SXNWD3G65KATFC76F07SD00QTXC26KZAXG72022VFVD5VUJJQ9JAV5J"
+        "QTX1TLFZ7EQNKADUQ6LSFTQUFU7E7ZSQQCX6RY46VNQ8T07DUZGANX7QK0Z0MD"
     );
 }
