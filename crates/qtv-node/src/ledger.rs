@@ -3440,6 +3440,48 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn a_contracts_mint_can_only_ever_credit_its_own_asset() {
+        // The mint effect names a holder and an amount, never an asset. The ledger always mints the
+        // calling contract's own asset, so a contract can never inflate another contract's asset.
+        let mint_selector: u64 = u32::from_be_bytes(*b"MINT") as u64;
+        let code = qtv_vm::asm::assemble(&format!(
+            "LDI r1, 80\nLDI r2, 40\nLDI r3, {mint_selector}\nEMIT r1, r2, r3\nHALT"
+        ))
+        .expect("the program assembles");
+        let selector = [1u8, 2, 3, 4];
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
+            }],
+        );
+        let mut l = Ledger::new();
+        let contract_id = [70u8; 32];
+        let contract = qtv_idfmt::render_address(&contract_id).unwrap();
+        l.set_contract_code(&contract_id, &container.canonical_bytes());
+        let caller = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
+
+        let mut payload = vec![0u8; 80];
+        payload.extend_from_slice(&[0xCCu8; 32]);
+        payload.extend_from_slice(&500u64.to_be_bytes());
+        assert!(l.call_contract(&caller, &contract, selector, &payload, 0, 1_000_000, 0, None, 0));
+
+        let own = asset_id_of(&contract_id);
+        let victim = asset_id_of(&[71u8; 32]);
+        assert_eq!(l.asset_supply(&own), 500, "the contract mints its own asset");
+        assert_eq!(l.asset_supply(&victim), 0, "another contract's asset is untouched");
+        assert_eq!(l.asset_balance(&victim, &[0xCCu8; 32]), 0);
+    }
+
+    #[test]
     fn issue_asset_sets_supply_once_and_rejects_reissue_and_zero() {
         let mut l = Ledger::new();
         let issuer = [3u8; 32];
