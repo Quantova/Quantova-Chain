@@ -634,7 +634,7 @@ fn contract_store_key(id: &[u8; 32]) -> Key {
     sha3::sha3_256(&input)
 }
 
-pub const CONTRACT_CONTEXT_BYTES: usize = 80;
+pub const CONTRACT_CONTEXT_BYTES: usize = 88;
 
 pub fn address_word(address: &str) -> Option<u64> {
     let id = address_id(address)?;
@@ -2297,6 +2297,10 @@ impl Ledger {
         // signed or quorum order folds this word into its message tag, so an order authorised for one
         // chain does not verify on another. The caller can never set it; the host always overwrites it.
         memory[72..80].copy_from_slice(&chain_id.to_be_bytes());
+        // The host injects the transaction's real transferred value at @value. An asset parameter's
+        // amount is lowered to read this word, so a contract books exactly what the chain moved and can
+        // never be told by attacker chosen calldata that it was paid more than it was.
+        memory[80..88].copy_from_slice(&value.to_be_bytes());
         match crate::execution::execute_contract_call(&code, selector, storage, &memory, meter) {
             Ok(outcome) => {
                 let mut native_credits: Vec<(String, u64)> = Vec::new();
