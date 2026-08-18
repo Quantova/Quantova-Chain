@@ -48,6 +48,7 @@ pub enum Request {
     BridgedSupply { asset_id: [u8; 16] },
     AssetBalance { issuer: [u8; 32], holder: [u8; 32] },
     AssetSupply { issuer: [u8; 32] },
+    GovernanceReferenda,
     GenesisAccounts,
 }
 
@@ -146,6 +147,7 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
         "get_asset_supply" => Ok(Request::AssetSupply {
             issuer: issuer_id(body)?,
         }),
+        "governance_referenda" => Ok(Request::GovernanceReferenda),
         "genesis_accounts" => Ok(Request::GenesisAccounts),
         "finalized_head" => Ok(Request::FinalizedHead),
         "burn_block" => {
@@ -283,6 +285,7 @@ pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result
         Request::BridgedSupply { asset_id } => Ok(bridged_supply(node, &asset_id)),
         Request::AssetBalance { issuer, holder } => Ok(asset_balance(node, &issuer, &holder)),
         Request::AssetSupply { issuer } => Ok(asset_supply(node, &issuer)),
+        Request::GovernanceReferenda => Ok(governance_referenda(node)),
         Request::GenesisAccounts => Ok(genesis_accounts(node)),
     }
 }
@@ -326,6 +329,40 @@ fn asset_supply(node: &DevNode, issuer: &[u8; 32]) -> Json {
         ),
         ("supply", amount_str(ledger.asset_supply_by_issuer(issuer))),
     ])
+}
+
+fn governance_referenda(node: &DevNode) -> Json {
+    let ledger = node.ledger();
+    let items: Vec<Json> = ledger
+        .gov_referenda()
+        .into_iter()
+        .map(|r| {
+            let mut proposer = [0u8; 32];
+            if r.proposer.len() == 32 {
+                proposer.copy_from_slice(&r.proposer);
+            }
+            let status = match r.status {
+                qtv_governance::Status::Deciding => "deciding",
+                qtv_governance::Status::Approved => "approved",
+                qtv_governance::Status::Rejected => "rejected",
+            };
+            object(vec![
+                ("id", Json::Int(r.id)),
+                ("track", Json::Int(r.track.code() as u64)),
+                (
+                    "proposer",
+                    Json::str(qtv_idfmt::render_address(&proposer).unwrap_or_default()),
+                ),
+                ("deposit", amount_str(r.deposit as u128)),
+                ("submitted_at", Json::Int(r.submitted_at)),
+                ("aye_stake", amount_str(r.tally.aye_stake)),
+                ("nay_stake", amount_str(r.tally.nay_stake)),
+                ("status", Json::str(status)),
+                ("killed", Json::Bool(r.killed)),
+            ])
+        })
+        .collect();
+    object(vec![("referenda", Json::Array(items))])
 }
 
 fn bridged_supply(node: &DevNode, asset_id: &[u8; 16]) -> Json {
