@@ -2297,9 +2297,6 @@ impl Ledger {
         // signed or quorum order folds this word into its message tag, so an order authorised for one
         // chain does not verify on another. The caller can never set it; the host always overwrites it.
         memory[72..80].copy_from_slice(&chain_id.to_be_bytes());
-        // The host injects the transaction's real transferred value at @value. An asset parameter's
-        // amount is lowered to read this word, so a contract books exactly what the chain moved and can
-        // never be told by attacker chosen calldata that it was paid more than it was.
         memory[80..88].copy_from_slice(&value.to_be_bytes());
         match crate::execution::execute_contract_call(&code, selector, storage, &memory, meter) {
             Ok(outcome) => {
