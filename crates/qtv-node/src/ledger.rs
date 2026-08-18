@@ -1478,6 +1478,16 @@ impl Ledger {
         self.write_leaf(asset_supply_key(asset_id), to_bytes(&supply));
     }
 
+    /// Read a holder's balance of the asset issued by `issuer`, naming the asset by its issuer address
+    /// the same way the surface and the transaction do. Wallets read a token balance through this.
+    pub fn asset_balance_by_issuer(&self, issuer: &[u8; 32], holder: &[u8; 32]) -> u128 {
+        self.asset_balance(&asset_id_of(issuer), holder)
+    }
+
+    pub fn asset_supply_by_issuer(&self, issuer: &[u8; 32]) -> u128 {
+        self.asset_supply(&asset_id_of(issuer))
+    }
+
     fn credit_asset(&mut self, asset_id: &[u8; 16], holder: &[u8; 32], amount: u128) -> bool {
         let updated = match self.asset_balance(asset_id, holder).checked_add(amount) {
             Some(sum) => sum,
