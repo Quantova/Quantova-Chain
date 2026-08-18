@@ -2477,6 +2477,17 @@ impl Ledger {
             .map(|bytes| from_bytes(bytes).expect("state holds a canonical referendum"))
     }
 
+    pub fn gov_referenda(&self) -> Vec<Referendum> {
+        let next = self.gov_next_id();
+        let mut out = Vec::new();
+        for id in 1..next {
+            if let Some(referendum) = self.gov_referendum(id) {
+                out.push(referendum);
+            }
+        }
+        out
+    }
+
     fn set_gov_referendum(&mut self, id: u64, referendum: &Referendum) {
         self.write_leaf(gov_referendum_key(id), to_bytes(referendum));
     }
