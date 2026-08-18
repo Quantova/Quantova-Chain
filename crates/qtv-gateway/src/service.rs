@@ -46,6 +46,8 @@ pub enum Request {
     BurnHeightsAfter(u64),
     BridgedBalance { asset_id: [u8; 16], holder: [u8; 32] },
     BridgedSupply { asset_id: [u8; 16] },
+    AssetBalance { issuer: [u8; 32], holder: [u8; 32] },
+    AssetSupply { issuer: [u8; 32] },
     GenesisAccounts,
 }
 
@@ -136,6 +138,13 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
         }),
         "get_bridged_supply" => Ok(Request::BridgedSupply {
             asset_id: hex_bytes::<16>(body, "asset_id")?,
+        }),
+        "get_asset_balance" => Ok(Request::AssetBalance {
+            issuer: issuer_id(body)?,
+            holder: holder_id(body)?,
+        }),
+        "get_asset_supply" => Ok(Request::AssetSupply {
+            issuer: issuer_id(body)?,
         }),
         "genesis_accounts" => Ok(Request::GenesisAccounts),
         "finalized_head" => Ok(Request::FinalizedHead),
@@ -240,6 +249,15 @@ fn holder_id(body: &Json) -> Result<[u8; 32], ClientError> {
     hex_bytes::<32>(body, "holder")
 }
 
+fn issuer_id(body: &Json) -> Result<[u8; 32], ClientError> {
+    let issuer = string_field(body, "issuer")?;
+    if let Ok(payload) = qtv_idfmt::parse_address(&issuer) {
+        return <[u8; 32]>::try_from(payload.as_slice())
+            .map_err(|_| ClientError::bad("bad_request", "the issuer address is not 32 bytes"));
+    }
+    hex_bytes::<32>(body, "issuer")
+}
+
 pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result<Json, ClientError> {
     match request {
         Request::NodeInfo => Ok(node_info(ctx, node)),
@@ -263,6 +281,8 @@ pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result
         Request::BurnHeightsAfter(cursor) => Ok(burn_heights_after(node, cursor)),
         Request::BridgedBalance { asset_id, holder } => Ok(bridged_balance(node, &asset_id, &holder)),
         Request::BridgedSupply { asset_id } => Ok(bridged_supply(node, &asset_id)),
+        Request::AssetBalance { issuer, holder } => Ok(asset_balance(node, &issuer, &holder)),
+        Request::AssetSupply { issuer } => Ok(asset_supply(node, &issuer)),
         Request::GenesisAccounts => Ok(genesis_accounts(node)),
     }
 }
@@ -278,6 +298,33 @@ fn bridged_balance(node: &DevNode, asset_id: &[u8; 16], holder: &[u8; 32]) -> Js
         ),
         ("balance", amount_str(ledger.bridged_balance(asset_id, holder))),
         ("supply", amount_str(ledger.bridged_supply(asset_id))),
+    ])
+}
+
+fn asset_balance(node: &DevNode, issuer: &[u8; 32], holder: &[u8; 32]) -> Json {
+    let ledger = node.ledger();
+    object(vec![
+        (
+            "issuer",
+            Json::str(qtv_idfmt::render_address(issuer).unwrap_or_default()),
+        ),
+        (
+            "holder",
+            Json::str(qtv_idfmt::render_address(holder).unwrap_or_default()),
+        ),
+        ("balance", amount_str(ledger.asset_balance_by_issuer(issuer, holder))),
+        ("supply", amount_str(ledger.asset_supply_by_issuer(issuer))),
+    ])
+}
+
+fn asset_supply(node: &DevNode, issuer: &[u8; 32]) -> Json {
+    let ledger = node.ledger();
+    object(vec![
+        (
+            "issuer",
+            Json::str(qtv_idfmt::render_address(issuer).unwrap_or_default()),
+        ),
+        ("supply", amount_str(ledger.asset_supply_by_issuer(issuer))),
     ])
 }
 

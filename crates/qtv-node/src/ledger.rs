@@ -251,9 +251,6 @@ const BRIDGE_BALANCE_TAG: &[u8] = b"qtv/bridge/bal/";
 const ASSET_BALANCE_TAG: &[u8] = b"qtv/asset/bal/";
 const ASSET_SUPPLY_TAG: &[u8] = b"qtv/asset/supply/";
 const ASSET_ID_DOMAIN: &[u8] = b"qtv/asset/id/v1";
-// A contract mints its own asset by emitting an event under this reserved selector, carrying the
-// thirty two byte holder followed by an eight byte amount. The credit always lands on the emitting
-// contract's own asset, so no contract can ever mint another's.
 const ASSET_MINT_SELECTOR: [u8; 4] = *b"MINT";
 const BRIDGE_SEEN_TAG: &[u8] = b"qtv/bridge/seen/";
 const BRIDGE_EPOCHMINT_TAG: &[u8] = b"qtv/bridge/epochmint/";
@@ -1478,6 +1475,14 @@ impl Ledger {
         self.write_leaf(asset_supply_key(asset_id), to_bytes(&supply));
     }
 
+    pub fn asset_balance_by_issuer(&self, issuer: &[u8; 32], holder: &[u8; 32]) -> u128 {
+        self.asset_balance(&asset_id_of(issuer), holder)
+    }
+
+    pub fn asset_supply_by_issuer(&self, issuer: &[u8; 32]) -> u128 {
+        self.asset_supply(&asset_id_of(issuer))
+    }
+
     fn credit_asset(&mut self, asset_id: &[u8; 16], holder: &[u8; 32], amount: u128) -> bool {
         let updated = match self.asset_balance(asset_id, holder).checked_add(amount) {
             Some(sum) => sum,
@@ -1510,8 +1515,6 @@ impl Ledger {
         Some(asset_id)
     }
 
-    /// Mint more of the issuer's own asset to a holder, growing its supply. The issuer is always the
-    /// contract that requested the mint, so the credit can only ever land on that contract's asset.
     pub fn mint_asset(&mut self, issuer: &[u8; 32], holder: &[u8; 32], amount: u128) -> bool {
         if amount == 0 {
             return false;
@@ -2269,7 +2272,6 @@ impl Ledger {
             None => return false,
         };
         let caller_id = address_id(caller).unwrap_or([0u8; 32]);
-        // An asset is named at the surface by its issuer address. The ledger derives the internal id.
         let in_asset_id = in_asset.map(|issuer| asset_id_of(&issuer));
         if value > 0 {
             match in_asset_id {
@@ -3317,10 +3319,6 @@ mod stake_state_tests {
 
     #[test]
     fn a_contract_swaps_one_asset_in_for_another_out_and_both_conserve() {
-        // The pool holds asset B and, when called, pays a fixed amount of asset B to the caller, whose
-        // thirty two byte id the payload places right after the thirty two byte issuer address that
-        // names the asset. The caller carries asset A in through the call value. One atomic call, two
-        // assets, each conserved.
         let selector = [1u8, 2, 3, 4];
         let mut l = Ledger::new();
         let contract_id = [70u8; 32];
@@ -3400,8 +3398,6 @@ mod stake_state_tests {
 
     #[test]
     fn a_contract_mints_its_own_asset_to_a_holder_and_grows_supply() {
-        // The program emits an event under the reserved MINT selector, its data the thirty two byte
-        // holder followed by an eight byte big endian amount, placed by the payload at offset eighty.
         let mint_selector: u64 = u32::from_be_bytes(*b"MINT") as u64;
         let code = qtv_vm::asm::assemble(&format!(
             "LDI r1, 80\nLDI r2, 40\nLDI r3, {mint_selector}\nEMIT r1, r2, r3\nHALT"
@@ -3441,8 +3437,6 @@ mod stake_state_tests {
 
     #[test]
     fn a_contracts_mint_can_only_ever_credit_its_own_asset() {
-        // The mint effect names a holder and an amount, never an asset. The ledger always mints the
-        // calling contract's own asset, so a contract can never inflate another contract's asset.
         let mint_selector: u64 = u32::from_be_bytes(*b"MINT") as u64;
         let code = qtv_vm::asm::assemble(&format!(
             "LDI r1, 80\nLDI r2, 40\nLDI r3, {mint_selector}\nEMIT r1, r2, r3\nHALT"

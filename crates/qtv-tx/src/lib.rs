@@ -109,8 +109,6 @@ impl Body {
         }
     }
 
-    /// Name the asset this transaction carries into the call, by its issuer address. When set, `value`
-    /// is an amount of that asset debited from the sender, not native QTOV. Absent means QTOV.
     pub fn carrying(mut self, issuer: [u8; 32]) -> Self {
         self.in_asset = Some(issuer);
         self
@@ -159,8 +157,6 @@ impl Encode for Body {
         self.call.encode(encoder);
         self.value.encode(encoder);
         self.chain_id.encode(encoder);
-        // A trailing length prefixed asset issuer. Empty means native QTOV, so the signed digest of a
-        // QTOV transaction gains only a zero length marker and every signer appends the same.
         encoder.put_bytes(self.in_asset.as_ref().map(|a| a.as_slice()).unwrap_or(&[]));
     }
 }
