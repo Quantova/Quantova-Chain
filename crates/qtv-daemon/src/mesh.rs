@@ -181,6 +181,7 @@ fn spawn_readers(
             }
             let mut tokens = PEER_MSG_BURST;
             let mut last = Instant::now();
+            let mut last_log: Option<Instant> = None;
             while let Ok(bytes) = channel.recv() {
                 let now = Instant::now();
                 tokens = (tokens + now.saturating_duration_since(last).as_secs_f64() * PEER_MSG_PER_SEC)
@@ -189,6 +190,10 @@ fn spawn_readers(
                 if tokens < 1.0 {
                     // This peer is over its rate. Drop the message rather than forward it,
                     // so a flood from one member cannot grow the inbound queue without bound.
+                    if last_log.map_or(true, |t| now.saturating_duration_since(t) > Duration::from_secs(10)) {
+                        log(&format!("peer {} is over its message rate, dropping its frames", from + 1));
+                        last_log = Some(now);
+                    }
                     continue;
                 }
                 tokens -= 1.0;
