@@ -35,11 +35,18 @@ const RATE_BURST: f64 = 100.0;
 // Cap on the rate table so a spray from many addresses cannot grow it without bound.
 const RATE_TABLE_CAP: usize = 100_000;
 
+const BAN_STRIKES: u32 = 100;
+
+const STRIKE_WINDOW: Duration = Duration::from_secs(10);
+
+const BAN_DURATION: Duration = Duration::from_secs(300);
+
 enum Admit {
     Ok,
     TotalFull,
     IpFull,
     RateLimited,
+    Banned,
 }
 
 // A global connection count bounds total load; a per address count keeps one
@@ -56,6 +63,8 @@ struct LimiterInner {
     // Two generations of rate buckets; the live map rotates into rate_old at the cap, bounding total buckets.
     rate: HashMap<IpAddr, Bucket>,
     rate_old: HashMap<IpAddr, Bucket>,
+    strikes: HashMap<IpAddr, (u32, Instant)>,
+    banned: HashMap<IpAddr, Instant>,
 }
 
 // A token bucket for one address. It starts full, refills with elapsed time up
@@ -91,13 +100,56 @@ impl LimiterInner {
         self.rate.insert(ip, bucket);
         allowed
     }
+
+    fn is_banned(&mut self, ip: IpAddr, now: Instant) -> bool {
+        match self.banned.get(&ip) {
+            Some(&until) if until > now => true,
+            Some(_) => {
+                self.banned.remove(&ip);
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn strike(&mut self, ip: IpAddr, now: Instant) -> bool {
+        if self.strikes.len() >= RATE_TABLE_CAP {
+            self.strikes.clear();
+        }
+        let entry = self.strikes.entry(ip).or_insert((0, now));
+        if now.saturating_duration_since(entry.1) > STRIKE_WINDOW {
+            *entry = (0, now);
+        }
+        entry.0 += 1;
+        if entry.0 < BAN_STRIKES {
+            return false;
+        }
+        self.strikes.remove(&ip);
+        if self.banned.len() >= RATE_TABLE_CAP {
+            self.banned.clear();
+        }
+        self.banned.insert(ip, now + BAN_DURATION);
+        eprintln!(
+            "gateway: banned {ip} for {}s after {BAN_STRIKES} rate-limited requests within {}s",
+            BAN_DURATION.as_secs(),
+            STRIKE_WINDOW.as_secs()
+        );
+        true
+    }
 }
 
 impl Limiter {
     fn try_admit(&self, ip: IpAddr, total_cap: usize, per_ip_cap: usize, now: Instant) -> Admit {
         let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if inner.is_banned(ip, now) {
+            return Admit::Banned;
+        }
         if !inner.spend_rate_token(ip, now) {
-            return Admit::RateLimited;
+            return if inner.strike(ip, now) {
+                Admit::Banned
+            } else {
+                Admit::RateLimited
+            };
         }
         if inner.total >= total_cap {
             return Admit::TotalFull;
@@ -168,6 +220,16 @@ pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>, allow: Vec<Ip
                             429,
                             "rate_limited",
                             "too many requests from this address, slow down",
+                        );
+                        continue;
+                    }
+                    Admit::Banned => {
+                        stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
+                        let _ = write_error(
+                            &mut stream,
+                            429,
+                            "banned",
+                            "address temporarily blocked for excessive requests",
                         );
                         continue;
                     }
@@ -405,6 +467,34 @@ mod tests {
         assert!(
             matches!(limiter.try_admit(peer, 100, 3, t), Admit::Ok),
             "a released slot is reusable"
+        );
+    }
+
+    #[test]
+    fn a_sustained_flood_is_banned_then_lifted_when_the_ban_expires() {
+        let limiter = Limiter::default();
+        let peer = ip(9);
+        let t = Instant::now();
+        let mut banned = false;
+        for _ in 0..(RATE_BURST as usize + BAN_STRIKES as usize + 50) {
+            match limiter.try_admit(peer, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, t) {
+                Admit::Ok => limiter.release(peer),
+                Admit::Banned => {
+                    banned = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(banned, "a persistent flood must trip the ban");
+        assert!(
+            matches!(limiter.try_admit(peer, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, t), Admit::Banned),
+            "a banned address is refused at admission"
+        );
+        let later = t + BAN_DURATION + Duration::from_secs(1);
+        assert!(
+            matches!(limiter.try_admit(peer, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, later), Admit::Ok),
+            "the ban lifts after its window"
         );
     }
 
