@@ -46,6 +46,8 @@ fn genesis(accounts: Vec<GenesisAccount>, online: &[bool]) -> Genesis {
         genesis_time: GENESIS_TIME,
         guardians: Default::default(),
         bridge_dest_chain: None,
+        bridge_operators: None,
+        bridged_assets: Vec::new(),
     }
 }
 
@@ -567,6 +569,8 @@ fn a_genesis_guardian_caucus_seeds_the_ledger_and_an_empty_one_stays_fail_closed
         genesis_time: GENESIS_TIME,
         guardians: GuardianSet::new(vec![[1u8; 32], [2u8; 32], [3u8; 32]], 2),
         bridge_dest_chain: None,
+        bridge_operators: None,
+        bridged_assets: Vec::new(),
     };
     let node = boot(seeded);
     assert_eq!(node.ledger().guardian_set().threshold, 2);
@@ -592,6 +596,8 @@ fn a_genesis_bridge_dest_chain_seeds_the_ledger_and_an_unset_one_stays_fail_clos
         genesis_time: GENESIS_TIME,
         guardians: Default::default(),
         bridge_dest_chain: Some(9000),
+        bridge_operators: None,
+        bridged_assets: Vec::new(),
     };
     let node = boot(bound);
     assert_eq!(node.ledger().bridge_dest_chain(), Some(9000));
@@ -611,6 +617,8 @@ fn boot_with_slots(online: &[bool], slots: u64) -> Node {
         genesis_time: GENESIS_TIME,
         guardians: Default::default(),
         bridge_dest_chain: None,
+        bridge_operators: None,
+        bridged_assets: Vec::new(),
     };
     let secrets = g
         .validators

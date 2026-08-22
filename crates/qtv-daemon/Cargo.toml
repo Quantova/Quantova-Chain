@@ -22,6 +22,7 @@ qtv-account = { path = "../qtv-account" }
 # and the committee selection the daemon drives. No test fixtures, so the daemon binary
 # carries no path that turns a validator id into key material.
 qtv-node = { path = "../qtv-node" }
+qtv-governance = { path = "../qtv-governance" }
 
 # The block model, for the header arbitrary data limit the daemon checks a note
 # against before handing it to the node.

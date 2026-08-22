@@ -6,7 +6,9 @@ use std::path::PathBuf;
 
 use qtv_node::consensus::ValidatorRegistration;
 use qtv_node::fee::FeeParams;
-use qtv_node::node::{Genesis, GenesisAccount, ValidatorSpec};
+use qtv_governance::GuardianSet;
+use qtv_node::bridge::OperatorSet;
+use qtv_node::node::{Genesis, GenesisAccount, GenesisBridgedAsset, ValidatorSpec};
 
 #[derive(Clone)]
 pub struct NodeConfig {
@@ -97,6 +99,10 @@ pub struct DevnetConfig {
     /// secret. When absent, the single process simulation derives the roster from the
     /// secrets it holds for every node it stands up.
     pub published_roster: Option<Vec<ValidatorRegistration>>,
+    pub bridge_dest_chain: Option<u32>,
+    pub guardians: GuardianSet,
+    pub bridge_operators: Option<OperatorSet>,
+    pub bridged_assets: Vec<GenesisBridgedAsset>,
 }
 
 impl DevnetConfig {
@@ -142,8 +148,10 @@ impl DevnetConfig {
             accounts: self.accounts.clone(),
             validators: self.validator_specs(),
             genesis_time: self.genesis_time,
-            guardians: Default::default(),
-            bridge_dest_chain: None,
+            guardians: self.guardians.clone(),
+            bridge_dest_chain: self.bridge_dest_chain,
+            bridge_operators: self.bridge_operators.clone(),
+            bridged_assets: self.bridged_assets.clone(),
         }
     }
 }

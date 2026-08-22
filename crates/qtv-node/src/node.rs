@@ -82,6 +82,13 @@ impl GenesisAccount {
 }
 
 #[derive(Clone, Debug)]
+pub struct GenesisBridgedAsset {
+    pub asset_id: [u8; 16],
+    pub cap: u128,
+    pub epoch_cap: u128,
+    pub requires_stark: bool,
+}
+
 pub struct Genesis {
     pub fee_params: FeeParams,
     pub accounts: Vec<GenesisAccount>,
@@ -89,6 +96,8 @@ pub struct Genesis {
     pub genesis_time: u64,
     pub guardians: qtv_governance::GuardianSet,
     pub bridge_dest_chain: Option<u32>,
+    pub bridge_operators: Option<crate::bridge::OperatorSet>,
+    pub bridged_assets: Vec<GenesisBridgedAsset>,
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -395,6 +404,8 @@ fn dispatch_evidence(chain_id: u64, ledger: &mut Ledger, wrapper: &Wrapper) -> b
 const GUARDIAN_DOMAIN: &[u8] = b"QUANTOVA/Q/BRIDGE-GUARDIAN/v1";
 const GUARDIAN_UNFREEZE: u8 = 0;
 const GUARDIAN_FREEZE: u8 = 1;
+const GUARDIAN_ENACT: u8 = 2;
+const MAX_GUARDIAN_PAYLOAD: usize = 1 << 16;
 const MAX_GUARDIAN_TARGETS: usize = 64;
 const MAX_GUARDIAN_APPROVALS: usize = 64;
 
@@ -411,10 +422,10 @@ struct GuardianAct {
     bound: u64,
     targets: Vec<[u8; 32]>,
     approvals: Vec<GuardianApproval>,
+    payload: Vec<u8>,
 }
 
 impl GuardianAct {
-    #[cfg(test)]
     fn encode(&self) -> Vec<u8> {
         let mut encoder = qtv_codec::Encoder::new();
         encoder.put_u8(self.op);
@@ -429,6 +440,7 @@ impl GuardianAct {
             encoder.put_bytes(&approval.public_key);
             encoder.put_bytes(&approval.signature);
         }
+        encoder.put_bytes(&self.payload);
         encoder.into_bytes()
     }
 
@@ -459,11 +471,16 @@ impl GuardianAct {
                 signature,
             });
         }
+        let payload = decoder.get_bytes().ok()?.to_vec();
+        if payload.len() > MAX_GUARDIAN_PAYLOAD {
+            return None;
+        }
         (decoder.remaining() == 0).then_some(GuardianAct {
             op,
             bound,
             targets,
             approvals,
+            payload,
         })
     }
 }
@@ -477,7 +494,65 @@ fn guardian_challenge(chain_id: u64, act: &GuardianAct) -> Vec<u8> {
     for target in &act.targets {
         message.extend_from_slice(target);
     }
+    message.extend_from_slice(&(act.payload.len() as u32).to_le_bytes());
+    message.extend_from_slice(&act.payload);
     message
+}
+
+fn guardian_enact_action(act: &GuardianAct) -> Option<Action> {
+    if act.op != GUARDIAN_ENACT || !act.targets.is_empty() {
+        return None;
+    }
+    let mut decoder = Decoder::new(&act.payload);
+    let action = Action::decode(&mut decoder).ok()?;
+    if decoder.remaining() != 0 {
+        return None;
+    }
+    match action {
+        Action::CommitteeRotate { .. } | Action::AssetRegister { .. } => Some(action),
+        _ => None,
+    }
+}
+
+pub fn guardian_enact_challenge(chain_id: u64, enact_nonce: u64, action: &Action) -> Vec<u8> {
+    let act = GuardianAct {
+        op: GUARDIAN_ENACT,
+        bound: enact_nonce,
+        targets: Vec::new(),
+        approvals: Vec::new(),
+        payload: qtv_codec::to_bytes(action),
+    };
+    guardian_challenge(chain_id, &act)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_guardian_enact_tx(
+    action: &Action,
+    chain_id: u64,
+    enact_nonce: u64,
+    approvals: Vec<(u8, Vec<u8>, Vec<u8>)>,
+    relayer: &qtv_account::Account,
+    nonce: u64,
+    meter: u64,
+    fee: u128,
+) -> Wrapper {
+    let act = GuardianAct {
+        op: GUARDIAN_ENACT,
+        bound: enact_nonce,
+        targets: Vec::new(),
+        approvals: approvals
+            .into_iter()
+            .map(|(scheme, public_key, signature)| GuardianApproval {
+                scheme,
+                public_key,
+                signature,
+            })
+            .collect(),
+        payload: qtv_codec::to_bytes(action),
+    };
+    let call = qtv_tx::Call::new(crate::ledger::bridge_guardian_address(), act.encode());
+    let body = qtv_tx::Body::with_context(relayer.address(), nonce, meter, fee, call, 0, chain_id);
+    qtv_tx::sign(relayer, &body)
 }
 
 fn guardian_member_id(scheme: u8, public_key: &[u8]) -> Option<[u8; 32]> {
@@ -573,6 +648,14 @@ pub(crate) fn guardian_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_id: 
             Some(freeze) if freeze.until == act.bound => {}
             _ => return false,
         },
+        GUARDIAN_ENACT => {
+            if guardian_enact_action(&act).is_none() {
+                return false;
+            }
+            if act.bound != ledger.guardian_enact_nonce() {
+                return false;
+            }
+        }
         _ => return false,
     }
     set.authorizes(&guardian_approvers(&set, &act, chain_id))
@@ -600,6 +683,13 @@ fn dispatch_bridge_guardian(
                 ledger.guardian_bridge_unfreeze(&approvers, now)
             }
             _ => false,
+        },
+        GUARDIAN_ENACT => match guardian_enact_action(&act) {
+            Some(action) => {
+                set.authorizes(&approvers)
+                    && ledger.guardian_enact_bridge_action(&action, act.bound, now, chain_id)
+            }
+            None => false,
         },
         _ => false,
     }
@@ -1262,6 +1352,12 @@ impl Node {
         }
         if let Some(dest_chain) = genesis.bridge_dest_chain {
             ledger.seed_bridge_dest_chain(dest_chain);
+        }
+        if let Some(ref operators) = genesis.bridge_operators {
+            ledger.seed_bridge_operator_set(operators);
+        }
+        for asset in &genesis.bridged_assets {
+            ledger.register_bridged_asset(&asset.asset_id, asset.cap, asset.epoch_cap, asset.requires_stark);
         }
 
         let validators: Vec<ConsensusValidator> = genesis
@@ -3137,6 +3233,7 @@ mod tests {
             bound,
             targets: targets.clone(),
             approvals: Vec::new(),
+            payload: Vec::new(),
         };
         let message = guardian_challenge(chain_id, &template);
         let approvals = signers
@@ -3158,6 +3255,7 @@ mod tests {
             bound,
             targets,
             approvals,
+            payload: Vec::new(),
         }
         .encode()
     }
@@ -3331,6 +3429,7 @@ mod tests {
             bound: 0,
             targets: vec![[0x4Cu8; 32]],
             approvals,
+            payload: Vec::new(),
         };
 
         GUARDIAN_VERIFY_CALLS.with(|c| c.set(0));

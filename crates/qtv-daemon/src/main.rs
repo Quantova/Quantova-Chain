@@ -225,6 +225,10 @@ fn build_devnet(genesis_file: &genesis::GenesisFile) -> DevnetConfig {
         fanout: FULL_FANOUT,
         slots: genesis_file.slots,
         published_roster: Some(roster),
+        bridge_dest_chain: genesis_file.genesis.bridge_dest_chain,
+        guardians: genesis_file.genesis.guardians.clone(),
+        bridge_operators: genesis_file.genesis.bridge_operators.clone(),
+        bridged_assets: genesis_file.genesis.bridged_assets.clone(),
     }
 }
 

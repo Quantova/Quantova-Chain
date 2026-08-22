@@ -255,6 +255,7 @@ const ASSET_MINT_SELECTOR: [u8; 4] = *b"MINT";
 const BRIDGE_SEEN_TAG: &[u8] = b"qtv/bridge/seen/";
 const BRIDGE_EPOCHMINT_TAG: &[u8] = b"qtv/bridge/epochmint/";
 const BRIDGE_OPERATORS_TAG: &[u8] = b"qtv/bridge/operators";
+const GUARDIAN_ENACT_NONCE_TAG: &[u8] = b"qtv/guardian/enact-nonce";
 const BRIDGE_VAULTBAL_TAG: &[u8] = b"qtv/bridge/vaultbal/";
 const BRIDGE_ASSET_LIST_TAG: &[u8] = b"qtv/bridge/assetlist";
 const BRIDGE_DESTCHAIN_TAG: &[u8] = b"qtv/bridge/destchain";
@@ -3001,6 +3002,41 @@ impl Ledger {
     }
 
     // a governed feature gate. node logic reads feature_version or feature_active to branch dormant logic on, and only a passed ChainUpgrade vote through execute_action can raise a version, so an upgrade ships in the binary dormant and turns on by vote instead of a fork
+    pub fn guardian_enact_nonce(&self) -> u64 {
+        self.trie
+            .get(&stake_singleton_key(GUARDIAN_ENACT_NONCE_TAG))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical guardian enact nonce"))
+            .unwrap_or(0)
+    }
+
+    fn set_guardian_enact_nonce(&mut self, nonce: u64) {
+        let key = stake_singleton_key(GUARDIAN_ENACT_NONCE_TAG);
+        self.write_leaf(key, to_bytes(&nonce));
+    }
+
+    pub fn guardian_enact_bridge_action(
+        &mut self,
+        action: &Action,
+        enact_nonce: u64,
+        now: u64,
+        chain_id: u64,
+    ) -> bool {
+        if self.guardian_enact_nonce() != enact_nonce {
+            return false;
+        }
+        let ok = match action {
+            Action::CommitteeRotate { .. } | Action::AssetRegister { .. } => {
+                self.execute_action(action, now, chain_id).is_ok()
+            }
+            _ => false,
+        };
+        if ok {
+            self.set_guardian_enact_nonce(enact_nonce.saturating_add(1));
+        }
+        ok
+    }
+
     pub fn feature_version(&self, feature: &[u8]) -> u64 {
         self.trie
             .get(&feature_gate_key(feature))
