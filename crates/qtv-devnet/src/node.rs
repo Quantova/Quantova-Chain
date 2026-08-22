@@ -404,6 +404,24 @@ impl DevNode {
             let (dest_key, dest_value) = self.ledger.seed_bridge_dest_chain(dest_chain);
             self.state_store.put_account(dest_key, dest_value)?;
         }
+        if let Some(ref operators) = genesis.bridge_operators {
+            if let Some((op_key, op_value)) = self.ledger.seed_bridge_operator_set(operators) {
+                self.state_store.put_account(op_key, op_value)?;
+            }
+        }
+        for asset in &genesis.bridged_assets {
+            let (asset_key, asset_value) = self.ledger.register_bridged_asset(
+                &asset.asset_id,
+                asset.cap,
+                asset.epoch_cap,
+                asset.requires_stark,
+            );
+            self.state_store.put_account(asset_key, asset_value)?;
+        }
+        if !genesis.guardians.members.is_empty() {
+            let (guardian_key, guardian_value) = self.ledger.seed_guardian_set(&genesis.guardians);
+            self.state_store.put_account(guardian_key, guardian_value)?;
+        }
         let (supply_key, supply_value) = self.ledger.seed_supply(supply);
         self.state_store.put_account(supply_key, supply_value)?;
         for (key, value) in self.ledger.take_dirty_entries() {

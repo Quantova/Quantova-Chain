@@ -8,7 +8,9 @@ use qtv_account::address_for_key;
 use qtv_crypto::sha3;
 use qtv_devnet::config::DEFAULT_SLOTS;
 use qtv_node::fee::FeeParams;
-use qtv_node::node::{Genesis, GenesisAccount, Root, ValidatorSpec};
+use qtv_node::bridge::{operator_pop_ok, OperatorSet};
+use qtv_governance::GuardianSet;
+use qtv_node::node::{Genesis, GenesisAccount, GenesisBridgedAsset, Root, ValidatorSpec};
 
 use crate::config::{parse_kv, Field};
 use crate::util::from_hex;
@@ -40,6 +42,11 @@ impl GenesisFile {
         let mut native_unit: Option<u128> = None;
         let mut max_fee_native: Option<u64> = None;
         let mut bridge_dest_chain: Option<u32> = None;
+        let mut guardian_members: Vec<[u8; 32]> = Vec::new();
+        let mut guardian_threshold: Option<u32> = None;
+        let mut bridge_ops: Vec<(u32, Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut bridge_threshold: Option<u32> = None;
+        let mut bridged: Vec<GenesisBridgedAsset> = Vec::new();
         let mut validators: Vec<ValidatorSpec> = Vec::new();
         let mut accounts: Vec<GenesisAccount> = Vec::new();
 
@@ -61,6 +68,41 @@ impl GenesisFile {
                 "bridge_dest_chain" => bridge_dest_chain = Some(field.u32("bridge_dest_chain")?),
                 "validator" => {}
                 "account" => accounts.push(parse_account(field)?),
+                "guardian" => {
+                    let id: [u8; 32] = from_hex(field.value.trim())
+                        .ok()
+                        .and_then(|b| b.try_into().ok())
+                        .ok_or_else(|| field.error("guardian expects a thirty two byte member id in hex"))?;
+                    guardian_members.push(id);
+                }
+                "guardian_threshold" => guardian_threshold = Some(field.u32("guardian_threshold")?),
+                "bridge_operator" => {
+                    let mut parts = field.value.split_whitespace();
+                    let id: u32 = parts.next().and_then(|s| s.parse().ok())
+                        .ok_or_else(|| field.error("bridge_operator expects '<id> <public_key_hex> <pop_hex>'"))?;
+                    let pk = parts.next().and_then(|s| from_hex(s).ok())
+                        .ok_or_else(|| field.error("bridge_operator expects '<id> <public_key_hex> <pop_hex>'"))?;
+                    let pop = parts.next().and_then(|s| from_hex(s).ok())
+                        .ok_or_else(|| field.error("bridge_operator expects '<id> <public_key_hex> <pop_hex>' (missing proof-of-possession)"))?;
+                    bridge_ops.push((id, pk, pop));
+                }
+                "bridge_threshold" => bridge_threshold = Some(field.u32("bridge_threshold")?),
+                "bridged_asset" => {
+                    let mut parts = field.value.split_whitespace();
+                    let asset_id: [u8; 16] = parts.next().and_then(|s| from_hex(s).ok())
+                        .and_then(|b| b.try_into().ok())
+                        .ok_or_else(|| field.error("bridged_asset expects '<asset_hex16> <cap> <epoch_cap> <stark 0|1>'"))?;
+                    let cap: u128 = parts.next().and_then(|s| s.parse().ok()).ok_or_else(|| field.error("bridged_asset cap"))?;
+                    let epoch_cap: u128 = parts.next().and_then(|s| s.parse().ok()).ok_or_else(|| field.error("bridged_asset epoch_cap"))?;
+                    let requires_stark = parts.next().map(|s| s == "1" || s.eq_ignore_ascii_case("true")).unwrap_or(false);
+                    if cap == 0 || epoch_cap == 0 {
+                        return Err(field.error("bridged_asset cap and epoch_cap must be nonzero"));
+                    }
+                    if requires_stark {
+                        return Err(field.error("bridged_asset requires_stark is not enforced yet (FRI verification unwired); refusing a false STARK assurance"));
+                    }
+                    bridged.push(GenesisBridgedAsset { asset_id, cap, epoch_cap, requires_stark });
+                }
                 other => {
                     return Err(field.error(&format!("unknown genesis key '{other}'")));
                 }
@@ -119,13 +161,59 @@ impl GenesisFile {
         }
         enforce_no_capture(&validators, &accounts)?;
 
+        let guardians = if guardian_members.is_empty() {
+            GuardianSet::default()
+        } else {
+            let threshold = guardian_threshold.unwrap_or(2);
+            let mut seen: Vec<[u8; 32]> = Vec::with_capacity(guardian_members.len());
+            for m in &guardian_members {
+                if seen.contains(m) {
+                    return Err("genesis guardian members must be distinct".to_string());
+                }
+                seen.push(*m);
+            }
+            if threshold < 2 || (threshold as usize) > guardian_members.len() {
+                return Err("genesis guardian_threshold must be >=2 and <= the number of guardians".to_string());
+            }
+            GuardianSet::new(guardian_members, threshold)
+        };
+        let bridge_operators = if bridge_ops.is_empty() {
+            None
+        } else {
+            let threshold = bridge_threshold.unwrap_or(2);
+            let mut operators: Vec<(u32, Vec<u8>)> = Vec::with_capacity(bridge_ops.len());
+            for (id, pk, pop) in &bridge_ops {
+                if operators.iter().any(|(oid, _)| oid == id) {
+                    return Err(format!("genesis bridge_operator id {id} is duplicated"));
+                }
+                if operators.iter().any(|(_, opk)| opk == pk) {
+                    return Err("genesis bridge_operator public keys must be distinct".to_string());
+                }
+                if !operator_pop_ok(*id, pk, pop, chain_binding) {
+                    return Err(format!("genesis bridge_operator {id} has an invalid proof-of-possession"));
+                }
+                operators.push((*id, pk.clone()));
+            }
+            if threshold < 2 {
+                return Err("genesis bridge_threshold must be at least 2".to_string());
+            }
+            if (threshold as usize) > operators.len() {
+                return Err("genesis bridge_threshold exceeds the committee size".to_string());
+            }
+            if (threshold as usize) * 3 < operators.len() * 2 {
+                return Err("genesis bridge_threshold is below the two thirds BFT safety ratio".to_string());
+            }
+            Some(OperatorSet::new(operators, threshold))
+        };
         let genesis = Genesis {
             fee_params,
             accounts,
             validators,
             genesis_time,
-            guardians: Default::default(),
+            guardians,
             bridge_dest_chain,
+            bridge_operators,
+            bridged_assets: bridged,
         };
         let hash = genesis_hash(&chain_id, &message, slots, &genesis);
         Ok(GenesisFile {
@@ -328,6 +416,8 @@ mod tests {
             genesis_time: 1_700_000_000,
             guardians: Default::default(),
             bridge_dest_chain,
+            bridge_operators: None,
+            bridged_assets: Vec::new(),
         }
     }
 
