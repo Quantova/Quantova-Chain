@@ -65,6 +65,7 @@ dependencies = [
  "qtv-crypto",
  "qtv-devnet",
  "qtv-gateway",
+ "qtv-governance",
  "qtv-net",
  "qtv-node",
 ]
@@ -80,6 +81,7 @@ dependencies = [
  "qtv-codec",
  "qtv-crypto",
  "qtv-devnet",
+ "qtv-governance",
  "qtv-idfmt",
  "qtv-net",
  "qtv-node",
@@ -169,6 +171,19 @@ dependencies = [
  "qtv-state",
  "qtv-tx",
  "qtv-vm",
+]
+
+[[package]]
+name = "qtv-oracle"
+version = "0.1.0"
+dependencies = [
+ "qtv-account",
+ "qtv-codec",
+ "qtv-crypto",
+ "qtv-governance",
+ "qtv-idfmt",
+ "qtv-node",
+ "qtv-tx",
 ]
 
 [[package]]

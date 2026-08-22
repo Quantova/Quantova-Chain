@@ -1,0 +1,22 @@
+# Copyright 2026 Quantova Inc
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "qtv-oracle"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Q-Oracle bridge signer: generates an operator committee, builds the CommitteeRotate registration, and signs bridge deposit mints the chain admits on quorum."
+
+[[bin]]
+name = "qtv-oracle"
+path = "src/main.rs"
+
+[dependencies]
+qtv-idfmt = { path = "../qtv-idfmt" }
+qtv-codec = { path = "../qtv-codec" }
+qtv-account = { path = "../qtv-account" }
+qtv-tx = { path = "../qtv-tx" }
+qtv-node = { path = "../qtv-node" }
+qtv-governance = { path = "../qtv-governance" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "33c7e9395ad23f07019909470d319211213e904f" }
