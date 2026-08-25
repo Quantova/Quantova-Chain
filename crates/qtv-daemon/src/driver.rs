@@ -435,8 +435,12 @@ impl Driver {
             if q == self.idx {
                 continue;
             }
-            if let Some(channel) = self.send[q].as_mut() {
-                let _ = channel.send(bytes);
+            let failed = match self.send[q].as_mut() {
+                Some(channel) => channel.send(bytes).is_err(),
+                None => false,
+            };
+            if failed {
+                self.send[q] = None;
             }
         }
     }

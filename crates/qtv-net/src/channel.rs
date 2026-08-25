@@ -66,4 +66,10 @@ impl Channel<std::net::TcpStream> {
         self.stream.set_read_timeout(timeout)?;
         self.stream.set_write_timeout(timeout)
     }
+
+    pub(crate) fn set_post_handshake(&self) -> std::io::Result<()> {
+        self.stream.set_read_timeout(None)?;
+        self.stream
+            .set_write_timeout(Some(std::time::Duration::from_millis(250)))
+    }
 }

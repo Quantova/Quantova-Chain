@@ -49,7 +49,7 @@ impl Channel<TcpStream> {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         let channel = respond(stream, identity, None)?;
-        channel.set_deadline(None)?;
+        channel.set_post_handshake()?;
         Ok(channel)
     }
 
@@ -61,7 +61,7 @@ impl Channel<TcpStream> {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         let channel = initiate(stream, identity, None)?;
-        channel.set_deadline(None)?;
+        channel.set_post_handshake()?;
         Ok(channel)
     }
 
@@ -74,7 +74,7 @@ impl Channel<TcpStream> {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         let channel = initiate(stream, identity, Some(peer))?;
-        channel.set_deadline(None)?;
+        channel.set_post_handshake()?;
         Ok(channel)
     }
 }

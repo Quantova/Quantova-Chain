@@ -481,17 +481,26 @@ impl Mempool {
             if !CONTRACTS_ENABLED {
                 return Err(Reject::BadCall);
             }
+            if self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce()) {
+                return Err(Reject::SenderQueueFull);
+            }
             let account = ledger.account(wrapper.body().sender());
             let signature_ok = qtv_tx::verify(&wrapper, &account.public_key);
             if !crate::node::vm_admissible(&wrapper, &account, fee_params, signature_ok) {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_key_register(&wrapper) {
+            if self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce()) {
+                return Err(Reject::SenderQueueFull);
+            }
             let account = ledger.account(wrapper.body().sender());
             if crate::node::key_register_admissible(&wrapper, &account, fee_params).is_none() {
                 return Err(Reject::BadCall);
             }
         } else if wrapper.body().call().target() == crate::ledger::gov_system_address() {
+            if self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce()) {
+                return Err(Reject::SenderQueueFull);
+            }
             let account = ledger.account(wrapper.body().sender());
             let signature_ok = qtv_tx::verify(&wrapper, &account.public_key);
             if crate::node::governance_admissible(&wrapper, &account, fee_params, signature_ok)
@@ -605,17 +614,25 @@ impl Mempool {
             let admissible = if crate::node::is_vm_op(ledger, &wrapper) {
                 if !CONTRACTS_ENABLED {
                     false
+                } else if self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce()) {
+                    false
                 } else {
                     let account = ledger.account(wrapper.body().sender());
                     crate::node::vm_admissible(&wrapper, &account, fee_params, verified[index])
                 }
             } else if crate::node::is_key_register(&wrapper) {
-                let account = ledger.account(wrapper.body().sender());
-                crate::node::key_register_admissible(&wrapper, &account, fee_params).is_some()
+                !self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce())
+                    && {
+                        let account = ledger.account(wrapper.body().sender());
+                        crate::node::key_register_admissible(&wrapper, &account, fee_params).is_some()
+                    }
             } else if wrapper.body().call().target() == crate::ledger::gov_system_address() {
-                let account = ledger.account(wrapper.body().sender());
-                crate::node::governance_admissible(&wrapper, &account, fee_params, verified[index])
-                    .is_some()
+                !self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce())
+                    && {
+                        let account = ledger.account(wrapper.body().sender());
+                        crate::node::governance_admissible(&wrapper, &account, fee_params, verified[index])
+                            .is_some()
+                    }
             } else if crate::node::is_evidence(&wrapper) {
                 crate::node::evidence_admissible(fee_params.chain_id, &wrapper, ledger)
             } else if crate::node::is_bridge_guardian(&wrapper) {

@@ -911,6 +911,8 @@ fn dispatch_bridge_exit(
 }
 
 const VM_BLOCK_METER_BUDGET: u64 = 50_000_000;
+const MAX_TX_METER: u64 = VM_BLOCK_METER_BUDGET / 4;
+const MAX_VM_ARGS: usize = 128 * 1024;
 
 pub(crate) fn is_vm_op(ledger: &Ledger, wrapper: &Wrapper) -> bool {
     let target = wrapper.body().call().target();
@@ -927,9 +929,12 @@ pub(crate) fn vm_admissible(
     if !account.has_key() || !qtv_tx::scheme_supported(wrapper.scheme()) || !signature_ok {
         return false;
     }
+    if body.call().args().len() > MAX_VM_ARGS {
+        return false;
+    }
     if body.nonce() != account.nonce
         || body.meter_limit() < crate::execution::TRANSFER_METER
-        || body.meter_limit() > VM_BLOCK_METER_BUDGET
+        || body.meter_limit() > MAX_TX_METER
     {
         return false;
     }
@@ -2330,7 +2335,7 @@ mod tests {
         let fee = FeeParams::devnet();
         let deployer = keypair(141);
         let code = qtv_vm::asm::assemble(
-            "LDI r1, 80\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT",
+            "LDI r1, 88\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT",
         )
         .expect("the program assembles");
         let genesis_selector = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
