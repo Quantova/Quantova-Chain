@@ -1003,7 +1003,7 @@ fn dispatch_vm(
             let mut genesis_memory =
                 vec![0u8; crate::ledger::CONTRACT_CONTEXT_BYTES + params.len()];
             genesis_memory[crate::ledger::CONTRACT_CONTEXT_BYTES..].copy_from_slice(params);
-            ledger.call_contract(
+            let genesis_ok = ledger.call_contract(
                 &sender,
                 &contract,
                 genesis,
@@ -1014,6 +1014,12 @@ fn dispatch_vm(
                 in_asset,
                 fee_params.chain_id,
             );
+            let declares_genesis = crate::execution::decode_container(container)
+                .map(|c| c.entries.iter().any(|e| e.selector == genesis))
+                .unwrap_or(false);
+            if declares_genesis && !genesis_ok {
+                ledger.clear_contract_code(&contract);
+            }
         }
     } else if args.len() >= 4 {
         let selector = [args[0], args[1], args[2], args[3]];
@@ -2387,6 +2393,49 @@ mod tests {
                 .get(&qtv_vm::abi::scalar_key(0)),
             Some(&0),
             "a bare deploy carries no parameter, so the genesis read and stored a zero"
+        );
+    }
+
+    #[test]
+    fn a_framed_deploy_whose_genesis_faults_leaves_no_orphan_contract() {
+        let fee = FeeParams::devnet();
+        let deployer = keypair(151);
+        // The genesis tries to send forty of an asset the fresh contract does not hold, which faults
+        // the same way `a_contract_cannot_send_more_of_an_asset_than_it_holds` proves a call faults.
+        let code = qtv_vm::asm::assemble("LDI r1, 88\nLDI r2, 64\nLDI r3, 40\nSEND r1, r2, r3\nHALT")
+            .expect("the program assembles");
+        let genesis_selector = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector: genesis_selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
+            }],
+        );
+        let cbytes = container.canonical_bytes();
+        let mut framed = Vec::new();
+        framed.extend_from_slice(super::DEPLOY_PARAMS_TAG);
+        framed.extend_from_slice(&(cbytes.len() as u32).to_be_bytes());
+        framed.extend_from_slice(&cbytes);
+        framed.extend_from_slice(&[0xB2u8; 32]);
+        framed.extend_from_slice(&[9u8; 32]);
+
+        let mut ledger = Ledger::new();
+        fund(&mut ledger, &deployer, 10_000 * 1_000_000);
+        let deploy =
+            system_tx(&deployer, &crate::ledger::vm_deploy_address(), framed, 0, 100_000, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[deploy], &fee, 0).len(), 1);
+        let contract = crate::ledger::contract_address(&deployer.address(), 0).unwrap();
+        assert!(
+            !ledger.is_contract(&contract),
+            "a framed deploy whose declared genesis faults must not leave an orphan container"
         );
     }
 

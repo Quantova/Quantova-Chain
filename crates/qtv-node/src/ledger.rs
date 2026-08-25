@@ -2225,6 +2225,12 @@ impl Ledger {
         self.write_leaf(contract_code_key(id), code.to_vec());
     }
 
+    pub fn clear_contract_code(&mut self, address: &str) {
+        if let Some(id) = address_id(address) {
+            self.erase_leaf(&contract_code_key(&id));
+        }
+    }
+
     pub fn deploy_contract(&mut self, deployer: &str, nonce: u64, code: &[u8]) -> Option<String> {
         let container = crate::execution::decode_container(code)?;
         container.verify().ok()?;
