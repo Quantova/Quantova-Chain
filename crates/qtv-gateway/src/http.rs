@@ -163,6 +163,15 @@ impl Limiter {
         Admit::Ok
     }
 
+    fn try_admit_total_only(&self, total_cap: usize) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if inner.total >= total_cap {
+            return false;
+        }
+        inner.total += 1;
+        true
+    }
+
     fn release(&self, ip: IpAddr) {
         let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(count) = inner.per_ip.get_mut(&ip) {
@@ -195,7 +204,17 @@ pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>, allow: Vec<Ip
                 let _ = write_error(&mut stream, 403, "forbidden", "this address may not reach the rpc");
                 continue;
             }
-            if !loopback_only {
+            if loopback_only {
+                // Behind a same host proxy every client presents as loopback, so the per address
+                // rate and ban logic would throttle the proxy itself. Keep only the global cap, which
+                // still bounds the connection and thread count so the node cannot be exhausted.
+                if !limiter.try_admit_total_only(MAX_CONNECTIONS) {
+                    stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
+                    let _ =
+                        write_error(&mut stream, 503, "busy", "the gateway is at its connection limit");
+                    continue;
+                }
+            } else {
                 match limiter.try_admit(ip, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, Instant::now()) {
                     Admit::Ok => {}
                     Admit::TotalFull => {
@@ -241,9 +260,7 @@ pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>, allow: Vec<Ip
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let _ = handle_connection(stream, requests);
                 }));
-                if !loopback_only {
-                    limiter.release(ip);
-                }
+                limiter.release(ip);
             });
         }
     });
