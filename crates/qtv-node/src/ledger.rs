@@ -2487,10 +2487,11 @@ impl Ledger {
             .map(|bytes| from_bytes(bytes).expect("state holds a canonical referendum"))
     }
 
-    pub fn gov_referenda(&self) -> Vec<Referendum> {
+    pub fn gov_referenda(&self, limit: usize) -> Vec<Referendum> {
         let next = self.gov_next_id();
+        let start = next.saturating_sub(limit as u64).max(1);
         let mut out = Vec::new();
-        for id in 1..next {
+        for id in start..next {
             if let Some(referendum) = self.gov_referendum(id) {
                 out.push(referendum);
             }

@@ -334,7 +334,7 @@ fn asset_supply(node: &DevNode, issuer: &[u8; 32]) -> Json {
 fn governance_referenda(node: &DevNode) -> Json {
     let ledger = node.ledger();
     let items: Vec<Json> = ledger
-        .gov_referenda()
+        .gov_referenda(MAX_LIST_ITEMS)
         .into_iter()
         .map(|r| {
             let mut proposer = [0u8; 32];
