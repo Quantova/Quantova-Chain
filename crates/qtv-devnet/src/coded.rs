@@ -100,6 +100,8 @@ pub fn commitment_in_bounds(commitment: &Commitment) -> bool {
     commitment.k >= 1
         && commitment.n >= commitment.k
         && commitment.n <= erasure::MAX_SHARDS
+        // the honest coder sets n to twice k so a wider spread only inflates the re encode work
+        && commitment.n <= commitment.k.saturating_mul(2)
 }
 
 pub fn reconstruct_block(
@@ -772,6 +774,28 @@ mod tests {
             }
         }
         same_proposal(&rebuilt.expect("the clean k reconstruct the proposal"), &proposal);
+    }
+
+    #[test]
+    fn a_lopsided_erasure_commitment_is_refused_before_the_costly_re_encode() {
+        let proposal = sample_proposal(32, 0);
+        let shards = code_proposal(&proposal).expect("code the proposal");
+
+        let honest = &shards[0].commitment;
+        assert_eq!(honest.n, honest.k * 2, "the honest coder emits n equal to twice k");
+        assert!(commitment_in_bounds(honest), "the honest commitment stays in bounds");
+
+        let mut hostile = shards[0].clone();
+        hostile.commitment.k = 1;
+        hostile.commitment.n = erasure::MAX_SHARDS;
+        assert!(
+            !commitment_in_bounds(&hostile.commitment),
+            "a spread past twice k is refused before the costly re encode"
+        );
+
+        let mut assembler = ProposalAssembler::new();
+        assert!(assembler.admit(hostile).is_none(), "the assembler drops a lopsided shard");
+        assert_eq!(assembler.buffered_bytes(), 0, "no piece buffers for a refused commitment");
     }
 
     #[test]
