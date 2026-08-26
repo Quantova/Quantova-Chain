@@ -3659,11 +3659,14 @@ mod tests {
         attest_for(sk, fact, BRIDGE_CHAIN_ID)
     }
 
+    const BRIDGE_VAULT: [u8; 32] = [0x5b; 32];
+
     fn seed_committee(ledger: &mut Ledger) -> (OperatorSecret, OperatorSecret) {
         let (pk0, sk0) = bridge_operator(1);
         let (pk1, sk1) = bridge_operator(2);
         let (pk2, _sk2) = bridge_operator(3);
         ledger.seed_bridge_dest_chain(BRIDGE_DEST);
+        ledger.seed_bridge_pool_vault(&BRIDGE_VAULT);
         ledger.seed_bridge_operator_set(&crate::bridge::OperatorSet::new(
             vec![(0, pk0.to_vec()), (1, pk1.to_vec()), (2, pk2.to_vec())],
             2,
@@ -4056,6 +4059,7 @@ mod tests {
             vec![(0, pk0.to_vec()), (1, pk1.to_vec())],
             2,
         ));
+        unset.seed_bridge_pool_vault(&BRIDGE_VAULT);
         unset.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
         let fact = deposit_fact(recipient_id, asset, 100_000, [0x71; 32]);
         let artifact = crate::bridge::MintArtifact {
