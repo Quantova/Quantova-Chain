@@ -818,6 +818,22 @@ mod tests {
     }
 
     #[test]
+    fn a_self_transfer_is_refused_so_the_two_copy_write_cannot_mint() {
+        let params = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let alice = keypair(1);
+        fund(&mut ledger, &alice, 1_000_000_000);
+        let start = ledger.account(&alice.address()).balance;
+        let tx = signed_transfer(&alice, &alice.address(), 100, 0, u128::from(params.transfer_fee()));
+        assert_eq!(
+            validate(&tx, &ledger, &params),
+            Err(Reject::SelfTransfer),
+            "a sender paying itself is the one write that would mint, so it must be refused"
+        );
+        assert_eq!(ledger.account(&alice.address()).balance, start);
+    }
+
+    #[test]
     fn remove_included_keeps_the_id_set_in_sync() {
         let params = FeeParams::devnet();
         let alice = keypair(1);
