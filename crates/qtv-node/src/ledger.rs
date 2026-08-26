@@ -2380,6 +2380,17 @@ impl Ledger {
                         return false;
                     }
                 }
+                let mut projected_credit: std::collections::BTreeMap<([u8; 16], [u8; 32]), u128> =
+                    std::collections::BTreeMap::new();
+                for (asset, holder, amount) in &asset_credits {
+                    let slot = projected_credit
+                        .entry((*asset, *holder))
+                        .or_insert_with(|| self.asset_balance(asset, holder));
+                    match slot.checked_add(*amount) {
+                        Some(sum) => *slot = sum,
+                        None => return false,
+                    }
+                }
                 if value > 0 {
                     match in_asset_id {
                         None => {
