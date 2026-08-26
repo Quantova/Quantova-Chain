@@ -244,8 +244,10 @@ pub struct Mempool {
     feeless_cap: usize,
     feeless_admits: usize,
     feeless_attempts_cap: usize,
-    feeless_attempts: usize,
     evidence_attempts: usize,
+    mint_attempts: usize,
+    settle_attempts: usize,
+    guardian_attempts: usize,
     // The capped fee actually charged bounds inclusion and eviction ranking, so a bid above the
     // ceiling buys no priority it never pays for. Refreshed from the fee params on every admit.
     ceiling: u128,
@@ -276,8 +278,10 @@ impl Mempool {
             feeless_cap: DEFAULT_FEELESS_ADMITS_PER_WINDOW,
             feeless_admits: 0,
             feeless_attempts_cap: DEFAULT_FEELESS_ATTEMPTS_PER_WINDOW,
-            feeless_attempts: 0,
             evidence_attempts: 0,
+            mint_attempts: 0,
+            settle_attempts: 0,
+            guardian_attempts: 0,
             ceiling: u128::MAX,
         }
     }
@@ -370,26 +374,25 @@ impl Mempool {
         self.feeless_admits < self.feeless_cap
     }
 
-    fn charge_feeless_attempt(&mut self) -> bool {
-        if self.feeless_attempts >= self.feeless_attempts_cap {
+    // Each feeless lane admits on cheap to forge evidence, so give every lane its own attempt window
+    // at the same cap. A junk flood on one lane then cannot spend the budget another lane relies on, in
+    // particular the guardian emergency freeze and the bridge settle.
+    fn charge_feeless_attempt_for(&mut self, wrapper: &Wrapper) -> bool {
+        let cap = self.feeless_attempts_cap;
+        let counter = if crate::node::is_evidence(wrapper) {
+            &mut self.evidence_attempts
+        } else if crate::node::is_bridge_mint(wrapper) {
+            &mut self.mint_attempts
+        } else if crate::node::is_bridge_settle(wrapper) {
+            &mut self.settle_attempts
+        } else {
+            &mut self.guardian_attempts
+        };
+        if *counter >= cap {
             return false;
         }
-        self.feeless_attempts += 1;
+        *counter += 1;
         true
-    }
-
-    // Evidence admits on the sender string alone, so a junk flood there must not spend the budget the
-    // bridge and guardian lanes rely on. Give evidence its own attempt window at the same cap.
-    fn charge_feeless_attempt_for(&mut self, wrapper: &Wrapper) -> bool {
-        if crate::node::is_evidence(wrapper) {
-            if self.evidence_attempts >= self.feeless_attempts_cap {
-                return false;
-            }
-            self.evidence_attempts += 1;
-            true
-        } else {
-            self.charge_feeless_attempt()
-        }
     }
 
     fn make_room(&mut self, incoming: &Wrapper) -> Result<(), Reject> {
@@ -718,8 +721,10 @@ impl Mempool {
             self.ids.remove(id);
         }
         self.feeless_admits = 0;
-        self.feeless_attempts = 0;
         self.evidence_attempts = 0;
+        self.mint_attempts = 0;
+        self.settle_attempts = 0;
+        self.guardian_attempts = 0;
     }
 }
 
