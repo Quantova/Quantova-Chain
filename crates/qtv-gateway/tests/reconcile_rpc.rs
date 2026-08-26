@@ -41,6 +41,10 @@ fn config_with_accounts(base: &Path, accounts: Vec<GenesisAccount>) -> DevnetCon
         fanout: FULL_FANOUT,
         slots: DEFAULT_SLOTS,
         published_roster: None,
+        bridge_dest_chain: None,
+        guardians: qtv_governance::GuardianSet::default(),
+        bridge_operators: None,
+        bridged_assets: vec![],
     }
 }
 

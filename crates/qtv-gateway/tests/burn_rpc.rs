@@ -31,6 +31,10 @@ fn single_node(base: &Path) -> DevnetConfig {
         fanout: FULL_FANOUT,
         slots: DEFAULT_SLOTS,
         published_roster: None,
+        bridge_dest_chain: None,
+        guardians: qtv_devnet::GuardianSet::default(),
+        bridge_operators: None,
+        bridged_assets: vec![],
     }
 }
 

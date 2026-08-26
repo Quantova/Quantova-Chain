@@ -43,6 +43,10 @@ fn config_with_slots(base: &std::path::Path, online: &[bool], slots: u64) -> Dev
         fanout: qtv_devnet::config::FULL_FANOUT,
         slots,
         published_roster: None,
+        bridge_dest_chain: None,
+        guardians: qtv_devnet::GuardianSet::default(),
+        bridge_operators: None,
+        bridged_assets: vec![],
     }
 }
 

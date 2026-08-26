@@ -40,6 +40,10 @@ fn chain_config(base: &std::path::Path, count: usize) -> DevnetConfig {
         fanout: 2,
         slots: qtv_devnet::config::DEFAULT_SLOTS,
         published_roster: None,
+        bridge_dest_chain: None,
+        guardians: qtv_devnet::GuardianSet::default(),
+        bridge_operators: None,
+        bridged_assets: vec![],
     }
 }
 

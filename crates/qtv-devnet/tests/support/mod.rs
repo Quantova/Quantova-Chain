@@ -96,6 +96,10 @@ pub fn config_with_fanout(
         fanout,
         slots: qtv_devnet::config::DEFAULT_SLOTS,
         published_roster: None,
+        bridge_dest_chain: None,
+        guardians: qtv_governance::GuardianSet::default(),
+        bridge_operators: None,
+        bridged_assets: vec![],
     }
 }
 

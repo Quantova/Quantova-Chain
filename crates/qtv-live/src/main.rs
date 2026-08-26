@@ -82,6 +82,10 @@ fn devnet_config(base: &PathBuf, validators: usize, senders: &[Account]) -> Devn
         fanout: FULL_FANOUT,
         slots: HARNESS_SLOTS,
         published_roster: None,
+        bridge_dest_chain: None,
+        guardians: qtv_devnet::GuardianSet::default(),
+        bridge_operators: None,
+        bridged_assets: vec![],
     }
 }
 

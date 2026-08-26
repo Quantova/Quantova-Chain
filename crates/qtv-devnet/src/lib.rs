@@ -17,6 +17,7 @@ pub mod wire;
 
 pub use clock::{Clock, Event, Time};
 pub use config::{DevnetConfig, NodeConfig};
+pub use qtv_governance::GuardianSet;
 pub use devnet::Devnet;
 pub use discovery::{PeerEntry, PeerTable};
 pub use network::Network;
