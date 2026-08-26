@@ -45,6 +45,7 @@ fn config_with_accounts(base: &Path, accounts: Vec<GenesisAccount>) -> DevnetCon
         guardians: qtv_governance::GuardianSet::default(),
         bridge_operators: None,
         bridged_assets: vec![],
+        bridge_era: None,
     }
 }
 

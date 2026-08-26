@@ -44,6 +44,7 @@ fn chain_config(base: &std::path::Path, count: usize) -> DevnetConfig {
         guardians: qtv_devnet::GuardianSet::default(),
         bridge_operators: None,
         bridged_assets: vec![],
+        bridge_era: None,
     }
 }
 

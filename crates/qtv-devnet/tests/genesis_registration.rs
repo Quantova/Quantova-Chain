@@ -82,6 +82,7 @@ fn a_genesis_of_independent_registrations_finalises_and_reproduces_no_peer_secre
         guardians: qtv_devnet::GuardianSet::default(),
         bridge_operators: None,
         bridged_assets: vec![],
+        bridge_era: None,
     };
 
     let mut devnet =

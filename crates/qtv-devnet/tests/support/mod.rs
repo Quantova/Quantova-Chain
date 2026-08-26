@@ -100,6 +100,7 @@ pub fn config_with_fanout(
         guardians: qtv_governance::GuardianSet::default(),
         bridge_operators: None,
         bridged_assets: vec![],
+        bridge_era: None,
     }
 }
 

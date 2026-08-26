@@ -47,6 +47,7 @@ fn config_with_slots(base: &std::path::Path, online: &[bool], slots: u64) -> Dev
         guardians: qtv_devnet::GuardianSet::default(),
         bridge_operators: None,
         bridged_assets: vec![],
+        bridge_era: None,
     }
 }
 
