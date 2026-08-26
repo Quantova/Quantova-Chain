@@ -1067,7 +1067,9 @@ fn execute_ordered_across(
         if ledger.is_blacklisted(wrapper.body().sender()) {
             continue;
         }
-        if ledger.is_frozen(wrapper.body().sender()) {
+        if ledger.is_frozen(wrapper.body().sender())
+            && wrapper.body().call().target() != gov_address
+        {
             continue;
         }
         if is_vm_op(ledger, wrapper) {
@@ -2778,6 +2780,56 @@ mod tests {
 
         let bad = gov_call_tx(&proposer, vec![99u8], 2, &fee);
         assert!(execute_ordered(&mut ledger, &[bad], &fee, 15).is_empty());
+    }
+
+    #[test]
+    fn a_frozen_voter_still_votes_but_still_cannot_move_value() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let proposer = keypair(150);
+        let voter = keypair(151);
+        let payee = keypair(152);
+        let g1 = keypair(153);
+        let g2 = keypair(154);
+        let g3 = keypair(155);
+        fund(&mut ledger, &proposer, 2_260_000 * 1_000_000);
+        fund(&mut ledger, &voter, 10_000 * 1_000_000);
+        ledger.seed_validator_bond(&voter.address(), 10_000 * 1_000_000);
+
+        let propose = gov_call_tx(&proposer, propose_price_args(70_000_000), 0, &fee);
+        assert_eq!(execute_ordered(&mut ledger, &[propose], &fee, 0).len(), 1);
+        assert!(ledger.gov_referendum(1).is_some());
+
+        ledger.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![
+                address_bytes(&g1.address()),
+                address_bytes(&g2.address()),
+                address_bytes(&g3.address()),
+            ],
+            2,
+        ));
+        assert!(ledger.guardian_freeze(
+            0,
+            &[address_bytes(&voter.address())],
+            &[address_bytes(&g1.address()), address_bytes(&g2.address())],
+            0,
+        ));
+        assert!(ledger.is_frozen(&voter.address()), "the quorum froze the voter");
+
+        let vote = gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee);
+        let escape = transfer(&voter, &payee.address(), 1_000 * 1_000_000, 1, &fee);
+        let included = execute_ordered(&mut ledger, &[vote, escape], &fee, 0);
+        assert_eq!(included.len(), 1, "the frozen voter's ballot lands while its transfer is dropped");
+        assert_eq!(
+            ledger.gov_total_locked(),
+            5_000 * 1_000_000,
+            "a frozen electorate can never be silenced against a guardian caucus"
+        );
+        assert_eq!(
+            ledger.account(&payee.address()).balance,
+            0,
+            "the freeze still blocks the frozen account from moving value out"
+        );
     }
 
     #[test]
