@@ -2436,6 +2436,7 @@ impl Ledger {
     pub fn seed_validator_set(&mut self, ids: &[[u8; 32]]) -> (Key, Vec<u8>) {
         let mut sorted: Vec<[u8; 32]> = ids.to_vec();
         sorted.sort_unstable();
+        sorted.dedup();
         let mut bytes = Vec::with_capacity(sorted.len() * KEY_LEN);
         for id in &sorted {
             bytes.extend_from_slice(id);
@@ -3314,6 +3315,19 @@ mod stake_state_tests {
             public_key: pk.to_vec(),
             pop,
         }
+    }
+
+    #[test]
+    fn a_duplicated_genesis_validator_is_recorded_once() {
+        let mut l = Ledger::new();
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        l.seed_validator_set(&[a, b, a]);
+        assert_eq!(
+            l.validator_ids(),
+            vec![a, b],
+            "a repeated validator id is recorded once so it cannot accrue twice"
+        );
     }
 
     #[test]
