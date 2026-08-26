@@ -148,6 +148,7 @@ pub enum SyncError {
     UnverifiedCertificate,
     WrongStateRoot,
     CheckpointConflict,
+    FinalityViolation,
     Io,
 }
 
@@ -1905,6 +1906,11 @@ impl DevNode {
             return Err(SyncError::UnverifiedCertificate);
         }
         self.observe_finality(self.height, subject.val);
+        if self.fatal.is_some() {
+            // observe_finality just recorded a conflicting finalization for this height. Stop before
+            // the conflicting block reaches the ledger or the disk, the same way finalize does.
+            return Err(SyncError::FinalityViolation);
+        }
         let mut ledger = self.ledger.clone();
         ledger.clear_block_events();
         ledger.set_round_proposer(header.proposer());
