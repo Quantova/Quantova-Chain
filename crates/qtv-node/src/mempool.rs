@@ -76,10 +76,11 @@ pub fn plan_from_account(
     if !qtv_tx::scheme_supported(wrapper.scheme()) {
         return Err(Reject::UnsupportedScheme);
     }
+    let plan = plan_from_account_checks(wrapper, account, fee_params)?;
     if !qtv_tx::verify(wrapper, &account.public_key) {
         return Err(Reject::BadSignature);
     }
-    plan_from_account_checks(wrapper, account, fee_params)
+    Ok(plan)
 }
 
 pub fn plan_verified(
@@ -160,6 +161,19 @@ fn plan_from_account_checks(
         amount,
         fee: charged,
     })
+}
+
+fn sender_prevalidated(wrapper: &Wrapper, account: &Account, fee_params: &FeeParams) -> bool {
+    let body = wrapper.body();
+    if body.nonce() != account.nonce {
+        return false;
+    }
+    if body.fee() < u128::from(fee_params.transfer_fee()) {
+        return false;
+    }
+    let charged = u64::try_from(body.fee().min(u128::from(fee_params.ceiling_fee())))
+        .unwrap_or_else(|_| fee_params.ceiling_fee());
+    account.balance >= charged
 }
 
 const PARALLEL_VERIFY_THRESHOLD: usize = 4;
@@ -504,6 +518,9 @@ impl Mempool {
                 return Err(Reject::SenderQueueFull);
             }
             let account = ledger.account(wrapper.body().sender());
+            if !sender_prevalidated(&wrapper, &account, fee_params) {
+                return Err(Reject::BadCall);
+            }
             let signature_ok = qtv_tx::verify(&wrapper, &account.public_key);
             if !crate::node::vm_admissible(&wrapper, &account, fee_params, signature_ok) {
                 return Err(Reject::BadCall);
@@ -521,6 +538,9 @@ impl Mempool {
                 return Err(Reject::SenderQueueFull);
             }
             let account = ledger.account(wrapper.body().sender());
+            if !sender_prevalidated(&wrapper, &account, fee_params) {
+                return Err(Reject::BadCall);
+            }
             let signature_ok = qtv_tx::verify(&wrapper, &account.public_key);
             if crate::node::governance_admissible(&wrapper, &account, fee_params, signature_ok)
                 .is_none()
@@ -548,6 +568,9 @@ impl Mempool {
                 return Err(Reject::SenderQueueFull);
             }
             let account = ledger.account(wrapper.body().sender());
+            if !sender_prevalidated(&wrapper, &account, fee_params) {
+                return Err(Reject::BadCall);
+            }
             let signature_ok = qtv_tx::verify(&wrapper, &account.public_key);
             if crate::node::bridge_exit_admissible(ledger, &wrapper, &account, fee_params, signature_ok)
                 .is_none()
