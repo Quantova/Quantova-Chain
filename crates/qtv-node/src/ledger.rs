@@ -2845,9 +2845,29 @@ impl Ledger {
                 for seizure in seizures {
                     if let Some(from_addr) = id_bytes_to_address(&seizure.from) {
                         let mut from = self.account(&from_addr);
-                        let take = from.balance.min(seizure.amount);
+                        let mut take = from.balance.min(seizure.amount);
                         from.balance -= take;
                         self.set_account(&from_addr, &from);
+                        // Stolen funds cannot hide inside a validator bond. A scoped recovery reaches the
+                        // stake too so a thief can never buy consensus or governance power with them.
+                        let remaining = seizure.amount - take;
+                        if remaining > 0 {
+                            if let Some(from_id) = id_from_slice(&seizure.from) {
+                                if let Some(mut bond) = self.stake_bond(&from_id) {
+                                    let from_bond = bond.amount.min(remaining);
+                                    if from_bond > 0 {
+                                        bond.amount -= from_bond;
+                                        if bond.amount == 0 {
+                                            self.clear_stake_bond(&from_id);
+                                        } else {
+                                            self.set_stake_bond(&from_id, &bond);
+                                        }
+                                        self.debit_staked(from_bond);
+                                        take = take.saturating_add(from_bond);
+                                    }
+                                }
+                            }
+                        }
                         recovered = recovered.saturating_add(take);
                         self.record_side_event(SideEvent::RecoverySeizure {
                             victim: victim_addr.clone(),
@@ -4435,18 +4455,20 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn a_recovery_reaches_a_thiefs_free_balance_but_never_its_bond() {
+    fn a_recovery_reaches_a_thiefs_free_balance_and_its_staked_bond() {
         let mut l = Ledger::new();
         let proposer = gov_addr(26);
         fund(&mut l, &proposer, 300_000 * 1_000_000);
         let thief = gov_addr(41);
+        // The thief holds part of the loot free and hides the rest inside a validator bond.
         l.seed_validator_bond(&thief, 2_000 * 1_000_000);
         fund(&mut l, &thief, 5_000 * 1_000_000);
         let victim = gov_addr(40);
+        let supply_before = l.total_supply();
 
         let seizures = vec![qtv_governance::Seizure {
             from: [41u8; 32].to_vec(),
-            amount: 5_000 * 1_000_000,
+            amount: 7_000 * 1_000_000,
         }];
         let scope = sha3::sha3_256(&qtv_governance::Action::recovery_scope_preimage(
             TEST_CHAIN,
@@ -4467,14 +4489,49 @@ mod stake_state_tests {
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         l.gov_enact(id, 6 * 3_600 + 1, TEST_CHAIN).unwrap();
 
-        assert_eq!(l.balance(&thief), 0, "the thief's stolen free balance is recovered");
-        assert_eq!(l.balance(&victim), 5_000 * 1_000_000, "the victim is made whole");
-        assert_eq!(
-            l.stake_bond(&[41u8; 32]).unwrap().amount,
-            2_000 * 1_000_000,
-            "the recovery never confiscates the consensus bond"
+        assert_eq!(l.balance(&thief), 0, "the thief's free balance is recovered");
+        assert!(
+            l.stake_bond(&[41u8; 32]).is_none(),
+            "the staked loot is recovered so it can never buy consensus"
         );
-        assert_eq!(l.total_staked(), 7_000 * 1_000_000);
+        assert_eq!(
+            l.balance(&victim),
+            7_000 * 1_000_000,
+            "the victim is made whole from the free balance and the bond"
+        );
+        assert_eq!(l.total_staked(), 5_000 * 1_000_000, "only the honest voter's bond remains staked");
+        assert_eq!(l.total_supply(), supply_before, "the recovery moves value between buckets and conserves supply");
+    }
+
+    #[test]
+    fn a_recovery_still_cannot_seize_a_reserved_protocol_pot() {
+        let mut l = Ledger::new();
+        let proposer = gov_addr(26);
+        fund(&mut l, &proposer, 300_000 * 1_000_000);
+        // The staking treasury is a reserved protocol pot. A recovery must never reach it.
+        let pot = sha3::sha3_256(b"qtv/stake/treasury");
+        let seizures = vec![qtv_governance::Seizure { from: pot.to_vec(), amount: 1_000 }];
+        let scope = sha3::sha3_256(&qtv_governance::Action::recovery_scope_preimage(
+            TEST_CHAIN,
+            &[40u8; 32],
+            &seizures,
+        ));
+        let action = qtv_governance::Action::FreezeRecovery {
+            scope,
+            victim: [40u8; 32].to_vec(),
+            seizures,
+        };
+        let id = l
+            .gov_propose(&proposer, qtv_governance::Track::FreezeRecovery, action, 0)
+            .unwrap();
+        let voter = gov_addr(27);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+        l.seed_validator_bond(&voter, 5_000 * 1_000_000);
+        l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
+        assert!(
+            l.gov_enact(id, 6 * 3_600 + 1, TEST_CHAIN).is_err(),
+            "a recovery aimed at a reserved protocol pot is refused"
+        );
     }
 
     #[test]
