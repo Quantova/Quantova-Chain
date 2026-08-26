@@ -245,6 +245,7 @@ pub struct Mempool {
     feeless_admits: usize,
     feeless_attempts_cap: usize,
     feeless_attempts: usize,
+    evidence_attempts: usize,
     // The capped fee actually charged bounds inclusion and eviction ranking, so a bid above the
     // ceiling buys no priority it never pays for. Refreshed from the fee params on every admit.
     ceiling: u128,
@@ -276,6 +277,7 @@ impl Mempool {
             feeless_admits: 0,
             feeless_attempts_cap: DEFAULT_FEELESS_ATTEMPTS_PER_WINDOW,
             feeless_attempts: 0,
+            evidence_attempts: 0,
             ceiling: u128::MAX,
         }
     }
@@ -376,6 +378,20 @@ impl Mempool {
         true
     }
 
+    // Evidence admits on the sender string alone, so a junk flood there must not spend the budget the
+    // bridge and guardian lanes rely on. Give evidence its own attempt window at the same cap.
+    fn charge_feeless_attempt_for(&mut self, wrapper: &Wrapper) -> bool {
+        if crate::node::is_evidence(wrapper) {
+            if self.evidence_attempts >= self.feeless_attempts_cap {
+                return false;
+            }
+            self.evidence_attempts += 1;
+            true
+        } else {
+            self.charge_feeless_attempt()
+        }
+    }
+
     fn make_room(&mut self, incoming: &Wrapper) -> Result<(), Reject> {
         let sender = incoming.body().sender();
         let sender_count = self
@@ -473,7 +489,7 @@ impl Mempool {
             if !self.feeless_has_room() {
                 return Err(Reject::RateLimited);
             }
-            if !self.charge_feeless_attempt() {
+            if !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
         }
@@ -607,7 +623,7 @@ impl Mempool {
             if is_feeless(&wrapper)
                 && (!self.has_capacity(&wrapper)
                     || !self.feeless_has_room()
-                    || !self.charge_feeless_attempt())
+                    || !self.charge_feeless_attempt_for(&wrapper))
             {
                 continue;
             }
@@ -703,6 +719,7 @@ impl Mempool {
         }
         self.feeless_admits = 0;
         self.feeless_attempts = 0;
+        self.evidence_attempts = 0;
     }
 }
 
