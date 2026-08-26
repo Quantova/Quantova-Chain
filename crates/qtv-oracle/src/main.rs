@@ -8,7 +8,7 @@ use qtv_node::node::{build_guardian_enact_tx, guardian_enact_challenge};
 use qtv_crypto::ml_dsa::{self, SECRET_KEY_BYTES};
 use qtv_node::bridge::{
     operator_pop_challenge, quorum_attests, Attestation, Direction, Fact, MintArtifact,
-    OperatorSet, SignerSig, ATTEST_DOMAIN, FACT_VERSION, POP_DOMAIN,
+    attest_context, OperatorSet, SignerSig, FACT_VERSION, POP_DOMAIN,
 };
 use qtv_node::ledger::bridge_mint_address;
 use qtv_codec::to_bytes;
@@ -70,8 +70,8 @@ fn keygen(a: &[String]) {
 }
 
 fn mint(a: &[String]) {
-    if a.len() != 15 {
-        fail("mint <secrets> <chain_id> <source_chain> <dest_chain> <route_id> <nonce> <source_ref_hex> <asset_hex> <amount> <recipient_hex> <expiry> <observed> <relayer_seed_hex> <relayer_index> <fee>");
+    if a.len() != 16 {
+        fail("mint <secrets> <chain_id> <source_chain> <dest_chain> <route_id> <nonce> <source_ref_hex> <asset_hex> <amount> <recipient_hex> <expiry> <observed> <relayer_seed_hex> <relayer_index> <fee> <era_hex>");
     }
     let secrets = fs::read_to_string(&a[0]).expect("read secrets");
     let chain_id: u64 = a[1].parse().expect("chain_id");
@@ -88,6 +88,7 @@ fn mint(a: &[String]) {
     let relayer_seed: [u8; 32] = unhex(&a[12]).try_into().expect("relayer seed 32 bytes");
     let relayer_index: u64 = a[13].parse().expect("relayer_index");
     let fee: u128 = a[14].parse().expect("fee");
+    let era: [u8; 32] = unhex(&a[15]).try_into().expect("era 32 bytes");
 
     let fact = Fact {
         version: FACT_VERSION,
@@ -116,7 +117,7 @@ fn mint(a: &[String]) {
         }
         let id: u32 = p[0].parse().expect("operator id");
         let sk: [u8; SECRET_KEY_BYTES] = unhex(p[1]).try_into().expect("secret key length");
-        let sig = ml_dsa::sign(&sk, &preimage, ATTEST_DOMAIN, &[0u8; 32]).expect("attest sign");
+        let sig = ml_dsa::sign(&sk, &preimage, &attest_context(&era), &[0u8; 32]).expect("attest sign");
         signatures.push(SignerSig {
             operator_id: id,
             signature: sig.to_vec(),
@@ -137,13 +138,14 @@ fn mint(a: &[String]) {
 
 
 fn check(a: &[String]) {
-    if a.len() != 4 {
-        fail("check <committee> <artifact_hex> <dest_chain> <chain_id>");
+    if a.len() != 5 {
+        fail("check <committee> <artifact_hex> <dest_chain> <chain_id> <era_hex>");
     }
     let committee = fs::read_to_string(&a[0]).expect("read committee");
     let artifact = MintArtifact::decode(&unhex(&a[1])).expect("decode artifact");
     let dest_chain: u32 = a[2].parse().expect("dest_chain");
     let chain_id: u64 = a[3].parse().expect("chain_id");
+    let era: [u8; 32] = unhex(&a[4]).try_into().expect("era 32 bytes");
     let mut lines = committee.lines();
     let threshold: u32 = lines.next().expect("threshold").trim().parse().expect("threshold");
     let mut operators: Vec<(u32, Vec<u8>)> = Vec::new();
@@ -155,7 +157,7 @@ fn check(a: &[String]) {
         operators.push((p[0].parse().expect("id"), unhex(p[1])));
     }
     let set = OperatorSet::new(operators, threshold);
-    let ok = quorum_attests(&set, &artifact.attestation, dest_chain, chain_id);
+    let ok = quorum_attests(&set, &artifact.attestation, dest_chain, chain_id, &era);
     println!("quorum_attests = {ok}");
     if !ok {
         std::process::exit(2);

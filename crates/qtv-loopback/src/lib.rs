@@ -68,6 +68,7 @@ pub fn devnet_config(base: &PathBuf, validators: usize, senders: &[Account]) -> 
         guardians: qtv_devnet::GuardianSet::default(),
         bridge_operators: None,
         bridged_assets: vec![],
+        bridge_era: None,
     }
 }
 

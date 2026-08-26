@@ -103,6 +103,7 @@ pub struct DevnetConfig {
     pub guardians: GuardianSet,
     pub bridge_operators: Option<OperatorSet>,
     pub bridged_assets: Vec<GenesisBridgedAsset>,
+    pub bridge_era: Option<[u8; 32]>,
 }
 
 impl DevnetConfig {
@@ -152,6 +153,7 @@ impl DevnetConfig {
             bridge_dest_chain: self.bridge_dest_chain,
             bridge_operators: self.bridge_operators.clone(),
             bridged_assets: self.bridged_assets.clone(),
+            bridge_era: self.bridge_era,
         }
     }
 }

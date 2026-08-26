@@ -98,6 +98,7 @@ pub struct Genesis {
     pub bridge_dest_chain: Option<u32>,
     pub bridge_operators: Option<crate::bridge::OperatorSet>,
     pub bridged_assets: Vec<GenesisBridgedAsset>,
+    pub bridge_era: Option<[u8; 32]>,
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]

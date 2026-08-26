@@ -405,6 +405,10 @@ impl DevNode {
             let (dest_key, dest_value) = self.ledger.seed_bridge_dest_chain(dest_chain);
             self.state_store.put_account(dest_key, dest_value)?;
         }
+        if let Some(era) = genesis.bridge_era {
+            let (era_key, era_value) = self.ledger.seed_bridge_era(&era);
+            self.state_store.put_account(era_key, era_value)?;
+        }
         if let Some(ref operators) = genesis.bridge_operators {
             if let Some((op_key, op_value)) = self.ledger.seed_bridge_operator_set(operators) {
                 self.state_store.put_account(op_key, op_value)?;

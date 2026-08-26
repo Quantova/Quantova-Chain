@@ -65,6 +65,7 @@ fn a_devnet_of_keystore_backed_nodes_stands_up_and_finalizes() {
         guardians: qtv_devnet::GuardianSet::default(),
         bridge_operators: None,
         bridged_assets: vec![],
+        bridge_era: None,
     };
 
     let mut devnet =
