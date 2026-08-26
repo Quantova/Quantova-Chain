@@ -179,7 +179,11 @@ impl Runtime {
             }
             match self.inbound.recv_timeout(Duration::from_millis(10)) {
                 Ok((_, bytes)) => match Message::decode(&bytes) {
-                    Ok(Message::Reveal(note)) => self.node.collect_reveal(*note),
+                    Ok(Message::Reveal(note)) => {
+                        if self.node.collect_reveal((*note).clone()) {
+                            self.broadcast(&Message::Reveal(note).encode());
+                        }
+                    }
                     Ok(_) => buffer_bounded(&mut self.buffered, 0, bytes),
                     Err(_) => {}
                 },
@@ -281,7 +285,11 @@ impl Runtime {
                 }
                 self.try_justified(selection);
             }
-            Message::Reveal(note) => self.node.collect_reveal(*note),
+            Message::Reveal(note) => {
+                if self.node.collect_reveal((*note).clone()) {
+                    self.broadcast(&Message::Reveal(note).encode());
+                }
+            }
             Message::Register(note) => {
                 self.node.collect_registration(*note);
                 self.node.apply_registrations();

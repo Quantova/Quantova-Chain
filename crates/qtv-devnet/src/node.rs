@@ -627,19 +627,20 @@ impl DevNode {
     /// Admit a peer reveal for the current height, verified against the peer's committed
     /// root. Reveals for another height, that do not authenticate, or duplicates are
     /// dropped.
-    pub fn collect_reveal(&mut self, note: RevealNote) {
+    pub fn collect_reveal(&mut self, note: RevealNote) -> bool {
         if note.height != self.height {
-            return;
+            return false;
         }
         let reveal = PublishedReveal::new(note.id, note.credential);
         if self.reveals.iter().any(|r| r.id == reveal.id) {
-            return;
+            return false;
         }
         if !self.consensus.verify_published(&self.beacon, self.slot(), &reveal) {
-            return;
+            return false;
         }
         self.reveals.push(reveal);
         *self.selection_cache.borrow_mut() = None;
+        true
     }
 
     fn reload(&mut self) -> Result<(), RoundError> {
