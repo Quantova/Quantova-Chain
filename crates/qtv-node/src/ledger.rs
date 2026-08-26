@@ -2030,12 +2030,25 @@ impl Ledger {
 
     pub fn accrue_reward(&mut self, address: &str, now_day: u64) -> u64 {
         match address_id(address) {
-            Some(id) => self.accrue_reward_by_id(&id, now_day),
+            Some(id) => {
+                let denom = self.total_staked();
+                self.accrue_reward_by_id(&id, now_day, denom)
+            }
             None => 0,
         }
     }
 
-    fn accrue_reward_by_id(&mut self, id: &[u8; 32], now_day: u64) -> u64 {
+    // The session reward is split only across the roster that is actually paid, so a bond outside the
+    // roster cannot dilute a validator's share by inflating the total staked figure.
+    fn roster_reward_denominator(&self) -> u64 {
+        self.validator_ids()
+            .iter()
+            .filter(|id| !self.is_stake_banned(id) && !self.is_gov_blacklisted(id))
+            .filter_map(|id| self.stake_bond(id).map(|bond| bond.amount))
+            .sum()
+    }
+
+    fn accrue_reward_by_id(&mut self, id: &[u8; 32], now_day: u64, denom: u64) -> u64 {
         if qtv_staking::in_blackout(now_day, self.stake_mainnet_start()) {
             return 0;
         }
@@ -2046,7 +2059,7 @@ impl Ledger {
             Some(bond) => bond.amount,
             None => return 0,
         };
-        let paid = qtv_staking::session_reward(stake, self.total_staked()).min(self.stake_pool());
+        let paid = qtv_staking::session_reward(stake, denom).min(self.stake_pool());
         if paid == 0 {
             return 0;
         }
@@ -2453,8 +2466,9 @@ impl Ledger {
         // record_session marks the session boundary; a completed session accrues the emergent reward to
         // every validator, pro rata by stake, no longer scaled by the session activity level.
         if self.record_session(transactions, now_day).is_some() {
+            let denom = self.roster_reward_denominator();
             for id in self.validator_ids() {
-                self.accrue_reward_by_id(&id, now_day);
+                self.accrue_reward_by_id(&id, now_day, denom);
             }
         }
     }
@@ -3315,6 +3329,27 @@ mod stake_state_tests {
             public_key: pk.to_vec(),
             pop,
         }
+    }
+
+    #[test]
+    fn a_non_roster_bond_does_not_dilute_the_roster_reward_split() {
+        let mut l = Ledger::new();
+        let v1 = [1u8; 32];
+        let v2 = [2u8; 32];
+        let outsider = [9u8; 32];
+        let a1 = qtv_idfmt::render_address(&v1).unwrap();
+        let a2 = qtv_idfmt::render_address(&v2).unwrap();
+        let ao = qtv_idfmt::render_address(&outsider).unwrap();
+        l.seed_validator_set(&[v1, v2]);
+        l.seed_validator_bond(&a1, 3_000);
+        l.seed_validator_bond(&a2, 2_000);
+        l.seed_validator_bond(&ao, 30_000);
+        assert_eq!(l.total_staked(), 35_000, "total staked counts every bond");
+        assert_eq!(
+            l.roster_reward_denominator(),
+            5_000,
+            "the reward split counts only the roster stake so an outsider cannot dilute it"
+        );
     }
 
     #[test]
