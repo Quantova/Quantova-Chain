@@ -415,10 +415,10 @@ thread_local! {
     pub(crate) static VERIFY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn verify_signature(pk: &[u8; PUBLIC_KEY_BYTES], message: &[u8], sig: &[u8; SIGNATURE_BYTES]) -> bool {
+fn verify_signature(pk: &[u8; PUBLIC_KEY_BYTES], message: &[u8], sig: &[u8; SIGNATURE_BYTES], era: &[u8; 32]) -> bool {
     #[cfg(test)]
     VERIFY_CALLS.with(|c| c.set(c.get() + 1));
-    ml_dsa::verify(pk, message, sig, ATTEST_DOMAIN)
+    ml_dsa::verify(pk, message, sig, &attest_context(era))
 }
 
 pub fn quorum_attests(
@@ -426,6 +426,7 @@ pub fn quorum_attests(
     attestation: &Attestation,
     dest_chain: u32,
     chain_id: u64,
+    era: &[u8; 32],
 ) -> bool {
     if set.threshold == 0 {
         return false;
@@ -460,7 +461,7 @@ pub fn quorum_attests(
             Ok(sig) => sig,
             Err(_) => continue,
         };
-        if verify_signature(pk, &message, sig) {
+        if verify_signature(pk, &message, sig, era) {
             counted_keys.push(public_key);
         }
     }
@@ -517,6 +518,23 @@ impl ExitRequest {
 }
 
 pub const EXIT_ACK_DOMAIN: &[u8] = b"QUANTOVA/Q-ORACLE/EXIT-ACK/v1";
+
+// The signature context binds an attestation to the chain era it was raised for, so a deposit or exit
+// proof from one launch of a reused chain name cannot be replayed on the next. The era is the genesis
+// hash the node seeds at launch and the operators sign under.
+pub fn attest_context(era: &[u8; 32]) -> Vec<u8> {
+    let mut ctx = Vec::with_capacity(ATTEST_DOMAIN.len() + 32);
+    ctx.extend_from_slice(ATTEST_DOMAIN);
+    ctx.extend_from_slice(era);
+    ctx
+}
+
+pub fn exit_ack_context(era: &[u8; 32]) -> Vec<u8> {
+    let mut ctx = Vec::with_capacity(EXIT_ACK_DOMAIN.len() + 32);
+    ctx.extend_from_slice(EXIT_ACK_DOMAIN);
+    ctx.extend_from_slice(era);
+    ctx
+}
 pub const EXIT_FACT_VERSION: u8 = 1;
 pub const EXIT_FACT_ENCODED_LEN: usize = 106;
 pub const ARTIFACT_EXIT_ACK: u8 = 0x03;
@@ -670,10 +688,11 @@ fn verify_exit_signature(
     pk: &[u8; PUBLIC_KEY_BYTES],
     message: &[u8],
     sig: &[u8; SIGNATURE_BYTES],
+    era: &[u8; 32],
 ) -> bool {
     #[cfg(test)]
     VERIFY_CALLS.with(|c| c.set(c.get() + 1));
-    ml_dsa::verify(pk, message, sig, EXIT_ACK_DOMAIN)
+    ml_dsa::verify(pk, message, sig, &exit_ack_context(era))
 }
 
 // verifies the exit attestation exactly as quorum_attests verifies a mint, no weaker
@@ -682,6 +701,7 @@ pub fn exit_quorum_attests(
     attestation: &ExitAttestation,
     dest_chain: u32,
     chain_id: u64,
+    era: &[u8; 32],
 ) -> bool {
     if set.threshold == 0 {
         return false;
@@ -716,7 +736,7 @@ pub fn exit_quorum_attests(
             Ok(sig) => sig,
             Err(_) => continue,
         };
-        if verify_exit_signature(pk, &message, sig) {
+        if verify_exit_signature(pk, &message, sig, era) {
             counted_keys.push(public_key);
         }
     }
@@ -752,9 +772,10 @@ mod tests {
     }
 
     const TEST_CHAIN_ID: u64 = 0x0123_4567_89AB_CDEF;
+    const TEST_ERA: [u8; 32] = [0x5Au8; 32];
 
     fn sign_fact(sk: &[u8; qtv_crypto::ml_dsa::SECRET_KEY_BYTES], fact: &Fact) -> Vec<u8> {
-        ml_dsa::sign(sk, &fact.attest_preimage(TEST_CHAIN_ID), ATTEST_DOMAIN, &[0u8; 32])
+        ml_dsa::sign(sk, &fact.attest_preimage(TEST_CHAIN_ID), &attest_context(&TEST_ERA), &[0u8; 32])
             .expect("the fact preimage stays within the length bound")
             .to_vec()
     }
@@ -863,9 +884,9 @@ mod tests {
                 },
             ],
         };
-        assert!(quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
+        assert!(quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
         assert!(
-            !quorum_attests(&set, &attestation, fact.dest_chain + 1, TEST_CHAIN_ID),
+            !quorum_attests(&set, &attestation, fact.dest_chain + 1, TEST_CHAIN_ID, &TEST_ERA),
             "a fact bound for another chain does not attest here"
         );
     }
@@ -880,7 +901,7 @@ mod tests {
         let chain_b = TEST_CHAIN_ID ^ (1u64 << 40);
         assert_eq!(chain_a as u32, chain_b as u32, "the two siblings share the low 32 bits");
         let sign_a = |sk: &[u8; qtv_crypto::ml_dsa::SECRET_KEY_BYTES]| {
-            ml_dsa::sign(sk, &fact.attest_preimage(chain_a), ATTEST_DOMAIN, &[0u8; 32])
+            ml_dsa::sign(sk, &fact.attest_preimage(chain_a), &attest_context(&TEST_ERA), &[0u8; 32])
                 .expect("the fact preimage stays within the length bound")
                 .to_vec()
         };
@@ -892,12 +913,42 @@ mod tests {
             ],
         };
         assert!(
-            quorum_attests(&set, &attestation, fact.dest_chain, chain_a),
+            quorum_attests(&set, &attestation, fact.dest_chain, chain_a, &TEST_ERA),
             "the quorum attests under the chain id it was signed for"
         );
         assert!(
-            !quorum_attests(&set, &attestation, fact.dest_chain, chain_b),
+            !quorum_attests(&set, &attestation, fact.dest_chain, chain_b, &TEST_ERA),
             "a sibling sharing the u32 dest chain refuses the replay"
+        );
+    }
+
+    #[test]
+    fn a_quorum_signed_for_one_era_is_refused_under_another() {
+        let fact = sample_fact();
+        let (pk0, sk0) = operator(12);
+        let (pk1, sk1) = operator(13);
+        let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 2);
+        let era_a = [0x11u8; 32];
+        let era_b = [0x22u8; 32];
+        let sign_a = |sk: &[u8; qtv_crypto::ml_dsa::SECRET_KEY_BYTES]| {
+            ml_dsa::sign(sk, &fact.attest_preimage(TEST_CHAIN_ID), &attest_context(&era_a), &[0u8; 32])
+                .expect("the fact preimage stays within the length bound")
+                .to_vec()
+        };
+        let attestation = Attestation {
+            fact: fact.clone(),
+            signatures: vec![
+                SignerSig { operator_id: 0, signature: sign_a(&sk0) },
+                SignerSig { operator_id: 1, signature: sign_a(&sk1) },
+            ],
+        };
+        assert!(
+            quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &era_a),
+            "the quorum attests under the era it was signed for"
+        );
+        assert!(
+            !quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &era_b),
+            "a deposit proof from one launch cannot replay on a relaunch with a new genesis era"
         );
     }
 
@@ -940,7 +991,7 @@ mod tests {
                 signature: sign_fact(&sk0, &fact),
             }],
         };
-        assert!(!quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
+        assert!(!quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
     }
 
     #[test]
@@ -958,7 +1009,7 @@ mod tests {
         signatures.push(SignerSig { operator_id: 0, signature: sign_fact(&sk0, &fact) });
         let attestation = Attestation { fact: fact.clone(), signatures };
         VERIFY_CALLS.with(|c| c.set(0));
-        let _ = quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID);
+        let _ = quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA);
         let calls = VERIFY_CALLS.with(|c| c.get());
         assert!(
             calls <= set.operators.len(),
@@ -987,7 +1038,7 @@ mod tests {
                 },
             ],
         };
-        assert!(!quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
+        assert!(!quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
     }
 
     #[test]
@@ -1004,7 +1055,7 @@ mod tests {
             ],
         };
         assert!(
-            !quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID),
+            !quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA),
             "one public key under two ids fills only one slot"
         );
     }
@@ -1031,7 +1082,7 @@ mod tests {
             fact: tampered,
             signatures: std::mem::take(&mut signatures),
         };
-        assert!(!quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
+        assert!(!quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
     }
 
     #[test]
@@ -1048,7 +1099,7 @@ mod tests {
                 signature: sign_fact(&skx, &fact),
             }],
         };
-        assert!(!quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
+        assert!(!quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
     }
 
     #[test]
@@ -1120,11 +1171,11 @@ mod tests {
                 SignerSig { operator_id: 1, signature: sign_fact(&sk1, &fact) },
             ],
         };
-        assert!(quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
+        assert!(quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
 
         assert!(set.revoke(1));
         assert!(
-            !quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID),
+            !quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA),
             "a revoked key drops below the threshold"
         );
 
@@ -1136,7 +1187,7 @@ mod tests {
             ],
         };
         assert!(
-            quorum_attests(&set, &healed, fact.dest_chain, TEST_CHAIN_ID),
+            quorum_attests(&set, &healed, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA),
             "the remaining live keys still reach the threshold"
         );
     }
@@ -1165,7 +1216,7 @@ mod tests {
     }
 
     fn sign_exit(sk: &[u8; qtv_crypto::ml_dsa::SECRET_KEY_BYTES], fact: &ExitFact, chain_id: u64) -> Vec<u8> {
-        ml_dsa::sign(sk, &fact.ack_preimage(chain_id), EXIT_ACK_DOMAIN, &[0u8; 32])
+        ml_dsa::sign(sk, &fact.ack_preimage(chain_id), &exit_ack_context(&TEST_ERA), &[0u8; 32])
             .expect("the exit preimage stays within the length bound")
             .to_vec()
     }
@@ -1236,7 +1287,7 @@ mod tests {
                 SignerSig { operator_id: 1, signature: sign_exit(&sk1, &fact, TEST_CHAIN_ID) },
             ],
         };
-        assert!(exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
+        assert!(exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
     }
 
     #[test]
@@ -1255,9 +1306,9 @@ mod tests {
                 SignerSig { operator_id: 1, signature: sign_exit(&sk1, &fact, chain_a) },
             ],
         };
-        assert!(exit_quorum_attests(&set, &attestation, fact.dest_chain, chain_a));
+        assert!(exit_quorum_attests(&set, &attestation, fact.dest_chain, chain_a, &TEST_ERA));
         assert!(
-            !exit_quorum_attests(&set, &attestation, fact.dest_chain, chain_b),
+            !exit_quorum_attests(&set, &attestation, fact.dest_chain, chain_b, &TEST_ERA),
             "a sibling sharing the u32 dest chain refuses the exit replay"
         );
     }
@@ -1276,7 +1327,7 @@ mod tests {
             ],
         };
         assert!(
-            !exit_quorum_attests(&set, &attestation, fact.dest_chain + 1, TEST_CHAIN_ID),
+            !exit_quorum_attests(&set, &attestation, fact.dest_chain + 1, TEST_CHAIN_ID, &TEST_ERA),
             "a fact bound for another dest chain does not ack here"
         );
     }
@@ -1298,12 +1349,12 @@ mod tests {
         };
         let attestation = ExitAttestation { fact: empty, signatures: vec![] };
         assert!(
-            !exit_quorum_attests(&set, &attestation, 9000, TEST_CHAIN_ID),
+            !exit_quorum_attests(&set, &attestation, 9000, TEST_CHAIN_ID, &TEST_ERA),
             "an empty prove nothing attestation never acks"
         );
         let zero_threshold = OperatorSet::new(vec![(0, pk0.to_vec())], 0);
         assert!(
-            !exit_quorum_attests(&zero_threshold, &attestation, 9000, TEST_CHAIN_ID),
+            !exit_quorum_attests(&zero_threshold, &attestation, 9000, TEST_CHAIN_ID, &TEST_ERA),
             "a zero threshold set never acks"
         );
     }
@@ -1322,7 +1373,7 @@ mod tests {
                 SignerSig { operator_id: 0, signature },
             ],
         };
-        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
+        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
     }
 
     #[test]
@@ -1339,7 +1390,7 @@ mod tests {
             ],
         };
         assert!(
-            !exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID),
+            !exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA),
             "one public key under two ids fills only one slot"
         );
     }
@@ -1354,7 +1405,7 @@ mod tests {
             fact: fact.clone(),
             signatures: vec![SignerSig { operator_id: 0, signature: sign_exit(&sk0, &fact, TEST_CHAIN_ID) }],
         };
-        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
+        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
     }
 
     #[test]
@@ -1368,7 +1419,7 @@ mod tests {
             fact: fact.clone(),
             signatures: vec![SignerSig { operator_id: 0, signature: sign_exit(&skx, &fact, TEST_CHAIN_ID) }],
         };
-        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
+        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
     }
 
     #[test]
@@ -1384,6 +1435,6 @@ mod tests {
         let mut tampered = fact.clone();
         tampered.amount += 1;
         let attestation = ExitAttestation { fact: tampered, signatures };
-        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID));
+        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
     }
 }

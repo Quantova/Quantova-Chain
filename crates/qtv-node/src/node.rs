@@ -707,7 +707,7 @@ fn bridge_mint_fact(ledger: &Ledger, wrapper: &Wrapper, chain_id: u64) -> Option
     let artifact = crate::bridge::MintArtifact::decode(wrapper.body().call().args())?;
     let dest_chain = ledger.bridge_dest_chain()?;
     let operators = ledger.bridge_operator_set()?;
-    if !crate::bridge::quorum_attests(&operators, &artifact.attestation, dest_chain, chain_id) {
+    if !crate::bridge::quorum_attests(&operators, &artifact.attestation, dest_chain, chain_id, &ledger.bridge_era()) {
         return None;
     }
     let fact = artifact.attestation.fact;
@@ -780,7 +780,7 @@ fn bridge_settle_fact(ledger: &Ledger, wrapper: &Wrapper, chain_id: u64) -> Opti
     let attestation = crate::bridge::ExitAttestation::decode(wrapper.body().call().args())?;
     let dest_chain = ledger.bridge_dest_chain()?;
     let operators = ledger.bridge_operator_set()?;
-    if !crate::bridge::exit_quorum_attests(&operators, &attestation, dest_chain, chain_id) {
+    if !crate::bridge::exit_quorum_attests(&operators, &attestation, dest_chain, chain_id, &ledger.bridge_era()) {
         return None;
     }
     Some(attestation.fact)
@@ -3702,7 +3702,7 @@ mod tests {
     const BRIDGE_CHAIN_ID: u64 = qtv_tx::LOCAL_CHAIN_ID;
 
     fn attest_for(sk: &OperatorSecret, fact: &crate::bridge::Fact, chain_id: u64) -> Vec<u8> {
-        qtv_crypto::ml_dsa::sign(sk, &fact.attest_preimage(chain_id), crate::bridge::ATTEST_DOMAIN, &[0u8; 32])
+        qtv_crypto::ml_dsa::sign(sk, &fact.attest_preimage(chain_id), &crate::bridge::attest_context(&[0u8; 32]), &[0u8; 32])
             .expect("the fact preimage stays within the length bound")
             .to_vec()
     }
@@ -4563,7 +4563,7 @@ mod tests {
     }
 
     fn attest_exit(sk: &OperatorSecret, fact: &crate::bridge::ExitFact, chain_id: u64) -> Vec<u8> {
-        qtv_crypto::ml_dsa::sign(sk, &fact.ack_preimage(chain_id), crate::bridge::EXIT_ACK_DOMAIN, &[0u8; 32])
+        qtv_crypto::ml_dsa::sign(sk, &fact.ack_preimage(chain_id), &crate::bridge::exit_ack_context(&[0u8; 32]), &[0u8; 32])
             .expect("the exit preimage stays within the length bound")
             .to_vec()
     }
