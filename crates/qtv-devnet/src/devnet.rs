@@ -577,7 +577,9 @@ impl<S: Read + Write> Devnet<S> {
                     Message::ViewChange(record) => {
                         self.deliver_view_change(to, *record, ceiling, active)?;
                     }
-                    Message::Reveal(note) => self.nodes[to].collect_reveal(*note),
+                    Message::Reveal(note) => {
+                        self.nodes[to].collect_reveal(*note);
+                    }
                     Message::Register(note) => {
                         self.nodes[to].collect_registration(*note);
                         self.nodes[to].apply_registrations();

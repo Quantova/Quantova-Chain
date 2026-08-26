@@ -100,3 +100,34 @@ fn a_multi_node_run_holding_only_own_secrets_finalises() {
     }
     assert_eq!(devnet.node(0).ledger().balance(&bob.address()), heights * 1_000);
 }
+
+#[test]
+fn a_fresh_reveal_forwards_once_and_a_duplicate_or_forgery_does_not() {
+    let base = unique_base("reveal-regossip");
+    let alice = user(0);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let cfg = config(&base, &[true, true, true, true], accounts);
+    let nodes = open_nodes(&cfg);
+    let notes: Vec<RevealNote> = nodes
+        .iter()
+        .map(|node| node.own_reveal_note().expect("a selected validator publishes"))
+        .collect();
+
+    let mut node1 = open_nodes(&cfg).into_iter().next().expect("node one");
+    let peer = notes.iter().find(|n| n.id == 2).unwrap().clone();
+    assert!(
+        node1.collect_reveal(peer.clone()),
+        "a fresh reveal is accepted, so a node re gossips it exactly once"
+    );
+    assert!(
+        !node1.collect_reveal(peer),
+        "a duplicate reveal is dropped, so the re gossip can never loop"
+    );
+
+    let three = notes.iter().find(|n| n.id == 3).unwrap();
+    let forged = RevealNote { height: three.height, id: 4, credential: three.credential.clone() };
+    assert!(
+        !node1.collect_reveal(forged),
+        "a reveal that does not authenticate is refused, so it is never forwarded"
+    );
+}
