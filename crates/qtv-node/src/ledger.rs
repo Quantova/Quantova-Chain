@@ -259,6 +259,7 @@ const GUARDIAN_ENACT_NONCE_TAG: &[u8] = b"qtv/guardian/enact-nonce";
 const BRIDGE_VAULTBAL_TAG: &[u8] = b"qtv/bridge/vaultbal/";
 const BRIDGE_ASSET_LIST_TAG: &[u8] = b"qtv/bridge/assetlist";
 const BRIDGE_DESTCHAIN_TAG: &[u8] = b"qtv/bridge/destchain";
+const BRIDGE_ERA_TAG: &[u8] = b"qtv/bridge/era";
 const BRIDGE_EPOCH_TAG: &[u8] = b"qtv/bridge/epoch";
 const BRIDGE_BURN_REF_DOMAIN: &[u8] = b"qtv/bridge/burn-ref/v1";
 const BRIDGE_EXIT_SEEN_TAG: &[u8] = b"qtv/bridge/exitseen/";
@@ -1596,6 +1597,25 @@ impl Ledger {
     pub fn seed_bridge_dest_chain(&mut self, dest_chain: u32) -> (Key, Vec<u8>) {
         let key = stake_singleton_key(BRIDGE_DESTCHAIN_TAG);
         let bytes = to_bytes(&dest_chain);
+        self.write_leaf(key, bytes.clone());
+        (key, bytes)
+    }
+
+    pub fn bridge_era(&self) -> [u8; 32] {
+        self.trie
+            .get(&stake_singleton_key(BRIDGE_ERA_TAG))
+            .filter(|bytes| bytes.len() == 32)
+            .map(|bytes| {
+                let mut era = [0u8; 32];
+                era.copy_from_slice(bytes);
+                era
+            })
+            .unwrap_or([0u8; 32])
+    }
+
+    pub fn seed_bridge_era(&mut self, era: &[u8; 32]) -> (Key, Vec<u8>) {
+        let key = stake_singleton_key(BRIDGE_ERA_TAG);
+        let bytes = era.to_vec();
         self.write_leaf(key, bytes.clone());
         (key, bytes)
     }
