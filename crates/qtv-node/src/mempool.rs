@@ -544,6 +544,9 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_bridge_exit(&wrapper) {
+            if self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce()) {
+                return Err(Reject::SenderQueueFull);
+            }
             let account = ledger.account(wrapper.body().sender());
             let signature_ok = qtv_tx::verify(&wrapper, &account.public_key);
             if crate::node::bridge_exit_admissible(ledger, &wrapper, &account, fee_params, signature_ok)
@@ -661,9 +664,18 @@ impl Mempool {
             } else if crate::node::is_bridge_settle(&wrapper) {
                 crate::node::bridge_settle_admissible(ledger, &wrapper, fee_params.chain_id)
             } else if crate::node::is_bridge_exit(&wrapper) {
-                let account = ledger.account(wrapper.body().sender());
-                crate::node::bridge_exit_admissible(ledger, &wrapper, &account, fee_params, verified[index])
-                    .is_some()
+                !self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce())
+                    && {
+                        let account = ledger.account(wrapper.body().sender());
+                        crate::node::bridge_exit_admissible(
+                            ledger,
+                            &wrapper,
+                            &account,
+                            fee_params,
+                            verified[index],
+                        )
+                        .is_some()
+                    }
             } else if crate::node::is_registration(&wrapper) {
                 false
             } else {
