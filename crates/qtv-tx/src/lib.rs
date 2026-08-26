@@ -284,6 +284,9 @@ pub fn verify(wrapper: &Wrapper, public_key: &[u8]) -> bool {
                 Ok(key) => key,
                 Err(_) => return false,
             };
+            if wrapper.signature.len() != slh_dsa::SIGNATURE_BYTES {
+                return false;
+            }
             slh_dsa::verify(public_key, &digest, &wrapper.signature, &[])
         }
         #[cfg(feature = "fn-dsa")]
