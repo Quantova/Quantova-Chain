@@ -2387,6 +2387,15 @@ impl Ledger {
                             self.apply_balance_delta(contract, i128::from(value));
                         }
                         Some(asset) => {
+                            // Reject an impossible contract credit before debiting the caller so a failed
+                            // credit can never strand the debited amount.
+                            if self
+                                .asset_balance(&asset, &contract_id)
+                                .checked_add(u128::from(value))
+                                .is_none()
+                            {
+                                return false;
+                            }
                             if !self.debit_asset(&asset, &caller_id, u128::from(value)) {
                                 return false;
                             }
@@ -2406,6 +2415,11 @@ impl Ledger {
                     });
                 }
                 for (asset, holder, amount) in &asset_credits {
+                    // Reject an impossible recipient credit before debiting the contract so a failed
+                    // credit can never strand the debited amount.
+                    if self.asset_balance(asset, holder).checked_add(*amount).is_none() {
+                        return false;
+                    }
                     if !self.debit_asset(asset, &contract_id, *amount) {
                         return false;
                     }
@@ -3476,6 +3490,36 @@ mod stake_state_tests {
         assert_eq!(l.asset_balance(&asset_b, &caller_id), 40);
         assert_eq!(l.asset_balance(&asset_a, &caller_id) + l.asset_balance(&asset_a, &contract_id), 50);
         assert_eq!(l.asset_balance(&asset_b, &caller_id) + l.asset_balance(&asset_b, &contract_id), 100);
+    }
+
+    #[test]
+    fn a_deposit_that_would_overflow_the_contract_asset_balance_strands_nothing() {
+        let selector = [1u8, 2, 3, 4];
+        let mut l = Ledger::new();
+        let contract_id = [70u8; 32];
+        let contract = qtv_idfmt::render_address(&contract_id).unwrap();
+        l.set_contract_code(&contract_id, &asset_sender_container(selector).canonical_bytes());
+
+        let caller_id = [9u8; 32];
+        let caller = qtv_idfmt::render_address(&caller_id).unwrap();
+        let issuer_a = [0xA1u8; 32];
+        let issuer_b = [0xB2u8; 32];
+        let asset_a = asset_id_of(&issuer_a);
+        let asset_b = asset_id_of(&issuer_b);
+        // The contract already holds almost the entire u128 range of the deposited asset.
+        l.set_asset_balance(&asset_a, &contract_id, u128::MAX - 5);
+        l.set_asset_balance(&asset_a, &caller_id, 10);
+        l.set_asset_balance(&asset_b, &contract_id, 100);
+
+        let mut payload = vec![0u8; 88];
+        payload.extend_from_slice(&issuer_b);
+        payload.extend_from_slice(&caller_id);
+
+        // Depositing ten more would overflow the contract balance, so the call is refused before any debit.
+        assert!(!l.call_contract(&caller, &contract, selector, &payload, 0, 1_000_000, 10, Some(issuer_a), 0));
+        assert_eq!(l.asset_balance(&asset_a, &caller_id), 10, "the caller keeps its asset, nothing is debited");
+        assert_eq!(l.asset_balance(&asset_a, &contract_id), u128::MAX - 5, "the contract balance is untouched");
+        assert_eq!(l.asset_balance(&asset_b, &contract_id), 100, "no asset moved on the refused call");
     }
 
     #[test]
