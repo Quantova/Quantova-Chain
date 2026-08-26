@@ -1636,6 +1636,10 @@ impl Ledger {
         if fact.amount == 0 {
             return false;
         }
+        // Never issue wrapped supply the vault cannot back, else a burn could strand un exitable.
+        if self.bridge_pool_vault().is_none() {
+            return false;
+        }
         if self.execution_height() > fact.expiry_height {
             return false;
         }
@@ -5522,12 +5526,39 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn a_bridge_mint_without_a_pool_vault_is_refused() {
+        let mut l = Ledger::new();
+        let asset = [0xC7u8; 16];
+        let holder = [0xE1u8; 32];
+        l.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
+        let refused = l.bridge_mint(&crate::bridge::Fact {
+            version: crate::bridge::FACT_VERSION,
+            source_chain: 1,
+            dest_chain: 9_000,
+            route_id: 7,
+            direction: crate::bridge::Direction::Deposit,
+            nonce: 1,
+            source_ref: [0x02u8; 32],
+            asset_id: asset,
+            amount: 1_000,
+            recipient: holder,
+            finality_depth: 6,
+            observed_height: 10,
+            expiry_height: 100,
+        });
+        assert!(!refused, "a mint with no pool vault is refused so wrapped tokens are never unbacked");
+        assert_eq!(l.bridged_supply(&asset), 0, "the refused mint issues no supply");
+    }
+
+    #[test]
     fn an_underflowing_vault_debit_fails_closed() {
         let mut l = Ledger::new();
         let asset = [0xC3u8; 16];
         let holder = [0xEEu8; 32];
         l.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
 
+        let vault = [0x0Au8; 32];
+        l.seed_bridge_pool_vault(&vault);
         assert!(l.bridge_mint(&crate::bridge::Fact {
             version: crate::bridge::FACT_VERSION,
             source_chain: 1,
@@ -5546,14 +5577,14 @@ mod stake_state_tests {
         assert_eq!(l.bridged_balance(&asset, &holder), 1_000);
         assert_eq!(l.bridged_supply(&asset), 1_000);
 
-        let vault = [0x0Au8; 32];
-        l.seed_bridge_pool_vault(&vault);
         l.seed_bridge_exits_enabled(true);
         l.seed_bridge_payout_cap(10_000_000);
+        // Drop the vault custody to nothing so a later draw underflows and must fail closed.
+        l.seed_bridge_vault_custody(&vault, &asset, 0);
         assert_eq!(
             l.bridge_vault_custody(&vault, &asset),
             0,
-            "the mint predated the vault so it records no custody"
+            "the vault holds no custody for this asset"
         );
 
         l.seed_outstanding_burn(&[0x07u8; 32], &asset, 500, &holder);
