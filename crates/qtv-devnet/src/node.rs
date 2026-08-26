@@ -668,12 +668,37 @@ impl DevNode {
             self.consensus.rotate_to_epoch(head_epoch, roster);
             *self.selection_cache.borrow_mut() = None;
         }
-        let selection = self
-            .committee_for_certificate(head, &certificate)
-            .ok_or(RoundError::Decode)?;
+        // The head is already committed and finalised. Its committee was reweighed against the state
+        // before the head block ran, so once the head block itself changes a member's stake, a slash
+        // or a bond, the roster reload just built no longer reproduces that committee and the digest
+        // would not match. The certificate already carries the finalising committee, so fall back to
+        // its reveals in the canonical ascending id order form_committee used, reaching the same beacon
+        // seed without a roster. The block was verified when it was accepted, so trusting it on reload
+        // is sound, and re-deriving it here was the bug that bricked restart.
+        let reveals = match self.committee_for_certificate(head, &certificate) {
+            Some(selection) => {
+                debug_assert!(
+                    certificate.committee_reveals.is_empty() || {
+                        let mut carried = certificate.committee_reveals.clone();
+                        carried.sort_by_key(|r| r.id);
+                        let rebuilt: Vec<_> =
+                            carried.iter().map(|r| r.credential.preimage).collect();
+                        rebuilt == selection.reveals
+                    },
+                    "the certificate reveal reconstruction must match the selected committee"
+                );
+                selection.reveals
+            }
+            None if !certificate.committee_reveals.is_empty() => {
+                let mut carried = certificate.committee_reveals.clone();
+                carried.sort_by_key(|r| r.id);
+                carried.iter().map(|r| r.credential.preimage).collect()
+            }
+            None => return Err(RoundError::Decode),
+        };
         self.beacon = self
             .beacon
-            .advance_from_reveals(self.consensus.slot_for(head), &selection.reveals);
+            .advance_from_reveals(self.consensus.slot_for(head), &reveals);
         self.height = head + 1;
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();
