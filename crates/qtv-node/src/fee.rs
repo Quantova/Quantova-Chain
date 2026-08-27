@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 pub const MICRO_USD_FLOOR: u128 = 500;
 
 pub const MICRO_USD_CEILING: u128 = 1000;

@@ -1,10 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Determinism over the logical clock. The same logical schedule, including a
-//! reordering delivery schedule and a timeout driven view change, gives the same
-//! finalized chain and the same state every run.
-
 mod support;
 
 use qtv_node::fee::FeeParams;
@@ -14,9 +10,6 @@ use qtv_devnet::{Devnet, Network};
 
 use support::{config, header_chain, transfer, unique_base, user};
 
-/// Run one fixed script over a fresh devnet under a reordering schedule with the
-/// first leader silenced, and return the finalized chain bytes and the final state
-/// root every node ends on.
 fn run_scripted(name: &str, params: &FeeParams) -> (Vec<[u8; 32]>, [u8; 32]) {
     let base = unique_base(name);
     let alice = user(0);

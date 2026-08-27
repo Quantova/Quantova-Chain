@@ -1,15 +1,12 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Round trip and rejection coverage for every identifier family.
-
 use qtv_idfmt::{
     parse_address, parse_block, parse_cid, parse_proof, parse_secret, parse_state, parse_tx,
     render_address, render_block, render_cid, render_proof, render_secret, render_state, render_tx,
     Error,
 };
 
-/// A deterministic byte pattern of the requested length.
 fn pattern(len: usize) -> Vec<u8> {
     (0..len)
         .map(|i| (i as u8).wrapping_mul(37).wrapping_add(11))

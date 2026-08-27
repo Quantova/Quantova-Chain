@@ -249,8 +249,6 @@ impl Tally {
                 >= electorate_stake.saturating_mul(PARTICIPATION_FLOOR_BPS)
             && self.aye_stake.saturating_mul(BPS_DENOM)
                 >= electorate_stake.saturating_mul(THRESHOLD_BPS)
-            // The aye stake must also outweigh the nay stake, so a minority that clears the
-            // absolute floor cannot carry a proposal over an opposing majority.
             && self.aye_stake > self.nay_stake
     }
 }
@@ -355,7 +353,6 @@ impl Decode for CommitteeRotation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    // turn on a feature that shipped in the binary but stayed dormant, by version, so an upgrade rides a vote and never a fork
     Activate { feature: Vec<u8>, version: u64 },
     Mint { to: Vec<u8>, amount: u64 },
     BridgeMigration { vault: Vec<u8> },
@@ -951,8 +948,6 @@ mod tests {
 
     #[test]
     fn a_minority_aye_cannot_carry_a_proposal_over_a_nay_majority() {
-        // 40% aye clears the absolute floor, but a 60% nay opposes it. The proposal must fail
-        // because the aye stake does not outweigh the nay stake.
         let mut opposed = Tally::default();
         opposed.record(true, 400_000);
         opposed.record(false, 600_000);
@@ -961,7 +956,6 @@ mod tests {
             "a forty percent aye must not overrule a sixty percent nay"
         );
 
-        // A clear aye majority that also clears the floor still passes.
         let mut carried = Tally::default();
         carried.record(true, 450_000);
         carried.record(false, 400_000);
@@ -1137,13 +1131,11 @@ mod tests {
     #[test]
     fn a_proposal_below_the_participation_floor_is_rejected() {
         let electorate = 1_000_000u128;
-        // Turnout under the floor is rejected, so a sliver of the electorate cannot carry it.
         let mut thin = Tally::default();
         thin.record(true, 200_000);
         assert!(thin.turnout() * BPS_DENOM < electorate * PARTICIPATION_FLOOR_BPS);
         assert!(!thin.approved(electorate));
 
-        // A turnout that clears the floor and the ayes that clear the threshold pass.
         let mut full = Tally::default();
         full.record(true, 450_000);
         assert!(full.turnout() * BPS_DENOM >= electorate * PARTICIPATION_FLOOR_BPS);

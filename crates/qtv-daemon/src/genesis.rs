@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::path::Path;
 
 use qtv_account::address_for_key;
@@ -346,10 +345,6 @@ fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) ->
     buf.extend_from_slice(&genesis.fee_params.rate_micro_usd_per_qtov.to_le_bytes());
     buf.extend_from_slice(&genesis.fee_params.native_unit.to_le_bytes());
     buf.extend_from_slice(&genesis.fee_params.max_fee_native.to_le_bytes());
-    // Fold the bridge destination only when it is set. An unset destination adds nothing, so
-    // a genesis without the field hashes to the exact pre-field V4 preimage the live testnet
-    // was launched on and its genesis hash does not move. A set destination binds into the
-    // hash so a chain that fixes its bridge target commits to that target at genesis.
     if let Some(dest_chain) = genesis.bridge_dest_chain {
         buf.extend_from_slice(&dest_chain.to_le_bytes());
     }
@@ -423,9 +418,6 @@ mod tests {
         }
     }
 
-    // An independent reconstruction of the preimage the daemon hashed before the bridge
-    // destination field existed: the V4 tag, the fee band, then validators and accounts, and no
-    // bridge bytes at all. It is the oracle for the hash the live testnet was launched on.
     fn legacy_v4_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) -> [u8; 32] {
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(b"QTV-GENESIS-V4");

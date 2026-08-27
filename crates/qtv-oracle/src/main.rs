@@ -136,7 +136,6 @@ fn mint(a: &[String]) {
     println!("{}", hexs(&to_bytes(&wrapper)));
 }
 
-
 fn check(a: &[String]) {
     if a.len() != 5 {
         fail("check <committee> <artifact_hex> <dest_chain> <chain_id> <era_hex>");
@@ -163,7 +162,6 @@ fn check(a: &[String]) {
         std::process::exit(2);
     }
 }
-
 
 fn guardian_member_id_hex(pk: &[u8]) -> String {
     let address = address_for_key(1, pk);

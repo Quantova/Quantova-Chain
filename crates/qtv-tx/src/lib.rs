@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 #![forbid(unsafe_code)]
 
 use qtv_account::Account;
@@ -210,12 +209,6 @@ fn body_digest(body: &Body) -> [u8; 32] {
 }
 
 pub fn sign(account: &Account, body: &Body) -> Wrapper {
-    // Fail closed. Call::encode and Body::encode reduce an address to its raw payload with
-    // parse_address(..).unwrap_or_default(), so an unparseable sender or target would encode as
-    // an empty payload and the signature would stand over a body that is not the one the caller
-    // named. Encode cannot return an error without changing the whole codec, so the signer is the
-    // place that refuses a bad address before it ever reaches encode. The higher level clients
-    // already reject a bad target, this is the low level backstop that no path routes around.
     assert!(
         qtv_idfmt::parse_address(body.sender()).is_ok(),
         "sign refuses a sender address that does not parse to an address payload"

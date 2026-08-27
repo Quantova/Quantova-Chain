@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use qtv_codec::{Decode, Decoder, Encode, Encoder, Error};
 use qtv_crypto::ml_dsa::{self, PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
 use qtv_crypto::sha3;
@@ -692,7 +691,6 @@ fn verify_exit_signature(
     ml_dsa::verify(pk, message, sig, &exit_ack_context(era))
 }
 
-// verifies the exit attestation exactly as quorum_attests verifies a mint, no weaker
 pub fn exit_quorum_attests(
     set: &OperatorSet,
     attestation: &ExitAttestation,
@@ -1232,7 +1230,6 @@ mod tests {
 
     #[test]
     fn the_exit_fact_encoding_matches_the_pinned_cross_repo_layout() {
-        // pins the wire layout the oracle's q-exits decision encoder must match
         let fact = ExitFact {
             version: EXIT_FACT_VERSION,
             corridor: 1,

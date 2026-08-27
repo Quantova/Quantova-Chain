@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use qtv_attest::aggregate::aggregate;
 use qtv_attest::committee::MemberKey;
 use qtv_attest::{CommitteeDigest, Attestation, Attester, Certificate, CommitteeCommitment};
@@ -14,8 +13,6 @@ use qtv_sampler::validator::Registration;
 pub use qtv_attest::{Beacon, Block, Parent};
 pub use qtv_sampler::validator::DEFAULT_SLOTS;
 
-/// A validator named together with its operator secret, used by the holder of a secret
-/// to derive its commitments. A node consumes the derived `ValidatorRegistration`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConsensusValidator {
     pub id: u64,
@@ -26,8 +23,6 @@ pub struct ConsensusValidator {
 }
 
 impl ConsensusValidator {
-    /// A validator built from its operator secret. Its bond and reward address is the
-    /// commitment the secret derives to.
     pub fn from_secret(id: u64, stake: u64, online: bool, secret: [u8; 32]) -> Self {
         let bond_address = crate::keys::validator_address(&secret);
         ConsensusValidator {
@@ -40,8 +35,6 @@ impl ConsensusValidator {
     }
 }
 
-// A per id convenience for tests and the single process simulation only, sourcing the
-// secret from the gated fixture. Absent from a default node build.
 #[cfg(any(test, feature = "test-fixtures"))]
 impl ConsensusValidator {
     pub fn online(id: u64, stake: u64) -> Self {
@@ -49,9 +42,6 @@ impl ConsensusValidator {
     }
 }
 
-/// The on chain commitment a node holds for a validator, its id and stake, its online
-/// expectation, its bond and reward address, its sortition root, and its attestation
-/// public key.
 #[derive(Clone, Debug)]
 pub struct ValidatorRegistration {
     pub id: u64,
@@ -63,7 +53,6 @@ pub struct ValidatorRegistration {
 }
 
 impl ValidatorRegistration {
-    /// The registration a validator's secret derives to.
     pub fn from_secret(id: u64, stake: u64, online: bool, secret: &[u8; 32], slots: u64) -> Self {
         let attester = Attester::from_secret_with_slots(id, secret, stake, slots);
         ValidatorRegistration {
@@ -86,9 +75,6 @@ impl ValidatorRegistration {
         )
     }
 
-    /// The registration read from a validator's own published genesis registration. It
-    /// carries only commitments, so a node assembles the roster from peers' public
-    /// registrations without holding or reconstructing any peer secret.
     pub fn from_spec(spec: &crate::node::ValidatorSpec) -> Self {
         ValidatorRegistration {
             id: spec.id,
@@ -118,7 +104,6 @@ impl ValidatorRegistration {
     }
 }
 
-/// Derive the public roster from a set of secret carrying descriptors.
 pub fn roster_of(validators: &[ConsensusValidator], slots: u64) -> Vec<ValidatorRegistration> {
     validators
         .iter()
@@ -140,22 +125,8 @@ pub fn genesis_beacon() -> Beacon {
     Beacon::genesis()
 }
 
-/// The reserved resource cost that marks a control plane subject, the view change vote and
-/// the lock proof a node signs during a view change, apart from a block proposal. Every block
-/// proposal carries a unit cost, so a subject at this cost is never a block a validator voted
-/// to finalize. A locked validator signs its view change vote and its lock proof at the same
-/// height and view it locked in, over two different subjects; without this mark the two read
-/// as a same view double vote and a reporter could lift them from one honest view change
-/// message and slash the signer. The mark rides inside the signed subject, so it cannot be
-/// stripped without breaking the signature.
 pub const VIEW_CHANGE_SUBJECT_COST: u64 = u64::MAX;
 
-/// The ids of validators that signed two conflicting attestations at one height in one view,
-/// each proven by verifying both signatures against the offender's registered attestation key.
-/// The view rides inside each signed attestation, so a pair whose signed views differ is a
-/// justified cross view re vote and never flags, and a forged pair naming a validator that
-/// never double signed does not authenticate and is never flagged. A control plane view change
-/// subject is not a block vote, so a pair touching one never flags.
 pub fn equivocation_offenders(
     chain_id: u64,
     attestations: &[Attestation],
@@ -186,7 +157,6 @@ pub fn equivocation_offenders(
     flagged
 }
 
-/// Validators signed into two conflicting quorums of `tau` at one height, the cross view double finalise the equal view rule misses; a value below `tau` is not finalized so an honest lone re vote never flags.
 pub fn double_finalize_offenders(
     chain_id: u64,
     attestations: &[Attestation],
@@ -283,9 +253,6 @@ impl FinalityLedger {
     }
 }
 
-/// A node's consensus state, its own attester and the roster of public commitments. It
-/// computes its own reveal and assembles the committee from published reveals verified
-/// against the roster.
 pub struct Consensus {
     chain_id: u64,
     own: Attester,
@@ -333,13 +300,10 @@ impl Consensus {
         }
     }
 
-    /// The chain id this consensus is bound to. Every attestation and certificate is signed and
-    /// verified under it, so nothing from another chain can be lifted onto this one.
     pub fn chain_id(&self) -> u64 {
         self.chain_id
     }
 
-    /// Replace the roster with a reweighted one.
     pub fn reweight(&mut self, roster: Vec<ValidatorRegistration>) {
         let mut roster = roster;
         roster.sort_by_key(|r| r.id);
@@ -354,14 +318,10 @@ impl Consensus {
         self.epoch_len
     }
 
-    /// The node's own one time sortition root for an epoch, the commitment it re registers
-    /// so peers admit its rotated reveals.
     pub fn own_epoch_root(&self, epoch: u64) -> Root {
         self.own.at_epoch(epoch).root()
     }
 
-    /// The node's own signed re registration of its rotated root for an epoch, verifiable
-    /// by any peer against its stable attestation key.
     pub fn own_epoch_registration(&self, epoch: u64) -> (Root, qtv_crypto::ml_dsa::Signature) {
         self.own.epoch_registration(epoch)
     }
@@ -374,9 +334,6 @@ impl Consensus {
         qtv_sampler::epoch::slot_in_epoch(height, self.epoch_len)
     }
 
-    /// Rotate the node's own attester onto the epoch's fresh one time sortition tree and
-    /// install the roster of rotated roots the epoch draws its committee from. Rotation
-    /// happens once per epoch boundary; a reweight within the same epoch keeps the roots.
     pub fn rotate_to_epoch(&mut self, epoch: u64, roster: Vec<ValidatorRegistration>) {
         if epoch != self.epoch {
             self.own = self.own.at_epoch(epoch);
@@ -401,12 +358,10 @@ impl Consensus {
         CommitteeView::new(self.roster.iter().map(|r| r.registration()).collect())
     }
 
-    /// The node's own reveal for a slot.
     pub fn own_reveal(&self, slot: u64) -> Credential {
         self.own.reveal(slot)
     }
 
-    /// The node's own published reveal for a slot when its own reveal is selected.
     pub fn published_self(&self, beacon: &Beacon, slot: u64) -> Option<PublishedReveal> {
         let credential = self.own.reveal(slot);
         if self.view().admits(beacon, slot, self.own_id, &credential) {
@@ -416,15 +371,11 @@ impl Consensus {
         }
     }
 
-    /// Whether a peer's published reveal authenticates to its committed root and is
-    /// selected for the slot.
     pub fn verify_published(&self, beacon: &Beacon, slot: u64, reveal: &PublishedReveal) -> bool {
         self.view()
             .admits(beacon, slot, reveal.id, &reveal.credential)
     }
 
-    /// Assemble the committee for a slot from the published reveals, verified against the
-    /// roster, and build its commitment from the member keys.
     pub fn select(
         &self,
         beacon: &Beacon,
@@ -468,7 +419,6 @@ impl Consensus {
         })
     }
 
-    /// The node's own attestation over a block, carrying its own reveal.
     pub fn own_attestation(
         &self,
         height: u64,
@@ -481,7 +431,6 @@ impl Consensus {
         self.own.attest(self.chain_id, height, slot, view, committee, block, beacon)
     }
 
-    /// Fold the collected attestations into a finality certificate.
     pub fn finalize(
         &self,
         selection: &Selection,
@@ -857,7 +806,6 @@ mod tests {
         let value_a = block_for(1);
         let value_b = Block::new(1, header_value(&[9u8; 32]), Parent::Genesis);
 
-        // A finalizes at view zero; 2, 3, 4 also sign a conflicting B quorum at view one.
         let mut evidence: Vec<Attestation> = [1u64, 2, 3, 4]
             .iter()
             .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], value_a, &beacon))
@@ -871,7 +819,6 @@ mod tests {
             "a conflicting finalization vote in a different view is slashed"
         );
 
-        // A re vote across a view change, and a higher view vote below a quorum, never flag.
         let mut honest: Vec<Attestation> = [1u64, 2, 3, 4]
             .iter()
             .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], value_a, &beacon))
@@ -883,7 +830,6 @@ mod tests {
             "a lone cross view re vote below a finalizing quorum is not a double finalize"
         );
 
-        // A relabelled vote naming validator 1 in the B quorum never authenticates under 1's key.
         let mut framed: Vec<Attestation> = [1u64, 2, 3, 4]
             .iter()
             .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], value_a, &beacon))
@@ -910,7 +856,6 @@ mod tests {
         let beacon = genesis_beacon();
         let slot = 1;
 
-        // A ValidatorRegistration exposes only commitments, no secret to read.
         for entry in &roster {
             let _: &Root = &entry.root;
             let _: &PublicKey = &entry.attest_pk;

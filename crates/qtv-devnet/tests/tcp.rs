@@ -1,9 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The devnet runs over real localhost TCP channels, not only the in memory
-//! duplex, and still reaches the same finalized block on every node.
-
 mod support;
 
 use std::collections::BTreeMap;
@@ -19,7 +16,6 @@ use qtv_devnet::{Devnet, Mesh};
 
 use support::{config, header_chain, transfer, unique_base, user};
 
-/// Stand up a full mesh over localhost TCP, one pinned channel per pair.
 fn tcp_mesh(identities: &[Identity]) -> Mesh<TcpStream> {
     let n = identities.len();
     let mut links = BTreeMap::new();

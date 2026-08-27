@@ -1,14 +1,11 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Coverage for the account derivation pipeline and the address format.
-
 use qtv_account::{
     address_for_key, derive, derive_with_scheme, rotate, SCHEME_HASH, SCHEME_LATTICE,
 };
 use qtv_idfmt::{parse_address, parse_secret, KEY_FLOOR};
 
-/// A deterministic master seed pattern.
 fn master() -> [u8; 32] {
     let mut seed = [0u8; 32];
     for (i, byte) in seed.iter_mut().enumerate() {

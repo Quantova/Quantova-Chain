@@ -1,9 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The crate secures bytes with qtv-crypto only. No classical cryptography and
-//! no X25519 is representable, on devnets or anywhere.
-
 const MANIFEST: &str = include_str!("../Cargo.toml");
 
 #[test]
@@ -12,7 +9,6 @@ fn the_only_cryptographic_dependency_is_qtv_crypto() {
         MANIFEST.contains("qtv-crypto"),
         "qtv-crypto must be the cryptographic dependency"
     );
-    // Every git dependency resolves to the single audited crypto crate.
     for line in MANIFEST.lines() {
         if line.contains("git =") {
             assert!(

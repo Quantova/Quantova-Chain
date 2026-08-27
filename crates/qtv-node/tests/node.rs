@@ -1,10 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Integration tests for the node state transition and finalization loop. They
-//! exercise execution, multi height finalization, rejection, an offline
-//! validator, and determinism end to end over the composed stack.
-
 use qtv_account::{derive, Account};
 use qtv_node::execution::{transfer_call, TRANSFER_METER};
 use qtv_node::fee::FeeParams;
@@ -52,9 +48,6 @@ fn genesis(accounts: Vec<GenesisAccount>, online: &[bool]) -> Genesis {
     }
 }
 
-/// Boot a node from genesis, supplying each validator's own fixture secret as the
-/// simulation roster. The genesis carries only commitments; the secrets are the test
-/// only fixtures the committed bond addresses were derived from.
 fn boot(genesis: Genesis) -> Node {
     let secrets = genesis
         .validators
@@ -102,16 +95,11 @@ fn a_signed_transfer_executes_lands_in_a_block_and_moves_state() {
     node.produce().expect("finalized");
     let finalized = node.chain().last().expect("a finalized block");
 
-    // The transaction landed in the finalized body.
     assert!(finalized.transaction_ids().contains(&tx_id));
-    // The post execution state root sits in the finalized header.
     assert_eq!(*finalized.header().q_root(), node.ledger().q_root());
-    // The finalized header binds the certificate over the real header.
     assert!(finalized.reconciles());
     assert_eq!(finalized.header().height(), 1);
 
-    // State moved: the sender paid the amount and the fee, the recipient received
-    // the amount.
     assert_eq!(
         node.ledger().balance(&alice.address()),
         1_000_000 - amount - fee
@@ -174,7 +162,6 @@ fn a_cross_view_double_finalizer_is_slashed_and_excluded_while_an_honest_voter_i
         &[true, true, true, true],
     ));
 
-    // 2, 3, 4 sign a conflicting quorum in view one while the honest round finalizes in view zero.
     let conflicting = node.forge_finalization_quorum(&[2, 3, 4], 1, [0xAB; 32]);
     node.observe_finalization_evidence(conflicting);
     node.produce().expect("height one finalizes");
@@ -267,21 +254,17 @@ fn a_bad_signature_or_insufficient_balance_is_rejected_and_never_finalized() {
         &[true, true, true, true],
     ));
 
-    // A forged signature is refused at the edge.
     let forged = tampered(transfer(&alice, &bob.address(), 5_000, 0, &params));
     assert_eq!(node.submit(forged), Err(Reject::BadSignature));
 
-    // A sender that cannot cover the amount and the fee is refused.
     let unaffordable = transfer(&poor, &bob.address(), 5_000, 0, &params);
     assert_eq!(node.submit(unaffordable), Err(Reject::InsufficientFunds));
 
-    // Neither reached the pool, so neither can be finalized.
     assert_eq!(node.mempool_len(), 0);
     node.produce().expect("empty block still finalizes");
     let finalized = node.chain().last().expect("a finalized block");
     assert!(finalized.transaction_ids().is_empty());
 
-    // No state moved for either sender.
     assert_eq!(node.ledger().balance(&alice.address()), 1_000_000);
     assert_eq!(node.ledger().balance(&poor.address()), 10);
     assert_eq!(node.ledger().balance(&bob.address()), 0);
@@ -292,7 +275,6 @@ fn an_offline_validator_lowers_the_count_without_stalling_and_is_never_slashed()
     let params = FeeParams::devnet();
     let alice = user(0);
     let bob = user(1);
-    // Four validators, the fourth offline. A supermajority of four is three.
     let mut node = boot(genesis(
         vec![GenesisAccount::from_account(&alice, 1_000_000)],
         &[true, true, true, false],
@@ -304,17 +286,13 @@ fn an_offline_validator_lowers_the_count_without_stalling_and_is_never_slashed()
 
     {
         let finalized = node.chain().last().expect("a finalized block");
-        // The offline member is still on the committee but did not attest, so the
-        // count is lower yet a supermajority still formed.
         assert_eq!(finalized.committee_size, 4);
         assert_eq!(finalized.attesters, vec![1, 2, 3]);
         assert!(!finalized.attesters.contains(&4));
     }
 
-    // The offline validator is never slashed, and the chain kept moving.
     assert!(node.slashed().is_empty());
 
-    // A second height still finalizes with the same absence.
     let tx = transfer(&alice, &bob.address(), 2_000, 1, &params);
     node.submit(tx).expect("admitted");
     node.produce().expect("finalized again");
@@ -322,8 +300,6 @@ fn an_offline_validator_lowers_the_count_without_stalling_and_is_never_slashed()
     assert_eq!(node.chain().len(), 2);
 }
 
-/// A per block digest of the finalized chain: the block id, the header hash, the
-/// state root, the certificate digest, and the attesters.
 type BlockPrint = (String, [u8; 32], [u8; 32], [u8; 32], Vec<u64>);
 
 fn fingerprint(node: &Node) -> Vec<BlockPrint> {
@@ -377,12 +353,6 @@ fn the_same_inputs_give_the_same_finalized_chain() {
     assert_eq!(one.height(), two.height());
 }
 
-/// A node running a block of many senders and recipients, mixing independent
-/// transfers and ones that share an account, at the given core count. The block
-/// is submitted at one height so the executor sees the whole block at once. Each
-/// sender appears once, since the mempool admits only the next nonce of a sender,
-/// so the conflicts come from a shared recipient and from one transfer paying an
-/// account that another transfer spends from.
 fn run_batch(params: &FeeParams, threads: usize) -> Node {
     let funders: Vec<Account> = (0..24).map(user).collect();
     let accounts: Vec<GenesisAccount> = funders
@@ -392,8 +362,6 @@ fn run_batch(params: &FeeParams, threads: usize) -> Node {
     let mut node =
         boot(genesis(accounts, &[true, true, true, true])).with_parallelism(threads);
 
-    // Ten independent transfers, each from its own sender to a recipient nobody
-    // else touches.
     for i in 0..10u64 {
         let tx = transfer(
             &funders[i as usize],
@@ -404,14 +372,10 @@ fn run_batch(params: &FeeParams, threads: usize) -> Node {
         );
         node.submit(tx).expect("admitted");
     }
-    // Two more senders pay the same recipient, a write write conflict on that
-    // account that must serialise in block order.
     node.submit(transfer(&funders[10], &user(23).address(), 500, 0, params))
         .expect("admitted");
     node.submit(transfer(&funders[11], &user(23).address(), 400, 0, params))
         .expect("admitted");
-    // A transfer that pays account twelve, which is itself a sender above, a read
-    // write conflict across the two.
     node.submit(transfer(&funders[13], &user(12).address(), 300, 0, params))
         .expect("admitted");
 
@@ -425,15 +389,11 @@ fn a_parallel_node_finalizes_the_identical_chain_as_the_sequential_node() {
     let sequential = run_batch(&params, 1);
     let parallel = run_batch(&params, 8);
 
-    // The whole finalized chain, including every header hash, state root, and
-    // certificate digest, is bit identical, so parallel execution changed nothing
-    // an observer of the chain can see.
     assert_eq!(fingerprint(&sequential), fingerprint(&parallel));
     assert_eq!(
         sequential.ledger().q_root(),
         parallel.ledger().q_root()
     );
-    // Every account landed on the same balance and nonce under both paths.
     for i in 0..24u64 {
         let address = user(i).address();
         assert_eq!(
@@ -453,7 +413,6 @@ fn a_validator_is_hard_wired_to_use_at_least_half_its_cores() {
     let machine = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    // The floor is half the machine's cores, rounded down, and never below one.
     assert_eq!(min_validator_cores(), (machine / 2).max(1));
     assert!(min_validator_cores() >= 1);
 
@@ -465,15 +424,12 @@ fn a_validator_is_hard_wired_to_use_at_least_half_its_cores() {
         ))
     };
 
-    // A default validator already executes at the floor.
     assert!(build().exec_cores() >= min_validator_cores());
-    // Configuring fewer cores than the floor cannot lower a validator below it.
     assert_eq!(
         build().with_parallelism(1).exec_cores(),
         min_validator_cores(),
         "a validator cannot run below the core floor"
     );
-    // Configuring more than the floor is honoured.
     assert_eq!(
         build().with_parallelism(4096).exec_cores(),
         4096,

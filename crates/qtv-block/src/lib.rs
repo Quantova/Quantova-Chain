@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 #![forbid(unsafe_code)]
 
 use std::fmt;
@@ -218,9 +217,6 @@ pub fn transaction_root(transactions: &[Wrapper]) -> [u8; ROOT_LEN] {
     merkle_root(&leaves)
 }
 
-// A leaf hash carries a leading leaf domain byte and an internal node a leading
-// node domain byte, so no leaf hash can ever equal an internal node hash and a
-// crafted transaction can never be reinterpreted as a subtree of two children.
 fn leaf_hash(data: &[u8]) -> [u8; ROOT_LEN] {
     let mut input = Vec::with_capacity(1 + data.len());
     input.push(MERKLE_LEAF_DOMAIN);
@@ -236,10 +232,6 @@ fn pair_hash(left: &[u8; ROOT_LEN], right: &[u8; ROOT_LEN]) -> [u8; ROOT_LEN] {
     sha3::sha3_256(&input)
 }
 
-// The tree splits at the largest power of two below the leaf count, the RFC 6962
-// rule, so its shape is fixed by the count alone. A leaf left without a sibling is
-// carried up as a subtree of its own rather than paired with a copy of itself, so
-// repeating the final leaf can no longer forge a second body with the same root.
 fn merkle_root(leaves: &[[u8; ROOT_LEN]]) -> [u8; ROOT_LEN] {
     match leaves.len() {
         0 => empty_transaction_root(),

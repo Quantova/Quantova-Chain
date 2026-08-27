@@ -1,12 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! De duplication and loop freedom over the overlay. In a ring a message reaches a
-//! far node by two paths, one from each side; the seen record counts it once and
-//! never relays it back, so no attestation is double counted and no relay loop
-//! forms. The run terminating at all is the loop freedom: an overlay that relayed a
-//! seen message again would never fall idle.
-
 mod support;
 
 use std::collections::BTreeSet;
@@ -32,8 +26,6 @@ fn a_duplicate_is_counted_once_and_a_relay_cannot_loop() {
     let mut devnet =
         Devnet::over_duplex(config_with_fanout(&base, &online, accounts, FANOUT)).expect("devnet");
 
-    // A ring, so every node has exactly two neighbors and a far node hears each
-    // message from both sides.
     assert_eq!(devnet.max_neighbor_count(), 2);
     assert!(devnet.max_neighbor_count() < NODES - 1);
 
@@ -43,13 +35,9 @@ fn a_duplicate_is_counted_once_and_a_relay_cannot_loop() {
         devnet
             .submit((nonce as usize) % devnet.len(), tx)
             .expect("admitted");
-        // If a seen message were relayed again the clock would never fall idle and
-        // this call would not return.
         devnet.step().expect("finalized over the overlay");
     }
 
-    // Every node holds the same finalized chain, so de duplication did not corrupt
-    // the block a message arriving by two paths contributes to.
     let reference = header_chain(devnet.node(0));
     assert_eq!(reference.len(), heights as usize);
     for i in 0..devnet.len() {
@@ -58,8 +46,6 @@ fn a_duplicate_is_counted_once_and_a_relay_cannot_loop() {
             reference,
             "node {i} finalized a different chain"
         );
-        // No attester appears twice in any certificate: a message arriving by two
-        // overlay paths is counted once.
         for block in devnet.node(i).chain() {
             let unique: BTreeSet<u64> = block.attesters.iter().copied().collect();
             assert_eq!(

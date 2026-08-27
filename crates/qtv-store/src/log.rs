@@ -1,18 +1,14 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use qtv_codec::{Encoder, LENGTH_WIDTH};
 
-/// Trailing per-frame checksum so bit rot and a truncated tail are caught at scan time, not read back as state.
 pub(crate) const CHECKSUM_WIDTH: usize = 4;
 
-/// The on disk size of a frame holding `payload_len` bytes, being the length
-/// prefix, the payload, and the checksum.
 pub(crate) fn frame_len(payload_len: usize) -> u64 {
     (LENGTH_WIDTH + payload_len + CHECKSUM_WIDTH) as u64
 }
@@ -36,22 +32,16 @@ impl Log {
         file.read_to_end(&mut bytes)?;
         let (frames, clean) = scan(&bytes);
         if clean < bytes.len() as u64 {
-            // A partial or corrupt tail is dropped so the file holds only whole,
-            // checksum verified frames, and the truncation is made durable.
             file.set_len(clean)?;
             file.sync_data()?;
         }
         file.seek(SeekFrom::End(0))?;
         if !existed {
-            // A newly created file is only durable once its directory entry is,
-            // so fsync the containing directory before the first commit lands.
             sync_parent_dir(path);
         }
         Ok((Log { file }, frames))
     }
 
-    /// Append a framed record. The bytes reach the page cache but are not made
-    /// durable here. Callers force durability at a commit boundary with `sync`.
     pub fn append(&mut self, payload: &[u8]) -> io::Result<()> {
         let mut encoder = Encoder::new();
         encoder.put_bytes(payload);
@@ -62,13 +52,10 @@ impl Log {
         Ok(())
     }
 
-    /// Flush appended records to stable storage. This is the durability point of
-    /// a per-height commit.
     pub fn sync(&mut self) -> io::Result<()> {
         self.file.sync_data()
     }
 
-    /// Cut the log back to `len` bytes and make it durable, discarding a partially written height.
     pub fn truncate(&mut self, len: u64) -> io::Result<()> {
         self.file.set_len(len)?;
         self.file.seek(SeekFrom::End(0))?;
@@ -78,7 +65,6 @@ impl Log {
 }
 
 fn sync_parent_dir(path: &Path) {
-    // Best effort: harden the directory entry so a freshly created log is not lost by name. Not fatal if unsupported.
     if let Some(parent) = path.parent() {
         let parent = if parent.as_os_str().is_empty() {
             Path::new(".")
@@ -91,8 +77,6 @@ fn sync_parent_dir(path: &Path) {
     }
 }
 
-/// A table driven CRC32 (IEEE 802.3), the standard integrity check for a write
-/// ahead log. It detects torn writes and bit rot. It is not a cryptographic MAC.
 const fn crc_table() -> [u32; 256] {
     let mut table = [0u32; 256];
     let mut i = 0;
@@ -124,7 +108,6 @@ fn checksum(bytes: &[u8]) -> u32 {
     crc ^ 0xFFFF_FFFF
 }
 
-/// Read whole, checksum-verified frames, stopping at the first truncated or corrupt one; returns the clean prefix length.
 fn scan(bytes: &[u8]) -> (Vec<Vec<u8>>, u64) {
     let mut frames = Vec::new();
     let mut pos = 0usize;
@@ -139,12 +122,10 @@ fn scan(bytes: &[u8]) -> (Vec<Vec<u8>>, u64) {
         let payload_start = pos + LENGTH_WIDTH;
         let available = bytes.len() - payload_start;
         if length > available as u64 {
-            // The payload runs past the end of the file, a torn tail.
             break;
         }
         let length = length as usize;
         if available - length < CHECKSUM_WIDTH {
-            // The checksum did not make it to disk, a torn tail.
             break;
         }
         let payload_end = payload_start + length;
@@ -155,8 +136,6 @@ fn scan(bytes: &[u8]) -> (Vec<Vec<u8>>, u64) {
                 .expect("checksum slice is four bytes"),
         );
         if stored != checksum(&bytes[pos..payload_end]) {
-            // Bit rot in the length, payload, or checksum, so stop at the last
-            // good record and read nothing beyond a corrupt frame.
             break;
         }
         frames.push(bytes[payload_start..payload_end].to_vec());
@@ -221,8 +200,6 @@ mod tests {
             log.sync().unwrap();
         }
         {
-            // A half written frame: a length prefix and one payload byte, with no
-            // room for the payload it claims nor its checksum.
             use std::io::Write;
             let mut file = OpenOptions::new().append(true).open(&path).unwrap();
             let mut encoder = Encoder::new();
@@ -232,7 +209,6 @@ mod tests {
         }
         let (_log, frames) = Log::open(&path).unwrap();
         assert_eq!(frames, vec![b"whole".to_vec()]);
-        // The torn tail is gone from disk, so a second open agrees.
         let (_log, frames) = Log::open(&path).unwrap();
         assert_eq!(frames, vec![b"whole".to_vec()]);
         std::fs::remove_file(&path).ok();
@@ -271,7 +247,6 @@ mod tests {
             log.append(b"bravo").unwrap();
             log.sync().unwrap();
         }
-        // Flip a bit inside the second record's payload (it begins at byte 25).
         {
             let mut bytes = std::fs::read(&path).unwrap();
             let target = frame_len(5) as usize + LENGTH_WIDTH;
@@ -312,7 +287,6 @@ mod tests {
             log.append(b"three").unwrap();
             log.sync().unwrap();
         }
-        // Corrupt the second record. Everything from it onward is unreadable.
         {
             let mut bytes = std::fs::read(&path).unwrap();
             let target = frame_len(3) as usize + LENGTH_WIDTH;

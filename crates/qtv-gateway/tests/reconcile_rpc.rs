@@ -117,8 +117,6 @@ fn genesis_accounts_rpc_serves_the_configured_allocations_and_moves_no_root() {
     assert_eq!(rows[1].get("address").and_then(Json::as_str), Some(second.as_str()));
     assert_eq!(rows[1].get("balance").and_then(Json::as_str), Some("7000"));
 
-    // The genesis supply baseline must equal the sum of the funded balances the accounts carry
-    // plus the pool and the validator bonds, which the reconstruction seeds at height zero.
     let sum_accounts: u64 = 5_000 + 7_000;
     assert!(node.genesis_supply() > sum_accounts, "supply also carries the pool and bonds");
 
@@ -157,7 +155,6 @@ fn bridged_balance_rpc_is_wired_read_only_and_accepts_hex_and_q1_holders() {
     assert_eq!(out.get("supply").and_then(Json::as_str), Some("0"));
     assert_eq!(out.get("asset_id").and_then(Json::as_str), Some(asset.as_str()));
 
-    // The same reader accepts a q1 holder address as well as raw 32-byte hex.
     let holder_q1 = qtv_idfmt::render_address(&[0xCDu8; 32]).unwrap();
     let out_q1 = served(handle(
         &ctx,

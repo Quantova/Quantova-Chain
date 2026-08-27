@@ -1,9 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! A fresh node with only genesis syncs the whole finalized chain from a peer and
-//! ends byte identical to it.
-
 mod support;
 
 use qtv_node::fee::FeeParams;
@@ -20,8 +17,6 @@ fn a_fresh_node_syncs_the_whole_chain_from_a_peer() {
     let alice = user(0);
     let bob = user(1);
     let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
-    // The fourth node stays offline from genesis: it is the fresh node, holding only
-    // the genesis state while the online supermajority builds the chain.
     let mut devnet =
         Devnet::over_duplex(config(&base, &[true, true, true, false], accounts)).expect("devnet");
     let fresh = devnet.len() - 1;
@@ -32,18 +27,14 @@ fn a_fresh_node_syncs_the_whole_chain_from_a_peer() {
         devnet.step().expect("finalized");
     }
 
-    // The fresh node has finalized nothing: it holds only genesis.
     assert_eq!(devnet.node(fresh).stored_blocks(), 0);
     assert!(devnet.node(fresh).chain().is_empty());
     let tip = devnet.node(0).height();
     assert!(tip > devnet.node(fresh).height());
 
-    // It comes online and syncs the whole finalized chain from a peer, verifying
-    // every block from genesis forward before it accepts it.
     devnet.set_active(fresh, true);
     devnet.sync().expect("fresh sync");
 
-    // It caught the tip and reproduced the peer's chain byte for byte.
     assert_eq!(devnet.node(fresh).height(), tip);
     assert_eq!(
         header_chain(devnet.node(fresh)),
@@ -55,7 +46,6 @@ fn a_fresh_node_syncs_the_whole_chain_from_a_peer() {
         devnet.node(fresh).stored_blocks(),
         devnet.node(0).stored_blocks()
     );
-    // The synced state carries the balances the chain moved.
     assert_eq!(
         devnet.node(fresh).ledger().balance(&bob.address()),
         devnet.node(0).ledger().balance(&bob.address())

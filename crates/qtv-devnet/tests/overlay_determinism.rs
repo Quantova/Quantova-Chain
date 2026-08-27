@@ -1,10 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Determinism over the overlay. The same logical schedule over the same bounded
-//! overlay gives the same finalized chain and the same state every run, so a run
-//! replays identically rather than racing.
-
 mod support;
 
 use qtv_node::fee::FeeParams;
@@ -17,8 +13,6 @@ use support::{config_with_fanout, header_chain, transfer, unique_base, user};
 const NODES: usize = 5;
 const FANOUT: usize = 2;
 
-/// Run one fixed script over a fresh bounded overlay and return the finalized chain
-/// and the final state root.
 fn run_scripted(name: &str, params: &FeeParams) -> (Vec<[u8; 32]>, [u8; 32]) {
     let base = unique_base(name);
     let alice = user(0);

@@ -148,9 +148,6 @@ impl Runtime {
             .map_err(|e| format!("finalize failed: {e:?}"))
     }
 
-    /// At an epoch boundary publish this node's signed re registration of its rotated one
-    /// time root, gather the peers' re registrations, and re form the committee. A no op in
-    /// the genesis epoch.
     fn disseminate_registrations(&mut self) {
         if self.node.epoch() == 0 {
             return;
@@ -183,7 +180,6 @@ impl Runtime {
         self.node.apply_registrations();
     }
 
-    /// Publish this node's own reveal for the height and gather the peers' reveals.
     fn disseminate_reveals(&mut self) {
         if let Some(note) = self.node.own_reveal_note() {
             let bytes = Message::Reveal(Box::new(note)).encode();

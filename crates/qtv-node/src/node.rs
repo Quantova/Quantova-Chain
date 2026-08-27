@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 #[cfg(any(test, feature = "test-fixtures"))]
 use std::collections::BTreeMap;
 use std::thread;
@@ -28,11 +27,6 @@ use crate::parallel::execute_parallel;
 #[cfg(any(test, feature = "test-fixtures"))]
 use qtv_attest::Certificate;
 
-/// A validator's own published registration. Every field is a public commitment the
-/// operator derived from the one secret it holds and never anything a second party can
-/// reproduce from an id: the bond and reward address, the one time sortition root, the
-/// attestation public key, and the peer to peer identity public key. Genesis carries
-/// these and nothing else of a validator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatorSpec {
     pub id: u64,
@@ -45,9 +39,6 @@ pub struct ValidatorSpec {
 }
 
 impl ValidatorSpec {
-    /// The registration a validator's own secret derives to. The operator runs this on
-    /// its own machine over the secret in its keystore and contributes the public result
-    /// to genesis; no one else holds the secret and no field is a function of the id.
     pub fn from_secret(id: u64, stake: u64, online: bool, secret: &[u8; 32], slots: u64) -> Self {
         let attester = qtv_attest::Attester::from_secret_with_slots(id, secret, stake, slots);
         ValidatorSpec {
@@ -151,10 +142,6 @@ pub struct FinalityHalt {
     pub conflicting: [u8; 32],
 }
 
-/// The bond and reward address of the validator behind a fixture secret index, for
-/// tests and the single process simulation only. A production caller derives the
-/// address from the operator secret it holds through `crate::keys::validator_address`,
-/// never from the public id; this convenience is absent from a default node build.
 #[cfg(any(test, feature = "test-fixtures"))]
 pub fn validator_address(id: u64) -> String {
     crate::keys::validator_address(&crate::keys::fixture_secret(id))
@@ -355,18 +342,10 @@ pub(crate) fn is_evidence(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::evidence_address()
 }
 
-/// A record the block leader carries so a restarting node rebuilds the rotated epoch roots
-/// from chain history. It touches no ledger state, so every node includes it identically
-/// and the block state root is unmoved. The record authenticates on its own and the node
-/// that reads it back on restart verifies it against the registered attestation key.
 pub(crate) fn is_registration(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::registration_address()
 }
 
-/// Whether the carried equivocation evidence would slash a validator, so a node admits it
-/// with no fee and no signature. It holds only when the evidence decodes, the named
-/// offender has an attestation key in state, the evidence authenticates against that key,
-/// and the offender is not already banned.
 pub(crate) fn evidence_admissible(chain_id: u64, wrapper: &Wrapper, ledger: &Ledger) -> bool {
     let evidence = match crate::evidence::Equivocation::decode(wrapper.body().call().args()) {
         Some(evidence) => evidence,
@@ -381,12 +360,6 @@ pub(crate) fn evidence_admissible(chain_id: u64, wrapper: &Wrapper, ledger: &Led
     }
 }
 
-/// Apply an equivocation evidence transaction as a deterministic in block state
-/// transition. The evidence carries no fee and authenticates on its own, so any sender can
-/// submit it and the block leader can inject it. The slash lands only when the carried
-/// evidence authenticates against the offender's attestation key held in state and the
-/// offender is not already banned, so every node executing the same block reaches the same
-/// slash with no access to the live roster.
 fn dispatch_evidence(chain_id: u64, ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
     let evidence = match crate::evidence::Equivocation::decode(wrapper.body().call().args()) {
         Some(evidence) => evidence,
@@ -783,7 +756,6 @@ pub(crate) fn is_bridge_settle(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::bridge_settle_address()
 }
 
-// operator set and dest chain from state, quorum verified; no sender signature, like the mint
 fn bridge_settle_fact(ledger: &Ledger, wrapper: &Wrapper, chain_id: u64) -> Option<crate::bridge::ExitFact> {
     let attestation = crate::bridge::ExitAttestation::decode(wrapper.body().call().args())?;
     let dest_chain = ledger.bridge_dest_chain()?;
@@ -1151,9 +1123,6 @@ fn execute_ordered_across(
         };
         #[cfg(test)]
         if plan.recipient == crate::ledger::fault_probe_address() {
-            // A test only injection: a transaction that mutates its sender and then faults
-            // partway. The apply_atomic firewall must roll the mutation and any recorded
-            // event back so the block carries no partial write from the faulted transaction.
             let _ = ledger.apply_atomic(|l| {
                 let mut victim = l.account(&plan.sender);
                 victim.balance = victim.balance.wrapping_sub(plan.amount);
@@ -1275,10 +1244,6 @@ fn verify_signatures(ledger: &Ledger, candidates: &[Wrapper], verify_cores: usiz
     verdicts
 }
 
-/// A single process node that stands the whole committee up in one process, each
-/// validator's attester computing its own reveal and the committee assembled from those
-/// published reveals. A simulation, compiled only under cfg(test) or the test-fixtures
-/// feature and absent from a default build.
 #[cfg(any(test, feature = "test-fixtures"))]
 pub struct Node {
     ledger: Ledger,
@@ -1304,8 +1269,6 @@ pub struct Node {
     finality: crate::consensus::FinalityLedger,
 }
 
-/// Reweigh the public roster from the live ledger bonds, moving only stake weight and
-/// keeping the fixed commitments. Falls back to the genesis weights when state is bare.
 pub fn reweigh_roster(
     ledger: &Ledger,
     base: &[crate::consensus::ValidatorRegistration],
@@ -1347,14 +1310,10 @@ pub fn committee_weights(
 
 #[cfg(any(test, feature = "test-fixtures"))]
 impl Node {
-    /// Build a single process node from genesis and the per validator secret roster.
     pub fn new(genesis: Genesis, secrets: &BTreeMap<u64, [u8; 32]>) -> Self {
         Self::new_with_slots(genesis, secrets, qtv_sampler::validator::DEFAULT_SLOTS)
     }
 
-    /// Build a single process node whose one time sortition trees each cover `slots`
-    /// heights, so `slots` is both the tree budget and the key rotation epoch length. At
-    /// every multiple of it the whole set rotates onto fresh trees and runs on.
     pub fn new_with_slots(
         genesis: Genesis,
         secrets: &BTreeMap<u64, [u8; 32]>,
@@ -1461,12 +1420,10 @@ impl Node {
         self.equivocator = Some(id);
     }
 
-    /// Stage peer finalization votes to be weighed as evidence at the next height.
     pub fn observe_finalization_evidence(&mut self, attestations: Vec<qtv_attest::Attestation>) {
         self.foreign_evidence.extend(attestations);
     }
 
-    /// A finalization quorum the given validators sign for a value in a view at this height.
     pub fn forge_finalization_quorum(
         &self,
         ids: &[u64],
@@ -1493,7 +1450,6 @@ impl Node {
         Ok(self)
     }
 
-    /// The reveals every simulated validator publishes for the slot.
     fn published_reveals(&self, slot: u64) -> Vec<qtv_sampler::committee::PublishedReveal> {
         self.sim_attesters
             .iter()
@@ -1950,9 +1906,6 @@ mod tests {
         let deployer = keypair(130);
         fund(&mut ledger, &deployer, 10_000 * 1_000_000);
 
-        // Store the injected caller word at scalar slot zero. The key pointer 1024 points into the zero
-        // region of memory, whose 32 zero bytes are the canonical key of scalar slot zero, so the write
-        // lands in a declared slot the manifest authorises.
         let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
             .expect("the program assembles");
         let selector = [1u8, 2, 3, 4];
@@ -2028,8 +1981,6 @@ mod tests {
             vec![qtv_vm::container::Entry {
                 selector: genesis_selector,
                 offset: 0,
-                // The genesis constructor writes the deployer word to scalar slot zero, so it declares
-                // that slot as a write; the manifest is enforced for the offset zero entry too.
                 access: qtv_vm::container::StateAccess {
                     reads: vec![],
                     writes: vec![0],
@@ -2376,8 +2327,6 @@ mod tests {
             vec![qtv_vm::container::Entry {
                 selector: genesis_selector,
                 offset: 0,
-                // Genesis reads the deploy parameter and writes it to scalar slot zero, so it declares
-                // that slot; the manifest is enforced for the offset zero entry.
                 access: qtv_vm::container::StateAccess {
                     reads: vec![],
                     writes: vec![0],
@@ -2467,9 +2416,6 @@ mod tests {
         let fee = FeeParams::devnet();
         let deployer = keypair(131);
 
-        // The counter lives in scalar slot zero. Key pointer 1024 points into the zero region of
-        // memory, whose 32 zero bytes are the canonical key of scalar slot zero, so both the load and
-        // the store land in the declared slot.
         let code = qtv_vm::asm::assemble(
             "LDI r0, 1024\nSLOAD r1, r0\nLDI r2, 1\nADD r1, r1, r2\nSSTORE r0, r1\nHALT",
         )
@@ -2621,8 +2567,6 @@ mod tests {
         let faulting = transfer(&carol, &crate::ledger::fault_probe_address(), 2_000, 0, &fee);
         let good_second = transfer(&dave, &erin.address(), 3_000, 0, &fee);
 
-        // The fault probe panics on purpose. Silence the panic hook only for this block so the
-        // deliberate fault does not print a backtrace, then restore it.
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let included = execute_ordered(&mut ledger, &[good_first, faulting, good_second], &fee, 0);
@@ -3663,9 +3607,6 @@ mod tests {
         fund(&mut ledger, &freezer, 2_000_000 * 1_000_000);
         fund(&mut ledger, &user, 10_000 * 1_000_000);
 
-        // Store the injected caller word at scalar slot zero. The key pointer 1024 points into the zero
-        // region of memory, whose 32 zero bytes are the canonical key of scalar slot zero, so the write
-        // lands in a declared slot the manifest authorises.
         let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
             .expect("the program assembles");
         let selector = [1u8, 2, 3, 4];
@@ -4564,7 +4505,6 @@ mod tests {
         );
     }
 
-    // the outward exit settle and slash path
     const EXIT_VAULT: [u8; 32] = [0x5b; 32];
     const EXIT_ASSET: [u8; 16] = [0x7c; 16];
 
@@ -4682,7 +4622,6 @@ mod tests {
     fn a_mint_then_burn_then_settle_conserves_custody_against_supply() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
-        // custody starts empty; the mint is what backs the wrapped, so the whole lifecycle stays honest
         let (sk0, sk1) = seed_exit_bridge(&mut ledger, 0, 10_000_000, 1_000_000, 5_000_000);
         let relayer = keypair(600);
         let holder = keypair(601);
@@ -4900,7 +4839,6 @@ mod tests {
     fn a_settle_without_a_seeded_committee_is_refused() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
-        // every trust root but the operator set, so the settle fails closed
         ledger.register_bridged_asset(&EXIT_ASSET, 10_000_000, 1_000_000, false);
         ledger.seed_bridge_exits_enabled(true);
         ledger.seed_bridge_pool_vault(&EXIT_VAULT);
@@ -4970,7 +4908,6 @@ mod tests {
         assert_eq!(execute_ordered(&mut over_global, &[settle_tx(&relayer, &att, &fee)], &fee, 0).len(), 0, "a payout over the global cap is refused");
         assert_eq!(over_global.bridged_balance(&EXIT_ASSET, &beneficiary), 0, "the refused payout moves no funds");
 
-        // Over the per asset epoch payout cap.
         let mut over_asset = Ledger::new();
         let (sk0, sk1) = seed_exit_bridge(&mut over_asset, 1_000_000, 10_000_000, 500_000, 5_000_000);
         over_asset.seed_outstanding_burn(&[0x92u8; 32], &EXIT_ASSET, 550_000, &beneficiary);
@@ -4978,7 +4915,6 @@ mod tests {
         let att = signed_exit(&fact, &sk0, &sk1);
         assert_eq!(execute_ordered(&mut over_asset, &[settle_tx(&relayer, &att, &fee)], &fee, 0).len(), 0, "a payout over the per asset epoch cap is refused");
 
-        // Over the pool custody the bridge actually holds.
         let mut thin_pool = Ledger::new();
         let (sk0, sk1) = seed_exit_bridge(&mut thin_pool, 100_000, 10_000_000, 1_000_000, 5_000_000);
         thin_pool.seed_outstanding_burn(&[0x93u8; 32], &EXIT_ASSET, 550_000, &beneficiary);
@@ -5014,7 +4950,6 @@ mod tests {
     fn a_slash_is_refused_while_exits_are_disabled() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
-        // Seed every trust root but leave the exits switch at its default off.
         let (sk0, sk1) = seed_committee(&mut ledger);
         ledger.register_bridged_asset(&EXIT_ASSET, 10_000_000, 1_000_000, false);
         ledger.seed_bridge_pool_vault(&EXIT_VAULT);

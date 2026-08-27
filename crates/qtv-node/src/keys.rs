@@ -1,27 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Per validator secret material for the node.
-//!
-//! Every private key a validator uses, its one time sortition tree, its ML-DSA-65
-//! attestation signing key, its peer to peer network identity, and its ledger bond
-//! and reward account, is derived from one 32 byte secret through domain separated
-//! derivations. Nothing is derived from the public validator id, and there is no
-//! shared master.
-//!
-//! The secret is high entropy material the operator generates on their own machine
-//! from the operating system CSPRNG and holds in a keystore file they own. It is read
-//! on startup and generated on first run when the file is absent. There is no path by
-//! which a second party can derive or hold a validator's secret; only the commitments
-//! (the sortition Merkle root, the ML-DSA public key, the peer id, and the bond
-//! account address) are ever published.
-//!
-//! FOUNDER DECISION, still open: the mainnet keystore backend, where and how the
-//! keystore file is protected at rest (an HSM, an encrypted store, an operator
-//! passphrase). This module is the single seam that backend plugs into; today it
-//! reads and writes a plain 0600 file, which is the developer default and not the
-//! mainnet answer.
-
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -29,31 +8,18 @@ use std::path::Path;
 use qtv_crypto::ml_dsa;
 use qtv_crypto::sha3::shake256;
 
-/// The length of a validator's root secret in bytes.
 pub const SECRET_LEN: usize = 32;
 
-// Domain tag under which the one secret a validator holds is expanded into the seed
-// of its ledger bond and reward account. It is distinct from the sortition tree, the
-// signing key, and the peer identity domains, so the one secret yields four
-// independent derived keys and no derived key or public commitment reveals the
-// others or the secret.
 const VALIDATOR_ACCOUNT_DOMAIN: &[u8] = b"QORUS/validator-keying/v1/ledger-bond-account";
 
 const P2P_IDENTITY_DOMAIN: &[u8] = b"QORUS/validator-keying/v1/p2p-identity";
 
-/// A freshly generated 32 byte secret from the operating system CSPRNG. This is how a
-/// validator's secret comes into being on first run: a real random draw the operator
-/// alone holds, never a function of any public value.
 pub fn generate() -> [u8; SECRET_LEN] {
     let mut secret = [0u8; SECRET_LEN];
     fill_random(&mut secret).expect("the operating system CSPRNG is available");
     secret
 }
 
-/// Read the node's own secret from its keystore file, generating it on first run when
-/// the file is absent. The secret never leaves the machine that holds this file; a
-/// party without the file cannot derive it. This is the whole of a validator's key
-/// custody: one file the operator owns, read here and nowhere else.
 pub fn load_or_generate(path: &Path) -> io::Result<[u8; SECRET_LEN]> {
     match fs::read_to_string(path) {
         Ok(text) => parse_hex32(text.trim()).ok_or_else(|| {
@@ -109,10 +75,6 @@ fn fill_random(buf: &mut [u8]) -> io::Result<()> {
     file.read_exact(buf)
 }
 
-/// Expand a validator's 32 byte secret into the seed of its ledger bond and reward
-/// account. The secret is material the validator alone holds; the account seed
-/// follows from it by a domain separated SHAKE and never leaves the validator. Only
-/// the account address is published, and it reveals neither this seed nor the secret.
 pub fn validator_account_seed(secret: &[u8; SECRET_LEN]) -> [u8; SECRET_LEN] {
     const D: usize = VALIDATOR_ACCOUNT_DOMAIN.len();
     let mut buf = [0u8; D + SECRET_LEN];
@@ -123,23 +85,14 @@ pub fn validator_account_seed(secret: &[u8; SECRET_LEN]) -> [u8; SECRET_LEN] {
     out
 }
 
-/// The validator's ledger bond and reward account, derived from its one secret. The
-/// account holds the bond genesis seeds and the rewards the validator claims; its
-/// signing key follows from the secret alone, so a party knowing only the public id
-/// or the public address cannot spend from it.
 pub fn validator_account(secret: &[u8; SECRET_LEN]) -> qtv_account::Account {
     qtv_account::derive(&validator_account_seed(secret), 0)
 }
 
-/// The published address of the validator's bond and reward account. This is a
-/// commitment: it goes into genesis, the roster, and the gateway view, and it carries
-/// no secret and cannot be turned back into the seed or the secret behind it.
 pub fn validator_address(secret: &[u8; SECRET_LEN]) -> String {
     validator_account(secret).address()
 }
 
-/// Expand a validator's secret into the seed of its peer to peer identity key, under
-/// a domain distinct from the ledger account, so the two derived keys are independent.
 pub fn p2p_identity_seed(secret: &[u8; SECRET_LEN]) -> [u8; SECRET_LEN] {
     const D: usize = P2P_IDENTITY_DOMAIN.len();
     let mut buf = [0u8; D + SECRET_LEN];
@@ -150,9 +103,6 @@ pub fn p2p_identity_seed(secret: &[u8; SECRET_LEN]) -> [u8; SECRET_LEN] {
     out
 }
 
-/// The published peer to peer identity public key of the node holding `secret`. It is
-/// the ML-DSA public half of the identity the secret derives to; the peer id is its
-/// hash. It carries no secret and cannot be turned back into one.
 pub fn p2p_public(secret: &[u8; SECRET_LEN]) -> ml_dsa::PublicKey {
     ml_dsa::keygen(&p2p_identity_seed(secret)).0
 }
@@ -177,19 +127,9 @@ fn to_hex(bytes: &[u8; SECRET_LEN]) -> String {
     out
 }
 
-// Test and simulation fixtures. A single process that simulates the whole validator
-// set, the devnet, the single process node, and the local load test binaries, needs
-// every node's secret at once. These helpers hand it a deterministic per index secret
-// so a run is reproducible. They are compiled only under `cfg(test)` or the
-// `test-fixtures` feature and are absent from a default node build, so no key material
-// is ever derived from the public id on any default path. Each fixture secret is an
-// independent image of its index, never a shared master expanded by an id.
 #[cfg(any(test, feature = "test-fixtures"))]
 const FIXTURE_SECRET_DOMAIN: &[u8] = b"QORUS/TEST-ONLY/insecure-node-fixture-secret/v1";
 
-/// A deterministic, per index secret for tests and the single process simulation
-/// only. It is a clearly test only fixture, not a production derivation, and cannot be
-/// reached from a default node build.
 #[cfg(any(test, feature = "test-fixtures"))]
 pub fn fixture_secret(index: u64) -> [u8; SECRET_LEN] {
     const D: usize = FIXTURE_SECRET_DOMAIN.len();

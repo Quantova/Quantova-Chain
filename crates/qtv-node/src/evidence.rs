@@ -8,11 +8,6 @@ use qtv_crypto::ml_dsa::{self, PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
 
 use qtv_attest::params::ATTEST_CONTEXT;
 
-/// Whether a signed subject is a control plane view change vote or lock proof rather than a
-/// block proposal, marked by the reserved resource cost no block proposal carries. The cost is
-/// the trailing field of the signed block, so the mark rides inside the signature and a
-/// reporter cannot strip it to pass an honest view change off as a block double vote. A view
-/// change subject is never a slashable equivocation.
 fn subject_is_view_change(block_bytes: &[u8]) -> bool {
     let len = block_bytes.len();
     len >= 8
@@ -27,11 +22,6 @@ fn attestation_message(
     committee: &[u8; 32],
     block_bytes: &[u8],
 ) -> Vec<u8> {
-    // The chain id leads the preimage, byte for byte the layout an attester signs in
-    // qtv-attest, so this on chain verifier rebuilds the exact message a real validator
-    // signed. Without it a genuine equivocation would fail to authenticate here and the
-    // offender would escape the slash, and evidence minted on one chain would slash the same
-    // key on another. A verifier rebuilds with its own chain id, so neither carries across.
     let mut msg = Vec::with_capacity(8 + 24 + block_bytes.len());
     msg.extend_from_slice(&chain_id.to_le_bytes());
     msg.extend_from_slice(&height.to_le_bytes());
@@ -42,21 +32,6 @@ fn attestation_message(
     msg
 }
 
-/// Attributable equivocation evidence, the two conflicting attestations one validator
-/// signed at one height in one view for two different blocks. It carries the offender's bond
-/// address, the height and slot, the view each conflicting attestation was cast in, and each
-/// signed block with its signature. It authenticates against the offender's registered
-/// attestation key alone, so any node can verify it from state with no access to the live
-/// roster and slash the same offender deterministically.
-/// The two views gate the offence. Only a same view double vote, the same target voted twice
-/// with two different blocks, attributes and is slashable. A pair whose views differ is a
-/// justified vote change, a block that failed to lock in one view followed by a different
-/// block in a higher view, and it never attributes. The view each attestation was cast in is
-/// committed inside the signed attestation message, so each view rides into its own signature
-/// preimage. A reporter that forges an equal view over an honest cross view pair no longer
-/// authenticates, since a view stated here that differs from the one the offender signed
-/// breaks the signature check. The gate binds the offender's own signed views, not a
-/// reporter's claim about them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Equivocation {
     pub offender: String,
@@ -81,8 +56,6 @@ impl Equivocation {
         if self.view_a != self.view_b {
             return false;
         }
-        // A view change vote or lock proof is not a block a validator voted to finalize, so a
-        // pair touching one is never a slashable double vote even when both signatures verify.
         if subject_is_view_change(&self.block_a) || subject_is_view_change(&self.block_b) {
             return false;
         }
@@ -167,7 +140,6 @@ impl Equivocation {
     }
 }
 
-/// A pool that watches the attestations a node sees and turns two conflicting attestations
 pub const MAX_HEIGHT_VIEW: u64 = 256;
 
 #[derive(Default)]
@@ -193,14 +165,12 @@ impl EvidencePool {
         block_bytes: Vec<u8>,
         sig: Vec<u8>,
     ) -> Option<Equivocation> {
-        // A control plane view change subject is not a block vote and never attributes.
         if subject_is_view_change(&block_bytes) {
             return None;
         }
         if view >= MAX_HEIGHT_VIEW {
             return None;
         }
-        // Lower height bookkeeping can never attribute again once observation moves on, so drop it on advance; drained evidence in pending is untouched.
         if height > self.floor {
             self.floor = height;
             self.seen.retain(|(_, h, _), _| *h >= height);
@@ -517,8 +487,6 @@ mod tests {
         let block = Block::new(1, [1u8; 32], Parent::Genesis);
         let mut pool = EvidencePool::new();
 
-        // A peer that feeds one attestation per advancing height, the shape of a slow
-        // leak: without a floor the seen and flagged maps grow one entry per height.
         for height in 1..=10_000u64 {
             let att = attester.attest(CHAIN_ID, height, 1, 0, [0u8; 32], block, &beacon);
             let _ = pool.observe(&address, height, 1, 0, [0u8; 32], block.to_bytes(), att.sig.to_vec());
@@ -543,9 +511,6 @@ mod tests {
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
 
-        // An honest validator legitimately re votes across a view change, block_a in view 0
-        // and block_b in view 1. A malicious reporter pairs the two and asserts an equal view
-        // to frame the honest signer as a same view double vote.
         let honest_a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
         let honest_b = attester.attest(CHAIN_ID, 1, 1, 1, [0u8; 32], block_b, &beacon);
         let framed = Equivocation {
@@ -567,8 +532,6 @@ mod tests {
             "a forged equal view over a genuine cross view re vote no longer authenticates"
         );
 
-        // Two conflicting blocks the offender actually signed in one and the same view are a
-        // genuine double vote that attributes and slashes.
         let double_a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
         let double_b = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_b, &beacon);
         let genuine = Equivocation {

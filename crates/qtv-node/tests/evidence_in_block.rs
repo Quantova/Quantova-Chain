@@ -1,10 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Equivocation evidence carried in a block slashes the offender as a deterministic in
-//! block state transition, verified against the attestation key held in state, so every
-//! node that executes the block reaches the same slash.
-
 use qtv_account::{derive, Account as KeyAccount};
 use qtv_attest::{Attester, Beacon, Block, Parent};
 use qtv_node::evidence::Equivocation;
@@ -17,10 +13,6 @@ use qtv_tx::{sign, Body, Call, Wrapper};
 
 const NATIVE_UNIT: u64 = 1_000_000;
 
-// The evidence executes under the local chain id, so the offender's attestations are signed
-// under the same id the on chain verifier rebuilds the preimage with. A mismatch would mean a
-// genuine double vote failed to authenticate on chain, which is exactly what the chain id
-// binding is meant to prevent, so the fixture signs under the chain it is executed on.
 const CHAIN_ID: u64 = qtv_tx::LOCAL_CHAIN_ID;
 
 fn reporter() -> KeyAccount {
@@ -35,8 +27,6 @@ fn innocent_secret() -> [u8; 32] {
     [10u8; 32]
 }
 
-/// A real equivocation, the two conflicting attestations the offender secret signs at one
-/// height for two different blocks.
 fn equivocation(offender_address: &str) -> Equivocation {
     let attester = Attester::from_secret(1, &offender_secret(), 2_000);
     let beacon = Beacon::genesis();
@@ -60,9 +50,6 @@ fn equivocation(offender_address: &str) -> Equivocation {
     }
 }
 
-/// A cross view re vote by the offender secret, block A signed in view 0 and block B signed
-/// in view 1 at the same height. The signatures are genuine but the views differ, so the
-/// evidence is a justified vote change rather than a double vote.
 fn cross_view_re_vote(offender_address: &str) -> Equivocation {
     let attester = Attester::from_secret(1, &offender_secret(), 2_000);
     let beacon = Beacon::genesis();
@@ -120,7 +107,6 @@ fn a_block_of_valid_evidence_slashes_the_offender_identically_on_every_node() {
         .to_vec();
     let tx = evidence_tx(&equivocation(&offender), &fee);
 
-    // Two independent nodes each execute the same evidence block.
     let mut node_one = seeded_ledger(&offender, &offender_pk);
     let mut node_two = seeded_ledger(&offender, &offender_pk);
     assert!(!node_one.is_validator_banned(&offender));
@@ -147,8 +133,6 @@ fn forged_evidence_naming_an_innocent_validator_slashes_no_one() {
         .attest_public_key()
         .to_vec();
 
-    // The offender's genuine conflicting signatures, but the evidence names the innocent
-    // validator, so it must authenticate against the innocent key and fail.
     let mut forged = equivocation(&offender);
     forged.offender = innocent.clone();
     let tx = evidence_tx(&forged, &fee);

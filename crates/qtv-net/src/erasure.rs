@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use qtv_crypto::sha3::sha3_256;
 
 pub const DIGEST_LEN: usize = 32;
@@ -28,7 +27,6 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
-
 
 struct Field {
     exp: [u8; 512],

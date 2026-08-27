@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use qtv_widearea::local::{run_scenario, Scenario};
 use qtv_widearea::{env_usize, prefix_matches, RunReport, TRANSPORT_PORT};
 

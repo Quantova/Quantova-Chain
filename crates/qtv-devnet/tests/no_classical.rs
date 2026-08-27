@@ -1,9 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The devnet secures the wire with qtv-net and qtv-crypto only. No classical
-//! cryptography and no X25519 is representable, on this devnet or anywhere.
-
 const MANIFEST: &str = include_str!("../Cargo.toml");
 
 #[test]

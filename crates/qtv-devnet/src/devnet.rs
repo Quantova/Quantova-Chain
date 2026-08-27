@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 
@@ -268,10 +267,6 @@ impl<S> Devnet<S> {
         (0..self.nodes.len()).filter(|&i| self.active[i]).collect()
     }
 
-    /// Disseminate the committee reveals for the current height. Each node computes its
-    /// own reveal and it is handed to every node, which admits it against the author's
-    /// committed root. Run over every node, since committee membership follows the
-    /// sortition and not a node's block attestation liveness.
     fn exchange_reveals(&mut self) {
         let notes: Vec<RevealNote> = (0..self.nodes.len())
             .filter_map(|i| self.nodes[i].own_reveal_note())
@@ -283,11 +278,6 @@ impl<S> Devnet<S> {
         }
     }
 
-    /// Disseminate the epoch re registrations. At an epoch boundary every node commits a
-    /// fresh one time sortition root and signs it under its stable attestation key; each
-    /// node admits the peers' rotated roots and re forms its committee, so the next
-    /// committee draws from the rotated roots. It is a no op in the genesis epoch, whose
-    /// roots the roster already carries.
     fn exchange_registrations(&mut self) {
         let notes: Vec<RegisterNote> = (0..self.nodes.len())
             .filter_map(|i| self.nodes[i].own_registration_note())

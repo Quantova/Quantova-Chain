@@ -1,13 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Build and sign a native transfer and print everything needed to fund the sender at
-//! genesis and submit the transaction over the RPC. It is the same account derivation,
-//! transaction assembly, and module lattice signing the Rust SDK core will do, used
-//! here to prove the wire end to end against the gateway.
-//!
-//! Usage: build_transfer <sender_index> <recipient_index> <nonce> <amount>
-
 use qtv_account::derive;
 use qtv_node::execution::{transfer_call, TRANSFER_METER};
 use qtv_node::fee::FeeParams;

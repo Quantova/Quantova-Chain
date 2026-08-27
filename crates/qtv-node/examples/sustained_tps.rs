@@ -1,22 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Sustained execution throughput. This answers one question, the maximum transactions a second the
-//! node can hold constantly, not for a single burst. It builds one workload of independent transfers,
-//! then executes it in a tight loop for a set duration, recording the throughput of every round. It
-//! reports running figures as it goes and a final summary, the floor being the number the node holds
-//! essentially all the time, which is the honest maximum a validator can rely on.
-//!
-//! Each round is a full block execute, module lattice signature verify, virtual machine transfer, and
-//! account write back, the exact path the node runs. The clone of the base ledger sits outside the
-//! timed region so the figure is execution alone. The parallel executor is checked against the
-//! sequential state root once before any number is trusted.
-//!
-//! Run it in release on a validator class machine:
-//!   cargo run --release --example sustained_tps -p qtv-node
-//! Arguments: transactions per round (default 100000), duration seconds (default 3600), threads
-//! (default all cores).
-
 use std::hint::black_box;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,10 +18,8 @@ use qtv_tx::{sign, Body, Wrapper};
 
 const SEED: [u8; 32] = [42u8; 32];
 const SENDER_BALANCE: u64 = 1_000_000_000;
-/// The throughput target the chain is built to clear.
 const TARGET_TPS: f64 = 25_000.0;
 
-/// Build `n` values across `threads` cores, returned in index order.
 fn parallel_build<T, F>(n: usize, threads: usize, f: F) -> Vec<T>
 where
     T: Send,
@@ -69,7 +51,6 @@ where
     collected.into_iter().map(|(_, v)| v).collect()
 }
 
-/// An address minted straight from a tagged payload, a recipient that exists to pay.
 fn tagged_address(domain: u8, tag: u64) -> String {
     let mut payload = [0u8; 32];
     payload[0] = domain;
@@ -77,8 +58,6 @@ fn tagged_address(domain: u8, tag: u64) -> String {
     render_address(&payload).expect("a thirty two byte payload renders as an address")
 }
 
-/// A block of independent transfers, each from a funded sender to a fresh recipient, so no two
-/// transactions share an account and the executor runs at full width.
 fn build_block(senders: &[KeyAccount], fee: &FeeParams, threads: usize) -> Vec<Wrapper> {
     let fee_amount = u128::from(fee.transfer_fee());
     parallel_build(senders.len(), threads, |i| {
@@ -89,7 +68,6 @@ fn build_block(senders: &[KeyAccount], fee: &FeeParams, threads: usize) -> Vec<W
     })
 }
 
-/// The min, fifth percentile, median, and max of a set of throughput samples.
 fn stats(samples: &[f64]) -> (f64, f64, f64, f64) {
     let mut s = samples.to_vec();
     s.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a timing"));
@@ -109,7 +87,6 @@ fn main() {
 
     let fee = FeeParams::devnet();
 
-    // Build the workload once, across the cores so setup does not dominate.
     let senders: Vec<KeyAccount> = parallel_build(count, threads, |i| derive(&SEED, i as u64));
     let mut base = Ledger::new();
     for sender in &senders {
@@ -121,7 +98,6 @@ fn main() {
     let _ = base.q_root();
     let block = build_block(&senders, &fee, threads);
 
-    // Trust the number only after the parallel executor is proven to match the sequential root.
     {
         let mut a = base.clone();
         let _ = execute_ordered(&mut a, &block, &fee, 0);

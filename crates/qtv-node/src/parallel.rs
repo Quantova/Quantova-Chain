@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -450,8 +449,6 @@ mod tests {
     fn the_parallel_and_ordered_paths_agree_on_the_event_root() {
         let fee = FeeParams::devnet();
         let (ledger, keys) = population(24, 50_000_000);
-        // A mixed block that spans several dependency layers, so the parallel path applies it
-        // out of block order across layers and must still record events in block position.
         let block: Vec<Wrapper> = (0..20)
             .map(|i| {
                 transfer(

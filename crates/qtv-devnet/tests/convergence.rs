@@ -1,9 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Several nodes reach the same finalized block at each height, byte identical
-//! chains across nodes, over the qtv-net channels.
-
 mod support;
 
 use qtv_node::fee::FeeParams;
@@ -30,7 +27,6 @@ fn nodes_reach_a_byte_identical_chain_at_each_height() {
         devnet.step().expect("the committee finalized the height");
     }
 
-    // Every node holds the same finalized chain, byte for byte.
     let reference = header_chain(devnet.node(0));
     assert_eq!(reference.len(), heights as usize);
     for i in 1..devnet.len() {
@@ -41,8 +37,6 @@ fn nodes_reach_a_byte_identical_chain_at_each_height() {
         );
     }
 
-    // Every node reached the same state, and every height carries the full
-    // committee of attesters.
     let root = devnet.node(0).ledger().q_root();
     for i in 0..devnet.len() {
         assert_eq!(devnet.node(i).ledger().q_root(), root);
@@ -51,7 +45,6 @@ fn nodes_reach_a_byte_identical_chain_at_each_height() {
         }
     }
 
-    // The transfers landed and moved state on every node.
     assert_eq!(
         devnet.node(0).ledger().balance(&bob.address()),
         heights * 1_000

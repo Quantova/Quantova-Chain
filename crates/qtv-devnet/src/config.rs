@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::path::PathBuf;
 
 use qtv_node::consensus::ValidatorRegistration;
@@ -18,10 +17,6 @@ pub struct NodeConfig {
     pub store_dir: PathBuf,
     pub bootstrap: Vec<u64>,
     pub address: String,
-    /// The node's own 32 byte operator secret. In a running node it is loaded from a
-    /// keystore file the operator owns; the single process simulation holds one per
-    /// node so it can stand up the whole set. It is never derived from the id and never
-    /// published; only the commitments it derives to are.
     pub secret: [u8; 32],
 }
 
@@ -45,16 +40,11 @@ impl NodeConfig {
         self
     }
 
-    /// The node's published bond and reward address, the commitment its secret derives
-    /// to.
     pub fn bond_address(&self) -> String {
         qtv_node::keys::validator_address(&self.secret)
     }
 }
 
-// Per id node constructors for tests and the single process simulation, sourcing the
-// secret from the gated fixture. A running node builds its config with a secret read
-// from its keystore; these are absent from a default build.
 #[cfg(any(test, feature = "test-fixtures"))]
 impl NodeConfig {
     pub fn online(id: u64, stake: u64, store_dir: impl Into<PathBuf>) -> Self {
@@ -94,10 +84,6 @@ pub struct DevnetConfig {
     pub genesis_time: u64,
     pub fanout: usize,
     pub slots: u64,
-    /// The public roster read from a multi party genesis, one own published registration
-    /// per validator. When set, a node assembles the committee from it and holds no peer
-    /// secret. When absent, the single process simulation derives the roster from the
-    /// secrets it holds for every node it stands up.
     pub published_roster: Option<Vec<ValidatorRegistration>>,
     pub bridge_dest_chain: Option<u32>,
     pub guardians: GuardianSet,
@@ -122,9 +108,6 @@ impl DevnetConfig {
             .collect()
     }
 
-    /// The public consensus roster, one commitment per validator. It is the roster the
-    /// genesis publishes when one is set, otherwise the one derived from the secrets the
-    /// single process simulation holds for the whole set.
     pub fn roster(&self) -> Vec<ValidatorRegistration> {
         if let Some(roster) = &self.published_roster {
             return roster.clone();

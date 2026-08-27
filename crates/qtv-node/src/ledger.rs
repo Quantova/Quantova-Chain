@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use qtv_codec::{from_bytes, to_bytes, Decode, Decoder, Encode, Encoder, Error};
 use qtv_crypto::sha3;
 use qtv_governance::{
@@ -431,9 +430,6 @@ pub fn stake_system_address() -> String {
         .expect("a full hash reaches the address floor")
 }
 
-/// A reserved recipient the apply path treats as a fault injection, present only in test
-/// builds. A transfer to it drives a native transition that mutates state and then faults, so
-/// a test can prove the atomic firewall rolls the partial write back.
 #[cfg(test)]
 pub(crate) fn fault_probe_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/native/fault-probe"))
@@ -722,7 +718,6 @@ fn u64_from_le(bytes: &[u8]) -> Option<u64> {
 
 fn action_is_enactable(action: &Action) -> bool {
     match action {
-        // a feature activation must name a feature; an empty name activates nothing
         Action::Activate { feature, .. } => !feature.is_empty(),
         _ => true,
     }
@@ -960,9 +955,6 @@ impl Ledger {
         }
     }
 
-    /// The registered attestation public key of a validator, held in state so a block can
-    /// carry equivocation evidence and every node verifies and applies the slash from the
-    /// same committed key with no access to the live roster.
     pub fn validator_attest_key(&self, address: &str) -> Option<Vec<u8>> {
         let id = address_id(address)?;
         self.trie
@@ -1738,7 +1730,6 @@ impl Ledger {
             Some(supply) => supply,
             None => return false,
         };
-        // the burn only retires wrapped supply; the backing coins do not leave the pool until a foreign payout is proven at settle, so custody is untouched here
         self.set_bridged_balance(asset_id, holder, balance - amount);
         self.set_bridged_asset(
             asset_id,
@@ -1779,7 +1770,6 @@ impl Ledger {
         true
     }
 
-    // burn_ref is the exit replay key: one burn resolves at most once, settle or slash never both
     pub fn bridge_exit_settled(&self, burn_ref: &[u8; 32]) -> bool {
         matches!(self.trie.get(&bridge_exit_seen_key(burn_ref)), Some(bytes) if !bytes.is_empty())
     }
@@ -1854,7 +1844,6 @@ impl Ledger {
         self.write_leaf(bridge_epochpay_global_key(epoch), to_bytes(&amount));
     }
 
-    // global per epoch payout ceiling in base units; zero is the unset sentinel that refuses payouts
     pub fn bridge_payout_cap(&self) -> u128 {
         self.trie
             .get(&stake_singleton_key(BRIDGE_PAYOUTCAP_TAG))
@@ -1872,7 +1861,6 @@ impl Ledger {
         (stake_singleton_key(BRIDGE_PAYOUTCAP_TAG), to_bytes(&cap))
     }
 
-    // close an exit on a proven foreign payout; the paid coins leave the pool, so draw them from custody exactly once, keeping the remaining custody above every outstanding wrapped token, then consume the burn_ref
     pub fn bridge_settle(&mut self, fact: &crate::bridge::ExitFact) -> bool {
         if !self.bridge_exits_enabled() {
             return false;
@@ -1917,7 +1905,6 @@ impl Ledger {
         true
     }
 
-    // refund the beneficiary on chain when a foreign payout fails; re-materialise the burned wrapped under the caps and never above the custody backing it, without drawing that custody down since the coins never left the pool, then consume the burn_ref
     pub fn bridge_slash(&mut self, fact: &crate::bridge::ExitFact) -> bool {
         if !self.bridge_exits_enabled() {
             return false;
@@ -1964,7 +1951,6 @@ impl Ledger {
         if new_supply > asset.cap {
             return false;
         }
-        // the refund re-issues wrapped against custody that stayed in the pool; the outstanding supply must not exceed that backing, but the backing is not drawn down
         if new_supply > self.bridge_vault_custody(&vault, &fact.asset_id) {
             return false;
         }
@@ -2334,9 +2320,6 @@ impl Ledger {
         memory[0..32].copy_from_slice(&caller_id);
         memory[32..64].copy_from_slice(&contract_id);
         memory[64..72].copy_from_slice(&now_seconds.to_be_bytes());
-        // The node injects its own chain identity at @chain, a fixed context word right after @time. A
-        // signed or quorum order folds this word into its message tag, so an order authorised for one
-        // chain does not verify on another. The caller can never set it; the host always overwrites it.
         memory[72..80].copy_from_slice(&chain_id.to_be_bytes());
         memory[80..88].copy_from_slice(&value.to_be_bytes());
         match crate::execution::execute_contract_call(&code, selector, storage, &memory, meter) {
@@ -2505,8 +2488,6 @@ impl Ledger {
         if self.stake_mainnet_start() == u64::MAX {
             return;
         }
-        // record_session marks the session boundary; a completed session accrues the emergent reward to
-        // every validator, pro rata by stake, no longer scaled by the session activity level.
         if self.record_session(transactions, now_day).is_some() {
             let denom = self.roster_reward_denominator();
             for id in self.validator_ids() {
@@ -3088,7 +3069,6 @@ impl Ledger {
         }
     }
 
-    // a governed feature gate. node logic reads feature_version or feature_active to branch dormant logic on, and only a passed ChainUpgrade vote through execute_action can raise a version, so an upgrade ships in the binary dormant and turns on by vote instead of a fork
     pub fn guardian_enact_nonce(&self) -> u64 {
         self.trie
             .get(&stake_singleton_key(GUARDIAN_ENACT_NONCE_TAG))
@@ -3140,7 +3120,6 @@ impl Ledger {
         self.write_leaf(feature_gate_key(feature), to_bytes(&version));
     }
 
-    /// Seed a feature version, returning the state leaf so a caller can persist it beside the genesis seeds.
     pub fn seed_feature_version(&mut self, feature: &[u8], version: u64) -> (Key, Vec<u8>) {
         let key = feature_gate_key(feature);
         let bytes = to_bytes(&version);
@@ -3430,8 +3409,6 @@ mod stake_state_tests {
 
     #[test]
     fn a_contract_call_injects_the_trusted_caller_and_persists_storage() {
-        // Store the injected caller word at scalar slot zero. Key pointer 1024 points into the zero
-        // region of memory, whose 32 zero bytes are the canonical key of scalar slot zero.
         let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
             .expect("the program assembles");
         let selector = [1u8, 2, 3, 4];
@@ -3687,10 +3664,6 @@ mod stake_state_tests {
 
     #[test]
     fn a_contract_sees_the_whole_caller_address_not_a_leading_word() {
-        // Store the caller's trailing word at scalar slot zero and the contract's leading word at
-        // scalar slot one. Key pointer 1024 is scalar_key(0), the 32 zero bytes of the zero region;
-        // pointer 1088 becomes scalar_key(1) once a one is written into its low word at 1112. Both are
-        // declared slots the manifest authorises.
         let code = qtv_vm::asm::assemble(
             "LDI r1, 24\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\n\
              LDI r3, 32\nMLOAD r4, r3\nLDI r6, 1112\nLDI r7, 1\nMSTORE r6, r7\n\
@@ -3867,7 +3840,6 @@ mod stake_state_tests {
         let voter = gov_addr(41);
         fund(&mut l, &voter, 10_000 * 1_000_000);
 
-        // the feature ships dormant in the binary, so it reads inactive until a vote turns it on
         assert!(!l.feature_active(b"parallel_state"));
         assert_eq!(l.feature_version(b"parallel_state"), 0);
 
@@ -3878,11 +3850,9 @@ mod stake_state_tests {
         l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 5_000 * 1_000_000, 0);
         l.gov_enact(id, 14 * 86_400 + 1, TEST_CHAIN).unwrap();
 
-        // the same binary now runs the feature because the vote raised its version, no fork
         assert!(l.feature_active(b"parallel_state"));
         assert_eq!(l.feature_version(b"parallel_state"), 2);
 
-        // a later vote can only raise the version; a downgrade or a version that turns it off is refused
         assert_eq!(
             l.execute_action(
                 &qtv_governance::Action::Activate {
@@ -3915,7 +3885,6 @@ mod stake_state_tests {
         let mut l = Ledger::new();
         let proposer = gov_addr(42);
         fund(&mut l, &proposer, 3_000_000 * 1_000_000);
-        // Activate belongs to the ChainUpgrade track, so proposing it on any other track is refused and stakes nothing
         assert!(l
             .gov_propose(
                 &proposer,

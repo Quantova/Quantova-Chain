@@ -1,10 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! A network split into two groups, neither a supermajority, finalizes nothing.
-//! When the split heals the nodes converge on one branch and resume finalizing,
-//! and no two nodes ever hold a different finalized block at one height.
-
 mod support;
 
 use qtv_node::node::GenesisAccount;
@@ -21,9 +17,6 @@ fn a_split_finalizes_nothing_and_heals_to_one_branch() {
     let mut devnet =
         Devnet::over_duplex(config(&base, &[true, true, true, true], accounts)).expect("devnet");
 
-    // Split the four nodes into two groups of two. The view zero leader and one
-    // partner form one group; the other two form the other. Neither group is a
-    // supermajority of three, so neither can finalize alone.
     let leader = devnet.peek_leader().expect("view zero leader");
     let leader_index = devnet.index_of(leader).expect("leader is a node");
     let partner = (0..devnet.len())
@@ -34,13 +27,9 @@ fn a_split_finalizes_nothing_and_heals_to_one_branch() {
     groups[partner] = 0;
     devnet.set_partition(&groups);
 
-    // Run the split for a bounded stretch: long enough for the leader's group to
-    // lock its block and the other group to time out once, short enough that the
-    // stalled group does not churn through every view.
     let deadline = devnet.view_timeout() + devnet.view_timeout() / 2;
     devnet.drive_window(2, deadline).expect("split window");
 
-    // Neither group finalized: no node holds a block at height one.
     for i in 0..devnet.len() {
         assert!(
             devnet.node(i).chain().is_empty(),
@@ -48,8 +37,6 @@ fn a_split_finalizes_nothing_and_heals_to_one_branch() {
         );
     }
 
-    // Heal the split and let the round loop run. The nodes reconcile through a view
-    // change and finalize one block.
     devnet.heal();
     let resumed = devnet.drive(2).expect("drive after heal");
     assert!(
@@ -57,8 +44,6 @@ fn a_split_finalizes_nothing_and_heals_to_one_branch() {
         "the nodes did not resume finalizing after the split healed"
     );
 
-    // Every node finalized exactly one block, and it is byte identical across nodes,
-    // so no two nodes hold a different finalized block at height one.
     let reference = header_chain(devnet.node(0));
     assert_eq!(reference.len(), 1, "height one did not finalize once");
     for i in 1..devnet.len() {
@@ -69,11 +54,9 @@ fn a_split_finalizes_nothing_and_heals_to_one_branch() {
         );
     }
 
-    // The split left only a single-node lock, which could never have finalized, so the safe-value rule does not re-propose it; every node still converged on one block above.
     let finalized = devnet.node(0).chain().last().expect("a finalized block");
     assert_eq!(finalized.header().height(), 1, "height one finalized once");
 
-    // The state agrees across nodes and no node was slashed.
     let root = devnet.node(0).ledger().q_root();
     for i in 0..devnet.len() {
         assert_eq!(devnet.node(i).ledger().q_root(), root, "node {i} state");

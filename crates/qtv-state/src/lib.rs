@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 #![forbid(unsafe_code)]
 
 use std::cell::RefCell;
@@ -255,9 +254,6 @@ impl Trie {
         self.persist_dirty.insert(key);
     }
 
-    /// Remove a leaf so its slot returns to the default, freeing the state it occupied. The
-    /// key is marked dirty so the change persists, and the root falls back to what it would
-    /// be had the leaf never existed.
     pub fn remove(&mut self, key: &Key) -> bool {
         let existed = self.leaves.remove(key).is_some();
         if existed {

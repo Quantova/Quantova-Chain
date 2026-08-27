@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Result as IoResult, Write};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
@@ -20,19 +19,16 @@ const MAX_HEAD: usize = 16 * 1024;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 
-// A total deadline for the whole request head and body, so a slow trickle cannot hold a connection open.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(20);
 
 const MAX_CONNECTIONS: usize = 512;
 
 const MAX_CONNECTIONS_PER_IP: usize = 32;
 
-// Sustained request rate per address and its burst; a token bucket caps the sustained rate.
 const RATE_REFILL_PER_SEC: f64 = 50.0;
 
 const RATE_BURST: f64 = 100.0;
 
-// Cap on the rate table so a spray from many addresses cannot grow it without bound.
 const RATE_TABLE_CAP: usize = 100_000;
 
 const BAN_STRIKES: u32 = 100;
@@ -49,8 +45,6 @@ enum Admit {
     Banned,
 }
 
-// A global connection count bounds total load; a per address count keeps one
-// source from claiming every slot and starving the rest of the internet.
 #[derive(Default)]
 struct Limiter {
     inner: Mutex<LimiterInner>,
@@ -60,23 +54,18 @@ struct Limiter {
 struct LimiterInner {
     total: usize,
     per_ip: HashMap<IpAddr, usize>,
-    // Two generations of rate buckets; the live map rotates into rate_old at the cap, bounding total buckets.
     rate: HashMap<IpAddr, Bucket>,
     rate_old: HashMap<IpAddr, Bucket>,
     strikes: HashMap<IpAddr, (u32, Instant)>,
     banned: HashMap<IpAddr, Instant>,
 }
 
-// A token bucket for one address. It starts full, refills with elapsed time up
-// to the burst ceiling, and spends one token per request.
 struct Bucket {
     tokens: f64,
     last: Instant,
 }
 
 impl LimiterInner {
-    // Spend one token for this address at `now`, refilling first for the time
-    // since its last request. Returns false when the address is over its rate.
     fn spend_rate_token(&mut self, ip: IpAddr, now: Instant) -> bool {
         let mut bucket = match self.rate.remove(&ip) {
             Some(bucket) => bucket,
@@ -197,8 +186,6 @@ pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>, allow: Vec<Ip
                 .peer_addr()
                 .map(|addr| addr.ip())
                 .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-            // When an allowlist is configured, only its addresses may reach the RPC. A
-            // validator sets this to its own read nodes so the endpoint is not public.
             if !allow.is_empty() && !allow.contains(&ip) {
                 stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
                 let _ = write_error(&mut stream, 403, "forbidden", "this address may not reach the rpc");
@@ -307,9 +294,6 @@ fn handle_connection(mut stream: TcpStream, requests: Sender<GatewayCall>) -> Io
         return write_error(&mut stream, 413, "too_large", "the request body is too large");
     }
 
-    // Grow the buffer only as bytes actually arrive rather than pre-sizing to the declared
-    // Content-Length, so a tiny request cannot force a full MAX_BODY zeroed allocation it never
-    // fills. The initial capacity is capped, and the loop still stops at content_length.
     let mut body = Vec::with_capacity(content_length.min(64 * 1024));
     let mut chunk = [0u8; 8192];
     while body.len() < content_length {
@@ -531,8 +515,6 @@ mod tests {
         let limiter = Limiter::default();
         let peer = ip(9);
         let t = Instant::now();
-        // At one instant an address may spend its whole burst and no more. The
-        // connection caps are held wide open so the rate is the only limit here.
         let mut admitted = 0usize;
         for _ in 0..(RATE_BURST as usize + 16) {
             match limiter.try_admit(peer, 1_000_000, 1_000_000, t) {
@@ -549,7 +531,6 @@ mod tests {
             matches!(limiter.try_admit(peer, 1_000_000, 1_000_000, t), Admit::RateLimited),
             "an address over its rate is refused"
         );
-        // A second later the bucket has refilled by the sustained rate.
         let later = t + Duration::from_secs(1);
         let mut refilled = 0usize;
         for _ in 0..(RATE_REFILL_PER_SEC as usize + 8) {
@@ -565,7 +546,6 @@ mod tests {
     fn the_rate_table_stays_bounded_under_a_flood_of_distinct_addresses() {
         let limiter = Limiter::default();
         let t = Instant::now();
-        // Three caps' worth of distinct source addresses, as an IPv6 flood would present.
         for i in 0..(RATE_TABLE_CAP as u32 * 3) {
             let ip = IpAddr::V4(Ipv4Addr::from(i));
             let _ = limiter.try_admit(ip, 1_000_000, 1_000_000, t);
@@ -692,10 +672,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (tx, _rx) = channel::<GatewayCall>();
-        // Allow only a documentation address, so loopback (the test client) is not on it.
         serve(listener, tx, vec![IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))]);
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        // The server refuses and closes early, so tolerate a broken write and read the reply.
         let _ = stream.write_all(b"POST /v1/node_info HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}");
         let mut response = String::new();
         let _ = stream.read_to_string(&mut response);

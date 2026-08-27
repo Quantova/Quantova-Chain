@@ -1,25 +1,10 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! A measurement of the state root update cost.
-//!
-//! It times a full recompute over the whole trie at several sizes, then times an
-//! incremental update for a range of changed account counts at a small state and
-//! at a large state. The full recompute scales with the total number of accounts,
-//! while the incremental update scales with the number of changed accounts and the
-//! tree depth and does not move with the total state. From the two it projects the
-//! per block cost at one million accounts.
-//!
-//! Run it in release so the hashes are optimized:
-//!
-//!   cargo run --release --example scaling -p qtv-state
-
 use std::time::{Duration, Instant};
 
 use qtv_state::{Key, Trie, DEPTH, KEY_LEN};
 
-/// A small deterministic generator, splitmix64, so the states and the change sets
-/// are varied but the run is reproducible.
 struct Rng(u64);
 
 impl Rng {
@@ -41,8 +26,6 @@ impl Rng {
     }
 }
 
-/// An account sized value, thirty two bytes, the shape a nonce, a balance, a
-/// scheme byte and a short key take once encoded.
 fn value(rng: &mut Rng) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     for _ in 0..4 {
@@ -51,8 +34,6 @@ fn value(rng: &mut Rng) -> Vec<u8> {
     out
 }
 
-/// A trie loaded with `count` random accounts, along with its keys, before the
-/// first root is taken.
 fn build(count: usize, rng: &mut Rng) -> (Trie, Vec<Key>) {
     let mut trie = Trie::new();
     let mut keys = Vec::with_capacity(count);
@@ -71,8 +52,6 @@ fn micros_per(total: Duration, n: usize) -> f64 {
 fn main() {
     println!("depth {} levels, sha3 256\n", DEPTH);
 
-    // A full recompute over the whole trie at three sizes. The per account cost is
-    // flat, which is the linear in total state behaviour that breaks at scale.
     println!("full recompute over the whole state");
     let mut full_us_per_account = 0.0;
     for &count in &[2_000usize, 20_000, 200_000] {
@@ -89,10 +68,6 @@ fn main() {
         );
     }
 
-    // An incremental update at a small state and a large state, over a range of
-    // changed account counts. Each figure is the average over several blocks. The
-    // per changed account cost is the same at both state sizes, so the block cost
-    // follows the changed count and the depth, not the total state.
     println!("\nincremental root update, average over 24 blocks");
     println!("  N        B        block          per changed account");
     let changed_counts = [1usize, 8, 64, 256, 1024];
@@ -100,7 +75,7 @@ fn main() {
     for &count in &[2_000usize, 200_000] {
         let mut rng = Rng(8738 ^ count as u64);
         let (mut trie, keys) = build(count, &mut rng);
-        let _ = trie.root(); // commit the whole state once, up front
+        let _ = trie.root();
         for &batch in &changed_counts {
             if batch > keys.len() {
                 continue;
@@ -128,8 +103,6 @@ fn main() {
         }
     }
 
-    // The projection to one million accounts. The full recompute grows with the
-    // state, the incremental block does not.
     let projected_full_ms = full_us_per_account * 1_000_000.0 / 1e3;
     println!("\nprojected at one million accounts");
     println!(

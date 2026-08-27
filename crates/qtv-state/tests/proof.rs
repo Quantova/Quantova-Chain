@@ -1,13 +1,9 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Coverage for the trie get, the deterministic root, and the proofs of
-//! presence and absence.
-
 use qtv_codec::{from_bytes, to_bytes};
 use qtv_state::{verify, Key, Proof, Trie};
 
-/// A deterministic thirty two byte key seeded by a single byte.
 fn key(seed: u8) -> Key {
     let mut out = [0u8; 32];
     for (index, byte) in out.iter_mut().enumerate() {

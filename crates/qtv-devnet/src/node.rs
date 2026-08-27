@@ -1566,6 +1566,9 @@ impl DevNode {
                 }
             }
         }
+        if attestation.block.cost == qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST {
+            return false;
+        }
         let slot = (attestation.from, attestation.view);
         if !self.attest_relayed.contains_key(&slot)
             && self.attest_relayed.len() >= MAX_RELAY_BUCKETS

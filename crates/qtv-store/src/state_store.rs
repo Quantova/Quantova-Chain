@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
@@ -87,7 +86,6 @@ pub struct StateStore {
 }
 
 impl StateStore {
-    /// Open the state log and recover the last fully committed height, discarding any entries past the last durable marker.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let (log, frames) = Log::open(path)?;
         let mut store = StateStore {
@@ -96,8 +94,6 @@ impl StateStore {
             head: None,
             committed_height: None,
         };
-        // Every frame the log returned is whole and checksum verified, so their
-        // sizes account for the entire file on disk.
         let total_len: u64 = frames.iter().map(|frame| frame_len(frame.len())).sum();
         let mut pending: Vec<(Key, Option<Vec<u8>>)> = Vec::new();
         let mut committed_len: u64 = 0;
@@ -130,14 +126,11 @@ impl StateStore {
             }
         }
         if committed_len < total_len {
-            // Discard everything past the last committed boundary (a height whose marker never landed).
             store.log.truncate(committed_len)?;
         }
         Ok(store)
     }
 
-    /// Record a state effect. The write reaches the page cache but is not durable
-    /// until the height's `commit`, which is the atomicity point.
     pub fn put_account(&mut self, key: Key, value: Vec<u8>) -> io::Result<()> {
         let record = StateRecord::Entry {
             key,
@@ -148,7 +141,6 @@ impl StateStore {
         Ok(())
     }
 
-    /// Record a deletion so a removed key is absent after recovery.
     pub fn delete_account(&mut self, key: Key) -> io::Result<()> {
         let record = StateRecord::Delete { key };
         self.log.append(&to_bytes(&record))?;
@@ -156,7 +148,6 @@ impl StateStore {
         Ok(())
     }
 
-    /// Seal a height: append the commit marker and sync, making effects and marker durable together.
     pub fn commit(&mut self, height: u64, root: Hash) -> io::Result<()> {
         let record = StateRecord::Commit { height, root };
         self.log.append(&to_bytes(&record))?;
@@ -174,7 +165,6 @@ impl StateStore {
         self.head
     }
 
-    /// The height of the last durable commit marker, or `None` if nothing has committed.
     pub fn committed_height(&self) -> Option<u64> {
         self.committed_height
     }
@@ -354,7 +344,6 @@ mod tests {
 
     #[test]
     fn entries_written_after_the_last_commit_are_discarded_on_reopen() {
-        // A crash after a height's effects but before its commit marker must recover the previous height.
         let path = temp_path("uncommitted-tail");
         let committed_root;
         {
@@ -363,7 +352,6 @@ mod tests {
             let root = store.load_trie().root();
             store.commit(1, root).unwrap();
             committed_root = root;
-            // Height two's effects land but the process dies before commit(2, ...).
             store.put_account(key(2), account(0, 200)).unwrap();
             store.put_account(key(1), account(1, 999)).unwrap();
         }
@@ -379,8 +367,6 @@ mod tests {
 
     #[test]
     fn the_uncommitted_tail_is_physically_removed_and_a_later_commit_is_clean() {
-        // After recovery drops the torn height, the log must be back at the
-        // committed boundary so the next height appends contiguously.
         let path = temp_path("truncate-then-append");
         {
             let mut store = StateStore::open(&path).unwrap();
@@ -424,7 +410,6 @@ mod tests {
 
     #[test]
     fn a_flipped_byte_in_a_committed_height_rolls_back_to_the_prior_one() {
-        // Bit rot inside an already committed height makes it and all after unreadable, so recovery yields the prior height.
         let path = temp_path("mid-corrupt");
         let root_two;
         {
@@ -441,8 +426,6 @@ mod tests {
             store.commit(3, root).unwrap();
         }
         {
-            // Flip a byte well inside height three's records (its entry frame),
-            // not at the very tail, so this is corruption rather than a short write.
             let mut bytes = std::fs::read(&path).unwrap();
             let target = bytes.len() - 100;
             bytes[target] ^= 0xFF;
@@ -458,8 +441,6 @@ mod tests {
 
     #[test]
     fn a_flipped_byte_inside_the_last_commit_marker_drops_it() {
-        // Corrupting the marker itself, rather than truncating it, is caught the
-        // same way: its frame fails the checksum and recovery falls back.
         let path = temp_path("marker-corrupt");
         let root_one;
         {
@@ -473,8 +454,6 @@ mod tests {
             store.commit(2, root).unwrap();
         }
         {
-            // The commit marker is the last 53 bytes: length (8) + tag (1) +
-            // height (8) + root (32) + checksum (4). Flip a byte inside its root.
             let mut bytes = std::fs::read(&path).unwrap();
             let target = bytes.len() - 20;
             bytes[target] ^= 0x01;
@@ -489,7 +468,6 @@ mod tests {
 
     #[test]
     fn a_truncated_commit_marker_falls_back_to_the_prior_height() {
-        // A torn write severing the second commit marker; the scan drops it and recovery reports the first height.
         let path = temp_path("torn-marker");
         let root_one;
         {
@@ -502,8 +480,6 @@ mod tests {
             let root = store.load_trie().root();
             store.commit(2, root).unwrap();
         }
-        // Cut a handful of bytes off the end: the second commit marker is now
-        // partial, so its frame fails the checksum and is dropped.
         {
             let len = std::fs::metadata(&path).unwrap().len();
             let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
