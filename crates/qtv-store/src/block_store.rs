@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
@@ -106,12 +105,10 @@ impl BlockStore {
         Ok(())
     }
 
-    /// Force appended blocks to stable storage, before the state commit marker.
     pub fn sync(&mut self) -> io::Result<()> {
         self.log.sync()
     }
 
-    /// Drop every block above `height`; orphans from a torn commit are always a suffix of the log.
     pub fn truncate_to_height(&mut self, height: u64) -> io::Result<()> {
         let keep = self.heights.iter().take_while(|&&h| h <= height).count();
         if keep == self.blocks.len() {
@@ -301,14 +298,11 @@ mod tests {
             store.put_block(&second).unwrap();
             store.put_block(&block(3, 30)).unwrap();
             store.sync().unwrap();
-            // An orphan block three sits above the committed height two.
             store.truncate_to_height(2).unwrap();
             assert_eq!(store.head_height(), Some(2));
             assert_eq!(store.len(), 2);
             assert_eq!(store.block_by_height(3), None);
         }
-        // The truncation is durable, so the orphan does not return on reopen, and
-        // the log continues contiguously.
         let mut store = BlockStore::open(&path).unwrap();
         assert_eq!(store.len(), 2);
         assert_eq!(store.head_height(), Some(2));

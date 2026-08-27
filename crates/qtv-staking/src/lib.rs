@@ -11,12 +11,8 @@ pub const MIN_STAKE: u64 = 2_000 * NATIVE_UNIT as u64;
 pub const STAKING_POOL: u64 = 685_714 * NATIVE_UNIT as u64;
 pub const MAX_SUPPLY: u64 = 4_571_429 * NATIVE_UNIT as u64;
 
-// The staking reward emission per session. The pool above is distributed pro rata by stake at the
-// founder preference rate of about 57,143 QTOV a year, roughly two sessions a year, so about 28,571 QTOV
 pub const SESSION_EMISSION: u64 = 28_571 * NATIVE_UNIT as u64;
 
-// A staking reward becomes fully transferable twelve months after the epoch it was earned, a rolling
-// schedule that is the sell pressure control.
 pub const REWARD_VEST_DAYS: u64 = 365;
 
 pub const HIGH_SESSION_TX: u64 = 50_000_000_000;
@@ -51,9 +47,6 @@ pub fn eligible(stake: u64) -> bool {
     stake >= MIN_STAKE
 }
 
-// The emergent staking reward. A fixed per session emission is distributed pro rata by stake, so the
-// yield finds its own level, high when little is staked to draw validators in and settling as the set
-// grows, with no cap. The earlier fixed bps curve and the USD rate cap are retired.
 pub fn session_reward(stake: u64, total_staked: u64) -> u64 {
     if total_staked == 0 {
         return 0;
@@ -65,8 +58,6 @@ pub fn in_blackout(now_day: u64, mainnet_start_day: u64) -> bool {
     now_day.saturating_sub(mainnet_start_day) < MAINNET_BLACKOUT_DAYS
 }
 
-// A staking reward tranche is locked until twelve months after the epoch it was earned, then becomes
-// fully transferable, a rolling twelve month schedule. This replaces the earlier multi tranche vest.
 pub fn released(earned: u64, age_days: u64) -> u64 {
     if age_days < REWARD_VEST_DAYS {
         0
@@ -418,8 +409,6 @@ mod tests {
 
     #[test]
     fn the_reward_is_emergent_and_pro_rata_by_stake() {
-        // A sole staker earns the whole session emission, two equal stakers split it, and a larger share
-        // of the same total earns proportionally more. There is no cap.
         let stake = 2_000 * QTOV;
         assert_eq!(session_reward(stake, stake), SESSION_EMISSION);
         assert_eq!(session_reward(stake, 2 * stake), SESSION_EMISSION / 2);
@@ -486,7 +475,6 @@ mod tests {
 
     #[test]
     fn rewards_come_from_the_pool_and_never_overdraw() {
-        // A small pool caps the emergent reward and the pool never goes negative.
         let mut l = StakeLedger::new(50 * QTOV);
         l.bond(id(1), 2_000 * QTOV, 0);
         assert_eq!(l.accrue(&id(1), 400, 0), 50 * QTOV);

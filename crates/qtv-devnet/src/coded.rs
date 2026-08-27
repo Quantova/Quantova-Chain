@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::collections::HashMap;
 
 use qtv_block::{transaction_root, Block as ChainBlock, Header};
@@ -176,7 +175,6 @@ pub fn code_proposal(proposal: &Proposal) -> Result<Vec<CodedProposal>, CodedErr
 
 type ProposalKey = (u64, [u8; DIGEST_LEN]);
 
-// Bound the assembler maps; a Byzantine peer picks keys freely, so evict lowest-height on overflow.
 const MAX_PENDING_PROPOSALS: usize = 256;
 
 const MAX_DONE_KEYS: usize = 4_096;
@@ -608,7 +606,6 @@ mod tests {
     #[test]
     fn the_assembler_bounds_pending_under_a_flood_of_distinct_keys() {
         let mut assembler = ProposalAssembler::new();
-        // Distinct views are distinct keys; one shard each leaves pending incomplete, so the cap must hold.
         for view in 0..(MAX_PENDING_PROPOSALS as u64 + 64) {
             let proposal = sample_proposal(1, view);
             let shards = code_proposal(&proposal).expect("code the proposal");

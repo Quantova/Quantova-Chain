@@ -1,14 +1,11 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Coverage for the header round trip, the transaction root, and the block id.
-
 use qtv_block::{empty_transaction_root, header_from_bytes, transaction_root, Block, Header};
 use qtv_codec::to_bytes;
 use qtv_crypto::ml_dsa;
 use qtv_tx::{Body, Call, Wrapper, SCHEME_LATTICE};
 
-/// A deterministic thirty two byte pattern seeded by a single byte.
 fn pattern(seed: u8) -> [u8; 32] {
     let mut out = [0u8; 32];
     for (i, byte) in out.iter_mut().enumerate() {
@@ -17,9 +14,6 @@ fn pattern(seed: u8) -> [u8; 32] {
     out
 }
 
-/// A module lattice signature over a fixed message. The transaction root hashes
-/// the wrapper encodings and never verifies the signature, so one signature is
-/// enough to assemble the sample wrappers.
 fn sample_signature() -> Vec<u8> {
     let (_public, secret) = ml_dsa::keygen(&[7u8; 32]);
     ml_dsa::sign(&secret, &[0u8; 32], &[], &[0u8; 32])
@@ -27,14 +21,12 @@ fn sample_signature() -> Vec<u8> {
         .to_vec()
 }
 
-/// A wrapper whose body carries the given nonce.
 fn wrapper_with_nonce(nonce: u64) -> Wrapper {
     let call = Call::new("q1target".to_string(), vec![1, 2, 3]);
     let body = Body::new("q1sender".to_string(), nonce, 21_000, 1_000_000, call);
     Wrapper::new(body, SCHEME_LATTICE, sample_signature())
 }
 
-/// A sample header whose transaction root covers the given body.
 fn sample_header(body: &[Wrapper]) -> Header {
     Header::new(
         42,

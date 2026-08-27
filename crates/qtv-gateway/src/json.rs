@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Json {
     Null,
@@ -111,7 +110,6 @@ fn write_string(s: &str, out: &mut String) {
 
 const MAX_DEPTH: usize = 64;
 
-// A separate node budget bounds total values, since the depth cap does nothing against width.
 const MAX_NODES: usize = 200_000;
 
 pub fn parse(input: &str) -> Result<Json, String> {

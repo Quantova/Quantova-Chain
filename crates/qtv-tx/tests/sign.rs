@@ -1,12 +1,9 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Coverage for transaction signing, verification, and the transaction id.
-
 use qtv_account::{derive, derive_with_scheme};
 use qtv_tx::{sign, verify, Body, Call, Wrapper, SCHEME_FALCON, SCHEME_HASH, SCHEME_LATTICE};
 
-/// A deterministic master seed pattern.
 fn master() -> [u8; 32] {
     let mut seed = [0u8; 32];
     for (i, byte) in seed.iter_mut().enumerate() {
@@ -15,7 +12,6 @@ fn master() -> [u8; 32] {
     seed
 }
 
-/// A sample body whose sender is index zero and whose target is index one.
 fn sample_body() -> Body {
     let seed = master();
     let sender = derive(&seed, 0);
@@ -24,7 +20,6 @@ fn sample_body() -> Body {
     Body::new(sender.address(), 7, 21_000, 1_000_000, call)
 }
 
-/// Rebuild a body while replacing a single field so the digest moves.
 fn rebuild(body: &Body, nonce: u64, args: Vec<u8>) -> Body {
     let call = Call::new(body.call().target().to_string(), args);
     Body::new(
@@ -95,8 +90,6 @@ fn an_unknown_scheme_is_rejected() {
     assert!(!verify(&forged, account.public_key()));
 }
 
-// Hash based signing is slow, so this keeps to one derive, one sign, and two
-// verifies. Run the suite in release if the debug run drags.
 #[test]
 fn hash_scheme_signs_and_verifies() {
     let seed = master();
@@ -204,7 +197,6 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The seed the cross language conformance vectors share.
 fn shared_seed() -> [u8; 32] {
     let mut seed = [0u8; 32];
     for (i, byte) in seed.iter_mut().enumerate() {

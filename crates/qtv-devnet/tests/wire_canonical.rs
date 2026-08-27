@@ -16,8 +16,6 @@ fn a_genesis_parent_with_a_nonzero_value_is_refused() {
     let attestation = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block, &beacon);
     let bytes = Message::Attest(Box::new(attestation)).encode();
 
-    // block.height(8) block.val(32) parent_tag(1), so the genesis parent value that
-    // the encoder wrote as zeros starts here.
     let pv_start = 1 + 8 + 8 + 8 + 8 + (8 + 32) + 8 + 32 + 1;
     assert_eq!(bytes[pv_start - 1], 0, "the encoder wrote the genesis parent tag");
 
@@ -32,8 +30,6 @@ fn a_genesis_parent_with_a_nonzero_value_is_refused() {
         "the canonical frame still hashes to itself"
     );
 
-    // The canonical frame decodes; the malleated copy no longer decodes, so a single
-    // valid message can no longer be re-spun into unbounded distinct gossip frames.
     assert!(Message::decode(&bytes).is_ok(), "the canonical frame decodes");
     assert!(
         Message::decode(&mutated).is_err(),

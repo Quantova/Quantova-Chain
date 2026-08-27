@@ -1,10 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! A node that restarts within an epoch rebuilds the peers rotated one time sortition roots
-//! from the registration records carried in the chain, so it draws the committee at once
-//! rather than waiting for the next boundary to re gossip.
-
 mod support;
 
 use qtv_devnet::config::{DevnetConfig, NodeConfig};
@@ -63,8 +59,6 @@ fn a_node_restarting_within_an_epoch_rebuilds_peers_rotated_roots_from_the_chain
     let online = [true, true, true, true];
     let mut devnet = Devnet::over_duplex(config_with_slots(&base, &online, slots)).expect("devnet");
 
-    // Drive past the first epoch boundary so the epoch one committee has rotated and the
-    // block that starts the epoch carries every validator's re registration.
     for _ in 0..6u64 {
         devnet.step().expect("the committee finalises across the rotation");
     }
@@ -78,9 +72,6 @@ fn a_node_restarting_within_an_epoch_rebuilds_peers_rotated_roots_from_the_chain
     let head_before = devnet.node(index).head_hash();
     let height_before = devnet.node(index).height();
 
-    // Restart the node from its store alone. The reload has to rebuild the rotated roots
-    // from the chain, since the certificate at the head was formed over the rotated
-    // committee and would not verify against the genesis roots.
     devnet.restart_node(index).expect("reopened across the boundary from the store");
 
     assert_eq!(devnet.node(index).head_hash(), head_before, "the head reloaded");
@@ -94,9 +85,6 @@ fn a_node_restarting_within_an_epoch_rebuilds_peers_rotated_roots_from_the_chain
         assert_ne!(*id, devnet.node(index).id(), "a rebuilt root is a peer, not the node's own");
     }
 
-    // It rejoins and keeps finalising the same chain as the peers that never restarted. The
-    // reloaded node holds only the blocks it finalised after reopening, so compare that tail
-    // against the matching span of a peer that never restarted.
     for _ in 0..3u64 {
         devnet.step().expect("the restarted node keeps finalising within the epoch");
     }

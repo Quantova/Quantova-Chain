@@ -1,8 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The same inputs give the same finalized chain across a run.
-
 mod support;
 
 use qtv_node::fee::FeeParams;
@@ -12,8 +10,6 @@ use qtv_devnet::Devnet;
 
 use support::{config, header_chain, transfer, unique_base, user};
 
-/// Run one fixed script over a fresh devnet and return the finalized chain bytes
-/// and the final state root every node ends on.
 fn run_scripted(name: &str, params: &FeeParams) -> (Vec<[u8; 32]>, [u8; 32]) {
     let base = unique_base(name);
     let alice = user(0);
@@ -32,7 +28,6 @@ fn run_scripted(name: &str, params: &FeeParams) -> (Vec<[u8; 32]>, [u8; 32]) {
     ];
     for (index, (from, to, amount, nonce)) in script.iter().enumerate() {
         let tx = transfer(from, to, *amount, *nonce, params);
-        // Submit each to a different node to exercise propagation.
         devnet.submit(index % devnet.len(), tx).expect("admitted");
         devnet.step().expect("finalized");
     }

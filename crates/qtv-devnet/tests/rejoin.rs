@@ -1,9 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! A node behind by several heights catches up by sync and then finalizes new
-//! heights with the group, ending byte identical to the nodes that never left.
-
 mod support;
 
 use qtv_node::fee::FeeParams;
@@ -29,7 +26,6 @@ fn a_lagging_node_catches_up_then_finalizes_with_the_group() {
         devnet.step().expect("finalized");
     }
 
-    // The last node falls several heights behind while offline.
     let lagging = devnet.len() - 1;
     devnet.set_active(lagging, false);
     for nonce in 2..6u64 {
@@ -44,8 +40,6 @@ fn a_lagging_node_catches_up_then_finalizes_with_the_group() {
         "the node should be several heights behind"
     );
 
-    // It comes back online. A step catches it up over sync, then the whole group
-    // finalizes a fresh height together.
     devnet.set_active(lagging, true);
     for nonce in 6..8u64 {
         let tx = transfer(&alice, &bob.address(), 1_000, nonce, &params);
@@ -55,8 +49,6 @@ fn a_lagging_node_catches_up_then_finalizes_with_the_group() {
             .expect("the rejoined node caught up and finalized with the group");
     }
 
-    // Every node advanced past the tip the group held, and the rejoined node's chain
-    // is byte identical to a peer that never left.
     let head = devnet.node(0).head_hash();
     let final_height = devnet.node(0).height();
     assert!(final_height > tip, "the group did not finalize new heights");
@@ -69,7 +61,6 @@ fn a_lagging_node_catches_up_then_finalizes_with_the_group() {
         header_chain(devnet.node(0)),
         "the rejoined chain diverged"
     );
-    // The rejoined node finalized the fresh heights itself, from live consensus.
     let attesters = &devnet
         .node(lagging)
         .chain()

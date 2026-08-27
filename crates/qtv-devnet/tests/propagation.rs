@@ -1,9 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! A transaction submitted to one node propagates over the wire and is finalized
-//! by the committee, even when the submitting node is not the leader.
-
 mod support;
 
 use qtv_node::fee::FeeParams;
@@ -24,8 +21,6 @@ fn a_transaction_propagates_from_one_node_and_is_finalized() {
     let mut devnet =
         Devnet::over_duplex(config(&base, &[true, true, true, true], accounts)).expect("devnet");
 
-    // Submit to a node that does not lead this height, so finalization proves the
-    // transaction reached the leader over the wire.
     let leader = devnet.peek_leader().expect("leader");
     let submitter = (0..devnet.len())
         .find(|&i| devnet.node(i).id() != leader)
@@ -37,7 +32,6 @@ fn a_transaction_propagates_from_one_node_and_is_finalized() {
         .submit(submitter, tx)
         .expect("admitted at the submitter");
 
-    // Only the submitting node holds the transaction before the round.
     assert_eq!(devnet.node(submitter).mempool_len(), 1);
     for i in 0..devnet.len() {
         if i != submitter {
@@ -47,8 +41,6 @@ fn a_transaction_propagates_from_one_node_and_is_finalized() {
 
     devnet.step().expect("the committee finalized the height");
 
-    // The transaction is in the finalized body on every node, and the leader, not
-    // the submitter, proposed it.
     for i in 0..devnet.len() {
         let finalized = devnet.node(i).chain().last().expect("a finalized block");
         let ids: Vec<String> = finalized.block.body().iter().map(Wrapper::id).collect();

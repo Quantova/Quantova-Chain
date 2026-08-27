@@ -1,9 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Determinism of catch up sync: the same schedule gives the same synced chain,
-//! byte for byte, across independent runs.
-
 mod support;
 
 use qtv_node::fee::FeeParams;
@@ -13,9 +10,6 @@ use qtv_devnet::Devnet;
 
 use support::{config, header_chain, transfer, unique_base, user};
 
-/// Run one fixed catch up schedule: four nodes finalize two heights, the last
-/// falls offline for a stretch, then rejoins and catches up by verified sync.
-/// Return the synced node's chain and a peer's chain, byte encoded.
 fn run(tag: &str) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
     let base = unique_base(tag);
     let params = FeeParams::devnet();
@@ -51,10 +45,8 @@ fn the_same_schedule_gives_the_same_synced_chain() {
     let (synced_a, peer_a) = run("determinism-a");
     let (synced_b, peer_b) = run("determinism-b");
 
-    // The synced node ends byte identical to the peer that never left, in both runs.
     assert_eq!(synced_a, peer_a);
     assert_eq!(synced_b, peer_b);
-    // And the two independent runs produce the identical synced chain.
     assert_eq!(synced_a, synced_b, "the synced chain was not deterministic");
     assert!(!synced_a.is_empty(), "the synced chain should not be empty");
 }

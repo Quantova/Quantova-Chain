@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 #![forbid(unsafe_code)]
 
 use qtv_crypto::{ml_dsa, sha3, slh_dsa};
@@ -84,9 +83,6 @@ impl std::fmt::Debug for Account {
 
 impl Drop for Account {
     fn drop(&mut self) {
-        // The per account seed is the one secret this type holds, so wipe it when the
-        // account goes out of scope rather than leave it in freed memory for a later read.
-        // The scheme, the index, and the public key are not secret and are left alone.
         self.seed.zeroize();
     }
 }

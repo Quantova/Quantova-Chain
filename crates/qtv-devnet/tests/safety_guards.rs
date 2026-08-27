@@ -1,10 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The running node consults the persistent anti double sign watermark before every
-//! signature and the finality ledger on every certificate, and treats a refusal or a
-//! finality violation as a fatal halt.
-
 mod support;
 
 use qtv_devnet::{DevNode, Fatal};
@@ -22,8 +18,6 @@ fn a_restarted_devnode_refuses_to_re_sign_a_height_it_already_signed() {
         let _ = node.enter_round(&selection, true);
         assert_eq!(node.height(), 1, "the node signed height one but did not finalise it");
         assert!(node.fatal().is_none(), "signing the first height is permitted");
-        // Drop the node without finalising, so nothing lands in the block store but the
-        // sign watermark is persisted at height one.
     }
 
     let mut restarted = DevNode::open(&cfg.nodes[0], &cfg).expect("reopen");

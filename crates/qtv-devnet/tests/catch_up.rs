@@ -1,9 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! A node that missed a stretch of finalized heights catches up by verified sync
-//! and ends byte identical to the nodes that never left.
-
 mod support;
 
 use qtv_node::fee::FeeParams;
@@ -23,7 +20,6 @@ fn a_node_that_missed_a_stretch_catches_up_and_matches() {
     let mut devnet =
         Devnet::over_duplex(config(&base, &[true, true, true, true], accounts)).expect("devnet");
 
-    // All four nodes finalize two heights together.
     for nonce in 0..2u64 {
         let tx = transfer(&alice, &bob.address(), 1_000, nonce, &params);
         devnet.submit(0, tx).expect("admitted");
@@ -32,8 +28,6 @@ fn a_node_that_missed_a_stretch_catches_up_and_matches() {
     let lagging = devnet.len() - 1;
     let height_before = devnet.node(lagging).height();
 
-    // The last node drops offline and misses a stretch of heights the online
-    // supermajority keeps finalizing.
     devnet.set_active(lagging, false);
     for nonce in 2..5u64 {
         let tx = transfer(&alice, &bob.address(), 1_000, nonce, &params);
@@ -51,13 +45,9 @@ fn a_node_that_missed_a_stretch_catches_up_and_matches() {
         "the lagging node advanced nothing while offline"
     );
 
-    // It comes back and catches up over the wire, verifying every finalized block
-    // before it accepts it, without finalizing a fresh height.
     devnet.set_active(lagging, true);
     devnet.sync().expect("catch up sync");
 
-    // It reached the group height, and the whole chain it holds is byte identical to
-    // a peer that never left.
     assert_eq!(devnet.node(lagging).height(), tip);
     let lagging_headers: Vec<[u8; 32]> =
         devnet.node(lagging).chain().iter().map(|b| b.header_hash()).collect();
@@ -73,6 +63,5 @@ fn a_node_that_missed_a_stretch_catches_up_and_matches() {
         devnet.node(0).stored_blocks(),
         "the synced node did not persist the whole chain"
     );
-    // A synced node is never slashed, and it slashes no one.
     assert!(devnet.node(lagging).slashed().is_empty());
 }

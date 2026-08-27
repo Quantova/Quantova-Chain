@@ -1,10 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Trustless sync refuses a forged chain. A block whose certificate does not
-//! verify, whose parent link is wrong, or whose state root is wrong is rejected
-//! and does not advance the syncing node, while the genuine block is accepted.
-
 mod support;
 
 use qtv_block::{Block as ChainBlock, Header};
@@ -25,14 +21,12 @@ fn a_forged_block_is_rejected_and_does_not_advance_the_node() {
     let mut devnet =
         Devnet::over_duplex(config(&base, &[true, true, true, true], accounts)).expect("devnet");
 
-    // Finalize a stretch so the peers hold a chain to serve.
     for nonce in 0..2u64 {
         let tx = transfer(&alice, &bob.address(), 1_000, nonce, &params);
         devnet.submit(0, tx).expect("admitted");
         devnet.step().expect("finalized");
     }
 
-    // One node drops offline for a single height, so it needs exactly that block.
     let victim = devnet.len() - 1;
     devnet.set_active(victim, false);
     let tx = transfer(&alice, &bob.address(), 1_000, 2, &params);
@@ -49,7 +43,6 @@ fn a_forged_block_is_rejected_and_does_not_advance_the_node() {
     );
     let header = genuine.header();
 
-    // A wrong parent link: the same block re-linked to a head it does not follow.
     let mut wrong_parent_hash = *header.parent_hash();
     wrong_parent_hash[0] ^= 255;
     let forged_parent = ChainBlock::new(
@@ -73,8 +66,6 @@ fn a_forged_block_is_rejected_and_does_not_advance_the_node() {
         "a bad parent advanced it"
     );
 
-    // A wrong state root: the genuine header over an emptied body no longer
-    // reproduces the committed state root.
     let forged_state = ChainBlock::new(header.clone(), genuine.certificate().to_vec(), Vec::new());
     assert!(devnet.apply_synced(victim, forged_state).is_err());
     assert_eq!(
@@ -83,8 +74,6 @@ fn a_forged_block_is_rejected_and_does_not_advance_the_node() {
         "a bad state root advanced it"
     );
 
-    // A certificate that does not verify: one signature byte flipped, so the
-    // aggregate no longer proves an entitled supermajority.
     let mut cert = genuine.certificate().to_vec();
     let last = cert.len() - 1;
     cert[last] ^= 1;
@@ -96,7 +85,6 @@ fn a_forged_block_is_rejected_and_does_not_advance_the_node() {
         "a bad certificate advanced it"
     );
 
-    // The genuine block still verifies and advances the node one height.
     devnet
         .apply_synced(victim, genuine)
         .expect("the verified block is accepted");

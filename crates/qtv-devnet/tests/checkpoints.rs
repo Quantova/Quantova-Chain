@@ -1,9 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The node build carries a recent finalised weak subjectivity checkpoint and refuses to
-//! sync across a block that conflicts with it, and it advances the checkpoint each epoch.
-
 mod support;
 
 use qtv_devnet::config::{DevnetConfig, NodeConfig};
@@ -55,7 +52,6 @@ fn config_with_slots(base: &std::path::Path, online: &[bool], slots: u64) -> Dev
 fn a_fork_before_the_checkpoint_is_refused() {
     let online = [true, true, true, false];
 
-    // The honest chain, whose height one value the node trusts as its checkpoint.
     let base_a = unique_base("wscp-honest");
     let cfg_a = config(&base_a, &online, vec![]);
     let mut honest_net = Devnet::over_duplex(cfg_a.clone()).expect("honest devnet");
@@ -67,8 +63,6 @@ fn a_fork_before_the_checkpoint_is_refused() {
         .expect("the honest height one block");
     let honest_value = header_value(&honest.header_hash());
 
-    // A fork with the same validators but a different genesis time, so height one carries a
-    // different value while still finalising under a real certificate.
     let base_b = unique_base("wscp-fork");
     let mut cfg_b = config(&base_b, &online, vec![]);
     cfg_b.genesis_time = GENESIS_TIME + 1_000_000;
@@ -82,8 +76,6 @@ fn a_fork_before_the_checkpoint_is_refused() {
     let fork_value = header_value(&fork.header_hash());
     assert_ne!(honest_value, fork_value, "the fork carries a different value at the checkpoint height");
 
-    // A fresh node that carries the honest checkpoint. It refuses the fork at the checkpoint
-    // height before it ever checks the certificate, then syncs the honest chain that matches.
     let mut node = DevNode::open(&cfg_a.nodes[3], &cfg_a).expect("verifier node");
     node.set_checkpoint(Checkpoint {
         height: 1,
@@ -109,7 +101,6 @@ fn the_node_advances_its_checkpoint_each_epoch() {
 
     assert!(devnet.node(0).checkpoint().is_none(), "no checkpoint before the first epoch closes");
 
-    // Run across two epoch boundaries.
     for _ in 0..(2 * epoch_len) {
         devnet.step().expect("finalised a height across the epochs");
     }
@@ -120,7 +111,6 @@ fn the_node_advances_its_checkpoint_each_epoch() {
         2 * epoch_len,
         "the checkpoint tracks the latest epoch boundary"
     );
-    // Every node landed on the same checkpoint, so it is agreed and not a local artifact.
     for i in 1..devnet.len() {
         assert_eq!(
             devnet.node(i).checkpoint(),

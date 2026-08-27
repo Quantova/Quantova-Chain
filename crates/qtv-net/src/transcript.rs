@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use qtv_crypto::sha3;
 
 pub const LABEL: &[u8] = b"qtv-net/handshake/v1";

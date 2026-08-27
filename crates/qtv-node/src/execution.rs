@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use qtv_codec::{Decoder, Encoder};
 use qtv_tx::Call;
 use qtv_vm::asm::assemble;
@@ -80,10 +79,6 @@ pub fn execute_transfer(
     memory[..32].copy_from_slice(&sender_key);
     memory[32..].copy_from_slice(&recipient_key);
 
-    // This is the one fixed, trusted transfer program, so it takes the manifest free interpreter
-    // path. That path does not enforce declared slot isolation, so attacker supplied container
-    // bytecode must never reach here. Every deployed container runs through execute_contract_call,
-    // which sets a manifest and enforces storage isolation.
     let outcome = Interpreter::new(&code, &consts, meter_limit)
         .with_storage(storage)
         .with_memory(&memory)
@@ -122,9 +117,6 @@ fn read_be_u64(bytes: &[u8], pos: &mut usize) -> Option<u64> {
     Some(u64::from_be_bytes(word.try_into().ok()?))
 }
 
-/// A hostile container could declare an enormous slot list to force unmetered work when the machine
-/// builds its manifest set at dispatch. A real contract declares at most its own state fields and map
-/// bases, far below this ceiling, so a list above it is refused at decode rather than allocated.
 const MAX_SLOTS_PER_LIST: usize = 1 << 16;
 
 fn read_slots(bytes: &[u8], pos: &mut usize) -> Option<Vec<u64>> {
@@ -171,10 +163,6 @@ pub fn decode_container(bytes: &[u8]) -> Option<qtv_vm::container::Container> {
         let offset = read_be_u32(bytes, &mut pos)?;
         let reads = read_slots(bytes, &mut pos)?;
         let writes = read_slots(bytes, &mut pos)?;
-        // The canonical container carries the keyed manifest, the map bases an entry may read and
-        // write, right after the scalar reads and writes. Decoding them in the same order the VM
-        // encodes them keeps this decoder in step with the format, so a deployed container carries its
-        // keyed authorisation on chain and map writes are not rejected as undeclared.
         let keyed_reads = read_slots(bytes, &mut pos)?;
         let keyed_writes = read_slots(bytes, &mut pos)?;
         entries.push(Entry {
@@ -203,10 +191,6 @@ pub fn execute_contract_call(
         .checked_sub(access_cost)
         .ok_or(ExecError::MeterExhausted)?;
     let container = decode_container(container_bytes).ok_or(ExecError::BadContainer)?;
-    // Validate the selector exists, then dispatch every entry under its storage manifest, including the
-    // first entry at code offset zero. Routing offset zero through Interpreter::new would leave the
-    // manifest unset and silently drop the declared slot enforcement, the dispatch meter, and the
-    // instruction boundary jump checks for the first entry of every contract.
     container
         .entry_offset(&selector)
         .ok_or(ExecError::BadContainer)?;
@@ -235,14 +219,14 @@ mod tests {
     #[test]
     fn a_container_with_a_huge_count_is_refused_without_a_giant_allocation() {
         let mut bytes = b"QVM1".to_vec();
-        bytes.extend_from_slice(&0u32.to_be_bytes()); // code length zero
-        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // a hostile constant count
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
         assert!(decode_container(&bytes).is_none());
 
         let mut bytes = b"QVM1".to_vec();
-        bytes.extend_from_slice(&0u32.to_be_bytes()); // code length zero
-        bytes.extend_from_slice(&0u32.to_be_bytes()); // no constants
-        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // a hostile entry count
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
         assert!(decode_container(&bytes).is_none());
     }
 

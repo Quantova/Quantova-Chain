@@ -1,17 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Signature verification throughput. This is the piece that decides whether the block path is
-//! verify bound or state bound. It builds signed transfers, then verifies them across the cores and
-//! reports the verifies a second, sequential and parallel. Set beside the pure virtual machine figure
-//! and the full block figure, it says which half of the path to parallelise to reach the target: if
-//! parallel verify sits far above the target then verify is not the ceiling and the state trie is, if
-//! it sits at or below the target then verification itself needs aggregation or a faster scheme.
-//!
-//! Run it in release:
-//!   cargo run --release --example verify_bench -p qtv-node
-//! Arguments: signature count (default 100000), threads (default all cores).
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Instant;
@@ -78,7 +67,6 @@ fn main() {
     let fee_amount = u128::from(fee.transfer_fee());
 
     let senders: Vec<KeyAccount> = parallel_build(count, threads, |i| derive(&SEED, i as u64));
-    // Signed transfers paired with the signer public key the verifier checks against.
     let signed: Vec<(Wrapper, Vec<u8>)> = parallel_build(count, threads, |i| {
         let recipient = tagged_address(1, i as u64);
         let call = transfer_call(&recipient, 100);
@@ -86,7 +74,6 @@ fn main() {
         (sign(&senders[i], &body), senders[i].public_key().to_vec())
     });
 
-    // Sequential verify, the per core figure.
     let seq: Vec<f64> = (0..3)
         .map(|_| {
             let start = Instant::now();
@@ -101,7 +88,6 @@ fn main() {
         })
         .collect();
 
-    // Parallel verify across the cores.
     let par: Vec<f64> = (0..5)
         .map(|_| {
             let next = AtomicUsize::new(0);

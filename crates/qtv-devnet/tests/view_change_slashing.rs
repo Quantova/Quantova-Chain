@@ -1,12 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! A view change record carries two attestations the honest signer casts at one height:
-//! the view change vote over the view change subject, and the lock proof over the block it
-//! locked. When the signer has not left its lock view, both ride at the same view over two
-//! different subjects. The equivocation slasher must not read that honest pair as a double
-//! vote, or any locked validator that broadcasts a view change is framed and banned.
-
 mod support;
 
 use qtv_node::consensus::{
@@ -96,8 +90,6 @@ fn an_honest_view_change_is_not_a_slashable_equivocation() {
         "the view change subject and the prevote subject are two different subjects"
     );
 
-    // A hostile reporter lifts the two signatures out of the one honest view change message
-    // and offers them as a same view double vote.
     let roster: Vec<ValidatorRegistration> = roster_of(
         &(1..=config.nodes.len() as u64)
             .map(|id| {

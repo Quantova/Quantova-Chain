@@ -1,9 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The three gossip messages round trip through the canonical codec, and a
-//! message that does not parse is refused at the edge.
-
 mod support;
 
 use qtv_attest::aggregate::aggregate;
@@ -18,9 +15,6 @@ use qtv_devnet::wire::{certificate_from_bytes, certificate_to_bytes, Message, Pr
 
 use support::{transfer, user};
 
-// A fixed chain id for the self contained round trips. The sign, aggregate and verify sides
-// all rebuild the preimage under the same id, so the certificate that is signed here is the
-// one that verifies here.
 const CHAIN_ID: u64 = 1;
 
 #[test]
@@ -99,7 +93,6 @@ fn a_coded_proposal_shard_round_trips_and_still_verifies() {
         body,
         justification: Vec::new(),
     };
-    // Code the proposal into its shards and round trip one shard message.
     let shards = code_proposal(&proposal).expect("code the proposal");
     let shard = shards[1].clone();
     let bytes = Message::CodedProposal(Box::new(shard.clone())).encode();
@@ -111,7 +104,6 @@ fn a_coded_proposal_shard_round_trips_and_still_verifies() {
             assert_eq!(decoded.shard, shard.shard);
             assert_eq!(decoded.proof, shard.proof);
             assert!(decoded.justification.is_empty());
-            // The shard still authenticates against its commitment after the wire.
             assert!(decoded.commitment.verify_shard(&decoded.shard, &decoded.proof));
         }
         _ => panic!("decoded a different message"),
@@ -137,7 +129,6 @@ fn an_attestation_message_round_trips_and_still_verifies() {
             assert_eq!(decoded.membership.preimage, attestation.membership.preimage);
             assert_eq!(decoded.membership.path, attestation.membership.path);
             assert_eq!(decoded.sig, attestation.sig);
-            // The signature survives the wire and still verifies under the key.
             assert!(decoded.signature_verifies(CHAIN_ID, attester.attest_public_key()));
         }
         _ => panic!("decoded a different message"),
@@ -182,8 +173,6 @@ fn a_status_and_a_block_request_round_trip() {
 
 #[test]
 fn a_certificate_carrying_block_round_trips_and_still_verifies() {
-    // Build a real stage one certificate, saturating each member share so a valid
-    // draw is entitled, exactly as the aggregation layer is exercised.
     let a = Attester::from_secret(1, &[1u8; 32], 100);
     let b = Attester::from_secret(2, &[2u8; 32], 100);
     let c = Attester::from_secret(3, &[3u8; 32], 100);
@@ -198,15 +187,11 @@ fn a_certificate_carrying_block_round_trips_and_still_verifies() {
     ];
     let cert = aggregate(CHAIN_ID, 1, 0, block, &commitment, &beacon, &atts, 3).expect("quorum");
 
-    // The certificate slot round trips to the same certificate, and it still
-    // verifies from public inputs alone, the check a syncing node runs.
     let cert_bytes = certificate_to_bytes(&cert);
     let decoded = certificate_from_bytes(&cert_bytes).expect("cert decodes");
     assert_eq!(decoded.digest(), cert.digest());
     assert!(decoded.verify(CHAIN_ID, &commitment, &beacon, 3).is_verified());
 
-    // A finalized block carrying the certificate round trips through the sync
-    // response, header, slot, and body preserved.
     let header = Header::new(
         1,
         [0u8; 32],
@@ -236,15 +221,12 @@ fn the_content_id_is_stable_and_separates_messages() {
     let bob = user(1);
     let one = transfer(&alice, &bob.address(), 1, 0, &params);
     let two = transfer(&alice, &bob.address(), 2, 1, &params);
-    // The same message hashes to the same id, distinct messages to distinct ids.
     assert_eq!(Message::Tx(one.clone()).id(), Message::Tx(one.clone()).id());
     assert_ne!(Message::Tx(one).id(), Message::Tx(two).id());
 }
 
 #[test]
 fn a_malformed_message_is_refused() {
-    // An unknown tag, a truncated body, and empty input all fail to parse and are
-    // dropped rather than admitted.
     assert!(Message::decode(&[]).is_err());
     assert!(Message::decode(&[9u8]).is_err());
     assert!(Message::decode(&[1u8, 0, 0]).is_err());

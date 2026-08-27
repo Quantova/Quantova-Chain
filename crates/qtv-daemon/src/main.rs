@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 #[cfg(panic = "abort")]
 compile_error!(
     "quantovad must be built with panic=unwind: the virtual machine contains a panicking post \

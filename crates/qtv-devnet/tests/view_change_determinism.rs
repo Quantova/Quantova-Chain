@@ -1,11 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The view change is deterministic over the logical clock. A round that routes
-//! around a silent first leader, and so finalizes through a view change and its
-//! justification rather than at view zero, replays to the identical finalized
-//! chain and state across runs.
-
 mod support;
 
 use qtv_node::fee::FeeParams;
@@ -15,9 +10,6 @@ use qtv_devnet::Devnet;
 
 use support::{config, header_chain, transfer, unique_base, user};
 
-/// Run one fixed view change script over a fresh devnet: silence the view zero
-/// leader so the height finalizes only through the view change, then return the
-/// finalized chain bytes and the state root.
 fn run_view_change(name: &str, params: &FeeParams) -> (Vec<[u8; 32]>, [u8; 32]) {
     let base = unique_base(name);
     let alice = user(0);

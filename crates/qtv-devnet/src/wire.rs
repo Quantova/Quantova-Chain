@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use qtv_attest::{Attestation, Block, Certificate, Envelope, Parent};
 use qtv_block::{Block as ChainBlock, Header};
 use qtv_codec::{Decoder, Encode, Encoder, Error as CodecError};
@@ -86,8 +85,6 @@ pub struct ViewChange {
     pub polka: Option<Certificate>,
 }
 
-/// A validator's own sortition reveal for a height, its height, author id, and
-/// credential, published so peers admit it to the committee.
 #[derive(Clone)]
 pub struct RevealNote {
     pub height: u64,
@@ -95,9 +92,6 @@ pub struct RevealNote {
     pub credential: Credential,
 }
 
-/// A validator's signed re registration of its rotated one time sortition root for an
-/// epoch. The signature is over the id, epoch, and root under the validator's stable
-/// attestation key, so a peer admits the new root without holding the validator's secret.
 #[derive(Clone)]
 pub struct RegisterNote {
     pub height: u64,

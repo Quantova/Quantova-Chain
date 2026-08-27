@@ -1,9 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The handshake rejects a tampered transcript, a wrong identity signature, and
-//! a man in the middle, and the channel tears down on a tampered record.
-
 use std::io::{self, Read, Write};
 use std::thread;
 
@@ -14,8 +11,6 @@ fn identity(seed: u8) -> Identity {
     Identity::from_seed(&[seed; 32])
 }
 
-/// A stream wrapper that flips one bit of the byte at a fixed absolute write
-/// offset, a man in the middle that corrupts a single byte on the wire.
 struct FlipWrite<S> {
     inner: S,
     position: u64,
@@ -55,22 +50,16 @@ impl<S: Read> Read for FlipWrite<S> {
     }
 }
 
-// ServerHello is the responder public key, the ephemeral encapsulation key, the
-// server nonce, and the responder signature, in that order.
 const SERVER_HELLO_ENCAPS_OFFSET: u64 = ml_dsa::PUBLIC_KEY_BYTES as u64;
 const SERVER_HELLO_SIGNATURE_OFFSET: u64 =
     (ml_dsa::PUBLIC_KEY_BYTES + ml_kem::ENCAPS_KEY_BYTES + 32) as u64;
 
-// The initiator writes ClientHello then ClientFinish before any record.
 const CLIENT_HANDSHAKE_BYTES: u64 =
     (ml_dsa::PUBLIC_KEY_BYTES + 32 + ml_kem::CIPHERTEXT_BYTES + ml_dsa::SIGNATURE_BYTES) as u64;
 
 #[test]
 fn a_tampered_transcript_is_rejected() {
     let (client_stream, server_stream) = duplex();
-    // Flip a byte inside the ephemeral key the responder sends. The responder
-    // signed the honest transcript, so the initiator recomputes a different
-    // transcript and the signature no longer verifies.
     let corrupted = FlipWrite::at(server_stream, SERVER_HELLO_ENCAPS_OFFSET);
     let responder = identity(6);
     let server = thread::spawn(move || Channel::accept(corrupted, &responder));
@@ -83,8 +72,6 @@ fn a_tampered_transcript_is_rejected() {
 #[test]
 fn a_wrong_identity_signature_is_rejected() {
     let (client_stream, server_stream) = duplex();
-    // Flip a byte inside the responder signature. The transcript is intact but
-    // the signature no longer verifies under the presented identity.
     let corrupted = FlipWrite::at(server_stream, SERVER_HELLO_SIGNATURE_OFFSET);
     let responder = identity(8);
     let server = thread::spawn(move || Channel::accept(corrupted, &responder));
@@ -99,9 +86,6 @@ fn a_man_in_the_middle_without_the_identity_key_cannot_authenticate() {
     let (client_stream, server_stream) = duplex();
     let victim = identity(9);
     let expected = victim.peer_id();
-    // The attacker holds its own identity key, not the victim key, and runs an
-    // honest handshake. The initiator pinned the victim, so the attacker is
-    // refused even though its own signature verifies.
     let attacker = identity(200);
     let server = thread::spawn(move || Channel::accept(server_stream, &attacker));
 
@@ -113,8 +97,6 @@ fn a_man_in_the_middle_without_the_identity_key_cannot_authenticate() {
 #[test]
 fn a_tampered_record_tears_down_the_channel() {
     let (client_stream, server_stream) = duplex();
-    // Let the handshake complete, then flip the first ciphertext byte of the
-    // first record the initiator sends.
     let corrupted = FlipWrite::at(client_stream, CLIENT_HANDSHAKE_BYTES + 4);
     let responder = identity(12);
     let responder_side = responder.clone();

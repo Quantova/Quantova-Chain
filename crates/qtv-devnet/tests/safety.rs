@@ -1,10 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Safety under asynchronous timing, message reordering, and a view change. No
-//! two nodes finalize different blocks at one height: the finalized block and the
-//! certificate are byte identical across nodes at every height.
-
 mod support;
 
 use qtv_node::fee::FeeParams;
@@ -24,9 +20,6 @@ fn no_two_nodes_finalize_different_blocks_at_a_height() {
     let mut devnet =
         Devnet::over_duplex(config(&base, &[true, true, true, true], accounts)).expect("devnet");
 
-    // Reorder the wire and force a view change at the first height by silencing its
-    // elected leader, so the height finalizes only through the rotation while
-    // records arrive out of order.
     devnet.set_network(Network::reordering());
     let silent = devnet.peek_leader().expect("view zero leader");
     let next = devnet.leader_at(1).expect("view one leader");
@@ -44,15 +37,12 @@ fn no_two_nodes_finalize_different_blocks_at_a_height() {
             .expect("finalized under reordering and a view change");
     }
 
-    // The first height finalized through the view change, not the silent leader.
     let first = devnet.node(0).chain().first().expect("a first block");
     assert_eq!(
         first.leader, next,
         "the first height did not route around the silent leader"
     );
 
-    // Safety: at every height, every node holds the identical finalized block and
-    // certificate, so no two nodes finalized different blocks at one height.
     let reference = header_chain(devnet.node(0));
     assert_eq!(reference.len(), heights as usize);
     for i in 1..devnet.len() {
@@ -68,7 +58,6 @@ fn no_two_nodes_finalize_different_blocks_at_a_height() {
         }
     }
 
-    // The state root agrees across nodes and no node was slashed.
     let root = devnet.node(0).ledger().q_root();
     for i in 0..devnet.len() {
         assert_eq!(devnet.node(i).ledger().q_root(), root, "node {i} state");

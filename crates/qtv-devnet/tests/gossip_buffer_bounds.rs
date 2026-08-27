@@ -1,12 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! A connected peer picks the view a proposal or a view change targets, and the
-//! target view is not gated by any bound. Left unbounded the future proposal buffer
-//! and the view change buffer grow one entry per distinct target view a peer emits,
-//! so a single peer floods a node's memory. These drive the two buffers with a flood
-//! of distinct far views straight over the node and prove each buffer stays bounded.
-
 mod support;
 
 use qtv_devnet::config::DevnetConfig;
@@ -47,11 +41,8 @@ fn a_flood_of_far_view_proposals_stays_bounded_in_the_future_buffer() {
     let leader0 = leader_for(&selection, 0);
     let leader0_idx = index_of(&config, leader0);
 
-    // One valid proposal at the height, cloned to every far view so buffering, not
-    // acceptance, is what the flood exercises.
     let base_proposal = nodes[leader0_idx].build_proposal(&selection);
 
-    // The victim stays at view zero, so every proposal for a higher view is buffered.
     let victim = (0..nodes.len())
         .find(|&i| i != leader0_idx)
         .expect("a non leader victim");
@@ -80,8 +71,6 @@ fn a_flood_of_distinct_target_views_stays_bounded_per_sender() {
 
     let selection = nodes[0].select().expect("committee");
 
-    // One committee member signs a valid view change for a run of distinct target
-    // views, every record authenticating, and floods them at a peer.
     let flood: u64 = 1_000;
     let mut records = Vec::with_capacity(flood as usize);
     for view in 1..=flood {

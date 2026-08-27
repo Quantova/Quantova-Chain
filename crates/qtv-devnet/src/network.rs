@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use crate::clock::{Time, SLOT_MS};
 
 const DELIVER_MS: Time = 5;

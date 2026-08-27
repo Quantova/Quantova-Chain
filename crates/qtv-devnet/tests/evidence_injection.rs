@@ -1,9 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The block leader carries the equivocation it attributed into the block it produces, so
-//! every node that executes the block slashes the offender from the block alone.
-
 mod support;
 
 use qtv_attest::Attester;
@@ -27,7 +24,6 @@ fn the_leader_carries_attributed_evidence_into_the_block_it_produces() {
             .collect::<Vec<_>>()
     };
 
-    // The leader collects every peer's reveal so it draws a full committee.
     let reveals: Vec<_> = open()
         .iter()
         .map(|node| node.own_reveal_note().expect("a selected validator publishes"))
@@ -45,13 +41,10 @@ fn the_leader_carries_attributed_evidence_into_the_block_it_produces() {
     );
     assert!(!leader.ledger().is_validator_banned(&offender));
 
-    // Feed the leader the two conflicting attestations the offender signed at this height.
     let secret = qtv_node::keys::fixture_secret(offender_id);
     let attester =
         Attester::from_secret_with_slots(offender_id, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
     let beacon = genesis_beacon();
-    // Sign under the chain the leader runs on, the id the executor rebuilds the preimage with
-    // when it slashes from the carried evidence.
     let chain_id = cfg.fee_params.chain_id;
     let height = leader.height();
     let block_a = Block::new(height, [1u8; 32], Parent::Genesis);
@@ -69,7 +62,6 @@ fn the_leader_carries_attributed_evidence_into_the_block_it_produces() {
         .count();
     assert_eq!(carried, 1, "the produced block carries the attributed evidence");
 
-    // Any node that executes the produced body reaches the same slash from the block alone.
     let fresh = open().into_iter().next().expect("a node that saw no attestation");
     assert!(!fresh.ledger().is_validator_banned(&offender));
     let mut ledger = fresh.ledger().clone();

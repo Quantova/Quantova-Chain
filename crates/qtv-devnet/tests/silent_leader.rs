@@ -1,9 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Leader liveness: a silent first leader does not stall the chain. Its view
-//! times out, the next leader in rotation proposes, and the height finalizes.
-
 mod support;
 
 use qtv_node::fee::FeeParams;
@@ -23,14 +20,10 @@ fn a_silent_first_leader_is_routed_around_by_a_view_change() {
     let mut devnet =
         Devnet::over_duplex(config(&base, &[true, true, true, true], accounts)).expect("devnet");
 
-    // The elected leader of view zero and the next leader in rotation, captured
-    // before the height is produced.
     let silent = devnet.peek_leader().expect("view zero leader");
     let next = devnet.leader_at(1).expect("view one leader");
     assert_ne!(silent, next, "the rotation moves to a different leader");
 
-    // Silence the first leader: it stays online and attests, but withholds its
-    // proposal, so view zero must time out.
     let silent_index = devnet
         .index_of(silent)
         .expect("the silent leader is a node");
@@ -42,7 +35,6 @@ fn a_silent_first_leader_is_routed_around_by_a_view_change() {
         .step()
         .expect("the timeout routed around the silent leader");
 
-    // Every node finalized the height, from the block the next leader proposed.
     for i in 0..devnet.len() {
         assert_eq!(
             devnet.node(i).chain().len(),
@@ -56,7 +48,6 @@ fn a_silent_first_leader_is_routed_around_by_a_view_change() {
         );
     }
 
-    // The chains are byte identical across nodes.
     let reference = header_chain(devnet.node(0));
     for i in 1..devnet.len() {
         assert_eq!(
@@ -66,8 +57,6 @@ fn a_silent_first_leader_is_routed_around_by_a_view_change() {
         );
     }
 
-    // The silent leader still attested the block and is never slashed for being
-    // silent. A view change is not a fault.
     let finalized = devnet.node(0).chain().last().expect("a finalized block");
     assert!(
         finalized.attesters.contains(&silent),
@@ -80,6 +69,5 @@ fn a_silent_first_leader_is_routed_around_by_a_view_change() {
         );
     }
 
-    // The transfer still landed.
     assert_eq!(devnet.node(0).ledger().balance(&bob.address()), 1_000);
 }

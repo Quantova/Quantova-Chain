@@ -1,39 +1,13 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Fault injection over the real wide area validator processes.
-//!
-//! This is the test that proves the wide area number will be honest before any host is
-//! provisioned. It stands the real validator binary up on this one host over real
-//! localhost sockets, the same substrate a real run uses with only the peer addresses
-//! changed, and it injects the three faults a wide area run will meet: a slow host, one
-//! host dropping, and two hosts dropping. It asserts the harness degrades honestly under
-//! each and never turns a broken run into a clean looking number.
-//!
-//! Finality reaches an absolute threshold derived from the registered committee, not a
-//! fraction of whoever published. A slow host is still a present committee member, so the
-//! round waits for it and the tail of the slow run is wider than the healthy tail. One
-//! host dropping leaves three publishers, which still meets the threshold, so the run
-//! finalises the whole run at zero margin over the three that remain. Two hosts dropping
-//! leaves two publishers, a minority below the threshold, so no height finalises however
-//! the two rotate the view, and the run reports the stall, never a number.
-//!
-//! Every figure here is a loopback multi process figure over real sockets with near zero
-//! propagation, exactly as the loopback run was labelled. It is not a network number.
-
 use qtv_widearea::local::{run_scenario, Scenario};
 use qtv_widearea::RunReport;
 
-/// The validator binary cargo built for this test, so the test drives the exact binary a
-/// real host runs.
 fn validator_bin() -> String {
     env!("CARGO_BIN_EXE_qtv-validator-wide").to_string()
 }
 
-/// A small fast scenario shared by the faults, so the whole test runs in seconds. The
-/// registered committee is four and the absolute threshold three, the block width small so
-/// a healthy height finalises in tens of milliseconds well under the view timeout, and the
-/// run is a short fixed height count so every up host stops together.
 fn base_scenario() -> Scenario {
     Scenario {
         validators: 4,
@@ -49,8 +23,6 @@ fn base_scenario() -> Scenario {
     }
 }
 
-/// The ingress host's report, index zero, the host that drives the workload and whose
-/// measurement the run reports.
 fn ingress(reports: &[RunReport]) -> RunReport {
     reports
         .iter()
@@ -61,8 +33,6 @@ fn ingress(reports: &[RunReport]) -> RunReport {
 
 #[test]
 fn faults_degrade_honestly_over_real_sockets() {
-    // The healthy baseline. Four up hosts, no fault, the committee is the whole
-    // registered set and finality reaches the absolute threshold with a margin.
     let healthy = base_scenario();
     let healthy_reports = run_scenario(&healthy);
     let base = ingress(&healthy_reports);
@@ -79,9 +49,6 @@ fn faults_degrade_honestly_over_real_sockets() {
         );
     }
 
-    // Fault two, one host dropping. Host three is down, so three of four publish. Three
-    // meets the absolute threshold, so the run still finalises the whole height count over
-    // the three that remain, now at zero margin. The committee is the three publishers.
     let mut drop_one = base_scenario();
     drop_one.up[3] = false;
     let drop_one_reports = run_scenario(&drop_one);
@@ -101,9 +68,6 @@ fn faults_degrade_honestly_over_real_sockets() {
         );
     }
 
-    // Fault three, two hosts dropping. Hosts two and three are down, so two of four
-    // publish. Two is below the absolute threshold, so no height reaches it however the two
-    // rotate the view, and the run reports the stall rather than finalising on a minority.
     let mut drop_two = base_scenario();
     drop_two.up[2] = false;
     drop_two.up[3] = false;

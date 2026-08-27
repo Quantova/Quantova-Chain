@@ -1,11 +1,8 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Round trip and rejection coverage for the canonical codec.
-
 use qtv_codec::{from_bytes, to_bytes, Decode, Decoder, Encode, Encoder, Error};
 
-/// A structure that carries one field of every primitive kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Header {
     version: u8,
@@ -37,12 +34,10 @@ impl Decode for Header {
     }
 }
 
-/// The tag bytes that name the variants of a frame.
 const TAG_PING: u8 = 0;
 const TAG_ECHO: u8 = 1;
 const TAG_SEQ: u8 = 2;
 
-/// A tagged value with three variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Frame {
     Ping,
@@ -77,7 +72,6 @@ impl Decode for Frame {
     }
 }
 
-/// A sample header used across the round trip checks.
 fn sample_header() -> Header {
     Header {
         version: 7,

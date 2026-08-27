@@ -1,8 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! A message sealed by one peer opens on the other and matches.
-
 use std::thread;
 
 use qtv_net::{duplex, Channel, DuplexStream, Identity};

@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use qtv_devnet::wire::wrapper_from_bytes;
 use qtv_devnet::DevNode;
 use qtv_node::fee::FeeParams;
@@ -702,7 +701,6 @@ fn transaction(node: &DevNode, tx_id: &str) -> Json {
     }
 }
 
-// Cap list entries per RPC response, so a large mempool or contract cannot build a huge string on the consensus thread.
 const MAX_LIST_ITEMS: usize = 1_000;
 
 const MAX_LIST_RESPONSE_BYTES: usize = 512 * 1024;

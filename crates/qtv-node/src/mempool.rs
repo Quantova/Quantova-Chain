@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::collections::HashSet;
 use std::thread;
 
@@ -250,7 +249,6 @@ fn candidate_order(a: &Wrapper, b: &Wrapper, ceiling: u128) -> std::cmp::Orderin
 #[derive(Debug, Clone)]
 pub struct Mempool {
     pending: Vec<Wrapper>,
-    // Ids currently in pending, kept in sync, so the duplicate check is O(1) not an O(n) rehash.
     ids: HashSet<String>,
     cap: usize,
     per_sender: usize,
@@ -262,8 +260,6 @@ pub struct Mempool {
     mint_attempts: usize,
     settle_attempts: usize,
     guardian_attempts: usize,
-    // The capped fee actually charged bounds inclusion and eviction ranking, so a bid above the
-    // ceiling buys no priority it never pays for. Refreshed from the fee params on every admit.
     ceiling: u128,
 }
 
@@ -300,8 +296,6 @@ impl Mempool {
         }
     }
 
-    // Remove the pending entry at `index`, keeping the id set in sync. Used by the
-    // eviction paths, which are the only places a pending entry leaves by index.
     fn remove_at(&mut self, index: usize) -> Wrapper {
         let wrapper = self.pending.remove(index);
         self.ids.remove(&wrapper.id());
@@ -383,7 +377,6 @@ impl Mempool {
         true
     }
 
-    // Whether the feeless window has room, without spending it, to reject before the admissibility check.
     fn feeless_has_room(&self) -> bool {
         self.feeless_admits < self.feeless_cap
     }
@@ -495,7 +488,6 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         }
-        // Gate a feeless call before the admissibility check; the window is charged only once it proves admissible.
         if is_feeless(&wrapper) {
             if !self.has_capacity(&wrapper) {
                 return Err(Reject::PoolFull);
@@ -582,7 +574,6 @@ impl Mempool {
             }
             validate(&wrapper, ledger, fee_params)?;
         }
-        // Charge the feeless window only now the call is admissible, so a malformed call cannot spend it.
         if is_feeless(&wrapper) && !self.charge_feeless() {
             return Err(Reject::RateLimited);
         }
@@ -645,7 +636,6 @@ impl Mempool {
                     continue;
                 }
             }
-            // Gate a feeless call before the admissibility check; charged only after it proves admissible.
             if is_feeless(&wrapper)
                 && (!self.has_capacity(&wrapper)
                     || !self.feeless_has_room()
@@ -790,7 +780,6 @@ mod tests {
         let params = FeeParams::devnet();
         let ceiling = u128::from(params.ceiling_fee());
         let mut ledger = Ledger::new();
-        // A single normal slot, so admitting a second normal transaction forces an eviction test.
         let mut pool = Mempool::with_limits(1, 100, 0);
 
         let alice = keypair(1);
@@ -801,8 +790,6 @@ mod tests {
             Ok(Admitted::Fresh)
         ));
 
-        // Bob bids far above the ceiling. His charge is capped at the ceiling, so his effective fee
-        // ties Alice's and he must not be able to evict her at the same real cost.
         let bob = keypair(2);
         fund(&mut ledger, &bob, 1_000_000_000);
         let above_ceiling = signed_transfer(&bob, &keypair(9).address(), 100, 0, u128::MAX);
@@ -961,7 +948,6 @@ mod tests {
         let params = FeeParams::devnet();
         let mut pool = Mempool::new();
 
-        // A forged evidence tx is feeless by target but inadmissible; it must not charge the window.
         let (_bare, forged, _) = seeded_evidence(&[11u8; 32]);
         let empty = Ledger::new();
         assert_eq!(pool.admit(forged, &empty, &params), Err(Reject::BadCall));
@@ -970,7 +956,6 @@ mod tests {
             "an inadmissible feeless call must not spend the feeless window"
         );
 
-        // A genuinely admissible feeless call spends exactly one unit.
         let (ledger, valid, _) = seeded_evidence(&[9u8; 32]);
         assert_eq!(pool.admit(valid, &ledger, &params), Ok(Admitted::Fresh));
         assert_eq!(

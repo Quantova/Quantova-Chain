@@ -1,9 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! A running multi node devnet rotates its one time sortition keys at each epoch
-//! boundary and finalises on past the point a single fixed tree would have run out.
-
 mod support;
 
 use qtv_devnet::config::{DevnetConfig, NodeConfig};
@@ -62,13 +59,10 @@ fn the_running_devnet_rotates_keys_across_epochs_and_finalises_past_the_fixed_ce
     let online = [true, true, true, true];
     let mut devnet = Devnet::over_duplex(config_with_slots(&base, &online, slots)).expect("devnet");
 
-    // Every node starts in the genesis epoch drawing from its fixed tree.
     for i in 0..devnet.len() {
         assert_eq!(devnet.node(i).epoch(), 0);
     }
 
-    // A single fixed tree of this size runs out at `slots`. Drive well past it, across
-    // several epoch boundaries, one finalised height at a time.
     let target = slots * 3 + 2;
     for expected_height in 1..=target {
         devnet.step().expect("the committee finalised the height across the rotation");
@@ -86,8 +80,6 @@ fn the_running_devnet_rotates_keys_across_epochs_and_finalises_past_the_fixed_ce
         "the run did not pass the point a single fixed tree would have run out",
     );
 
-    // The keys rotated across at least two epoch boundaries, and every node landed on
-    // the identical finalised chain, so the rotation is agreed and not a local artifact.
     let reference = header_chain(devnet.node(0));
     assert_eq!(reference.len() as u64, target, "not every height finalised");
     for i in 0..devnet.len() {

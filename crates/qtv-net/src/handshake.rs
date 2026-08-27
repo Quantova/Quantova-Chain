@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
@@ -36,10 +35,6 @@ impl<S: Read + Write> Channel<S> {
     }
 }
 
-// A handshake over a raw socket must not block forever on a peer that opens the
-// connection and then stalls. These constructors hold a read and write deadline
-// over the handshake, so a slow or silent peer is dropped instead of pinning the
-// acceptor, then lift the deadline so the settled channel keeps its blocking reads.
 impl Channel<TcpStream> {
     pub fn accept_with_timeout(
         stream: TcpStream,
@@ -245,7 +240,6 @@ mod tests {
             (outcome.is_err(), start.elapsed())
         });
 
-        // Connect and then send nothing, the classic slow loris.
         let _idle = TcpStream::connect(address).unwrap();
         let (errored, elapsed) = server.join().unwrap();
         assert!(errored, "a silent peer must be dropped, not admitted");
