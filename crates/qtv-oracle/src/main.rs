@@ -186,8 +186,8 @@ fn guardian_keygen(a: &[String]) {
 }
 
 fn guardian_enact_asset(a: &[String]) {
-    if a.len() != 10 {
-        fail("guardian-enact-asset <gsecrets_comma_sep> <chain_id> <enact_nonce> <asset_hex16> <cap> <epoch_cap> <stark 0|1> <relayer_seed_hex> <relayer_index> <fee>");
+    if a.len() != 11 {
+        fail("guardian-enact-asset <gsecrets_comma_sep> <chain_id> <enact_nonce> <asset_hex16> <cap> <epoch_cap> <stark 0|1> <relayer_seed_hex> <relayer_index> <fee> <era_hex32>");
     }
     let chain_id: u64 = a[1].parse().expect("chain_id");
     let enact_nonce: u64 = a[2].parse().expect("enact_nonce");
@@ -198,8 +198,9 @@ fn guardian_enact_asset(a: &[String]) {
     let relayer_seed: [u8; 32] = unhex(&a[7]).try_into().expect("relayer seed");
     let relayer_index: u64 = a[8].parse().expect("relayer_index");
     let fee: u128 = a[9].parse().expect("fee");
+    let era: [u8; 32] = unhex(&a[10]).try_into().expect("era 32 bytes");
     let action = Action::AssetRegister { asset_id, cap, epoch_cap, requires_stark };
-    let challenge = guardian_enact_challenge(chain_id, enact_nonce, &action);
+    let challenge = guardian_enact_challenge(chain_id, &era, enact_nonce, &action);
     let mut approvals: Vec<(u8, Vec<u8>, Vec<u8>)> = Vec::new();
     for path in a[0].split(',') {
         let gsecret = fs::read_to_string(path.trim()).expect("read gsecret");
