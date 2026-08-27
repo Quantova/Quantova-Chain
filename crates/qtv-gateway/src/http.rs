@@ -205,9 +205,6 @@ pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>, allow: Vec<Ip
                 continue;
             }
             if loopback_only {
-                // Behind a same host proxy every client presents as loopback, so the per address
-                // rate and ban logic would throttle the proxy itself. Keep only the global cap, which
-                // still bounds the connection and thread count so the node cannot be exhausted.
                 if !limiter.try_admit_total_only(MAX_CONNECTIONS) {
                     stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
                     let _ =

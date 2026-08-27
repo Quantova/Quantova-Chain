@@ -16,7 +16,6 @@ fn a_genesis_parent_with_a_nonzero_value_is_refused() {
     let attestation = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block, &beacon);
     let bytes = Message::Attest(Box::new(attestation)).encode();
 
-    // The block sits at: tag(1) from(8) height(8) slot(8) view(8) committee(8+32) then
     // block.height(8) block.val(32) parent_tag(1), so the genesis parent value that
     // the encoder wrote as zeros starts here.
     let pv_start = 1 + 8 + 8 + 8 + 8 + (8 + 32) + 8 + 32 + 1;

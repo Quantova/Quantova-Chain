@@ -33,10 +33,6 @@ const BANNED_CRATES: &[&str] = &[
 
 const BANNED_SOURCES: &[&str] = &["q-oracle", "q-prover", "prover-bridge", "oracle"];
 
-// The crates the running node actually links. The oracle side tooling lives in the same workspace as a
-// sibling, so scanning the whole lockfile flags it even though the node never depends on it. Checking the
-// node's own dependency closure is the property that matters, a linked banned crate rather than a name
-// that merely appears in the shared lockfile.
 const NODE_ROOTS: &[&str] = &["qtv-node", "qtv-daemon"];
 
 struct Package {

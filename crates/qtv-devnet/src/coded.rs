@@ -100,7 +100,6 @@ pub fn commitment_in_bounds(commitment: &Commitment) -> bool {
     commitment.k >= 1
         && commitment.n >= commitment.k
         && commitment.n <= erasure::MAX_SHARDS
-        // the honest coder sets n to twice k so a wider spread only inflates the re encode work
         && commitment.n <= commitment.k.saturating_mul(2)
 }
 

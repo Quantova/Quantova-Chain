@@ -261,6 +261,7 @@ pub struct DevNode {
     epoch_roots: HashMap<u64, Root>,
     epoch_notes: HashMap<u64, RegisterNote>,
     epoch_conflicted: HashSet<u64>,
+    epoch_conflict_notes: Vec<RegisterNote>,
     sign_guard: SignGuard,
     finality: FinalityLedger,
     guarded_height: Option<Height>,
@@ -344,6 +345,7 @@ impl DevNode {
             epoch_roots: HashMap::new(),
             epoch_notes: HashMap::new(),
             epoch_conflicted: HashSet::new(),
+            epoch_conflict_notes: Vec::new(),
             sign_guard,
             finality: FinalityLedger::new(),
             guarded_height: None,
@@ -475,6 +477,7 @@ impl DevNode {
             self.epoch_roots.clear();
             self.epoch_notes.clear();
             self.epoch_conflicted.clear();
+            self.epoch_conflict_notes.clear();
         }
         let roster = self.epoch_roster();
         self.consensus.rotate_to_epoch(epoch, roster);
@@ -505,9 +508,6 @@ impl DevNode {
     /// verified against the peer's stable attestation key held in the genesis roster. A
     /// note for another epoch, from an unknown author, or with a signature that does not
     /// authenticate is dropped.
-    /// Returns whether the admitted note changed this node's epoch roster, so a caller only pays
-    /// to re form the committee when a registration actually moved the roster and a replayed or
-    /// duplicate note cannot amplify into repeated roster rebuilds.
     pub fn collect_registration(&mut self, note: RegisterNote) -> bool {
         let epoch = self.consensus.epoch_for(self.height);
         if note.epoch != epoch || note.id == self.id {
@@ -525,10 +525,6 @@ impl DevNode {
         ) {
             return false;
         }
-        // A validator that signs two different rotated roots for one epoch has equivocated its
-        // registration. Keeping either root would let nodes that saw them in different orders
-        // rotate to different committees, so on the first conflict the id is dropped back to its
-        // base roster root, a value every node agrees on regardless of arrival order.
         if self.epoch_conflicted.contains(&note.id) {
             return false;
         }
@@ -592,6 +588,7 @@ impl DevNode {
                 notes.push(note.clone());
             }
         }
+        notes.extend(self.epoch_conflict_notes.iter().cloned());
         notes
     }
 
@@ -632,11 +629,6 @@ impl DevNode {
                     &note.root,
                     &note.sig,
                 ) {
-                    // Resolve a registration conflict exactly as the gossip path does, so a
-                    // validator that anchored two different rotated roots for one epoch falls
-                    // back to its base roster root on every node's reload. Applying the same
-                    // deterministic first writer plus conflict to base rule to the chain
-                    // anchored notes is what keeps the rebuilt roster identical across nodes.
                     if self.epoch_conflicted.contains(&note.id) {
                         continue;
                     }
@@ -717,13 +709,6 @@ impl DevNode {
             self.consensus.rotate_to_epoch(head_epoch, roster);
             *self.selection_cache.borrow_mut() = None;
         }
-        // The head is already committed and finalised. Its committee was reweighed against the state
-        // before the head block ran, so once the head block itself changes a member's stake, a slash
-        // or a bond, the roster reload just built no longer reproduces that committee and the digest
-        // would not match. The certificate already carries the finalising committee, so fall back to
-        // its reveals in the canonical ascending id order form_committee used, reaching the same beacon
-        // seed without a roster. The block was verified when it was accepted, so trusting it on reload
-        // is sound, and re-deriving it here was the bug that bricked restart.
         let reveals = match self.committee_for_certificate(head, &certificate) {
             Some(selection) => {
                 debug_assert!(
@@ -1039,7 +1024,6 @@ impl DevNode {
         let staged = self.staged.take().expect("the staged block is present");
         self.observe_finality(self.height, block.val);
         if self.fatal.is_some() {
-            // observe_finality just recorded a conflicting finalization for this height. Stop before
             // the conflicting state reaches the ledger or the disk. The driver halts on the fatal.
             return Err(RoundError::NotFinalized);
         }
@@ -1590,11 +1574,6 @@ impl DevNode {
         if attestation.height != self.height {
             return;
         }
-        // A view past the bounded consensus range is not a legitimate finality vote. Rejecting it
-        // here, before it can be recorded toward finality or fed to the evidence pool, keeps the
-        // finality count and the slashing pool consistent, so an offender cannot stamp a huge view
-        // to have its vote counted for finality while the pool drops it and the double sign escapes
-        // the slash.
         if attestation.view >= qtv_node::evidence::MAX_HEIGHT_VIEW {
             return;
         }
@@ -2027,8 +2006,6 @@ impl DevNode {
         }
         self.observe_finality(self.height, subject.val);
         if self.fatal.is_some() {
-            // observe_finality just recorded a conflicting finalization for this height. Stop before
-            // the conflicting block reaches the ledger or the disk, the same way finalize does.
             return Err(SyncError::FinalityViolation);
         }
         let mut ledger = self.ledger.clone();

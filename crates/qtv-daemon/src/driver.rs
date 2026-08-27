@@ -248,7 +248,9 @@ impl Driver {
             match self.inbound.recv_timeout(TICK) {
                 Ok((_, bytes)) => match Message::decode(&bytes) {
                     Ok(Message::Register(note)) => {
-                        self.node.collect_registration(*note);
+                        if self.node.collect_registration((*note).clone()) {
+                            self.broadcast(&Message::Register(note).encode());
+                        }
                     }
                     Ok(_) => self.buffered.push(bytes),
                     Err(_) => {}
@@ -378,7 +380,8 @@ impl Driver {
                 }
             }
             Message::Register(note) => {
-                if self.node.collect_registration(*note) {
+                if self.node.collect_registration((*note).clone()) {
+                    self.broadcast(&Message::Register(note).encode());
                     self.node.apply_registrations();
                 }
             }

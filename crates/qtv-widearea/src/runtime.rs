@@ -151,7 +151,9 @@ impl Runtime {
             match self.inbound.recv_timeout(Duration::from_millis(10)) {
                 Ok((_, bytes)) => match Message::decode(&bytes) {
                     Ok(Message::Register(note)) => {
-                        self.node.collect_registration(*note);
+                        if self.node.collect_registration((*note).clone()) {
+                            self.broadcast(&Message::Register(note).encode());
+                        }
                     }
                     Ok(_) => buffer_bounded(&mut self.buffered, 0, bytes),
                     Err(_) => {}
@@ -293,7 +295,8 @@ impl Runtime {
                 }
             }
             Message::Register(note) => {
-                if self.node.collect_registration(*note) {
+                if self.node.collect_registration((*note).clone()) {
+                    self.broadcast(&Message::Register(note).encode());
                     self.node.apply_registrations();
                 }
             }

@@ -489,8 +489,6 @@ impl GuardianAct {
 fn guardian_challenge(chain_id: u64, era: &[u8; 32], act: &GuardianAct) -> Vec<u8> {
     let mut message = Vec::with_capacity(8 + 32 + 1 + 8 + 4 + act.targets.len() * 32);
     message.extend_from_slice(&chain_id.to_le_bytes());
-    // The genesis era binds a guardian control op to this launch of the chain, so a captured
-    // FREEZE or ENACT approval cannot be replayed onto a later same name relaunch whose era differs.
     message.extend_from_slice(era);
     message.push(act.op);
     message.extend_from_slice(&act.bound.to_le_bytes());
@@ -2427,8 +2425,6 @@ mod tests {
     fn a_framed_deploy_whose_genesis_faults_leaves_no_orphan_contract() {
         let fee = FeeParams::devnet();
         let deployer = keypair(151);
-        // The genesis tries to send forty of an asset the fresh contract does not hold, which faults
-        // the same way `a_contract_cannot_send_more_of_an_asset_than_it_holds` proves a call faults.
         let code = qtv_vm::asm::assemble("LDI r1, 88\nLDI r2, 64\nLDI r3, 40\nSEND r1, r2, r3\nHALT")
             .expect("the program assembles");
         let genesis_selector = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
