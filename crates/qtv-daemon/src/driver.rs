@@ -247,7 +247,9 @@ impl Driver {
             }
             match self.inbound.recv_timeout(TICK) {
                 Ok((_, bytes)) => match Message::decode(&bytes) {
-                    Ok(Message::Register(note)) => self.node.collect_registration(*note),
+                    Ok(Message::Register(note)) => {
+                        self.node.collect_registration(*note);
+                    }
                     Ok(_) => self.buffered.push(bytes),
                     Err(_) => {}
                 },
@@ -376,8 +378,9 @@ impl Driver {
                 }
             }
             Message::Register(note) => {
-                self.node.collect_registration(*note);
-                self.node.apply_registrations();
+                if self.node.collect_registration(*note) {
+                    self.node.apply_registrations();
+                }
             }
             Message::Peers(_)
             | Message::Status(_)

@@ -486,9 +486,12 @@ impl GuardianAct {
     }
 }
 
-fn guardian_challenge(chain_id: u64, act: &GuardianAct) -> Vec<u8> {
-    let mut message = Vec::with_capacity(8 + 1 + 8 + 4 + act.targets.len() * 32);
+fn guardian_challenge(chain_id: u64, era: &[u8; 32], act: &GuardianAct) -> Vec<u8> {
+    let mut message = Vec::with_capacity(8 + 32 + 1 + 8 + 4 + act.targets.len() * 32);
     message.extend_from_slice(&chain_id.to_le_bytes());
+    // The genesis era binds a guardian control op to this launch of the chain, so a captured
+    // FREEZE or ENACT approval cannot be replayed onto a later same name relaunch whose era differs.
+    message.extend_from_slice(era);
     message.push(act.op);
     message.extend_from_slice(&act.bound.to_le_bytes());
     message.extend_from_slice(&(act.targets.len() as u32).to_le_bytes());
@@ -515,7 +518,12 @@ fn guardian_enact_action(act: &GuardianAct) -> Option<Action> {
     }
 }
 
-pub fn guardian_enact_challenge(chain_id: u64, enact_nonce: u64, action: &Action) -> Vec<u8> {
+pub fn guardian_enact_challenge(
+    chain_id: u64,
+    era: &[u8; 32],
+    enact_nonce: u64,
+    action: &Action,
+) -> Vec<u8> {
     let act = GuardianAct {
         op: GUARDIAN_ENACT,
         bound: enact_nonce,
@@ -523,7 +531,7 @@ pub fn guardian_enact_challenge(chain_id: u64, enact_nonce: u64, action: &Action
         approvals: Vec::new(),
         payload: qtv_codec::to_bytes(action),
     };
-    guardian_challenge(chain_id, &act)
+    guardian_challenge(chain_id, era, &act)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -597,8 +605,9 @@ fn guardian_approvers(
     set: &qtv_governance::GuardianSet,
     act: &GuardianAct,
     chain_id: u64,
+    era: &[u8; 32],
 ) -> Vec<[u8; 32]> {
-    let message = guardian_challenge(chain_id, act);
+    let message = guardian_challenge(chain_id, era, act);
     let mut attempted: Vec<[u8; 32]> = Vec::new();
     let mut verified: Vec<[u8; 32]> = Vec::new();
     for approval in &act.approvals {
@@ -659,7 +668,7 @@ pub(crate) fn guardian_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_id: 
         }
         _ => return false,
     }
-    set.authorizes(&guardian_approvers(&set, &act, chain_id))
+    set.authorizes(&guardian_approvers(&set, &act, chain_id, &ledger.bridge_era()))
 }
 
 fn dispatch_bridge_guardian(
@@ -676,7 +685,7 @@ fn dispatch_bridge_guardian(
         Some(act) => act,
         None => return false,
     };
-    let approvers = guardian_approvers(&set, &act, chain_id);
+    let approvers = guardian_approvers(&set, &act, chain_id, &ledger.bridge_era());
     match act.op {
         GUARDIAN_FREEZE => ledger.guardian_freeze(act.bound, &act.targets, &approvers, now),
         GUARDIAN_UNFREEZE => match ledger.bridge_freeze() {
@@ -3242,10 +3251,12 @@ mod tests {
         let evidence = crate::evidence::Equivocation {
             offender: offender.clone(),
             height: 1,
-            slot: 1,
             view_a: 0,
             view_b: 0,
-            committee: [0u8; 32],
+            slot_a: 1,
+            slot_b: 1,
+            committee_a: [0u8; 32],
+            committee_b: [0u8; 32],
             block_a: block_a.to_bytes(),
             sig_a: a.sig.to_vec(),
             block_b: block_b.to_bytes(),
@@ -3358,7 +3369,7 @@ mod tests {
             approvals: Vec::new(),
             payload: Vec::new(),
         };
-        let message = guardian_challenge(chain_id, &template);
+        let message = guardian_challenge(chain_id, &[0u8; 32], &template);
         let approvals = signers
             .iter()
             .map(|signer| {
@@ -3556,7 +3567,7 @@ mod tests {
         };
 
         GUARDIAN_VERIFY_CALLS.with(|c| c.set(0));
-        let approvers = guardian_approvers(&set, &act, chain);
+        let approvers = guardian_approvers(&set, &act, chain, &[0u8; 32]);
         let calls = GUARDIAN_VERIFY_CALLS.with(|c| c.get());
         assert!(approvers.is_empty(), "garbage signatures authorize no member");
         assert!(calls <= 1, "ran {calls} verifies for a single repeated member id");

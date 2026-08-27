@@ -28,5 +28,5 @@ qtv-devnet = { path = "../qtv-devnet", features = ["test-fixtures"] }
 # The consensus parameters reported alongside the numbers: the committee budget,
 # the stake floor, and the slot. Pinned at the same tag the devnet uses so the
 # whole graph keeps one crypto version.
-qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "63b3c4304c8b9162da857e8e3febb003c9ddf5db" }
-qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "63b3c4304c8b9162da857e8e3febb003c9ddf5db" }
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "5fe6e9457613a04009260b9f8ffcbca6465b5009" }
+qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "5fe6e9457613a04009260b9f8ffcbca6465b5009" }

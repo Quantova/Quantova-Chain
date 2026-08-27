@@ -3,7 +3,7 @@
 
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 
 use qtv_attest::committee::CommitteeDigest;
@@ -260,6 +260,7 @@ pub struct DevNode {
     block_messages: HashMap<u64, Vec<u8>>,
     epoch_roots: HashMap<u64, Root>,
     epoch_notes: HashMap<u64, RegisterNote>,
+    epoch_conflicted: HashSet<u64>,
     sign_guard: SignGuard,
     finality: FinalityLedger,
     guarded_height: Option<Height>,
@@ -342,6 +343,7 @@ impl DevNode {
             block_messages: HashMap::new(),
             epoch_roots: HashMap::new(),
             epoch_notes: HashMap::new(),
+            epoch_conflicted: HashSet::new(),
             sign_guard,
             finality: FinalityLedger::new(),
             guarded_height: None,
@@ -472,6 +474,7 @@ impl DevNode {
         if epoch != self.consensus.epoch() {
             self.epoch_roots.clear();
             self.epoch_notes.clear();
+            self.epoch_conflicted.clear();
         }
         let roster = self.epoch_roster();
         self.consensus.rotate_to_epoch(epoch, roster);
@@ -502,13 +505,16 @@ impl DevNode {
     /// verified against the peer's stable attestation key held in the genesis roster. A
     /// note for another epoch, from an unknown author, or with a signature that does not
     /// authenticate is dropped.
-    pub fn collect_registration(&mut self, note: RegisterNote) {
+    /// Returns whether the admitted note changed this node's epoch roster, so a caller only pays
+    /// to re form the committee when a registration actually moved the roster and a replayed or
+    /// duplicate note cannot amplify into repeated roster rebuilds.
+    pub fn collect_registration(&mut self, note: RegisterNote) -> bool {
         let epoch = self.consensus.epoch_for(self.height);
         if note.epoch != epoch || note.id == self.id {
-            return;
+            return false;
         }
         let Some(reg) = self.base_roster.iter().find(|r| r.id == note.id) else {
-            return;
+            return false;
         };
         if !qtv_attest::epoch_registration_verifies(
             &reg.attest_pk,
@@ -517,10 +523,29 @@ impl DevNode {
             &note.root,
             &note.sig,
         ) {
-            return;
+            return false;
         }
-        self.epoch_notes.insert(note.id, note.clone());
-        self.epoch_roots.insert(note.id, note.root);
+        // A validator that signs two different rotated roots for one epoch has equivocated its
+        // registration. Keeping either root would let nodes that saw them in different orders
+        // rotate to different committees, so on the first conflict the id is dropped back to its
+        // base roster root, a value every node agrees on regardless of arrival order.
+        if self.epoch_conflicted.contains(&note.id) {
+            return false;
+        }
+        match self.epoch_roots.get(&note.id) {
+            Some(existing) if *existing == note.root => false,
+            Some(_) => {
+                self.epoch_conflicted.insert(note.id);
+                self.epoch_roots.remove(&note.id);
+                self.epoch_notes.remove(&note.id);
+                true
+            }
+            None => {
+                self.epoch_notes.insert(note.id, note.clone());
+                self.epoch_roots.insert(note.id, note.root);
+                true
+            }
+        }
     }
 
     /// Re form the committee roster from the rotated roots collected for this epoch, so a
