@@ -416,6 +416,7 @@ fn encode_attestation(encoder: &mut Encoder, attestation: &Attestation) {
     encoder.put_u64(attestation.height);
     encoder.put_u64(attestation.slot);
     encoder.put_u64(attestation.view);
+    encoder.put_bytes(&attestation.committee);
     encode_block(encoder, &attestation.block);
     encode_credential(encoder, &attestation.membership);
     encoder.put_bytes(&attestation.sig);
@@ -426,6 +427,7 @@ fn decode_attestation(decoder: &mut Decoder<'_>) -> Result<Attestation, DecodeEr
     let height = decoder.get_u64()?;
     let slot = decoder.get_u64()?;
     let view = decoder.get_u64()?;
+    let committee: [u8; 32] = read_fixed(decoder)?;
     let block = decode_block(decoder)?;
     let membership = decode_credential(decoder)?;
     let sig: [u8; SIGNATURE_BYTES] = read_fixed(decoder)?;
@@ -434,6 +436,7 @@ fn decode_attestation(decoder: &mut Decoder<'_>) -> Result<Attestation, DecodeEr
         height,
         slot,
         view,
+        committee,
         block,
         membership,
         sig,

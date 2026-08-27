@@ -127,6 +127,7 @@ fn an_honest_view_change_is_not_a_slashable_equivocation() {
         slot: vote.slot,
         view_a: vote.view,
         view_b: lock_att.view,
+        committee: [0u8; 32],
         block_a: vote.block.to_bytes(),
         sig_a: vote.sig.to_vec(),
         block_b: lock_att.block.to_bytes(),

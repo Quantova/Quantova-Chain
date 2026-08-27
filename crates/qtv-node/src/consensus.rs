@@ -4,7 +4,7 @@
 
 use qtv_attest::aggregate::aggregate;
 use qtv_attest::committee::MemberKey;
-use qtv_attest::{Attestation, Attester, Certificate, CommitteeCommitment};
+use qtv_attest::{CommitteeDigest, Attestation, Attester, Certificate, CommitteeCommitment};
 use qtv_crypto::ml_dsa::PublicKey;
 use qtv_sampler::committee::{CommitteeView, PublishedReveal};
 use qtv_sampler::onetime::Root;
@@ -472,10 +472,11 @@ impl Consensus {
         height: u64,
         slot: u64,
         view: u64,
+        committee: CommitteeDigest,
         block: Block,
         beacon: &Beacon,
     ) -> Attestation {
-        self.own.attest(self.chain_id, height, slot, view, block, beacon)
+        self.own.attest(self.chain_id, height, slot, view, committee, block, beacon)
     }
 
     /// Fold the collected attestations into a finality certificate.
@@ -582,7 +583,7 @@ mod tests {
                 .iter()
                 .filter(|id| self.online.get(id).copied().unwrap_or(false))
                 .filter_map(|id| self.attesters.get(id))
-                .map(|a| a.attest(CHAIN_ID, height, slot, 0, block, beacon))
+                .map(|a| a.attest(CHAIN_ID, height, slot, 0, selection.commitment.digest(), block, beacon))
                 .collect()
         }
     }
@@ -721,7 +722,7 @@ mod tests {
         let mk_a = || block_for(1);
         let mk_b = || Block::new(1, header_value(&[42u8; 32]), Parent::Genesis);
         let att =
-            |id: u64, block: Block| sim.attesters.get(&id).unwrap().attest(CHAIN_ID, 1, 1, 0, block, &beacon);
+            |id: u64, block: Block| sim.attesters.get(&id).unwrap().attest(CHAIN_ID, 1, 1, 0, selection.commitment.digest(), block, &beacon);
         let atts_a = vec![att(1, mk_a()), att(2, mk_a()), att(4, mk_a())];
         let atts_b = vec![att(3, mk_b()), att(4, mk_b())];
         let cert_a = consensus.finalize(&selection, 1, 1, mk_a(), &beacon, &atts_a);
@@ -809,7 +810,7 @@ mod tests {
 
         let honest: Vec<Attestation> = [1u64, 2, 3, 4]
             .iter()
-            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, block_for(1), &beacon))
+            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_for(1), &beacon))
             .collect();
         assert!(equivocation_offenders(CHAIN_ID, &honest, &roster).is_empty());
 
@@ -818,6 +819,7 @@ mod tests {
             1,
             1,
             0,
+            [0u8; 32],
             Block::new(1, header_value(&[9u8; 32]), Parent::Genesis),
             &beacon,
         );
@@ -825,12 +827,13 @@ mod tests {
         evidence.push(conflict);
         assert_eq!(equivocation_offenders(CHAIN_ID, &evidence, &roster), vec![2]);
 
-        let mut forged_a = sim.attesters[&3].attest(CHAIN_ID, 1, 1, 0, block_for(1), &beacon);
+        let mut forged_a = sim.attesters[&3].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_for(1), &beacon);
         let mut forged_b = sim.attesters[&3].attest(
             CHAIN_ID,
             1,
             1,
             0,
+            [0u8; 32],
             Block::new(1, header_value(&[7u8; 32]), Parent::Genesis),
             &beacon,
         );
@@ -855,10 +858,10 @@ mod tests {
         // A finalizes at view zero; 2, 3, 4 also sign a conflicting B quorum at view one.
         let mut evidence: Vec<Attestation> = [1u64, 2, 3, 4]
             .iter()
-            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, value_a, &beacon))
+            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], value_a, &beacon))
             .collect();
         for id in [2u64, 3, 4] {
-            evidence.push(sim.attesters[&id].attest(CHAIN_ID, 1, 1, 1, value_b, &beacon));
+            evidence.push(sim.attesters[&id].attest(CHAIN_ID, 1, 1, 1, [0u8; 32], value_b, &beacon));
         }
         assert_eq!(
             double_finalize_offenders(CHAIN_ID, &evidence, &roster, 3),
@@ -869,10 +872,10 @@ mod tests {
         // A re vote across a view change, and a higher view vote below a quorum, never flag.
         let mut honest: Vec<Attestation> = [1u64, 2, 3, 4]
             .iter()
-            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, value_a, &beacon))
+            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], value_a, &beacon))
             .collect();
-        honest.push(sim.attesters[&2].attest(CHAIN_ID, 1, 1, 2, value_a, &beacon));
-        honest.push(sim.attesters[&3].attest(CHAIN_ID, 1, 1, 2, value_b, &beacon));
+        honest.push(sim.attesters[&2].attest(CHAIN_ID, 1, 1, 2, [0u8; 32], value_a, &beacon));
+        honest.push(sim.attesters[&3].attest(CHAIN_ID, 1, 1, 2, [0u8; 32], value_b, &beacon));
         assert!(
             double_finalize_offenders(CHAIN_ID, &honest, &roster, 3).is_empty(),
             "a lone cross view re vote below a finalizing quorum is not a double finalize"
@@ -881,12 +884,12 @@ mod tests {
         // A relabelled vote naming validator 1 in the B quorum never authenticates under 1's key.
         let mut framed: Vec<Attestation> = [1u64, 2, 3, 4]
             .iter()
-            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, value_a, &beacon))
+            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], value_a, &beacon))
             .collect();
         for id in [2u64, 3, 4] {
-            framed.push(sim.attesters[&id].attest(CHAIN_ID, 1, 1, 1, value_b, &beacon));
+            framed.push(sim.attesters[&id].attest(CHAIN_ID, 1, 1, 1, [0u8; 32], value_b, &beacon));
         }
-        let mut forged = sim.attesters[&2].attest(CHAIN_ID, 1, 1, 1, value_b, &beacon);
+        let mut forged = sim.attesters[&2].attest(CHAIN_ID, 1, 1, 1, [0u8; 32], value_b, &beacon);
         forged.from = 1;
         framed.push(forged);
         assert_eq!(
@@ -966,7 +969,7 @@ mod tests {
             .iter()
             .filter(|(id, _)| selection.members.contains(id))
             .take(3)
-            .map(|(_, a)| a.attest(CHAIN_ID, 1, 1, 0, block, &beacon))
+            .map(|(_, a)| a.attest(CHAIN_ID, 1, 1, 0, selection.commitment.digest(), block, &beacon))
             .collect();
         let depth = atts[0].membership.path.siblings.len();
         atts[0].membership = Credential {

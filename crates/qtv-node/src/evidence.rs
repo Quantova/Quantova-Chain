@@ -24,6 +24,7 @@ fn attestation_message(
     height: u64,
     slot: u64,
     view: u64,
+    committee: &[u8; 32],
     block_bytes: &[u8],
 ) -> Vec<u8> {
     // The chain id leads the preimage, byte for byte the layout an attester signs in
@@ -36,6 +37,7 @@ fn attestation_message(
     msg.extend_from_slice(&height.to_le_bytes());
     msg.extend_from_slice(&slot.to_le_bytes());
     msg.extend_from_slice(&view.to_le_bytes());
+    msg.extend_from_slice(committee);
     msg.extend_from_slice(block_bytes);
     msg
 }
@@ -63,6 +65,7 @@ pub struct Equivocation {
     pub slot: u64,
     pub view_a: u64,
     pub view_b: u64,
+    pub committee: [u8; 32],
     pub block_a: Vec<u8>,
     pub sig_a: Vec<u8>,
     pub block_b: Vec<u8>,
@@ -94,8 +97,10 @@ impl Equivocation {
             Ok(sig) => sig,
             Err(_) => return false,
         };
-        let msg_a = attestation_message(chain_id, self.height, self.slot, self.view_a, &self.block_a);
-        let msg_b = attestation_message(chain_id, self.height, self.slot, self.view_b, &self.block_b);
+        let msg_a =
+            attestation_message(chain_id, self.height, self.slot, self.view_a, &self.committee, &self.block_a);
+        let msg_b =
+            attestation_message(chain_id, self.height, self.slot, self.view_b, &self.committee, &self.block_b);
         ml_dsa::verify(&pk, &msg_a, &sig_a, ATTEST_CONTEXT)
             && ml_dsa::verify(&pk, &msg_b, &sig_b, ATTEST_CONTEXT)
     }
@@ -107,6 +112,7 @@ impl Equivocation {
         encoder.put_u64(self.slot);
         encoder.put_u64(self.view_a);
         encoder.put_u64(self.view_b);
+        encoder.put_bytes(&self.committee);
         encoder.put_bytes(&self.block_a);
         encoder.put_bytes(&self.sig_a);
         encoder.put_bytes(&self.block_b);
@@ -121,6 +127,7 @@ impl Equivocation {
         let slot = decoder.get_u64().ok()?;
         let view_a = decoder.get_u64().ok()?;
         let view_b = decoder.get_u64().ok()?;
+        let committee: [u8; 32] = decoder.get_bytes().ok()?.try_into().ok()?;
         let block_a = decoder.get_bytes().ok()?.to_vec();
         let sig_a = decoder.get_bytes().ok()?.to_vec();
         let block_b = decoder.get_bytes().ok()?.to_vec();
@@ -132,6 +139,7 @@ impl Equivocation {
             slot,
             view_a,
             view_b,
+            committee,
             block_a,
             sig_a,
             block_b,
@@ -149,7 +157,7 @@ impl Equivocation {
 /// lower view arrived after the node moved on and is ignored.
 #[derive(Default)]
 pub struct EvidencePool {
-    seen: HashMap<(String, u64), (u64, u64, Vec<u8>, Vec<u8>)>,
+    seen: HashMap<(String, u64), (u64, u64, [u8; 32], Vec<u8>, Vec<u8>)>,
     pending: Vec<Equivocation>,
     flagged: Vec<(String, u64)>,
     floor: u64,
@@ -166,6 +174,7 @@ impl EvidencePool {
         height: u64,
         slot: u64,
         view: u64,
+        committee: [u8; 32],
         block_bytes: Vec<u8>,
         sig: Vec<u8>,
     ) -> Option<Equivocation> {
@@ -181,9 +190,9 @@ impl EvidencePool {
         }
         let key = (offender.to_string(), height);
         match self.seen.get(&key) {
-            Some((prev_view, _, prev_block, prev_sig)) => {
+            Some((prev_view, _, _prev_committee, prev_block, prev_sig)) => {
                 if view > *prev_view {
-                    self.seen.insert(key, (view, slot, block_bytes, sig));
+                    self.seen.insert(key, (view, slot, committee, block_bytes, sig));
                     return None;
                 }
                 if view < *prev_view {
@@ -201,6 +210,7 @@ impl EvidencePool {
                     slot,
                     view_a: *prev_view,
                     view_b: view,
+                    committee,
                     block_a: prev_block.clone(),
                     sig_a: prev_sig.clone(),
                     block_b: block_bytes,
@@ -211,7 +221,7 @@ impl EvidencePool {
                 Some(evidence)
             }
             None => {
-                self.seen.insert(key, (view, slot, block_bytes, sig));
+                self.seen.insert(key, (view, slot, committee, block_bytes, sig));
                 None
             }
         }
@@ -244,14 +254,15 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(CHAIN_ID, 1, 1, 0, block_a, &beacon);
-        let b = attester.attest(CHAIN_ID, 1, 1, 0, block_b, &beacon);
+        let a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
+        let b = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_b, &beacon);
         let evidence = Equivocation {
             offender: address.to_string(),
             height: 1,
             slot: 1,
             view_a: 0,
             view_b: 0,
+            committee: [0u8; 32],
             block_a: block_a.to_bytes(),
             sig_a: a.sig.to_vec(),
             block_b: block_b.to_bytes(),
@@ -273,13 +284,14 @@ mod tests {
         let (attester, address) = attester();
         let beacon = Beacon::genesis();
         let block = Block::new(1, [1u8; 32], Parent::Genesis);
-        let a = attester.attest(CHAIN_ID, 1, 1, 0, block, &beacon);
+        let a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block, &beacon);
         let evidence = Equivocation {
             offender: address,
             height: 1,
             slot: 1,
             view_a: 0,
             view_b: 0,
+            committee: [0u8; 32],
             block_a: block.to_bytes(),
             sig_a: a.sig.to_vec(),
             block_b: block.to_bytes(),
@@ -302,15 +314,15 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(CHAIN_ID, 1, 1, 0, block_a, &beacon);
-        let b = attester.attest(CHAIN_ID, 1, 1, 0, block_b, &beacon);
+        let a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
+        let b = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_b, &beacon);
 
         let mut pool = EvidencePool::new();
         assert!(pool
-            .observe(&address, 1, 1, 0, block_a.to_bytes(), a.sig.to_vec())
+            .observe(&address, 1, 1, 0, [0u8; 32], block_a.to_bytes(), a.sig.to_vec())
             .is_none());
         let flagged = pool
-            .observe(&address, 1, 1, 0, block_b.to_bytes(), b.sig.to_vec())
+            .observe(&address, 1, 1, 0, [0u8; 32], block_b.to_bytes(), b.sig.to_vec())
             .expect("a conflicting block in the same view is a genuine double vote");
         assert_eq!((flagged.view_a, flagged.view_b), (0, 0));
         assert!(
@@ -325,15 +337,15 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(CHAIN_ID, 1, 1, 0, block_a, &beacon);
-        let b = attester.attest(CHAIN_ID, 1, 1, 1, block_b, &beacon);
+        let a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
+        let b = attester.attest(CHAIN_ID, 1, 1, 1, [0u8; 32], block_b, &beacon);
 
         let mut pool = EvidencePool::new();
         assert!(pool
-            .observe(&address, 1, 1, 0, block_a.to_bytes(), a.sig.to_vec())
+            .observe(&address, 1, 1, 0, [0u8; 32], block_a.to_bytes(), a.sig.to_vec())
             .is_none());
         assert!(
-            pool.observe(&address, 1, 1, 1, block_b.to_bytes(), b.sig.to_vec())
+            pool.observe(&address, 1, 1, 1, [0u8; 32], block_b.to_bytes(), b.sig.to_vec())
                 .is_none(),
             "a higher view re vote is a justified vote change"
         );
@@ -345,6 +357,7 @@ mod tests {
             slot: 1,
             view_a: 0,
             view_b: 1,
+            committee: [0u8; 32],
             block_a: block_a.to_bytes(),
             sig_a: a.sig.to_vec(),
             block_b: block_b.to_bytes(),
@@ -362,15 +375,15 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(CHAIN_ID, 1, 1, 0, block_a, &beacon);
-        let b = attester.attest(CHAIN_ID, 1, 1, 2, block_b, &beacon);
+        let a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
+        let b = attester.attest(CHAIN_ID, 1, 1, 2, [0u8; 32], block_b, &beacon);
 
         let mut pool = EvidencePool::new();
         assert!(pool
-            .observe(&address, 1, 1, 2, block_b.to_bytes(), b.sig.to_vec())
+            .observe(&address, 1, 1, 2, [0u8; 32], block_b.to_bytes(), b.sig.to_vec())
             .is_none());
         assert!(
-            pool.observe(&address, 1, 1, 0, block_a.to_bytes(), a.sig.to_vec())
+            pool.observe(&address, 1, 1, 0, [0u8; 32], block_a.to_bytes(), a.sig.to_vec())
                 .is_none(),
             "an older view arriving after the node advanced is not evidence"
         );
@@ -383,19 +396,19 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(CHAIN_ID, 1, 1, 0, block_a, &beacon);
-        let b = attester.attest(CHAIN_ID, 1, 1, 0, block_b, &beacon);
+        let a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
+        let b = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_b, &beacon);
 
         let mut pool = EvidencePool::new();
         assert!(pool
-            .observe(&address, 1, 1, 0, block_a.to_bytes(), a.sig.to_vec())
+            .observe(&address, 1, 1, 0, [0u8; 32], block_a.to_bytes(), a.sig.to_vec())
             .is_none());
         let flagged = pool
-            .observe(&address, 1, 1, 0, block_b.to_bytes(), b.sig.to_vec())
+            .observe(&address, 1, 1, 0, [0u8; 32], block_b.to_bytes(), b.sig.to_vec())
             .expect("the conflicting attestation is flagged");
         assert!(flagged.attributes(CHAIN_ID, attester.attest_public_key()));
         assert!(pool
-            .observe(&address, 1, 1, 0, block_b.to_bytes(), b.sig.to_vec())
+            .observe(&address, 1, 1, 0, [0u8; 32], block_b.to_bytes(), b.sig.to_vec())
             .is_none(), "a validator is flagged only once");
         assert_eq!(pool.drain().len(), 1);
     }
@@ -410,8 +423,8 @@ mod tests {
         // A peer that feeds one attestation per advancing height, the shape of a slow
         // leak: without a floor the seen and flagged maps grow one entry per height.
         for height in 1..=10_000u64 {
-            let att = attester.attest(CHAIN_ID, height, 1, 0, block, &beacon);
-            let _ = pool.observe(&address, height, 1, 0, block.to_bytes(), att.sig.to_vec());
+            let att = attester.attest(CHAIN_ID, height, 1, 0, [0u8; 32], block, &beacon);
+            let _ = pool.observe(&address, height, 1, 0, [0u8; 32], block.to_bytes(), att.sig.to_vec());
         }
 
         assert!(
@@ -436,14 +449,15 @@ mod tests {
         // An honest validator legitimately re votes across a view change, block_a in view 0
         // and block_b in view 1. A malicious reporter pairs the two and asserts an equal view
         // to frame the honest signer as a same view double vote.
-        let honest_a = attester.attest(CHAIN_ID, 1, 1, 0, block_a, &beacon);
-        let honest_b = attester.attest(CHAIN_ID, 1, 1, 1, block_b, &beacon);
+        let honest_a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
+        let honest_b = attester.attest(CHAIN_ID, 1, 1, 1, [0u8; 32], block_b, &beacon);
         let framed = Equivocation {
             offender: address.clone(),
             height: 1,
             slot: 1,
             view_a: 0,
             view_b: 0,
+            committee: [0u8; 32],
             block_a: block_a.to_bytes(),
             sig_a: honest_a.sig.to_vec(),
             block_b: block_b.to_bytes(),
@@ -456,14 +470,15 @@ mod tests {
 
         // Two conflicting blocks the offender actually signed in one and the same view are a
         // genuine double vote that attributes and slashes.
-        let double_a = attester.attest(CHAIN_ID, 1, 1, 0, block_a, &beacon);
-        let double_b = attester.attest(CHAIN_ID, 1, 1, 0, block_b, &beacon);
+        let double_a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
+        let double_b = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_b, &beacon);
         let genuine = Equivocation {
             offender: address,
             height: 1,
             slot: 1,
             view_a: 0,
             view_b: 0,
+            committee: [0u8; 32],
             block_a: block_a.to_bytes(),
             sig_a: double_a.sig.to_vec(),
             block_b: block_b.to_bytes(),

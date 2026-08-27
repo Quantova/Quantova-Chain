@@ -122,7 +122,9 @@ impl Runtime {
             }
             Message::Attest(attestation) => self.node.on_attestation(*attestation),
             Message::ViewChange(record) => self.node.collect_view_change(selection, *record),
-            Message::Reveal(note) => self.node.collect_reveal(*note),
+            Message::Reveal(note) => {
+                self.node.collect_reveal(*note);
+            }
             Message::Register(note) => {
                 self.node.collect_registration(*note);
                 self.node.apply_registrations();
