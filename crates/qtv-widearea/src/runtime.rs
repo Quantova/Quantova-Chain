@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -124,9 +123,6 @@ impl Runtime {
             .collect()
     }
 
-    /// At an epoch boundary publish this node's signed re registration of its rotated one
-    /// time root, gather the peers' re registrations, and re form the committee. A no op in
-    /// the genesis epoch, whose roots the roster already carries.
     fn disseminate_registrations(&mut self) {
         if self.node.epoch() == 0 {
             return;
@@ -165,8 +161,6 @@ impl Runtime {
         self.node.apply_registrations();
     }
 
-    /// Publish this node's own reveal for the height and gather the peers' reveals,
-    /// until the up set is heard from or a bounded window elapses.
     fn disseminate_reveals(&mut self) {
         if self.i_am_up() {
             if let Some(note) = self.node.own_reveal_note() {
@@ -277,7 +271,9 @@ impl Runtime {
             }
             Message::Attest(attestation) => {
                 let aggregate_start = Instant::now();
-                self.node.on_attestation(*attestation);
+                if self.node.on_attestation((*attestation).clone()) {
+                    self.broadcast(&Message::Attest(attestation).encode());
+                }
                 self.phase.aggregate += aggregate_start.elapsed();
             }
             Message::ViewChange(record) => {
@@ -372,7 +368,8 @@ impl Runtime {
                 Err(RecvTimeoutError::Disconnected) => break,
             }
             if !gossiped.is_empty() {
-                self.node.admit_gossiped_batch(std::mem::take(&mut gossiped));
+                self.node
+                    .admit_gossiped_batch(std::mem::take(&mut gossiped));
             }
         }
         if !gossiped.is_empty() {

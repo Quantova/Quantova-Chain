@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -16,7 +15,6 @@ use qtv_node::consensus::{
     FinalityStatus, Parent, Selection, ValidatorRegistration,
 };
 use qtv_node::evidence::{Equivocation, EvidencePool};
-use qtv_node::watermark::SignGuard;
 use qtv_node::fee::FeeParams;
 use qtv_node::ledger::{
     account_key, evidence_address, registration_address, Account, BlockEvent, Ledger, SideEvent,
@@ -24,6 +22,7 @@ use qtv_node::ledger::{
 };
 use qtv_node::mempool::{Admitted, Mempool, Reject};
 use qtv_node::node::{day_of_height, execute_ordered, reweigh_roster, Genesis, GenesisAccount};
+use qtv_node::watermark::SignGuard;
 use qtv_sampler::committee::PublishedReveal;
 use qtv_store::{BlockStore, BurnArchive, BurnArchiveEntry, StateStore};
 use qtv_tx::{Body, Call, Wrapper};
@@ -39,38 +38,23 @@ pub type Height = u64;
 
 pub type View = u64;
 
-/// A node's peer to peer identity, derived from the one secret the node holds. Only
-/// the public peer id is ever published; the secret half never leaves the node and is
-/// not recomputable from the public id.
 pub fn p2p_identity(secret: &[u8; 32]) -> Identity {
     Identity::from_seed(&qtv_node::keys::p2p_identity_seed(secret))
 }
 
-/// The peer id of a published peer to peer identity public key. This is how a running
-/// node pins a peer read from the genesis roster, never by recomputing it from an id.
 pub fn peer_id_of(public: &qtv_crypto::ml_dsa::PublicKey) -> PeerId {
     PeerId::from_public(public)
 }
 
-/// The published public peer id of the node holding `secret`. This is the commitment
-/// a peer pins against; it carries no secret and cannot be turned back into one.
 pub fn p2p_peer_id(secret: &[u8; 32]) -> PeerId {
     p2p_identity(secret).peer_id()
 }
 
-/// The peer to peer identity of validator `id` under the gated fixture secret, for the
-/// single process simulation and the local load test binaries only. A running node
-/// builds its own identity from the secret in its keystore through `p2p_identity`, and
-/// pins a peer by the peer id published in the roster, never by recomputing it from an
-/// id. This convenience is absent from a default node build.
 #[cfg(any(test, feature = "test-fixtures"))]
 pub fn node_identity(id: u64) -> Identity {
     p2p_identity(&qtv_node::keys::fixture_secret(id))
 }
 
-/// The published peer id of validator `id` under the gated fixture secret, for the
-/// single process simulation and the local load test binaries only. Absent from a
-/// default node build.
 #[cfg(any(test, feature = "test-fixtures"))]
 pub fn node_peer_id(id: u64) -> PeerId {
     p2p_peer_id(&qtv_node::keys::fixture_secret(id))
@@ -89,8 +73,6 @@ pub fn leader_for(selection: &Selection, view: View) -> u64 {
     members[(base + offset) % members.len()]
 }
 
-/// The committed height recorded for genesis state. Genesis has no block of its
-/// own, and the first block is `MIN_HEIGHT` (one), so genesis is height zero.
 const GENESIS_COMMIT_HEIGHT: Height = 0;
 
 const MAX_ROUND_ATTESTATIONS: usize = 8192;
@@ -153,21 +135,12 @@ pub enum SyncError {
     Io,
 }
 
-/// A weak subjectivity checkpoint, a finalised height paired with the value the node
-/// trusts at it. The node build carries a recent one and the node advances it each epoch.
-/// A block at the checkpoint height whose value differs is a long range fork the node
-/// refuses to sync across, before it ever checks the certificate that a fork could forge
-/// from retired validator keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Checkpoint {
     pub height: Height,
     pub value: [u8; 32],
 }
 
-/// A condition the running node must never cross. Either it was asked to sign a height
-/// its persisted watermark says it already signed, or it saw a certificate that conflicts
-/// with a height it already finalised. Both halt the node loudly rather than let it double
-/// sign or adopt a forked finality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fatal {
     DoubleSignRefused {
@@ -247,6 +220,7 @@ pub struct DevNode {
     staged: Option<Staged>,
     lock: Option<Lock>,
     round_atts: Vec<Attestation>,
+    attest_relayed: std::collections::HashSet<Vec<u8>>,
     prevotes: Vec<Attestation>,
     future_props: Vec<Proposal>,
     view_changes: Vec<ViewChange>,
@@ -272,9 +246,6 @@ pub struct DevNode {
     genesis_supply: u64,
 }
 
-/// The money supply committed at genesis: the funded account balances, the staking pool, and the
-/// validator bonds. It matches the figure `init_genesis` seeds into the supply leaf and lets a
-/// from-genesis reconstruction start from a complete supply baseline. Reading it moves no root.
 fn genesis_supply_value(genesis: &Genesis, roster: &[ValidatorRegistration]) -> u64 {
     let mut supply: u64 = 0;
     for account in &genesis.accounts {
@@ -331,6 +302,7 @@ impl DevNode {
             staged: None,
             lock: None,
             round_atts: Vec::new(),
+            attest_relayed: std::collections::HashSet::new(),
             prevotes: Vec::new(),
             future_props: Vec::new(),
             view_changes: Vec::new(),
@@ -356,7 +328,6 @@ impl DevNode {
             genesis_supply,
         };
 
-        // Reconcile the logs after a crash: drop blocks above the last committed state.
         if let Some(committed) = dev.state_store.committed_height() {
             dev.block_store.truncate_to_height(committed)?;
         }
@@ -405,7 +376,8 @@ impl DevNode {
             }
         }
         let (validators_key, validators_value) = self.ledger.seed_validator_set(&validator_ids);
-        self.state_store.put_account(validators_key, validators_value)?;
+        self.state_store
+            .put_account(validators_key, validators_value)?;
         if let Some(dest_chain) = genesis.bridge_dest_chain {
             let (dest_key, dest_value) = self.ledger.seed_bridge_dest_chain(dest_chain);
             self.state_store.put_account(dest_key, dest_value)?;
@@ -440,8 +412,8 @@ impl DevNode {
                 None => self.state_store.delete_account(key)?,
             }
         }
-        // Genesis has no block; its committed state marks height zero.
-        self.state_store.commit(GENESIS_COMMIT_HEIGHT, self.ledger.q_root())?;
+        self.state_store
+            .commit(GENESIS_COMMIT_HEIGHT, self.ledger.q_root())?;
         self.ledger.clear_dirty();
         self.refresh_committee();
         Ok(())
@@ -486,9 +458,6 @@ impl DevNode {
         self.record_own_reveal();
     }
 
-    /// This node's own signed re registration of its rotated root for the current epoch,
-    /// published at an epoch boundary so peers admit its rotated reveals. It is absent in
-    /// the genesis epoch, whose roots the roster already carries.
     pub fn own_registration_note(&self) -> Option<RegisterNote> {
         let epoch = self.consensus.epoch_for(self.height);
         if epoch == 0 {
@@ -504,10 +473,6 @@ impl DevNode {
         })
     }
 
-    /// Admit a peer's signed re registration of its rotated root for the current epoch,
-    /// verified against the peer's stable attestation key held in the genesis roster. A
-    /// note for another epoch, from an unknown author, or with a signature that does not
-    /// authenticate is dropped.
     pub fn collect_registration(&mut self, note: RegisterNote) -> bool {
         let epoch = self.consensus.epoch_for(self.height);
         if note.epoch != epoch || note.id == self.id {
@@ -544,8 +509,6 @@ impl DevNode {
         }
     }
 
-    /// Re form the committee roster from the rotated roots collected for this epoch, so a
-    /// peer that has re registered is admitted with its rotated root.
     pub fn apply_registrations(&mut self) {
         let epoch = self.consensus.epoch_for(self.height);
         let roster = self.epoch_roster();
@@ -554,7 +517,6 @@ impl DevNode {
         self.record_own_reveal();
     }
 
-    /// Record this node's own reveal for the current height when it is selected.
     fn record_own_reveal(&mut self) {
         if let Some(reveal) = self.consensus.published_self(&self.beacon, self.slot()) {
             if !self.reveals.iter().any(|r| r.id == reveal.id) {
@@ -564,18 +526,14 @@ impl DevNode {
         }
     }
 
-    /// The ids of the validators whose reveal this node has collected for the height.
     pub fn collected_reveal_ids(&self) -> Vec<u64> {
         self.reveals.iter().map(|r| r.id).collect()
     }
 
-    /// The ids of the peers whose rotated epoch root this node has admitted this epoch.
     pub fn collected_registration_ids(&self) -> Vec<u64> {
         self.epoch_roots.keys().copied().collect()
     }
 
-    /// The signed re registrations this node holds for the current epoch, its own and every
-    /// peer's it has admitted, ordered by id so the block a leader carries is deterministic.
     fn epoch_registration_notes(&self) -> Vec<RegisterNote> {
         let mut notes: Vec<RegisterNote> = Vec::new();
         if let Some(own) = self.own_registration_note() {
@@ -592,10 +550,6 @@ impl DevNode {
         notes
     }
 
-    /// Rebuild the rotated epoch roots for the head's epoch from the registration records
-    /// carried in the chain, so a node that restarts within an epoch draws the same
-    /// committee at once rather than waiting for the next boundary to re gossip. Each record
-    /// is verified against the registered stable attestation key before it is trusted.
     fn rebuild_epoch_registrations(&mut self, head: Height) {
         let epoch = self.consensus.epoch_for(head);
         if epoch == 0 {
@@ -649,7 +603,6 @@ impl DevNode {
         }
     }
 
-    /// This node's own reveal for the current height, as a note to publish, when selected.
     pub fn own_reveal_note(&self) -> Option<RevealNote> {
         self.consensus
             .published_self(&self.beacon, self.slot())
@@ -660,9 +613,6 @@ impl DevNode {
             })
     }
 
-    /// Admit a peer reveal for the current height, verified against the peer's committed
-    /// root. Reveals for another height, that do not authenticate, or duplicates are
-    /// dropped.
     pub fn collect_reveal(&mut self, note: RevealNote) -> bool {
         if note.height != self.height {
             return false;
@@ -671,7 +621,10 @@ impl DevNode {
         if self.reveals.iter().any(|r| r.id == reveal.id) {
             return false;
         }
-        if !self.consensus.verify_published(&self.beacon, self.slot(), &reveal) {
+        if !self
+            .consensus
+            .verify_published(&self.beacon, self.slot(), &reveal)
+        {
             return false;
         }
         self.reveals.push(reveal);
@@ -756,9 +709,9 @@ impl DevNode {
     }
 
     pub fn submit(&mut self, transaction: Wrapper) -> Result<Admitted, Reject> {
-        let admitted =
-            self.mempool
-                .admit(transaction.clone(), &self.ledger, &self.fee_params)?;
+        let admitted = self
+            .mempool
+            .admit(transaction.clone(), &self.ledger, &self.fee_params)?;
         if admitted == Admitted::Fresh {
             self.outbox.push(transaction);
         }
@@ -788,8 +741,6 @@ impl DevNode {
             .admit_batch(batch, &self.ledger, &self.fee_params);
     }
 
-    /// The committee for the current height, assembled from the reveals collected so far
-    /// and cached until a new reveal is admitted or the height advances.
     pub fn select(&self) -> Result<Selection, RoundError> {
         if let Some(selection) = self.selection_cache.borrow().as_ref() {
             return Ok(selection.clone());
@@ -833,8 +784,17 @@ impl DevNode {
         ledger.clear_block_events();
         ledger.set_round_proposer(&proposer);
         ledger.set_execution_height(height);
-        let included = execute_ordered(&mut ledger, &candidates, &self.fee_params, day_of_height(height));
-        let event_leaves: Vec<Vec<u8>> = ledger.block_events().iter().map(BlockEvent::encode).collect();
+        let included = execute_ordered(
+            &mut ledger,
+            &candidates,
+            &self.fee_params,
+            day_of_height(height),
+        );
+        let event_leaves: Vec<Vec<u8>> = ledger
+            .block_events()
+            .iter()
+            .map(BlockEvent::encode)
+            .collect();
         let mut header = Header::new(
             height,
             self.parent_header_hash,
@@ -898,8 +858,17 @@ impl DevNode {
         ledger.clear_block_events();
         ledger.set_round_proposer(header.proposer());
         ledger.set_execution_height(header.height());
-        let included = execute_ordered(&mut ledger, body, &self.fee_params, day_of_height(header.height()));
-        let event_leaves: Vec<Vec<u8>> = ledger.block_events().iter().map(BlockEvent::encode).collect();
+        let included = execute_ordered(
+            &mut ledger,
+            body,
+            &self.fee_params,
+            day_of_height(header.height()),
+        );
+        let event_leaves: Vec<Vec<u8>> = ledger
+            .block_events()
+            .iter()
+            .map(BlockEvent::encode)
+            .collect();
         if included.len() != body.len()
             || ledger.q_root() != *header.q_root()
             || transaction_root(&included) != *header.transaction_root()
@@ -921,10 +890,6 @@ impl DevNode {
         Ok(())
     }
 
-    /// Consult the persistent anti double sign watermark once per height before this node
-    /// signs anything at that height. It returns whether signing is permitted; a refusal,
-    /// meaning the height was already signed in an earlier run, sets a fatal halt so the
-    /// node never double signs across a restart.
     fn guard_height(&mut self) -> bool {
         if self.fatal.is_some() {
             return false;
@@ -947,9 +912,6 @@ impl DevNode {
         }
     }
 
-    /// Observe a finalized value for a height against the finality ledger. A value that
-    /// conflicts with one already finalized at that height sets a fatal halt so the node
-    /// never carries two conflicting finalities.
     fn observe_finality(&mut self, height: Height, value: [u8; 32]) {
         if let FinalityStatus::Violation {
             height,
@@ -965,34 +927,31 @@ impl DevNode {
         }
     }
 
-    /// The fatal condition that halted this node, if any.
     pub fn fatal(&self) -> Option<Fatal> {
         self.fatal
     }
 
-    /// Observe a certificate's finalized value for a height on the running node, returning
-    /// the fatal condition if it conflicts with a finality already held.
     pub fn observe_certificate(&mut self, height: Height, value: [u8; 32]) -> Option<Fatal> {
         self.observe_finality(height, value);
         self.fatal
     }
 
     fn current_committee_digest(&self) -> CommitteeDigest {
-        self.select().map(|s| s.commitment.digest()).unwrap_or([0u8; 32])
+        self.select()
+            .map(|s| s.commitment.digest())
+            .unwrap_or([0u8; 32])
     }
 
     pub fn attest(&self) -> Result<Attestation, RoundError> {
         let staged = self.staged.as_ref().ok_or(RoundError::NotStaged)?;
-        Ok(self
-            .consensus
-            .own_attestation(
-                self.height,
-                self.slot(),
-                self.view,
-                self.current_committee_digest(),
-                staged.block,
-                &self.beacon,
-            ))
+        Ok(self.consensus.own_attestation(
+            self.height,
+            self.slot(),
+            self.view,
+            self.current_committee_digest(),
+            staged.block,
+            &self.beacon,
+        ))
     }
 
     pub fn finalize(
@@ -1024,7 +983,6 @@ impl DevNode {
         let staged = self.staged.take().expect("the staged block is present");
         self.observe_finality(self.height, block.val);
         if self.fatal.is_some() {
-            // the conflicting state reaches the ledger or the disk. The driver halts on the fatal.
             return Err(RoundError::NotFinalized);
         }
 
@@ -1041,9 +999,6 @@ impl DevNode {
         let cert_slot = crate::wire::certificate_to_bytes(&certificate);
         let chain_block = ChainBlock::new(staged.header, cert_slot, staged.body);
         if let Err(err) = self.persist(&chain_block) {
-            // The block did not reach the disk, so the committed height now trails this in memory
-            // height. Halt cleanly with a clear reason rather than run on advanced but uncommitted
-            // state. A restart reconciles the ledger back to the last committed height.
             self.fatal = Some(Fatal::PersistFailed {
                 height: self.height,
             });
@@ -1067,6 +1022,7 @@ impl DevNode {
         self.view = 0;
         self.lock = None;
         self.round_atts.clear();
+        self.attest_relayed.clear();
         self.prevotes.clear();
         self.future_props.clear();
         self.view_changes.clear();
@@ -1155,7 +1111,9 @@ impl DevNode {
                 }
             }
             None => {
-                if *proposal.header.proposer() != self.validator_address(leader_for(selection, view)) {
+                if *proposal.header.proposer()
+                    != self.validator_address(leader_for(selection, view))
+                {
                     return Vec::new();
                 }
             }
@@ -1181,12 +1139,18 @@ impl DevNode {
         self.prevote_staged()
     }
 
-    fn justified_lock(&self, selection: &Selection, records: &[ViewChange]) -> Option<(View, LockedBlock)> {
+    fn justified_lock(
+        &self,
+        selection: &Selection,
+        records: &[ViewChange],
+    ) -> Option<(View, LockedBlock)> {
         let mut best: Option<(View, LockedBlock)> = None;
         for record in records {
             if let (Some(block), Some(polka)) = (&record.locked, &record.polka) {
                 if self.polka_backs(selection, record.lock_view, block, polka)
-                    && best.as_ref().map_or(true, |(view, _)| record.lock_view > *view)
+                    && best
+                        .as_ref()
+                        .map_or(true, |(view, _)| record.lock_view > *view)
                 {
                     best = Some((record.lock_view, block.clone()));
                 }
@@ -1219,15 +1183,14 @@ impl DevNode {
         let value = header_value(&staged.header.hash());
         let committee = self.current_committee_digest();
         let subject = prevote_subject(self.height, staged.view, value);
-        let prevote =
-            self.consensus.own_attestation(
-                self.height,
-                self.slot(),
-                staged.view,
-                committee,
-                subject,
-                &self.beacon,
-            );
+        let prevote = self.consensus.own_attestation(
+            self.height,
+            self.slot(),
+            staged.view,
+            committee,
+            subject,
+            &self.beacon,
+        );
         self.record_prevote(&prevote);
         let mut out = vec![Message::Prevote(Box::new(prevote))];
         if let Ok(selection) = self.select() {
@@ -1309,7 +1272,11 @@ impl DevNode {
         if seen {
             return;
         }
-        let from_count = self.prevotes.iter().filter(|p| p.from == prevote.from).count();
+        let from_count = self
+            .prevotes
+            .iter()
+            .filter(|p| p.from == prevote.from)
+            .count();
         if from_count >= MAX_ATTESTATIONS_PER_SENDER {
             return;
         }
@@ -1425,7 +1392,10 @@ impl DevNode {
         {
             return false;
         }
-        if !record.att.signature_verifies(self.consensus.chain_id(), &member.attest_pk) {
+        if !record
+            .att
+            .signature_verifies(self.consensus.chain_id(), &member.attest_pk)
+        {
             return false;
         }
         record.att.is_entitled(
@@ -1453,9 +1423,6 @@ impl DevNode {
         records: &[ViewChange],
         view: View,
     ) -> Option<Vec<ViewChange>> {
-        // A justification carries at most one view change per committee member, so a set larger
-        // than the committee cannot be valid. Reject it before verifying any signature, so a
-        // padded set cannot amplify the per record lattice verify into a consensus thread stall.
         if records.len() > selection.commitment.len() {
             return None;
         }
@@ -1487,9 +1454,11 @@ impl DevNode {
         view: View,
     ) -> Option<Proposal> {
         let records = self.justified_records(selection, view)?;
-        let bound = self
-            .justified_lock(selection, &records)
-            .or_else(|| self.lock.as_ref().map(|lock| (lock.view, lock.block.clone())));
+        let bound = self.justified_lock(selection, &records).or_else(|| {
+            self.lock
+                .as_ref()
+                .map(|lock| (lock.view, lock.block.clone()))
+        });
         let proposal = match bound {
             Some((_, locked)) => {
                 self.stage_from(&locked.header, &locked.body, view).ok()?;
@@ -1532,9 +1501,9 @@ impl DevNode {
         }
     }
 
-
     pub fn view_sync_target(&self, selection: &Selection) -> Option<View> {
-        let blocking = view_sync_blocking(selection.expected, selection.members.len(), selection.tau);
+        let blocking =
+            view_sync_blocking(selection.expected, selection.members.len(), selection.tau);
         let mut views: Vec<View> = self.view_changes.iter().map(|r| r.target_view).collect();
         views.sort_unstable();
         views.dedup();
@@ -1570,15 +1539,15 @@ impl DevNode {
             .map(|staged| header_value(&staged.header.hash()))
     }
 
-    pub fn on_attestation(&mut self, attestation: Attestation) {
+    pub fn on_attestation(&mut self, attestation: Attestation) -> bool {
         if attestation.height != self.height {
-            return;
+            return false;
         }
         if attestation.view >= qtv_node::evidence::MAX_HEIGHT_VIEW {
-            return;
+            return false;
         }
         if !self.watch_for_equivocation(&attestation) {
-            return;
+            return false;
         }
         if let Ok(selection) = self.select() {
             if let Some(member) = selection.commitment.member(attestation.from) {
@@ -1595,6 +1564,14 @@ impl DevNode {
                 }
             }
         }
+        if self.attest_relayed.len() >= MAX_ROUND_ATTESTATIONS {
+            return false;
+        }
+        let mut key = Vec::with_capacity(16 + 32);
+        key.extend_from_slice(&attestation.from.to_le_bytes());
+        key.extend_from_slice(&attestation.view.to_le_bytes());
+        key.extend_from_slice(&attestation.block.to_bytes());
+        self.attest_relayed.insert(key)
     }
 
     pub fn on_timeout(&mut self, view: View) -> bool {
@@ -1657,17 +1634,10 @@ impl DevNode {
         self.round_atts.push(attestation.clone());
     }
 
-    /// Feed an observed attestation to the evidence pool, keyed by the signer's bond
-    /// address and tagged with the view the offender signed into the attestation. A second
-    /// attestation from the same signer at the same height in the same signed view for a
-    /// different block is turned into attributable evidence a block can carry. A conflicting
-    /// attestation in a higher signed view is a justified vote change and is never attributed.
     fn watch_for_equivocation(&mut self, attestation: &Attestation) -> bool {
         let chain_id = self.consensus.chain_id();
         let Some(offender) = self.base_roster.iter().find_map(|r| {
-            if r.id == attestation.from
-                && attestation.signature_verifies(chain_id, &r.attest_pk)
-            {
+            if r.id == attestation.from && attestation.signature_verifies(chain_id, &r.attest_pk) {
                 Some(r.bond_address.clone())
             } else {
                 None
@@ -1687,8 +1657,6 @@ impl DevNode {
         true
     }
 
-    /// The equivocation evidence this node has attributed from the attestations it has seen,
-    /// ready for a block to carry so every node applies the same slash on execution.
     pub fn pending_evidence(&mut self) -> Vec<Equivocation> {
         self.evidence_pool.drain()
     }
@@ -1732,7 +1700,6 @@ impl DevNode {
         for wrapper in block.body() {
             self.tx_index.insert(wrapper.id(), height);
         }
-        // Write state effects and the block, then the commit marker; the block is synced before the marker.
         for (key, value) in self.ledger.take_dirty_entries() {
             match value {
                 Some(value) => self.state_store.put_account(key, value)?,
@@ -1747,9 +1714,9 @@ impl DevNode {
 
     fn archive_burn_block(&mut self, block: &ChainBlock) {
         let events = self.ledger.block_events();
-        let carries_burn = events
-            .iter()
-            .any(|event| event.selector == EVENT_BRIDGE_BURN && event.contract == NATIVE_EVENT_SOURCE);
+        let carries_burn = events.iter().any(|event| {
+            event.selector == EVENT_BRIDGE_BURN && event.contract == NATIVE_EVENT_SOURCE
+        });
         if !carries_burn {
             return;
         }
@@ -1799,9 +1766,6 @@ impl DevNode {
         self.id
     }
 
-    /// The committed bond and reward address of validator `id`, read from the roster
-    /// this node holds. The address is a commitment; it is never recomputed from the
-    /// id.
     fn validator_address(&self, id: u64) -> String {
         self.base_roster
             .iter()
@@ -1810,9 +1774,6 @@ impl DevNode {
             .unwrap_or_default()
     }
 
-    /// Reconstruct the committee a finalized block was formed over from the reveals its
-    /// certificate carries, adding this node's own reveal when needed, and accept it only
-    /// when its committee digest matches the one the certificate commits to.
     fn committee_for_certificate(
         &self,
         height: u64,
@@ -1851,18 +1812,14 @@ impl DevNode {
         self.consensus.epoch_for(self.height)
     }
 
-    /// The weak subjectivity checkpoint the node currently trusts.
     pub fn checkpoint(&self) -> Option<Checkpoint> {
         self.checkpoint
     }
 
-    /// Install the recent finalised checkpoint the node build carries. A node that syncs
-    /// will refuse any block at the checkpoint height whose value differs from it.
     pub fn set_checkpoint(&mut self, checkpoint: Checkpoint) {
         self.checkpoint = Some(checkpoint);
     }
 
-    /// Whether a block at `height` with `value` conflicts with the trusted checkpoint.
     pub fn conflicts_with_checkpoint(&self, height: Height, value: [u8; 32]) -> bool {
         matches!(self.checkpoint, Some(cp) if cp.height == height && cp.value != value)
     }
@@ -1928,11 +1885,17 @@ impl DevNode {
     }
 
     pub fn events_at(&self, height: Height) -> Vec<BlockEvent> {
-        self.events_by_height.get(&height).cloned().unwrap_or_default()
+        self.events_by_height
+            .get(&height)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn side_events_at(&self, height: Height) -> Vec<SideEvent> {
-        self.side_events_by_height.get(&height).cloned().unwrap_or_default()
+        self.side_events_by_height
+            .get(&height)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn block_at_height(&self, height: Height) -> Option<ChainBlock> {
@@ -1999,7 +1962,12 @@ impl DevNode {
             .committee_for_certificate(self.height, &certificate)
             .ok_or(SyncError::NoCommittee)?;
         if !certificate
-            .verify(self.consensus.chain_id(), &selection.commitment, &self.beacon, selection.tau)
+            .verify(
+                self.consensus.chain_id(),
+                &selection.commitment,
+                &self.beacon,
+                selection.tau,
+            )
             .is_verified()
         {
             return Err(SyncError::UnverifiedCertificate);
@@ -2012,8 +1980,17 @@ impl DevNode {
         ledger.clear_block_events();
         ledger.set_round_proposer(header.proposer());
         ledger.set_execution_height(header.height());
-        let included = execute_ordered(&mut ledger, block.body(), &self.fee_params, day_of_height(header.height()));
-        let event_leaves: Vec<Vec<u8>> = ledger.block_events().iter().map(BlockEvent::encode).collect();
+        let included = execute_ordered(
+            &mut ledger,
+            block.body(),
+            &self.fee_params,
+            day_of_height(header.height()),
+        );
+        let event_leaves: Vec<Vec<u8>> = ledger
+            .block_events()
+            .iter()
+            .map(BlockEvent::encode)
+            .collect();
         if included.len() != block.body().len()
             || ledger.q_root() != *header.q_root()
             || transaction_root(&included) != *header.transaction_root()
@@ -2051,6 +2028,7 @@ impl DevNode {
         self.staged = None;
         self.lock = None;
         self.round_atts.clear();
+        self.attest_relayed.clear();
         self.prevotes.clear();
         self.future_props.clear();
         self.view_changes.clear();
@@ -2066,10 +2044,6 @@ impl DevNode {
     }
 }
 
-/// Wrap attributed equivocation evidence as a fee free system transaction the leader
-/// carries in the block it produces. It authenticates on its own against the offender's
-/// attestation key held in state, so every node that executes the block reaches the same
-/// slash whether or not it saw the equivocation itself.
 fn evidence_transaction(evidence: &Equivocation, chain_id: u64) -> Wrapper {
     let target = evidence_address();
     let call = Call::new(target.clone(), evidence.encode());
@@ -2077,9 +2051,6 @@ fn evidence_transaction(evidence: &Equivocation, chain_id: u64) -> Wrapper {
     Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new())
 }
 
-/// Wrap a signed epoch re registration as a fee free system transaction a leader carries in
-/// the block, so the rotated root is persisted in chain history and a restarting node reads
-/// it back rather than waiting for the next boundary.
 fn registration_transaction(note: &RegisterNote, chain_id: u64) -> Wrapper {
     let target = registration_address();
     let call = Call::new(target.clone(), encode_register_note(note));
@@ -2122,8 +2093,6 @@ fn view_change_subject(
     buf.extend_from_slice(&locked_value);
     buf.push(has_lock as u8);
     let commitment = qtv_bft::hash::digest_256(&buf);
-    // Mark the subject with the reserved control plane cost so the equivocation slasher never
-    // reads a view change vote as a block double vote and frames the honest signer.
     ConsensusBlock::with_cost(
         height,
         commitment,
@@ -2156,16 +2125,31 @@ mod tests {
     #[test]
     fn a_hostile_upper_height_is_clamped_to_the_serve_window() {
         let ceiling = serve_ceiling(0, u64::MAX);
-        assert_eq!(ceiling, MAX_SERVE_BLOCKS - 1, "the window did not clamp a u64::MAX request");
-        assert_eq!(span(0, ceiling), MAX_SERVE_BLOCKS, "the served span exceeded the window");
+        assert_eq!(
+            ceiling,
+            MAX_SERVE_BLOCKS - 1,
+            "the window did not clamp a u64::MAX request"
+        );
+        assert_eq!(
+            span(0, ceiling),
+            MAX_SERVE_BLOCKS,
+            "the served span exceeded the window"
+        );
     }
 
     #[test]
     fn the_window_never_overflows_for_a_high_lower_bound() {
         let from = u64::MAX - 3;
         let ceiling = serve_ceiling(from, u64::MAX);
-        assert_eq!(ceiling, u64::MAX, "a near ceiling from must saturate, not wrap");
-        assert!(span(from, ceiling) <= MAX_SERVE_BLOCKS, "the span breached the window near u64::MAX");
+        assert_eq!(
+            ceiling,
+            u64::MAX,
+            "a near ceiling from must saturate, not wrap"
+        );
+        assert!(
+            span(from, ceiling) <= MAX_SERVE_BLOCKS,
+            "the span breached the window near u64::MAX"
+        );
     }
 
     #[test]
@@ -2206,5 +2190,4 @@ mod tests {
             "a threshold above the whole committee saturates to one"
         );
     }
-
 }
