@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 
+use qtv_attest::committee::CommitteeDigest;
 use qtv_attest::{Attestation, Certificate};
 use qtv_block::{event_root, transaction_root, Block as ChainBlock, Header};
 use qtv_codec::{to_bytes, Decoder};
@@ -948,11 +949,22 @@ impl DevNode {
         self.fatal
     }
 
+    fn current_committee_digest(&self) -> CommitteeDigest {
+        self.select().map(|s| s.commitment.digest()).unwrap_or([0u8; 32])
+    }
+
     pub fn attest(&self) -> Result<Attestation, RoundError> {
         let staged = self.staged.as_ref().ok_or(RoundError::NotStaged)?;
         Ok(self
             .consensus
-            .own_attestation(self.height, self.slot(), self.view, staged.block, &self.beacon))
+            .own_attestation(
+                self.height,
+                self.slot(),
+                self.view,
+                self.current_committee_digest(),
+                staged.block,
+                &self.beacon,
+            ))
     }
 
     pub fn finalize(
@@ -1178,10 +1190,17 @@ impl DevNode {
             return Vec::new();
         };
         let value = header_value(&staged.header.hash());
+        let committee = self.current_committee_digest();
         let subject = prevote_subject(self.height, staged.view, value);
         let prevote =
-            self.consensus
-                .own_attestation(self.height, self.slot(), staged.view, subject, &self.beacon);
+            self.consensus.own_attestation(
+                self.height,
+                self.slot(),
+                staged.view,
+                committee,
+                subject,
+                &self.beacon,
+            );
         self.record_prevote(&prevote);
         let mut out = vec![Message::Prevote(Box::new(prevote))];
         if let Ok(selection) = self.select() {
@@ -1287,9 +1306,15 @@ impl DevNode {
         };
         let subject =
             view_change_subject(self.height, target_view, lock_view, locked_value, has_lock);
-        let att = self
-            .consensus
-            .own_attestation(self.height, self.slot(), self.view, subject, &self.beacon);
+        let committee = self.current_committee_digest();
+        let att = self.consensus.own_attestation(
+            self.height,
+            self.slot(),
+            self.view,
+            committee,
+            subject,
+            &self.beacon,
+        );
         ViewChange {
             height: self.height,
             target_view,
@@ -1613,6 +1638,7 @@ impl DevNode {
             attestation.height,
             attestation.slot,
             attestation.view,
+            attestation.committee,
             attestation.block.to_bytes(),
             attestation.sig.to_vec(),
         );

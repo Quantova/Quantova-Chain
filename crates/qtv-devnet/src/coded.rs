@@ -830,6 +830,7 @@ mod tests {
             height: 1,
             slot: 0,
             view: 0,
+            committee: [0u8; 32],
             block: Block::new(1, [0u8; 32], Parent::Genesis),
             membership: Credential {
                 position: 0,

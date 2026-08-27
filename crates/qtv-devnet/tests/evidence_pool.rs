@@ -34,8 +34,8 @@ fn a_running_node_attributes_an_equivocation_from_conflicting_attestations() {
     let beacon = genesis_beacon();
     let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
     let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-    let att_a = offender.attest(chain_id, 1, 1, 0, block_a, &beacon);
-    let att_b = offender.attest(chain_id, 1, 1, 0, block_b, &beacon);
+    let att_a = offender.attest(chain_id, 1, 1, 0, [0u8; 32], block_a, &beacon);
+    let att_b = offender.attest(chain_id, 1, 1, 0, [0u8; 32], block_b, &beacon);
 
     node.on_attestation(att_a);
     let evidence = node.pending_evidence();
@@ -67,8 +67,8 @@ fn a_running_node_does_not_attribute_an_honest_cross_view_re_vote() {
     let beacon = genesis_beacon();
     let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
     let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-    let att_a = offender.attest(chain_id, 1, 1, 0, block_a, &beacon);
-    let att_b = offender.attest(chain_id, 1, 1, 1, block_b, &beacon);
+    let att_a = offender.attest(chain_id, 1, 1, 0, [0u8; 32], block_a, &beacon);
+    let att_b = offender.attest(chain_id, 1, 1, 1, [0u8; 32], block_b, &beacon);
 
     node.on_attestation(att_a);
     assert!(node.pending_evidence().is_empty());
