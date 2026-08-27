@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::io::{BufRead, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -120,7 +119,9 @@ impl Runtime {
                     self.emit(message);
                 }
             }
-            Message::Attest(attestation) => self.node.on_attestation(*attestation),
+            Message::Attest(attestation) => {
+                self.node.on_attestation(*attestation);
+            }
             Message::ViewChange(record) => self.node.collect_view_change(selection, *record),
             Message::Reveal(note) => {
                 self.node.collect_reveal(*note);
@@ -158,7 +159,9 @@ impl Runtime {
             let bytes = Message::Register(Box::new(note)).encode();
             self.broadcast(&bytes, None);
         }
-        let expected: Vec<u64> = (1..=self.n as u64).filter(|&id| id != self.node.id()).collect();
+        let expected: Vec<u64> = (1..=self.n as u64)
+            .filter(|&id| id != self.node.id())
+            .collect();
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
             let have = self.node.collected_registration_ids();
@@ -207,7 +210,10 @@ impl Runtime {
         }
     }
 
-    fn drive_height(&mut self, batch: Option<Vec<qtv_tx::Wrapper>>) -> Result<HeightOutcome, String> {
+    fn drive_height(
+        &mut self,
+        batch: Option<Vec<qtv_tx::Wrapper>>,
+    ) -> Result<HeightOutcome, String> {
         let start_height = self.node.height();
         self.disseminate_registrations();
         self.disseminate_reveals();
@@ -273,7 +279,9 @@ impl Runtime {
                         Err(_) => continue,
                     };
                     match message_height(&message) {
-                        Some(h) if h > start_height => buffer_bounded(&mut self.buffered, from, bytes),
+                        Some(h) if h > start_height => {
+                            buffer_bounded(&mut self.buffered, from, bytes)
+                        }
                         Some(h) if h < start_height => {}
                         _ => self.dispatch(from, message, &selection),
                     }
@@ -300,7 +308,9 @@ fn build_mesh(
     let identity_acc = identity.clone();
     let acceptor = thread::spawn(move || {
         for _ in 0..(n - 1) {
-            let (stream, _) = listener.accept().expect("accept an inbound peer connection");
+            let (stream, _) = listener
+                .accept()
+                .expect("accept an inbound peer connection");
             let channel = Channel::accept(stream, &identity_acc).expect("responder handshake");
             let peer = channel.peer_id().clone();
             let from = (0..n)
@@ -359,7 +369,10 @@ fn main() {
     let senders_n = env_usize("QTV_MP_ACCOUNTS", 250).max(2);
     let run_secs = env_usize("QTV_MP_SECS", 60).max(1) as f64;
     let warmup = env_usize("QTV_MP_WARMUP", 2);
-    let height_cap = env_usize("QTV_MP_HEIGHTCAP", (qtv_loopback::HARNESS_SLOTS as usize) - 64);
+    let height_cap = env_usize(
+        "QTV_MP_HEIGHTCAP",
+        (qtv_loopback::HARNESS_SLOTS as usize) - 64,
+    );
     let base = std::env::var("QTV_MP_BASE").expect("the store base directory");
     let base = std::path::PathBuf::from(base);
 

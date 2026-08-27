@@ -1,7 +1,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::collections::VecDeque;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,12 +21,10 @@ use crate::util::{hex, log};
 
 const TICK: Duration = Duration::from_millis(20);
 
-// Bound the ahead-of-height replay buffer by frame count and total bytes.
 const MAX_BUFFERED_FRAMES: usize = 8192;
 
 const MAX_BUFFERED_BYTES: usize = 32 * 1024 * 1024;
 
-/// Ahead-of-height replay buffer; oldest frames are evicted when a ceiling is hit.
 #[derive(Default)]
 struct FrameBuffer {
     frames: VecDeque<Vec<u8>>,
@@ -36,7 +33,6 @@ struct FrameBuffer {
 
 impl FrameBuffer {
     fn push(&mut self, frame: Vec<u8>) {
-        // A frame larger than the whole byte budget can never fit, so refuse it.
         if frame.len() > MAX_BUFFERED_BYTES {
             return;
         }
@@ -52,7 +48,6 @@ impl FrameBuffer {
         self.frames.push_back(frame);
     }
 
-    /// Drain the buffer for a replay pass, leaving it empty.
     fn take(&mut self) -> VecDeque<Vec<u8>> {
         self.bytes = 0;
         std::mem::take(&mut self.frames)
@@ -106,7 +101,6 @@ impl Driver {
     }
 
     fn serve_rpc(&mut self) {
-        // Cap RPC calls served per consensus tick so a backlog cannot stall block production.
         const RPC_CALLS_PER_TICK: usize = 128;
         let Some(requests) = self.rpc_requests.as_ref() else {
             return;
@@ -149,9 +143,6 @@ impl Driver {
         Ok(())
     }
 
-    /// Stop the node loudly the moment a safety guard trips. A double sign refusal from the
-    /// persistent watermark or a finality violation from the finality ledger is not
-    /// something the driver rides through, it halts the node and surfaces the reason.
     fn halt_if_fatal(&self) -> Result<(), String> {
         match self.node.fatal() {
             Some(fatal) => {
@@ -202,8 +193,7 @@ impl Driver {
             let view = self.node.view();
             let leads = leader_for(&selection, view) == self.node.id();
             let interval_elapsed = height_start.elapsed() >= block_interval;
-            let ready =
-                entered_view != Some(view) && (!(view == 0 && leads) || interval_elapsed);
+            let ready = entered_view != Some(view) && (!(view == 0 && leads) || interval_elapsed);
             if ready {
                 self.enter_current_view(&selection, view);
                 entered_view = Some(view);
@@ -223,10 +213,6 @@ impl Driver {
         }
     }
 
-    /// At an epoch boundary publish this node's signed re registration of its rotated one
-    /// time root and gather the peers' re registrations, until the up set is heard from or
-    /// the window elapses, then re form the committee from the rotated roots. A no op in
-    /// the genesis epoch, whose roots the roster already carries.
     fn disseminate_registrations(&mut self, window: Duration) {
         if self.node.epoch() == 0 {
             return;
@@ -262,8 +248,6 @@ impl Driver {
         self.node.apply_registrations();
     }
 
-    /// Publish this node's own reveal for the height and gather the peers' reveals,
-    /// until the up set is heard from or the window elapses.
     fn disseminate_reveals(&mut self, window: Duration) {
         if let Some(note) = self.node.own_reveal_note() {
             let bytes = Message::Reveal(Box::new(note)).encode();
@@ -364,7 +348,11 @@ impl Driver {
                     self.emit(message);
                 }
             }
-            Message::Attest(attestation) => self.node.on_attestation(*attestation),
+            Message::Attest(attestation) => {
+                if self.node.on_attestation((*attestation).clone()) {
+                    self.broadcast(&Message::Attest(attestation).encode());
+                }
+            }
             Message::ViewChange(record) => {
                 self.node.collect_view_change(selection, *record);
                 if let Some(target) = self.node.view_sync_target(selection) {
@@ -425,7 +413,6 @@ impl Driver {
             }
         }
     }
-
 
     fn emit(&mut self, message: Message) {
         match message {
@@ -495,8 +482,6 @@ fn message_height(message: &Message) -> Option<u64> {
 mod tests {
     use super::{FrameBuffer, MAX_BUFFERED_BYTES, MAX_BUFFERED_FRAMES};
 
-    // The one invariant every case must uphold: the held frame count and the held byte
-    // count both stay at or under their ceilings, whatever a peer streams at the buffer.
     fn within_ceilings(buffer: &FrameBuffer) {
         assert!(
             buffer.len() <= MAX_BUFFERED_FRAMES,
@@ -515,8 +500,6 @@ mod tests {
     #[test]
     fn a_flood_of_tiny_ahead_frames_stays_within_the_count_ceiling() {
         let mut buffer = FrameBuffer::default();
-        // Stream far more small frames than the count ceiling, as an ahead of height
-        // flood would. The buffer must never grow past the ceiling.
         for _ in 0..(MAX_BUFFERED_FRAMES * 4) {
             buffer.push(vec![7u8; 32]);
             within_ceilings(&buffer);
@@ -527,13 +510,11 @@ mod tests {
     #[test]
     fn a_flood_of_large_ahead_frames_stays_within_the_byte_ceiling() {
         let mut buffer = FrameBuffer::default();
-        // Near record sized frames, enough of them to demand many times the byte ceiling.
         let frame = vec![3u8; 1024 * 1024];
         for _ in 0..((MAX_BUFFERED_BYTES / frame.len()) * 4) {
             buffer.push(frame.clone());
             within_ceilings(&buffer);
         }
-        // The byte ceiling, not the count ceiling, is what binds a large frame flood.
         assert!(buffer.len() < MAX_BUFFERED_FRAMES);
         assert!(buffer.byte_len() + frame.len() > MAX_BUFFERED_BYTES);
     }
@@ -541,8 +522,6 @@ mod tests {
     #[test]
     fn mixed_frame_sizes_cannot_bypass_either_ceiling() {
         let mut buffer = FrameBuffer::default();
-        // Interleave a tiny frame and a large frame, the shape an attacker would try to
-        // slip a payload past a single dimension bound. Both ceilings must hold every step.
         for round in 0..5000 {
             buffer.push(vec![1u8; 16]);
             within_ceilings(&buffer);
@@ -561,10 +540,17 @@ mod tests {
         for _ in 0..MAX_BUFFERED_FRAMES {
             buffer.push(vec![0u8; 8]);
         }
-        assert_eq!(buffer.len(), MAX_BUFFERED_FRAMES, "the buffer fills to the ceiling");
-        // One frame over the boundary evicts the oldest rather than growing the buffer.
+        assert_eq!(
+            buffer.len(),
+            MAX_BUFFERED_FRAMES,
+            "the buffer fills to the ceiling"
+        );
         buffer.push(vec![0u8; 8]);
-        assert_eq!(buffer.len(), MAX_BUFFERED_FRAMES, "the ceiling holds one frame over");
+        assert_eq!(
+            buffer.len(),
+            MAX_BUFFERED_FRAMES,
+            "the ceiling holds one frame over"
+        );
         within_ceilings(&buffer);
     }
 
@@ -574,19 +560,23 @@ mod tests {
         buffer.push(vec![5u8; 4096]);
         let before_frames = buffer.len();
         let before_bytes = buffer.byte_len();
-        // A frame larger than the whole byte budget can never be held, so it is dropped
-        // without evicting what is already buffered.
         buffer.push(vec![6u8; MAX_BUFFERED_BYTES + 1]);
-        assert_eq!(buffer.len(), before_frames, "the oversized frame was not stored");
-        assert_eq!(buffer.byte_len(), before_bytes, "no bytes were charged for it");
+        assert_eq!(
+            buffer.len(),
+            before_frames,
+            "the oversized frame was not stored"
+        );
+        assert_eq!(
+            buffer.byte_len(),
+            before_bytes,
+            "no bytes were charged for it"
+        );
         within_ceilings(&buffer);
     }
 
     #[test]
     fn eviction_keeps_the_freshest_frames() {
         let mut buffer = FrameBuffer::default();
-        // Tag frames with a running counter in the first bytes, overflow the count ceiling,
-        // then confirm the survivors are the most recent ones, oldest first.
         let total = MAX_BUFFERED_FRAMES + 100;
         for tag in 0..total as u64 {
             let mut frame = tag.to_le_bytes().to_vec();

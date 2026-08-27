@@ -79,3 +79,26 @@ fn a_running_node_does_not_attribute_an_honest_cross_view_re_vote() {
         "a conflicting block signed in a higher view is a justified vote change, not a double vote"
     );
 }
+
+#[test]
+fn both_halves_of_a_same_view_double_sign_relay_and_a_duplicate_does_not() {
+    let base = unique_base("evidence-relay");
+    let cfg = config(&base, &[true, true, true, true], vec![]);
+    let mut node = DevNode::open(&cfg.nodes[0], &cfg).expect("open");
+
+    let offender_id = 2u64;
+    let secret = qtv_node::keys::fixture_secret(offender_id);
+    let offender =
+        Attester::from_secret_with_slots(offender_id, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+    let chain_id = cfg.fee_params.chain_id;
+    let beacon = genesis_beacon();
+    let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
+    let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
+    let att_a = offender.attest(chain_id, 1, 1, 0, [0u8; 32], block_a, &beacon);
+    let att_b = offender.attest(chain_id, 1, 1, 0, [0u8; 32], block_b, &beacon);
+
+    assert!(node.on_attestation(att_a.clone()));
+    assert!(!node.on_attestation(att_a));
+    assert!(node.on_attestation(att_b));
+    assert_eq!(node.pending_evidence().len(), 1);
+}
