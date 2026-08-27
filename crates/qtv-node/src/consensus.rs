@@ -442,9 +442,11 @@ impl Consensus {
             .filter_map(|id| self.roster.iter().find(|r| r.id == *id))
             .map(ValidatorRegistration::member_key)
             .collect();
-        let commitment = CommitteeCommitment::from_member_keys(slot, member_keys, self.budget);
-        let leader = view.elect_leader(&committee, beacon, slot)?.id;
         let weights = view.weights();
+        let registered_weight = weights.iter().copied().fold(0u64, u64::saturating_add);
+        let commitment = CommitteeCommitment::from_member_keys(slot, member_keys, self.budget)
+            .with_total_weight(registered_weight);
+        let leader = view.elect_leader(&committee, beacon, slot)?.id;
         let total: u128 = weights.iter().map(|&w| w as u128).fold(0u128, u128::saturating_add);
         let saturated = total > 0
             && weights
