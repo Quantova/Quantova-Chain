@@ -1547,10 +1547,22 @@ impl DevNode {
         if attestation.height != self.height {
             return;
         }
-        self.watch_for_equivocation(&attestation);
+        if !self.watch_for_equivocation(&attestation) {
+            return;
+        }
         if let Ok(selection) = self.select() {
-            if self.verify_attestation(&selection, &attestation) {
-                self.record_attestation(&attestation);
+            if let Some(member) = selection.commitment.member(attestation.from) {
+                if attestation.slot == self.consensus.slot_for(self.height)
+                    && attestation.is_entitled(
+                        &member.root,
+                        &self.beacon,
+                        member.weight,
+                        selection.commitment.total_weight,
+                        selection.commitment.budget,
+                    )
+                {
+                    self.record_attestation(&attestation);
+                }
             }
         }
     }
@@ -1620,7 +1632,7 @@ impl DevNode {
     /// attestation from the same signer at the same height in the same signed view for a
     /// different block is turned into attributable evidence a block can carry. A conflicting
     /// attestation in a higher signed view is a justified vote change and is never attributed.
-    fn watch_for_equivocation(&mut self, attestation: &Attestation) {
+    fn watch_for_equivocation(&mut self, attestation: &Attestation) -> bool {
         let chain_id = self.consensus.chain_id();
         let Some(offender) = self.base_roster.iter().find_map(|r| {
             if r.id == attestation.from
@@ -1631,7 +1643,7 @@ impl DevNode {
                 None
             }
         }) else {
-            return;
+            return false;
         };
         self.evidence_pool.observe(
             &offender,
@@ -1642,6 +1654,7 @@ impl DevNode {
             attestation.block.to_bytes(),
             attestation.sig.to_vec(),
         );
+        true
     }
 
     /// The equivocation evidence this node has attributed from the attestations it has seen,
