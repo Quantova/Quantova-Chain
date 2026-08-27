@@ -519,9 +519,6 @@ impl ExitRequest {
 
 pub const EXIT_ACK_DOMAIN: &[u8] = b"QUANTOVA/Q-ORACLE/EXIT-ACK/v1";
 
-// The signature context binds an attestation to the chain era it was raised for, so a deposit or exit
-// proof from one launch of a reused chain name cannot be replayed on the next. The era is the genesis
-// hash the node seeds at launch and the operators sign under.
 pub fn attest_context(era: &[u8; 32]) -> Vec<u8> {
     let mut ctx = Vec::with_capacity(ATTEST_DOMAIN.len() + 32);
     ctx.extend_from_slice(ATTEST_DOMAIN);

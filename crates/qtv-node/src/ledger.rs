@@ -1656,7 +1656,6 @@ impl Ledger {
         if fact.amount == 0 {
             return false;
         }
-        // Never issue wrapped supply the vault cannot back, else a burn could strand un exitable.
         if self.bridge_pool_vault().is_none() {
             return false;
         }
@@ -2062,8 +2061,6 @@ impl Ledger {
         }
     }
 
-    // The session reward is split only across the roster that is actually paid, so a bond outside the
-    // roster cannot dilute a validator's share by inflating the total staked figure.
     fn roster_reward_denominator(&self) -> u64 {
         self.validator_ids()
             .iter()
@@ -2418,8 +2415,6 @@ impl Ledger {
                             self.apply_balance_delta(contract, i128::from(value));
                         }
                         Some(asset) => {
-                            // Reject an impossible contract credit before debiting the caller so a failed
-                            // credit can never strand the debited amount.
                             if self
                                 .asset_balance(&asset, &contract_id)
                                 .checked_add(u128::from(value))
@@ -2446,8 +2441,6 @@ impl Ledger {
                     });
                 }
                 for (asset, holder, amount) in &asset_credits {
-                    // Reject an impossible recipient credit before debiting the contract so a failed
-                    // credit can never strand the debited amount.
                     if self.asset_balance(asset, holder).checked_add(*amount).is_none() {
                         return false;
                     }
@@ -2893,10 +2886,6 @@ impl Ledger {
                         let mut take = from.balance.min(seizure.amount);
                         from.balance -= take;
                         self.set_account(&from_addr, &from);
-                        // A recovery reaches a validator bond only when the target was first frozen as
-                        // an incident, so a vote can never blanket seize the stake of validators that were
-                        // never marked. It then dissolves the whole bond and returns any residue to the
-                        // holder free balance, so no floor sized dust weight is left to wedge finality.
                         let remaining = seizure.amount - take;
                         if remaining > 0 {
                             if let Some(from_id) = id_from_slice(&seizure.from) {
@@ -3542,7 +3531,6 @@ mod stake_state_tests {
         let issuer_b = [0xB2u8; 32];
         let asset_a = asset_id_of(&issuer_a);
         let asset_b = asset_id_of(&issuer_b);
-        // The contract already holds almost the entire u128 range of the deposited asset.
         l.set_asset_balance(&asset_a, &contract_id, u128::MAX - 5);
         l.set_asset_balance(&asset_a, &caller_id, 10);
         l.set_asset_balance(&asset_b, &contract_id, 100);
@@ -3551,7 +3539,6 @@ mod stake_state_tests {
         payload.extend_from_slice(&issuer_b);
         payload.extend_from_slice(&caller_id);
 
-        // Depositing ten more would overflow the contract balance, so the call is refused before any debit.
         assert!(!l.call_contract(&caller, &contract, selector, &payload, 0, 1_000_000, 10, Some(issuer_a), 0));
         assert_eq!(l.asset_balance(&asset_a, &caller_id), 10, "the caller keeps its asset, nothing is debited");
         assert_eq!(l.asset_balance(&asset_a, &contract_id), u128::MAX - 5, "the contract balance is untouched");
@@ -4540,10 +4527,8 @@ mod stake_state_tests {
         let proposer = gov_addr(26);
         fund(&mut l, &proposer, 300_000 * 1_000_000);
         let thief = gov_addr(41);
-        // The thief holds part of the loot free and hides the rest inside a validator bond.
         l.seed_validator_bond(&thief, 2_000 * 1_000_000);
         fund(&mut l, &thief, 5_000 * 1_000_000);
-        // The thief was frozen as an incident target, so the recovery may reach the staked loot.
         l.set_frozen(&[41u8; 32]);
         let victim = gov_addr(40);
         let supply_before = l.total_supply();
@@ -4590,7 +4575,6 @@ mod stake_state_tests {
         let mut l = Ledger::new();
         let proposer = gov_addr(26);
         fund(&mut l, &proposer, 300_000 * 1_000_000);
-        // The staking treasury is a reserved protocol pot. A recovery must never reach it.
         let pot = sha3::sha3_256(b"qtv/stake/treasury");
         let seizures = vec![qtv_governance::Seizure { from: pot.to_vec(), amount: 1_000 }];
         let scope = sha3::sha3_256(&qtv_governance::Action::recovery_scope_preimage(
@@ -5776,7 +5760,6 @@ mod stake_state_tests {
 
         l.seed_bridge_exits_enabled(true);
         l.seed_bridge_payout_cap(10_000_000);
-        // Drop the vault custody to nothing so a later draw underflows and must fail closed.
         l.seed_bridge_vault_custody(&vault, &asset, 0);
         assert_eq!(
             l.bridge_vault_custody(&vault, &asset),

@@ -48,7 +48,6 @@ fn attestation_message(
 /// signed block with its signature. It authenticates against the offender's registered
 /// attestation key alone, so any node can verify it from state with no access to the live
 /// roster and slash the same offender deterministically.
-///
 /// The two views gate the offence. Only a same view double vote, the same target voted twice
 /// with two different blocks, attributes and is slashable. A pair whose views differ is a
 /// justified vote change, a block that failed to lock in one view followed by a different
@@ -99,11 +98,6 @@ impl Equivocation {
             Ok(sig) => sig,
             Err(_) => return false,
         };
-        // Each half is rebuilt with the slot and committee the offender actually signed it under,
-        // so two conflicting blocks at one height and view attribute no matter what slot or
-        // committee digest the offender embedded in each. A single shared slot or committee would
-        // let an offender sign the two halves under different values to make the pair fail its own
-        // signature check while still poisoning the pool's dedup, escaping the slash.
         let msg_a = attestation_message(
             chain_id,
             self.height,
@@ -174,21 +168,6 @@ impl Equivocation {
 }
 
 /// A pool that watches the attestations a node sees and turns two conflicting attestations
-/// from one validator at one height in one view into attributable evidence. Every view a
-/// validator votes in at a height is remembered on its own, keyed by height and view, so a
-/// second attestation for a different block in the same view is an equivocation the pool emits
-/// once for a block to carry. Two blocks in two different views are a justified vote change and
-/// never collide, since they land under different keys. Tracking each view on its own is what
-/// keeps a same view double vote attributable no matter what order the votes are seen in and
-/// even when the offender has also cast a benign vote in a higher view, so a validator can no
-/// longer pre poison its own record with a high view vote to hide a lower view double sign.
-///
-/// The view a vote names is capped rather than the count of stored views being evicted. A view
-/// beyond the bounded consensus range at a height is not a legitimate finality vote, so it is
-/// dropped and never stored. That caps the per validator per height view set at MAX_HEIGHT_VIEW
-/// entries without ever evicting a stored vote, which closes the flood that an evicting bound
-/// would allow, where an offender stores the first half of a double sign, floods enough distinct
-/// views to evict it, then casts the second half into an empty slot and escapes the slash.
 pub const MAX_HEIGHT_VIEW: u64 = 256;
 
 #[derive(Default)]
@@ -218,10 +197,6 @@ impl EvidencePool {
         if subject_is_view_change(&block_bytes) {
             return None;
         }
-        // A view past the bounded consensus range at a height is never a legitimate finality vote,
-        // so it is dropped rather than stored. Capping the view value keeps the tracked set bounded
-        // without evicting an earlier vote, so a flood of high view votes cannot drop the first half
-        // of a genuine double sign before its second half is seen.
         if view >= MAX_HEIGHT_VIEW {
             return None;
         }
@@ -356,8 +331,6 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        // The offender embeds two different committee digests in the two conflicting votes to try
-        // to make the evidence non-attributable while still occupying the pool's dedup slot.
         let g1 = [0x11u8; 32];
         let g2 = [0x22u8; 32];
         let a = attester.attest(CHAIN_ID, 1, 1, 0, g1, block_a, &beacon);
@@ -387,12 +360,9 @@ mod tests {
         let b = attester.attest(CHAIN_ID, 1, 1, 3, [0u8; 32], block_b, &beacon);
 
         let mut pool = EvidencePool::new();
-        // Store the first half of a view 3 double sign.
         assert!(pool
             .observe(&address, 1, 1, 3, [0u8; 32], block_a.to_bytes(), a.sig.to_vec())
             .is_none());
-        // Flood every other admissible view for this validator at this height. A view past the cap
-        // is dropped, and no stored view is evicted, so the view 3 record survives the flood.
         for v in 0..super::MAX_HEIGHT_VIEW + 10 {
             if v == 3 {
                 continue;
@@ -401,7 +371,6 @@ mod tests {
             let f = attester.attest(CHAIN_ID, 1, 1, v, [0u8; 32], filler, &beacon);
             let _ = pool.observe(&address, 1, 1, v, [0u8; 32], filler.to_bytes(), f.sig.to_vec());
         }
-        // The second half of the view 3 double sign is still attributed.
         let flagged = pool
             .observe(&address, 1, 1, 3, [0u8; 32], block_b.to_bytes(), b.sig.to_vec())
             .expect("the stored view 3 vote was not evicted by the flood");
@@ -444,7 +413,6 @@ mod tests {
         let b = attester.attest(CHAIN_ID, 1, 1, 2, [0u8; 32], block_b, &beacon);
 
         let mut pool = EvidencePool::new();
-        // The offender pre poisons its record with a benign vote in a higher view.
         assert!(pool
             .observe(&address, 1, 1, 5, [0u8; 32], high.to_bytes(), h.sig.to_vec())
             .is_none());

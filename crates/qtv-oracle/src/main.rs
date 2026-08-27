@@ -109,7 +109,7 @@ fn mint(a: &[String]) {
     let mut signatures = Vec::new();
     for (i, line) in secrets.lines().enumerate() {
         if i == 0 {
-            continue; // header: n threshold chain_id
+            continue;
         }
         let p: Vec<&str> = line.split_whitespace().collect();
         if p.len() < 2 {

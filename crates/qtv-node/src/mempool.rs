@@ -388,9 +388,6 @@ impl Mempool {
         self.feeless_admits < self.feeless_cap
     }
 
-    // Each feeless lane admits on cheap to forge evidence, so give every lane its own attempt window
-    // at the same cap. A junk flood on one lane then cannot spend the budget another lane relies on, in
-    // particular the guardian emergency freeze and the bridge settle.
     fn charge_feeless_attempt_for(&mut self, wrapper: &Wrapper) -> bool {
         let cap = self.feeless_attempts_cap;
         let counter = if crate::node::is_evidence(wrapper) {
