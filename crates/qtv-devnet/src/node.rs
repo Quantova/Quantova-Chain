@@ -632,8 +632,26 @@ impl DevNode {
                     &note.root,
                     &note.sig,
                 ) {
-                    self.epoch_notes.insert(note.id, note.clone());
-                    self.epoch_roots.insert(note.id, note.root);
+                    // Resolve a registration conflict exactly as the gossip path does, so a
+                    // validator that anchored two different rotated roots for one epoch falls
+                    // back to its base roster root on every node's reload. Applying the same
+                    // deterministic first writer plus conflict to base rule to the chain
+                    // anchored notes is what keeps the rebuilt roster identical across nodes.
+                    if self.epoch_conflicted.contains(&note.id) {
+                        continue;
+                    }
+                    match self.epoch_roots.get(&note.id) {
+                        Some(existing) if *existing == note.root => {}
+                        Some(_) => {
+                            self.epoch_conflicted.insert(note.id);
+                            self.epoch_roots.remove(&note.id);
+                            self.epoch_notes.remove(&note.id);
+                        }
+                        None => {
+                            self.epoch_notes.insert(note.id, note.clone());
+                            self.epoch_roots.insert(note.id, note.root);
+                        }
+                    }
                 }
             }
         }
@@ -1570,6 +1588,14 @@ impl DevNode {
 
     pub fn on_attestation(&mut self, attestation: Attestation) {
         if attestation.height != self.height {
+            return;
+        }
+        // A view past the bounded consensus range is not a legitimate finality vote. Rejecting it
+        // here, before it can be recorded toward finality or fed to the evidence pool, keeps the
+        // finality count and the slashing pool consistent, so an offender cannot stamp a huge view
+        // to have its vote counted for finality while the pool drops it and the double sign escapes
+        // the slash.
+        if attestation.view >= qtv_node::evidence::MAX_HEIGHT_VIEW {
             return;
         }
         if !self.watch_for_equivocation(&attestation) {

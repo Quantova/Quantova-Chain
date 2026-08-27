@@ -189,7 +189,7 @@ impl Equivocation {
 /// entries without ever evicting a stored vote, which closes the flood that an evicting bound
 /// would allow, where an offender stores the first half of a double sign, floods enough distinct
 /// views to evict it, then casts the second half into an empty slot and escapes the slash.
-const MAX_HEIGHT_VIEW: u64 = 256;
+pub const MAX_HEIGHT_VIEW: u64 = 256;
 
 #[derive(Default)]
 pub struct EvidencePool {
