@@ -76,6 +76,8 @@ pub fn leader_for(selection: &Selection, view: View) -> u64 {
 const GENESIS_COMMIT_HEIGHT: Height = 0;
 
 const MAX_ROUND_ATTESTATIONS: usize = 8192;
+const MAX_RELAY_BLOCKS_PER_VIEW: usize = 2;
+const MAX_RELAY_BUCKETS: usize = 1 << 16;
 
 const MAX_ATTESTATIONS_PER_SENDER: usize = 64;
 
@@ -220,7 +222,7 @@ pub struct DevNode {
     staged: Option<Staged>,
     lock: Option<Lock>,
     round_atts: Vec<Attestation>,
-    attest_relayed: std::collections::HashSet<Vec<u8>>,
+    attest_relayed: std::collections::HashMap<(u64, u64), std::collections::HashSet<Vec<u8>>>,
     prevotes: Vec<Attestation>,
     future_props: Vec<Proposal>,
     view_changes: Vec<ViewChange>,
@@ -302,7 +304,7 @@ impl DevNode {
             staged: None,
             lock: None,
             round_atts: Vec::new(),
-            attest_relayed: std::collections::HashSet::new(),
+            attest_relayed: std::collections::HashMap::new(),
             prevotes: Vec::new(),
             future_props: Vec::new(),
             view_changes: Vec::new(),
@@ -1564,14 +1566,17 @@ impl DevNode {
                 }
             }
         }
-        if self.attest_relayed.len() >= MAX_ROUND_ATTESTATIONS {
+        let slot = (attestation.from, attestation.view);
+        if !self.attest_relayed.contains_key(&slot)
+            && self.attest_relayed.len() >= MAX_RELAY_BUCKETS
+        {
             return false;
         }
-        let mut key = Vec::with_capacity(16 + 32);
-        key.extend_from_slice(&attestation.from.to_le_bytes());
-        key.extend_from_slice(&attestation.view.to_le_bytes());
-        key.extend_from_slice(&attestation.block.to_bytes());
-        self.attest_relayed.insert(key)
+        let bucket = self.attest_relayed.entry(slot).or_default();
+        if bucket.len() >= MAX_RELAY_BLOCKS_PER_VIEW {
+            return false;
+        }
+        bucket.insert(attestation.block.to_bytes())
     }
 
     pub fn on_timeout(&mut self, view: View) -> bool {

@@ -102,3 +102,46 @@ fn both_halves_of_a_same_view_double_sign_relay_and_a_duplicate_does_not() {
     assert!(node.on_attestation(att_b));
     assert_eq!(node.pending_evidence().len(), 1);
 }
+
+#[test]
+fn a_third_block_at_one_view_slot_is_not_relayed() {
+    let base = unique_base("evidence-relay-cap");
+    let cfg = config(&base, &[true, true, true, true], vec![]);
+    let mut node = DevNode::open(&cfg.nodes[0], &cfg).expect("open");
+
+    let secret = qtv_node::keys::fixture_secret(2);
+    let offender = Attester::from_secret_with_slots(2, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+    let chain_id = cfg.fee_params.chain_id;
+    let beacon = genesis_beacon();
+    let a = offender.attest(chain_id, 1, 1, 0, [0u8; 32], Block::new(1, [1u8; 32], Parent::Genesis), &beacon);
+    let b = offender.attest(chain_id, 1, 1, 0, [0u8; 32], Block::new(1, [2u8; 32], Parent::Genesis), &beacon);
+    let c = offender.attest(chain_id, 1, 1, 0, [0u8; 32], Block::new(1, [3u8; 32], Parent::Genesis), &beacon);
+
+    assert!(node.on_attestation(a));
+    assert!(node.on_attestation(b));
+    assert!(!node.on_attestation(c));
+}
+
+#[test]
+fn flooding_other_view_slots_does_not_suppress_an_equivocation_relay() {
+    let base = unique_base("evidence-relay-isolation");
+    let cfg = config(&base, &[true, true, true, true], vec![]);
+    let mut node = DevNode::open(&cfg.nodes[0], &cfg).expect("open");
+    let chain_id = cfg.fee_params.chain_id;
+    let beacon = genesis_beacon();
+
+    let flood_secret = qtv_node::keys::fixture_secret(3);
+    let flooder = Attester::from_secret_with_slots(3, &flood_secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+    for v in 0..250u64 {
+        let blk = Block::new(1, [(v % 251) as u8 + 4; 32], Parent::Genesis);
+        node.on_attestation(flooder.attest(chain_id, 1, 1, v, [0u8; 32], blk, &beacon));
+    }
+
+    let secret = qtv_node::keys::fixture_secret(2);
+    let offender = Attester::from_secret_with_slots(2, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+    let a = offender.attest(chain_id, 1, 1, 0, [0u8; 32], Block::new(1, [1u8; 32], Parent::Genesis), &beacon);
+    let b = offender.attest(chain_id, 1, 1, 0, [0u8; 32], Block::new(1, [2u8; 32], Parent::Genesis), &beacon);
+    assert!(node.on_attestation(a));
+    assert!(node.on_attestation(b));
+    assert_eq!(node.pending_evidence().len(), 1);
+}
