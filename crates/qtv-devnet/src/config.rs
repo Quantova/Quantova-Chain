@@ -137,6 +137,7 @@ impl DevnetConfig {
             bridge_operators: self.bridge_operators.clone(),
             bridged_assets: self.bridged_assets.clone(),
             bridge_era: self.bridge_era,
+            bridge_bitcoin_anchor: None,
         }
     }
 }

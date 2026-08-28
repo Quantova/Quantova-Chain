@@ -90,6 +90,7 @@ pub struct Genesis {
     pub bridge_operators: Option<crate::bridge::OperatorSet>,
     pub bridged_assets: Vec<GenesisBridgedAsset>,
     pub bridge_era: Option<[u8; 32]>,
+    pub bridge_bitcoin_anchor: Option<crate::bridge_btc::BitcoinAnchor>,
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -1359,6 +1360,9 @@ impl Node {
         }
         if let Some(ref operators) = genesis.bridge_operators {
             ledger.seed_bridge_operator_set(operators);
+        }
+        if let Some(ref anchor) = genesis.bridge_bitcoin_anchor {
+            ledger.seed_bridge_bitcoin_anchor(anchor);
         }
         for asset in &genesis.bridged_assets {
             ledger.register_bridged_asset(&asset.asset_id, asset.cap, asset.epoch_cap, asset.requires_stark);
