@@ -17,6 +17,8 @@ test-fixtures = []
 
 [dependencies]
 qtv-btc-spv = { path = "../qtv-btc-spv" }
+qlc-ethereum = { path = "../qlc-ethereum" }
+q-bls = { path = "../q-bls" }
 qtv-idfmt = { path = "../qtv-idfmt" }
 qtv-codec = { path = "../qtv-codec" }
 qtv-account = { path = "../qtv-account" }
@@ -35,3 +37,5 @@ qtv-attest = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "5fe
 # Enable the test only fixtures for this crate's own integration tests, the standard
 # way to turn a feature on for a crate testing itself.
 qtv-node = { path = ".", features = ["test-fixtures"] }
+qlc-ethereum = { path = "../qlc-ethereum", features = ["test-util"] }
+q-bls = { path = "../q-bls", features = ["test-util"] }

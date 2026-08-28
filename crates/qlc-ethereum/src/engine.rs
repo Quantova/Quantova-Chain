@@ -148,7 +148,6 @@ impl LightClientStore {
         self.next_sync_committee.as_ref()
     }
 
-    #[cfg(any(test, feature = "test-util"))]
     pub fn from_trusted_committee(
         config: EvmChainConfig,
         period: u64,

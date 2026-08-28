@@ -16,7 +16,6 @@ const BANNED_CRATES: &[&str] = &[
     "secp256k1",
     "rsa",
     "bls12_381",
-    "blst",
     "ark-ec",
     "ark-bls12-381",
     "ark-groth16",
@@ -32,6 +31,10 @@ const BANNED_CRATES: &[&str] = &[
 ];
 
 const BANNED_SOURCES: &[&str] = &["q-oracle", "q-prover", "prover-bridge", "oracle"];
+
+const BRIDGE_VERIFIER_CRATES: &[&str] = &["blst"];
+
+const BRIDGE_VERIFIER_WRAPPERS: &[&str] = &["q-bls"];
 
 const NODE_ROOTS: &[&str] = &["qtv-node", "qtv-daemon"];
 
@@ -125,6 +128,14 @@ fn the_node_links_no_classical_or_oracle_crate() {
                     !lower.contains(token),
                     "the node dependency closure links an oracle side source: {token} in {name}"
                 );
+            }
+            for dep in &pkg.deps {
+                if BRIDGE_VERIFIER_CRATES.contains(&dep.as_str()) {
+                    assert!(
+                        BRIDGE_VERIFIER_WRAPPERS.contains(&name.as_str()),
+                        "a foreign proof verifier {dep} enters the node through {name}, outside the audited bridge wrapper set"
+                    );
+                }
             }
         }
     }

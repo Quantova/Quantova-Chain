@@ -4,6 +4,9 @@
 name = "q-bls"
 version = "0.1.0"
 edition = "2021"
+[features]
+test-util = []
+
 [dependencies]
 blst = "=0.3.16"
 qlc-ethereum = { path = "../qlc-ethereum" }

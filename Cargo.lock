@@ -268,6 +268,8 @@ dependencies = [
 name = "qtv-node"
 version = "0.1.0"
 dependencies = [
+ "q-bls",
+ "qlc-ethereum",
  "qtv-account",
  "qtv-attest",
  "qtv-bft",

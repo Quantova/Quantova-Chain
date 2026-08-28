@@ -150,3 +150,32 @@ mod tests {
         );
     }
 }
+
+#[cfg(feature = "test-util")]
+pub mod testsign {
+    use super::*;
+    use blst::min_pk::{AggregateSignature, SecretKey, Signature};
+
+    pub struct BlsKeypair {
+        secret: SecretKey,
+        pub public: BlsPubkey,
+    }
+
+    pub fn keypair_from_ikm(ikm: &[u8; 32]) -> BlsKeypair {
+        let secret = SecretKey::key_gen(ikm, &[]).expect("ikm carries thirty two bytes of entropy");
+        let public = BlsPubkey(secret.sk_to_pk().compress());
+        BlsKeypair { secret, public }
+    }
+
+    pub fn aggregate_sign(keys: &[&BlsKeypair], message: &[u8; 32]) -> BlsSignature {
+        let sigs: Vec<Signature> = keys
+            .iter()
+            .map(|k| k.secret.sign(message, ETH_SYNC_COMMITTEE_DST, &[]))
+            .collect();
+        let refs: Vec<&Signature> = sigs.iter().collect();
+        let aggregate = AggregateSignature::aggregate(&refs, true)
+            .expect("a non empty signer set aggregates")
+            .to_signature();
+        BlsSignature(aggregate.compress())
+    }
+}
