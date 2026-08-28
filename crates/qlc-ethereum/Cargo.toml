@@ -4,6 +4,9 @@
 name = "qlc-ethereum"
 version = "0.1.0"
 edition = "2021"
+[features]
+test-util = []
+
 [dependencies]
 qlc-core = { path = "../qlc-core" }
 qlc-stark = { path = "../qlc-stark" }

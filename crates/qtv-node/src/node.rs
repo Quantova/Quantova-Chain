@@ -91,6 +91,7 @@ pub struct Genesis {
     pub bridged_assets: Vec<GenesisBridgedAsset>,
     pub bridge_era: Option<[u8; 32]>,
     pub bridge_bitcoin_anchor: Option<crate::bridge_btc::BitcoinAnchor>,
+    pub bridge_eth_anchors: Vec<crate::bridge_eth::EthAnchor>,
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -681,10 +682,15 @@ pub(crate) fn is_bridge_mint(wrapper: &Wrapper) -> bool {
     let target = wrapper.body().call().target();
     target == crate::ledger::bridge_mint_address()
         || target == crate::ledger::bridge_btc_mint_address()
+        || target == crate::ledger::bridge_eth_mint_address()
 }
 
 fn is_bridge_btc_mint(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::bridge_btc_mint_address()
+}
+
+fn is_bridge_eth_mint(wrapper: &Wrapper) -> bool {
+    wrapper.body().call().target() == crate::ledger::bridge_eth_mint_address()
 }
 
 pub(crate) fn is_bridge_exit(wrapper: &Wrapper) -> bool {
@@ -697,6 +703,12 @@ fn bridge_mint_fact(ledger: &Ledger, wrapper: &Wrapper, chain_id: u64) -> Option
         let anchor = ledger.bridge_bitcoin_anchor()?;
         let dest_chain = ledger.bridge_dest_chain()?;
         return crate::bridge_btc::verify_bitcoin_mint(&anchor, &proof, dest_chain);
+    }
+    if is_bridge_eth_mint(wrapper) {
+        let proof = crate::bridge_eth::EthMintProof::decode(wrapper.body().call().args())?;
+        let anchor = ledger.bridge_eth_anchor(proof.config_selector)?;
+        let dest_chain = ledger.bridge_dest_chain()?;
+        return crate::bridge_eth::verify_eth_mint(&anchor, &proof, dest_chain);
     }
     let artifact = crate::bridge::MintArtifact::decode(wrapper.body().call().args())?;
     let dest_chain = ledger.bridge_dest_chain()?;
@@ -736,6 +748,10 @@ pub(crate) fn bridge_mint_source_key(wrapper: &Wrapper) -> Option<(u32, [u8; 32]
         let txid = qtv_btc_spv::tx::Transaction::parse(&proof.raw_tx).ok()?.txid();
         return Some((crate::bridge_btc::BITCOIN_MINT_SOURCE_CHAIN, txid));
     }
+    if is_bridge_eth_mint(wrapper) {
+        let proof = crate::bridge_eth::EthMintProof::decode(wrapper.body().call().args())?;
+        return Some(proof.source_key());
+    }
     crate::bridge::MintArtifact::decode(wrapper.body().call().args())
         .map(|artifact| (artifact.attestation.fact.source_chain, artifact.attestation.fact.source_ref))
 }
@@ -746,6 +762,8 @@ pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_i
     }
     let max_bytes = if is_bridge_btc_mint(wrapper) {
         MAX_BTC_MINT_BYTES
+    } else if is_bridge_eth_mint(wrapper) {
+        crate::bridge_eth::MAX_ETH_MINT_BYTES
     } else {
         max_mint_artifact_bytes(ledger)
     };
@@ -1363,6 +1381,9 @@ impl Node {
         }
         if let Some(ref anchor) = genesis.bridge_bitcoin_anchor {
             ledger.seed_bridge_bitcoin_anchor(anchor);
+        }
+        for anchor in &genesis.bridge_eth_anchors {
+            ledger.seed_bridge_eth_anchor(anchor);
         }
         for asset in &genesis.bridged_assets {
             ledger.register_bridged_asset(&asset.asset_id, asset.cap, asset.epoch_cap, asset.requires_stark);
@@ -3964,6 +3985,189 @@ mod tests {
         assert!(ledger.bridge_reference_seen(crate::bridge_btc::BITCOIN_MINT_SOURCE_CHAIN, &txid), "the txid is bound against replay");
         assert!(ledger.bridge_operator_set().is_none(), "no operator set exists yet the deposit minted trustlessly");
     }
+    #[test]
+    fn an_ethereum_beacon_proof_mints_trustlessly_with_no_operator_set() {
+        use q_bls::testsign::{aggregate_sign, keypair_from_ikm, BlsKeypair};
+        use qlc_ethereum::beacon::{
+            compute_domain, compute_signing_root, BeaconBlockHeader, SyncAggregate, SyncCommittee,
+            DOMAIN_SYNC_COMMITTEE, EXECUTION_RECEIPTS_DEPTH, EXECUTION_RECEIPTS_INDEX,
+            FINALIZED_ROOT_DEPTH, FINALIZED_ROOT_INDEX,
+        };
+        use qlc_ethereum::bls::BlsPubkey;
+        use qlc_ethereum::engine::{DepositProof, ExecutionCommit, LightClientUpdate};
+        use qlc_ethereum::mpt::builder;
+        use qlc_ethereum::receipt::fixtures::deposit_receipt;
+        use qlc_ethereum::{config, rlp, ssz};
+
+        const TEST_DEPOSIT_CONTRACT: [u8; 20] = [
+            0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x71, 0x82, 0x93, 0xa4, 0xb5, 0xc6, 0xd7, 0xe8,
+            0xf9, 0x0a, 0x1b, 0x2c, 0x3d, 0x4e,
+        ];
+        const PERIOD: u64 = 870;
+        const PERIOD_SLOTS: u64 = 32 * 256;
+        let signature_slot = PERIOD * PERIOD_SLOTS + 100;
+
+        let mut cfg = config::ethereum();
+        cfg.deposit_contract = TEST_DEPOSIT_CONTRACT;
+
+        let mut secrets: Vec<BlsKeypair> = Vec::with_capacity(512);
+        let mut pubkeys: Vec<BlsPubkey> = Vec::with_capacity(512);
+        for i in 0..512u32 {
+            let mut ikm = [0u8; 32];
+            ikm[0..4].copy_from_slice(&i.to_le_bytes());
+            ikm[31] = 0xA5;
+            let kp = keypair_from_ikm(&ikm);
+            pubkeys.push(kp.public);
+            secrets.push(kp);
+        }
+        let committee = SyncCommittee {
+            pubkeys,
+            aggregate_pubkey: BlsPubkey([0x11; 48]),
+        };
+        let committee_root = committee.hash_tree_root();
+
+        let recipient = [0x5c; 32];
+        let asset = [0x77u8; 16];
+        let amount: u128 = 250_000;
+        let receipt = deposit_receipt(&TEST_DEPOSIT_CONTRACT, &recipient, amount, &asset);
+        let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for i in 0..6u64 {
+            let key = rlp::encode_uint(i);
+            let value = if i == 3 {
+                receipt.clone()
+            } else {
+                let mut v = b"other-receipt-payload-over-thirty-two-bytes-".to_vec();
+                v.push(i as u8);
+                v
+            };
+            entries.push((key, value));
+        }
+        let nibble_entries: Vec<(Vec<u8>, Vec<u8>)> = entries
+            .iter()
+            .map(|(k, v)| {
+                let mut nibbles = Vec::new();
+                for b in k {
+                    nibbles.push(b >> 4);
+                    nibbles.push(b & 0x0f);
+                }
+                (nibbles, v.clone())
+            })
+            .collect();
+        let trie = builder::build(nibble_entries);
+        let receipts_root = builder::root_hash(&trie);
+        let receipt_proof = builder::prove(&trie, &entries[3].0);
+
+        let execution_branch: Vec<[u8; 32]> = (0..EXECUTION_RECEIPTS_DEPTH)
+            .map(|i| [0xe0 + i as u8; 32])
+            .collect();
+        let body_root = ssz::merkle_root_from_branch(
+            &receipts_root,
+            &execution_branch,
+            EXECUTION_RECEIPTS_INDEX,
+        );
+        let finalized_header = BeaconBlockHeader {
+            slot: PERIOD * PERIOD_SLOTS + 40,
+            proposer_index: 99,
+            parent_root: [0x01; 32],
+            state_root: [0x02; 32],
+            body_root,
+        };
+        let finalized_root = finalized_header.hash_tree_root();
+        let finality_branch: Vec<[u8; 32]> = (0..FINALIZED_ROOT_DEPTH)
+            .map(|i| [0xf0 + i as u8; 32])
+            .collect();
+        let attested_state_root =
+            ssz::merkle_root_from_branch(&finalized_root, &finality_branch, FINALIZED_ROOT_INDEX);
+        let attested_header = BeaconBlockHeader {
+            slot: PERIOD * PERIOD_SLOTS + 60,
+            proposer_index: 100,
+            parent_root: [0x03; 32],
+            state_root: attested_state_root,
+            body_root: [0x04; 32],
+        };
+
+        let fork_version = cfg.fork_version_at_slot(signature_slot - 1);
+        let domain =
+            compute_domain(DOMAIN_SYNC_COMMITTEE, fork_version.0, &cfg.genesis_validators_root);
+        let signing_root = compute_signing_root(&attested_header.hash_tree_root(), &domain);
+        let key_refs: Vec<&BlsKeypair> = secrets.iter().collect();
+        let sync_aggregate = SyncAggregate {
+            participation: vec![true; 512],
+            signature: aggregate_sign(&key_refs, &signing_root),
+        };
+
+        let update = LightClientUpdate {
+            attested_header,
+            finalized_header,
+            finality_branch,
+            sync_aggregate,
+            signature_slot,
+            execution: ExecutionCommit {
+                receipts_root,
+                block_number: 20_000_000,
+                execution_branch,
+            },
+        };
+        let deposit = DepositProof {
+            receipt_index: 3,
+            receipt_proof,
+        };
+
+        let anchor = crate::bridge_eth::EthAnchor {
+            config_selector: 0,
+            period: PERIOD,
+            sync_committee_root: committee_root,
+            deposit_contract: TEST_DEPOSIT_CONTRACT,
+            asset_id: asset,
+        };
+        let proof = crate::bridge_eth::EthMintProof {
+            config_selector: 0,
+            sync_committee: committee,
+            update,
+            deposit,
+        };
+        assert_eq!(
+            crate::bridge_eth::EthMintProof::decode(&proof.encode()).as_ref(),
+            Some(&proof),
+            "the eth proof round-trips through its wire encoding"
+        );
+
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        ledger.seed_bridge_dest_chain(BRIDGE_DEST);
+        ledger.seed_bridge_pool_vault(&BRIDGE_VAULT);
+        ledger.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
+        ledger.seed_bridge_eth_anchor(&anchor);
+
+        let (source_chain, source_ref) = proof.source_key();
+        let relayer = keypair(412);
+        let tx = system_tx(
+            &relayer,
+            &crate::ledger::bridge_eth_mint_address(),
+            proof.encode(),
+            0,
+            TRANSFER_METER,
+            &fee,
+        );
+        let included = execute_ordered(&mut ledger, &[tx], &fee, 0);
+
+        assert_eq!(included.len(), 1, "the trustless ethereum mint rides in the block");
+        assert_eq!(
+            ledger.bridged_balance(&asset, &recipient),
+            amount,
+            "the beacon-proven recipient holds the proven amount with no operator involved"
+        );
+        assert_eq!(ledger.bridged_supply(&asset), amount);
+        assert!(
+            ledger.bridge_reference_seen(source_chain, &source_ref),
+            "the ethereum deposit is bound against replay"
+        );
+        assert!(
+            ledger.bridge_operator_set().is_none(),
+            "no operator set exists yet the ethereum deposit minted trustlessly"
+        );
+    }
+
 
     #[test]
     fn a_quorum_signed_for_a_sibling_chain_id_does_not_mint() {

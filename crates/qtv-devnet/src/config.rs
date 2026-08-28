@@ -138,6 +138,7 @@ impl DevnetConfig {
             bridged_assets: self.bridged_assets.clone(),
             bridge_era: self.bridge_era,
             bridge_bitcoin_anchor: None,
+            bridge_eth_anchors: Vec::new(),
         }
     }
 }
