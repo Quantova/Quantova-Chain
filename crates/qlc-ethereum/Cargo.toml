@@ -1,0 +1,13 @@
+# Copyright 2026 Quantova Inc
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "qlc-ethereum"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+qlc-core = { path = "../qlc-core" }
+qlc-stark = { path = "../qlc-stark" }
+qlc-bitcoin = { path = "../qtv-btc-spv", package = "qtv-btc-spv" }
+
+[dev-dependencies]
+qlc-airlock = { path = "../qlc-airlock" }
