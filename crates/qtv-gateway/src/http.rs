@@ -161,6 +161,21 @@ impl Limiter {
         true
     }
 
+    fn throttle_forwarded(&self, ip: IpAddr, now: Instant) -> Admit {
+        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if inner.is_banned(ip, now) {
+            return Admit::Banned;
+        }
+        if !inner.spend_rate_token(ip, now) {
+            return if inner.strike(ip, now) {
+                Admit::Banned
+            } else {
+                Admit::RateLimited
+            };
+        }
+        Admit::Ok
+    }
+
     fn release(&self, ip: IpAddr) {
         let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(count) = inner.per_ip.get_mut(&ip) {
@@ -240,9 +255,10 @@ pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>, allow: Vec<Ip
             }
             let requests = requests.clone();
             let limiter = limiter.clone();
+            let throttle_limiter = limiter.clone();
             thread::spawn(move || {
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _ = handle_connection(stream, requests);
+                    let _ = handle_connection(stream, requests, throttle_limiter, loopback_only);
                 }));
                 limiter.release(ip);
             });
@@ -250,7 +266,18 @@ pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>, allow: Vec<Ip
     });
 }
 
-fn handle_connection(mut stream: TcpStream, requests: Sender<GatewayCall>) -> IoResult<()> {
+fn forwarded_client_ip(header: &Option<String>) -> Option<IpAddr> {
+    let value = header.as_ref()?;
+    let first = value.split(',').next()?.trim();
+    first.parse::<IpAddr>().ok()
+}
+
+fn handle_connection(
+    mut stream: TcpStream,
+    requests: Sender<GatewayCall>,
+    limiter: Arc<Limiter>,
+    loopback_only: bool,
+) -> IoResult<()> {
     stream.set_read_timeout(Some(IO_TIMEOUT)).ok();
     stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -267,6 +294,7 @@ fn handle_connection(mut stream: TcpStream, requests: Sender<GatewayCall>) -> Io
     let path = parts.next().unwrap_or("").to_string();
 
     let mut content_length = 0usize;
+    let mut forwarded_for: Option<String> = None;
     loop {
         let header = match read_capped_line(&mut reader, &mut head_budget, deadline) {
             Ok(Some(header)) => header,
@@ -281,6 +309,33 @@ fn handle_connection(mut stream: TcpStream, requests: Sender<GatewayCall>) -> Io
         }
         if let Some(value) = header_value(trimmed, "content-length") {
             content_length = value.parse().unwrap_or(0);
+        }
+        if let Some(value) = header_value(trimmed, "x-forwarded-for") {
+            forwarded_for = Some(value.to_string());
+        }
+    }
+
+    if loopback_only {
+        if let Some(client) = forwarded_client_ip(&forwarded_for) {
+            match limiter.throttle_forwarded(client, Instant::now()) {
+                Admit::Ok => {}
+                Admit::Banned => {
+                    return write_error(
+                        &mut stream,
+                        429,
+                        "banned",
+                        "address temporarily blocked for excessive requests",
+                    )
+                }
+                _ => {
+                    return write_error(
+                        &mut stream,
+                        429,
+                        "rate_limited",
+                        "too many requests from this address, slow down",
+                    )
+                }
+            }
         }
     }
 
@@ -447,6 +502,42 @@ mod tests {
 
     fn ip(last: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(203, 0, 113, last))
+    }
+
+    #[test]
+    fn a_forwarded_header_yields_the_original_client_ip() {
+        assert_eq!(
+            forwarded_client_ip(&Some("198.51.100.7, 10.0.0.1, 127.0.0.1".to_string())),
+            Some(ip(0).to_string().parse::<IpAddr>().map(|_| IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))).unwrap())
+        );
+        assert_eq!(forwarded_client_ip(&None), None);
+        assert_eq!(forwarded_client_ip(&Some("not-an-ip".to_string())), None);
+    }
+
+    #[test]
+    fn a_proxied_client_is_rate_limited_and_banned_by_its_forwarded_ip() {
+        let limiter = Limiter::default();
+        let client = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9));
+        let t = Instant::now();
+        let mut rate_limited = false;
+        for _ in 0..(RATE_BURST as usize + BAN_STRIKES as usize + 50) {
+            match limiter.throttle_forwarded(client, t) {
+                Admit::Ok => {}
+                Admit::RateLimited => rate_limited = true,
+                Admit::Banned => rate_limited = true,
+                _ => {}
+            }
+        }
+        assert!(rate_limited, "a proxied client that floods on one forwarded ip is throttled");
+        assert!(
+            matches!(limiter.throttle_forwarded(client, t), Admit::Banned),
+            "a sustained flood on one forwarded ip is banned even behind the loopback proxy"
+        );
+        let other = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10));
+        assert!(
+            matches!(limiter.throttle_forwarded(other, t), Admit::Ok),
+            "a different proxied client is not collateral banned"
+        );
     }
 
     #[test]
