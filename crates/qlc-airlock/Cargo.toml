@@ -1,0 +1,10 @@
+# Copyright 2026 Quantova Inc
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "qlc-airlock"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+qlc-stark = { path = "../qlc-stark" }
+qlc-registry = { path = "../qlc-registry" }
+qlc-core = { path = "../qlc-core" }
