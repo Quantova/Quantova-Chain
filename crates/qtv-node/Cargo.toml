@@ -29,10 +29,10 @@ qtv-state = { path = "../qtv-state" }
 qtv-staking = { path = "../qtv-staking" }
 qtv-governance = { path = "../qtv-governance" }
 qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", tag = "v0.3.1" }
-qtv-vm = { git = "https://github.com/Quantova/QVM.git", tag = "v0.5.5" }
-qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "5fe6e9457613a04009260b9f8ffcbca6465b5009" }
-qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "5fe6e9457613a04009260b9f8ffcbca6465b5009" }
-qtv-attest = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "5fe6e9457613a04009260b9f8ffcbca6465b5009" }
+qtv-vm = { git = "https://github.com/Quantova/QVM.git", tag = "v0.5.6" }
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", tag = "v0.9.2" }
+qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", tag = "v0.9.2" }
+qtv-attest = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", tag = "v0.9.2" }
 
 [dev-dependencies]
 # Enable the test only fixtures for this crate's own integration tests, the standard
