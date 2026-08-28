@@ -45,6 +45,7 @@ pub enum Request {
     BurnHeightsAfter(u64),
     BridgedBalance { asset_id: [u8; 16], holder: [u8; 32] },
     BridgedSupply { asset_id: [u8; 16] },
+    BridgeReserves { asset_id: [u8; 16] },
     AssetBalance { issuer: [u8; 32], holder: [u8; 32] },
     AssetSupply { issuer: [u8; 32] },
     GovernanceReferenda,
@@ -137,6 +138,9 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
             holder: holder_id(body)?,
         }),
         "get_bridged_supply" => Ok(Request::BridgedSupply {
+            asset_id: hex_bytes::<16>(body, "asset_id")?,
+        }),
+        "get_bridge_reserves" => Ok(Request::BridgeReserves {
             asset_id: hex_bytes::<16>(body, "asset_id")?,
         }),
         "get_asset_balance" => Ok(Request::AssetBalance {
@@ -282,6 +286,7 @@ pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result
         Request::BurnHeightsAfter(cursor) => Ok(burn_heights_after(node, cursor)),
         Request::BridgedBalance { asset_id, holder } => Ok(bridged_balance(node, &asset_id, &holder)),
         Request::BridgedSupply { asset_id } => Ok(bridged_supply(node, &asset_id)),
+        Request::BridgeReserves { asset_id } => Ok(bridge_reserves(node, &asset_id)),
         Request::AssetBalance { issuer, holder } => Ok(asset_balance(node, &issuer, &holder)),
         Request::AssetSupply { issuer } => Ok(asset_supply(node, &issuer)),
         Request::GovernanceReferenda => Ok(governance_referenda(node)),
@@ -300,6 +305,19 @@ fn bridged_balance(node: &DevNode, asset_id: &[u8; 16], holder: &[u8; 32]) -> Js
         ),
         ("balance", amount_str(ledger.bridged_balance(asset_id, holder))),
         ("supply", amount_str(ledger.bridged_supply(asset_id))),
+    ])
+}
+
+fn bridge_reserves(node: &DevNode, asset_id: &[u8; 16]) -> Json {
+    let ledger = node.ledger();
+    let (custody, supply) = ledger.bridge_reserve_state(asset_id).unwrap_or((0, 0));
+    let outstanding = custody.saturating_sub(supply);
+    object(vec![
+        ("asset_id", Json::str(crate::json::to_hex(asset_id))),
+        ("custody", amount_str(custody)),
+        ("supply", amount_str(supply)),
+        ("outstanding", amount_str(outstanding)),
+        ("conserved", Json::Bool(ledger.bridge_reserves_conserved(asset_id))),
     ])
 }
 

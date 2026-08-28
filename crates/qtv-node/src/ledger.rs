@@ -1569,6 +1569,18 @@ impl Ledger {
         self.record_outstanding_burn(burn_ref, asset_id, amount, beneficiary);
     }
 
+    pub fn bridge_reserve_state(&self, asset_id: &[u8; 16]) -> Option<(u128, u128)> {
+        let vault = self.bridge_pool_vault()?;
+        Some((self.bridge_vault_custody(&vault, asset_id), self.bridged_supply(asset_id)))
+    }
+
+    pub fn bridge_reserves_conserved(&self, asset_id: &[u8; 16]) -> bool {
+        match self.bridge_reserve_state(asset_id) {
+            Some((custody, supply)) => custody >= supply,
+            None => self.bridged_supply(asset_id) == 0,
+        }
+    }
+
     pub fn bridge_vault_custody(&self, vault: &[u8; 32], asset_id: &[u8; 16]) -> u128 {
         self.trie
             .get(&bridge_vault_custody_key(vault, asset_id))
@@ -5863,6 +5875,76 @@ mod stake_state_tests {
         };
         assert!(!l.bridge_slash(&slash), "a refund above the vault custody fails closed");
         assert_eq!(l.bridged_supply(&asset), 1_000, "the refused refund moves no supply");
+    }
+
+    #[test]
+    fn the_deposit_burn_settle_cycle_conserves_reserves_for_the_watchtower() {
+        let mut l = Ledger::new();
+        let asset = [0x5au8; 16];
+        let holder = [0x42u8; 32];
+        let vault = [0x0bu8; 32];
+        let destination = [0x99u8; 32];
+        let chain_id = 9_000u64;
+        l.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
+        l.seed_bridge_pool_vault(&vault);
+
+        assert!(l.bridge_mint(&crate::bridge::Fact {
+            version: crate::bridge::FACT_VERSION,
+            source_chain: 1,
+            dest_chain: chain_id as u32,
+            route_id: 0,
+            direction: crate::bridge::Direction::Deposit,
+            nonce: 1,
+            source_ref: [0x01u8; 32],
+            asset_id: asset,
+            amount: 1_000,
+            recipient: holder,
+            finality_depth: 6,
+            observed_height: 10,
+            expiry_height: u64::MAX,
+        }));
+        assert_eq!(
+            l.bridge_reserve_state(&asset),
+            Some((1_000, 1_000)),
+            "a deposit credits custody and supply together"
+        );
+        assert!(l.bridge_reserves_conserved(&asset));
+
+        l.seed_bridge_exits_enabled(true);
+        l.seed_bridge_payout_cap(10_000_000);
+
+        let event_index = l.block_events().len() as u64;
+        let nonce = 7u64;
+        assert!(l.bridge_burn(&asset, &holder, 400, &destination, chain_id, nonce));
+        assert_eq!(
+            l.bridge_reserve_state(&asset),
+            Some((1_000, 600)),
+            "the burn removes wrapped supply while the native custody is still held for the outstanding exit"
+        );
+        assert!(
+            l.bridge_reserves_conserved(&asset),
+            "custody covers supply while the exit is outstanding"
+        );
+
+        let burn_ref =
+            bridge_burn_ref(chain_id, &asset, &holder, 400, &destination, nonce, event_index);
+        let settle = crate::bridge::ExitFact {
+            version: crate::bridge::EXIT_FACT_VERSION,
+            corridor: 0,
+            dest_chain: chain_id as u32,
+            asset_id: asset,
+            amount: 400,
+            beneficiary: holder,
+            burn_ref,
+            outcome: crate::bridge::ExitOutcome::Settle,
+        };
+        assert!(l.bridge_settle(&settle), "the settle releases the native custody for the proven burn");
+        assert_eq!(
+            l.bridge_reserve_state(&asset),
+            Some((600, 600)),
+            "custody and supply realign once the exit settles on the source chain"
+        );
+        assert!(l.bridge_reserves_conserved(&asset));
     }
 
     #[test]
