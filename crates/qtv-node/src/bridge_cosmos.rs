@@ -8,13 +8,14 @@ use qlc_cosmos::light::TrustedState;
 use qlc_cosmos::proof::{ExistenceProof, InnerOp, LeafOp};
 use qlc_cosmos::proto::{BlockId, Timestamp};
 use qlc_cosmos::sha256::sha256;
-use qlc_cosmos::validator::{ValidatorInfo, ValidatorSet, MAX_VALIDATORS};
+use qlc_cosmos::validator::{ValidatorInfo, ValidatorSet};
 use qlc_cosmos::verify_trustless_deposit;
 
 pub const MAX_COSMOS_FIELD_BYTES: usize = 1 << 16;
 pub const MAX_COSMOS_PATH: usize = 256;
 pub const MAX_COSMOS_STORE_DEPTH: usize = 4;
 pub const MAX_COSMOS_MINT_BYTES: usize = 1 << 21;
+pub const MAX_COSMOS_SIGNERS: usize = 512;
 pub const COSMOS_SLOT_MS: u64 = qtv_bft::params::SLOT_MS;
 
 pub fn cosmos_source_chain(config_selector: u8) -> u32 {
@@ -222,7 +223,7 @@ fn decode_commit(cursor: &mut Cursor) -> Option<Commit> {
     let round = cursor.i64()?;
     let block_id = decode_block_id(cursor)?;
     let count = cursor.u32()? as usize;
-    if count > MAX_VALIDATORS {
+    if count > MAX_COSMOS_SIGNERS {
         return None;
     }
     let mut signatures = Vec::with_capacity(count);
@@ -247,7 +248,7 @@ fn encode_validator_set(out: &mut Vec<u8>, set: &ValidatorSet) {
 
 fn decode_validator_set(cursor: &mut Cursor) -> Option<ValidatorSet> {
     let count = cursor.u32()? as usize;
-    if count > MAX_VALIDATORS {
+    if count > MAX_COSMOS_SIGNERS {
         return None;
     }
     let mut validators = Vec::with_capacity(count);
@@ -589,6 +590,35 @@ mod tests {
         assert_eq!(chain, cosmos_source_chain(0));
         assert_eq!(reference, sha256(&proof.proof.key));
         assert_ne!(cosmos_source_chain(0), cosmos_source_chain(1));
+    }
+
+    #[test]
+    fn a_signer_set_over_the_corridor_cap_is_refused_before_any_verification() {
+        let mut proof = dummy_proof();
+        proof.signing_set = ValidatorSet {
+            validators: (0..(MAX_COSMOS_SIGNERS + 1))
+                .map(|i| ValidatorInfo { pubkey: [i as u8; 32], voting_power: 1 })
+                .collect(),
+        };
+        assert_eq!(
+            CosmosMintProof::decode(&proof.encode()),
+            None,
+            "an oversized signing set is rejected at decode so it cannot force millions of ed25519 checks"
+        );
+    }
+
+    #[test]
+    fn a_commit_over_the_corridor_cap_is_refused_before_any_verification() {
+        let mut proof = dummy_proof();
+        proof.commit.signatures = (0..(MAX_COSMOS_SIGNERS + 1))
+            .map(|i| CommitSig {
+                flag: BlockIdFlag::Commit,
+                validator_address: [i as u8; 20],
+                timestamp: Timestamp { seconds: 1, nanos: 0 },
+                signature: vec![0x11; 64],
+            })
+            .collect();
+        assert_eq!(CosmosMintProof::decode(&proof.encode()), None);
     }
 
     #[test]
