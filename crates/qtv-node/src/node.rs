@@ -677,7 +677,13 @@ fn dispatch_bridge_guardian(
 }
 
 pub(crate) fn is_bridge_mint(wrapper: &Wrapper) -> bool {
-    wrapper.body().call().target() == crate::ledger::bridge_mint_address()
+    let target = wrapper.body().call().target();
+    target == crate::ledger::bridge_mint_address()
+        || target == crate::ledger::bridge_btc_mint_address()
+}
+
+fn is_bridge_btc_mint(wrapper: &Wrapper) -> bool {
+    wrapper.body().call().target() == crate::ledger::bridge_btc_mint_address()
 }
 
 pub(crate) fn is_bridge_exit(wrapper: &Wrapper) -> bool {
@@ -685,6 +691,12 @@ pub(crate) fn is_bridge_exit(wrapper: &Wrapper) -> bool {
 }
 
 fn bridge_mint_fact(ledger: &Ledger, wrapper: &Wrapper, chain_id: u64) -> Option<crate::bridge::Fact> {
+    if is_bridge_btc_mint(wrapper) {
+        let proof = crate::bridge_btc::BitcoinMintProof::decode(wrapper.body().call().args())?;
+        let anchor = ledger.bridge_bitcoin_anchor()?;
+        let dest_chain = ledger.bridge_dest_chain()?;
+        return crate::bridge_btc::verify_bitcoin_mint(&anchor, &proof, dest_chain);
+    }
     let artifact = crate::bridge::MintArtifact::decode(wrapper.body().call().args())?;
     let dest_chain = ledger.bridge_dest_chain()?;
     let operators = ledger.bridge_operator_set()?;
@@ -707,6 +719,8 @@ fn bridge_mint_fact(ledger: &Ledger, wrapper: &Wrapper, chain_id: u64) -> Option
 
 const MAX_BRIDGE_STARK_BYTES: usize = 1 << 20;
 
+const MAX_BTC_MINT_BYTES: usize = 1 << 20;
+
 fn max_mint_artifact_bytes(ledger: &Ledger) -> usize {
     let operators = ledger.bridge_operator_set().map(|s| s.operators.len()).unwrap_or(0);
     let sig_frame = 4 + 2 + qtv_crypto::ml_dsa::SIGNATURE_BYTES;
@@ -716,6 +730,11 @@ fn max_mint_artifact_bytes(ledger: &Ledger) -> usize {
 }
 
 pub(crate) fn bridge_mint_source_key(wrapper: &Wrapper) -> Option<(u32, [u8; 32])> {
+    if is_bridge_btc_mint(wrapper) {
+        let proof = crate::bridge_btc::BitcoinMintProof::decode(wrapper.body().call().args())?;
+        let txid = qtv_btc_spv::tx::Transaction::parse(&proof.raw_tx).ok()?.txid();
+        return Some((crate::bridge_btc::BITCOIN_MINT_SOURCE_CHAIN, txid));
+    }
     crate::bridge::MintArtifact::decode(wrapper.body().call().args())
         .map(|artifact| (artifact.attestation.fact.source_chain, artifact.attestation.fact.source_ref))
 }
@@ -724,7 +743,12 @@ pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_i
     if ledger.bridge_is_frozen() {
         return false;
     }
-    if wrapper.body().call().args().len() > max_mint_artifact_bytes(ledger) {
+    let max_bytes = if is_bridge_btc_mint(wrapper) {
+        MAX_BTC_MINT_BYTES
+    } else {
+        max_mint_artifact_bytes(ledger)
+    };
+    if wrapper.body().call().args().len() > max_bytes {
         return false;
     }
     let (source_chain, source_ref) = match bridge_mint_source_key(wrapper) {
