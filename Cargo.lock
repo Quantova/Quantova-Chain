@@ -48,6 +48,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "qtv-btc-spv"
+version = "0.1.0"
+
+[[package]]
 name = "qtv-codec"
 version = "0.1.0"
 
