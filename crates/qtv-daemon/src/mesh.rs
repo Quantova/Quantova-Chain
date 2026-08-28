@@ -1,7 +1,8 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use std::net::{TcpListener, TcpStream};
+use std::collections::HashSet;
+use std::net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
@@ -19,6 +20,70 @@ const HELLO_LEN: usize = 8 + 32;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const MAX_HANDSHAKE_INFLIGHT: usize = 64;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+const BOOTSTRAP_DEADLINE: Duration = Duration::from_secs(60);
+
+struct InflightGuard(Arc<AtomicUsize>);
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn known_peer_ips(peer_addrs: &[Option<String>]) -> HashSet<IpAddr> {
+    let mut ips = HashSet::new();
+    for addr in peer_addrs.iter().flatten() {
+        if let Ok(resolved) = addr.to_socket_addrs() {
+            for socket in resolved {
+                ips.insert(socket.ip());
+            }
+        }
+    }
+    ips
+}
+
+fn connect_peer(
+    addr: &str,
+    identity: &Identity,
+    peer: &PeerId,
+    hello: &[u8],
+    label: usize,
+) -> Option<Channel<TcpStream>> {
+    let deadline = Instant::now() + BOOTSTRAP_DEADLINE;
+    let stream = loop {
+        if Instant::now() >= deadline {
+            log(&format!(
+                "could not reach peer {} within the bootstrap window, dropping it",
+                label + 1
+            ));
+            return None;
+        }
+        let resolved = addr.to_socket_addrs().ok().and_then(|mut it| it.next());
+        match resolved {
+            Some(socket) => match TcpStream::connect_timeout(&socket, CONNECT_TIMEOUT) {
+                Ok(stream) => break stream,
+                Err(_) => thread::sleep(Duration::from_millis(200)),
+            },
+            None => thread::sleep(Duration::from_millis(200)),
+        }
+    };
+    let mut channel =
+        match Channel::connect_pinned_with_timeout(stream, identity, peer, HANDSHAKE_TIMEOUT) {
+            Ok(channel) => channel,
+            Err(_) => {
+                log(&format!("could not handshake peer {}, dropping it", label + 1));
+                return None;
+            }
+        };
+    if channel.send(hello).is_err() {
+        log(&format!("could not greet peer {}, dropping it", label + 1));
+        return None;
+    }
+    Some(channel)
+}
 
 const INBOUND_CAP: usize = 4096;
 
@@ -56,13 +121,15 @@ pub fn build_mesh(
     let identity_acc = identity.clone();
     let up_acc = up.clone();
     let peer_ids_acc: Vec<Option<PeerId>> = peer_ids.to_vec();
+    let known_ips = known_peer_ips(peer_addrs);
     let (worker_tx, worker_rx) = mpsc::channel::<(usize, Channel<TcpStream>)>();
     let acceptor = thread::spawn(move || {
         let _ = listener.set_nonblocking(true);
         let mut seen = vec![false; n];
         let mut registered = 0usize;
         let inflight = Arc::new(AtomicUsize::new(0));
-        while registered < up_peers {
+        let deadline = Instant::now() + BOOTSTRAP_DEADLINE;
+        while registered < up_peers && Instant::now() < deadline {
             while let Ok((from, channel)) = worker_rx.try_recv() {
                 if from < n && !seen[from] {
                     seen[from] = true;
@@ -73,14 +140,15 @@ pub fn build_mesh(
             if registered >= up_peers {
                 break;
             }
-            let stream = match listener.accept() {
-                Ok((stream, _)) => stream,
+            let (stream, addr) = match listener.accept() {
+                Ok(pair) => pair,
                 Err(_) => {
                     thread::sleep(Duration::from_millis(5));
                     continue;
                 }
             };
-            if inflight.load(Ordering::Relaxed) >= MAX_HANDSHAKE_INFLIGHT {
+            let known = known_ips.contains(&addr.ip());
+            if !known && inflight.load(Ordering::Relaxed) >= MAX_HANDSHAKE_INFLIGHT {
                 continue;
             }
             inflight.fetch_add(1, Ordering::Relaxed);
@@ -90,6 +158,7 @@ pub fn build_mesh(
             let worker_tx_w = worker_tx.clone();
             let inflight_w = Arc::clone(&inflight);
             thread::spawn(move || {
+                let _guard = InflightGuard(inflight_w);
                 let _ = stream.set_nonblocking(false);
                 if let Ok(channel) =
                     Channel::accept_with_timeout(stream, &identity_w, HANDSHAKE_TIMEOUT)
@@ -104,45 +173,39 @@ pub fn build_mesh(
                         let _ = worker_tx_w.send((from, channel));
                     }
                 }
-                inflight_w.fetch_sub(1, Ordering::Relaxed);
             });
+        }
+        while let Ok((from, channel)) = worker_rx.try_recv() {
+            if from < n && !seen[from] {
+                seen[from] = true;
+                let _ = accepted_tx.send((from, channel));
+            }
         }
     });
 
     let hello = hello_frame(&genesis_hash);
-    let mut send: Vec<Option<Channel<TcpStream>>> = (0..n).map(|_| None).collect();
+    let mut dialers = Vec::new();
     for (q, addr) in peer_addrs.iter().enumerate() {
-        let (q, addr) = match addr {
-            Some(addr) if q != idx => (q, addr),
-            _ => continue,
-        };
-        let Some(peer) = peer_ids.get(q).and_then(|p| p.clone()) else {
-            log(&format!("no published peer id for peer {}, dropping it", q + 1));
-            continue;
-        };
-        let stream = loop {
-            match TcpStream::connect(addr) {
-                Ok(stream) => break stream,
-                Err(_) => thread::sleep(Duration::from_millis(20)),
-            }
-        };
-        let mut channel = match Channel::connect_pinned_with_timeout(
-            stream,
-            identity,
-            &peer,
-            HANDSHAKE_TIMEOUT,
-        ) {
-            Ok(channel) => channel,
-            Err(_) => {
-                log(&format!("could not handshake peer {}, dropping it", q + 1));
+        let (addr, peer) = match (addr, peer_ids.get(q).and_then(|p| p.clone())) {
+            (Some(addr), Some(peer)) if q != idx => (addr.clone(), peer),
+            (Some(_), None) if q != idx => {
+                log(&format!("no published peer id for peer {}, dropping it", q + 1));
                 continue;
             }
+            _ => continue,
         };
-        if channel.send(&hello).is_err() {
-            log(&format!("could not greet peer {}, dropping it", q + 1));
-            continue;
+        let identity_dial = identity.clone();
+        let hello_dial = hello.clone();
+        dialers.push((
+            q,
+            thread::spawn(move || connect_peer(&addr, &identity_dial, &peer, &hello_dial, q)),
+        ));
+    }
+    let mut send: Vec<Option<Channel<TcpStream>>> = (0..n).map(|_| None).collect();
+    for (q, dialer) in dialers {
+        if let Ok(Some(channel)) = dialer.join() {
+            send[q] = Some(channel);
         }
-        send[q] = Some(channel);
     }
 
     acceptor.join().expect("the acceptor thread joins");
