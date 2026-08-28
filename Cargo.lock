@@ -84,6 +84,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "qcore"
+version = "0.1.0"
+dependencies = [
+ "qtv-account",
+ "qtv-codec",
+ "qtv-crypto",
+ "qtv-idfmt",
+ "qtv-tx",
+ "qtv-vm 0.2.0",
+ "qtv-wipe",
+]
+
+[[package]]
 name = "qlc-airlock"
 version = "0.1.0"
 dependencies = [
@@ -160,6 +173,15 @@ dependencies = [
  "qtv-crypto",
  "qtv-idfmt",
  "qtv-tx",
+]
+
+[[package]]
+name = "qtv-bridge-relay"
+version = "0.1.0"
+dependencies = [
+ "qcore",
+ "qtv-devnet",
+ "qtv-node",
 ]
 
 [[package]]
@@ -293,7 +315,7 @@ dependencies = [
  "qtv-staking",
  "qtv-state",
  "qtv-tx",
- "qtv-vm",
+ "qtv-vm 0.2.0 (git+https://github.com/Quantova/QVM.git?rev=36329536940a917669e356535a459dbdf4db2463)",
 ]
 
 [[package]]
@@ -352,6 +374,13 @@ dependencies = [
  "qtv-crypto",
  "qtv-idfmt",
  "qtv-wipe",
+]
+
+[[package]]
+name = "qtv-vm"
+version = "0.2.0"
+dependencies = [
+ "qtv-crypto",
 ]
 
 [[package]]

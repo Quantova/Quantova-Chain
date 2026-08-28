@@ -1,0 +1,13 @@
+# Copyright 2026 Quantova Inc
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "qtv-bridge-relay"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+qtv-node = { path = "../qtv-node" }
+qcore = { path = "../../../QCore.rs", features = ["client"] }
+
+[dev-dependencies]
+qtv-devnet = { path = "../qtv-devnet" }
