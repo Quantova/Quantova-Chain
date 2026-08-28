@@ -42,4 +42,4 @@ qtv-gateway = { path = "../qtv-gateway" }
 
 # The audited post quantum crypto, for the SHA3 that fixes the genesis hash a chain
 # id is bound through. Pinned at the same tag the rest of the graph uses.
-qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "33c7e9395ad23f07019909470d319211213e904f" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", tag = "v0.3.1" }
