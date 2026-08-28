@@ -683,6 +683,7 @@ pub(crate) fn is_bridge_mint(wrapper: &Wrapper) -> bool {
     target == crate::ledger::bridge_mint_address()
         || target == crate::ledger::bridge_btc_mint_address()
         || target == crate::ledger::bridge_eth_mint_address()
+        || target == crate::ledger::bridge_cosmos_mint_address()
 }
 
 fn is_bridge_btc_mint(wrapper: &Wrapper) -> bool {
@@ -691,6 +692,10 @@ fn is_bridge_btc_mint(wrapper: &Wrapper) -> bool {
 
 fn is_bridge_eth_mint(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::bridge_eth_mint_address()
+}
+
+fn is_bridge_cosmos_mint(wrapper: &Wrapper) -> bool {
+    wrapper.body().call().target() == crate::ledger::bridge_cosmos_mint_address()
 }
 
 pub(crate) fn is_bridge_exit(wrapper: &Wrapper) -> bool {
@@ -709,6 +714,13 @@ fn bridge_mint_fact(ledger: &Ledger, wrapper: &Wrapper, chain_id: u64) -> Option
         let anchor = ledger.bridge_eth_anchor(proof.config_selector)?;
         let dest_chain = ledger.bridge_dest_chain()?;
         return crate::bridge_eth::verify_eth_mint(&anchor, &proof, dest_chain);
+    }
+    if is_bridge_cosmos_mint(wrapper) {
+        let proof = crate::bridge_cosmos::CosmosMintProof::decode(wrapper.body().call().args())?;
+        let anchor = ledger.bridge_cosmos_anchor(proof.config_selector)?;
+        let dest_chain = ledger.bridge_dest_chain()?;
+        let now = crate::bridge_cosmos::chain_now(ledger.chain_genesis_time(), ledger.execution_height());
+        return crate::bridge_cosmos::verify_cosmos_mint(&anchor, &proof, dest_chain, now);
     }
     let artifact = crate::bridge::MintArtifact::decode(wrapper.body().call().args())?;
     let dest_chain = ledger.bridge_dest_chain()?;
@@ -752,6 +764,10 @@ pub(crate) fn bridge_mint_source_key(wrapper: &Wrapper) -> Option<(u32, [u8; 32]
         let proof = crate::bridge_eth::EthMintProof::decode(wrapper.body().call().args())?;
         return Some(proof.source_key());
     }
+    if is_bridge_cosmos_mint(wrapper) {
+        let proof = crate::bridge_cosmos::CosmosMintProof::decode(wrapper.body().call().args())?;
+        return Some(proof.source_key());
+    }
     crate::bridge::MintArtifact::decode(wrapper.body().call().args())
         .map(|artifact| (artifact.attestation.fact.source_chain, artifact.attestation.fact.source_ref))
 }
@@ -764,6 +780,8 @@ pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_i
         MAX_BTC_MINT_BYTES
     } else if is_bridge_eth_mint(wrapper) {
         crate::bridge_eth::MAX_ETH_MINT_BYTES
+    } else if is_bridge_cosmos_mint(wrapper) {
+        crate::bridge_cosmos::MAX_COSMOS_MINT_BYTES
     } else {
         max_mint_artifact_bytes(ledger)
     };
@@ -1373,6 +1391,7 @@ impl Node {
         if !genesis.guardians.members.is_empty() {
             ledger.seed_guardian_set(&genesis.guardians);
         }
+        ledger.seed_chain_genesis_time(genesis.genesis_time);
         if let Some(dest_chain) = genesis.bridge_dest_chain {
             ledger.seed_bridge_dest_chain(dest_chain);
         }
@@ -4167,6 +4186,139 @@ mod tests {
             "no operator set exists yet the ethereum deposit minted trustlessly"
         );
     }
+    #[test]
+    fn a_cosmos_tendermint_proof_mints_trustlessly_with_no_operator_set() {
+        use qlc_cosmos::chain::COSMOS_HUB;
+        use qlc_cosmos::commit::{BlockIdFlag, Commit, CommitSig, Header};
+        use qlc_cosmos::ed25519::{public_key_from_seed, sign};
+        use qlc_cosmos::proof::{encode_deposit_value, wrap_store_layer, ExistenceProof, InnerOp, LeafOp};
+        use qlc_cosmos::proto::{vote_sign_bytes, BlockId, CanonicalVote, Timestamp, PRECOMMIT_TYPE};
+        use qlc_cosmos::validator::{ValidatorInfo, ValidatorSet};
+
+        const GENESIS_TIME: u64 = 1_700_000_000;
+        let asset = *b"qATOM.atom\0\0\0\0\0\0";
+        let recipient = [0x51u8; 32];
+        let amount: u128 = 7_500_000u128;
+
+        let seeds: Vec<[u8; 32]> = (1..=4u8).map(|b| [b; 32]).collect();
+        let infos: Vec<ValidatorInfo> = seeds
+            .iter()
+            .map(|s| ValidatorInfo {
+                pubkey: public_key_from_seed(s),
+                voting_power: 25,
+            })
+            .collect();
+        let set = ValidatorSet::new(infos);
+
+        let iavl = ExistenceProof {
+            key: b"bridge/deposits/0x1a2b".to_vec(),
+            value: encode_deposit_value(&recipient, &asset, amount),
+            leaf: LeafOp { prefix: vec![0x00, 0x02, 0x00] },
+            path: vec![
+                InnerOp { prefix: vec![0x01, 0x0a], suffix: vec![0x1b, 0x2c] },
+                InnerOp { prefix: vec![0x01], suffix: vec![0x33, 0x44, 0x55] },
+            ],
+            store: None,
+        };
+        let (app_hash, proof) = wrap_store_layer(iavl, b"bridge");
+
+        let header = Header {
+            version_block: 11,
+            version_app: 0,
+            chain_id: COSMOS_HUB.chain_id.to_string(),
+            height: 18_500_000,
+            time: Timestamp { seconds: GENESIS_TIME as i64, nanos: 9 },
+            last_block_id: BlockId { hash: vec![0xaa; 32], part_total: 1, part_hash: vec![0xbb; 32] },
+            last_commit_hash: vec![0x01; 32],
+            data_hash: vec![0x02; 32],
+            validators_hash: set.hash().to_vec(),
+            next_validators_hash: set.hash().to_vec(),
+            consensus_hash: vec![0x03; 32],
+            app_hash: app_hash.to_vec(),
+            last_results_hash: vec![0x05; 32],
+            evidence_hash: vec![0x06; 32],
+            proposer_address: set.validators[0].address().to_vec(),
+        };
+
+        let block_id = BlockId { hash: header.hash().to_vec(), part_total: 1, part_hash: vec![0xcc; 32] };
+        let mut signatures = Vec::new();
+        for (i, seed) in seeds.iter().enumerate() {
+            let timestamp = Timestamp { seconds: GENESIS_TIME as i64 + 1, nanos: i as i32 };
+            let vote = CanonicalVote {
+                vote_type: PRECOMMIT_TYPE,
+                height: header.height,
+                round: 0,
+                block_id: block_id.clone(),
+                timestamp,
+                chain_id: COSMOS_HUB.chain_id.to_string(),
+            };
+            signatures.push(CommitSig {
+                flag: BlockIdFlag::Commit,
+                validator_address: set.validators[i].address(),
+                timestamp,
+                signature: sign(seed, &vote_sign_bytes(&vote)).to_vec(),
+            });
+        }
+        let commit = Commit { height: header.height, round: 0, block_id, signatures };
+
+        let anchor = crate::bridge_cosmos::CosmosAnchor {
+            config_selector: 0,
+            trusted_height: 0,
+            trusted_time: Timestamp { seconds: GENESIS_TIME as i64 - 3600, nanos: 0 },
+            trusted_validators_hash: set.hash(),
+            asset_id: asset,
+        };
+        let mint_proof = crate::bridge_cosmos::CosmosMintProof {
+            config_selector: 0,
+            trusted_validators: set.clone(),
+            header,
+            commit,
+            signing_set: set,
+            proof,
+        };
+        assert_eq!(
+            crate::bridge_cosmos::CosmosMintProof::decode(&mint_proof.encode()).as_ref(),
+            Some(&mint_proof),
+            "the cosmos proof round-trips through its wire encoding"
+        );
+
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        ledger.seed_chain_genesis_time(GENESIS_TIME);
+        ledger.seed_bridge_dest_chain(BRIDGE_DEST);
+        ledger.seed_bridge_pool_vault(&BRIDGE_VAULT);
+        ledger.register_bridged_asset(&asset, 100_000_000, 100_000_000, false);
+        ledger.seed_bridge_cosmos_anchor(&anchor);
+
+        let (source_chain, source_ref) = mint_proof.source_key();
+        let relayer = keypair(413);
+        let tx = system_tx(
+            &relayer,
+            &crate::ledger::bridge_cosmos_mint_address(),
+            mint_proof.encode(),
+            0,
+            TRANSFER_METER,
+            &fee,
+        );
+        let included = execute_ordered(&mut ledger, &[tx], &fee, 0);
+
+        assert_eq!(included.len(), 1, "the trustless cosmos mint rides in the block");
+        assert_eq!(
+            ledger.bridged_balance(&asset, &recipient),
+            amount,
+            "the tendermint-proven recipient holds the proven amount with no operator involved"
+        );
+        assert_eq!(ledger.bridged_supply(&asset), amount);
+        assert!(
+            ledger.bridge_reference_seen(source_chain, &source_ref),
+            "the cosmos deposit is bound against replay"
+        );
+        assert!(
+            ledger.bridge_operator_set().is_none(),
+            "no operator set exists yet the cosmos deposit minted trustlessly"
+        );
+    }
+
 
 
     #[test]
