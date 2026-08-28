@@ -43,27 +43,24 @@ fn guarded_handshake<T>(
     timeout: Duration,
     body: impl FnOnce(TcpStream) -> Result<T>,
 ) -> Result<T> {
+    let socket = stream.try_clone().map_err(Error::Io)?;
     let done = Arc::new(AtomicBool::new(false));
-    let watchdog = stream.try_clone().ok().map(|socket| {
-        let done = Arc::clone(&done);
-        thread::spawn(move || {
-            let deadline = Instant::now() + timeout;
-            while Instant::now() < deadline {
-                if done.load(Ordering::Relaxed) {
-                    return;
-                }
-                thread::sleep(Duration::from_millis(50));
+    let done_watchdog = Arc::clone(&done);
+    let watchdog = thread::spawn(move || {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if done_watchdog.load(Ordering::Relaxed) {
+                return;
             }
-            if !done.load(Ordering::Relaxed) {
-                let _ = socket.shutdown(Shutdown::Both);
-            }
-        })
+            thread::sleep(Duration::from_millis(50));
+        }
+        if !done_watchdog.load(Ordering::Relaxed) {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
     });
     let outcome = body(stream);
     done.store(true, Ordering::Relaxed);
-    if let Some(handle) = watchdog {
-        let _ = handle.join();
-    }
+    let _ = watchdog.join();
     outcome
 }
 
