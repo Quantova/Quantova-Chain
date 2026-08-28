@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bridge;
+pub mod bridge_btc;
 pub mod consensus;
 pub mod evidence;
 pub mod execution;

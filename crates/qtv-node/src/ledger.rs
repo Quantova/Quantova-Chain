@@ -259,6 +259,7 @@ const BRIDGE_VAULTBAL_TAG: &[u8] = b"qtv/bridge/vaultbal/";
 const BRIDGE_ASSET_LIST_TAG: &[u8] = b"qtv/bridge/assetlist";
 const BRIDGE_DESTCHAIN_TAG: &[u8] = b"qtv/bridge/destchain";
 const BRIDGE_ERA_TAG: &[u8] = b"qtv/bridge/era";
+const BRIDGE_BTC_ANCHOR_TAG: &[u8] = b"qtv/bridge/btcanchor";
 const BRIDGE_EPOCH_TAG: &[u8] = b"qtv/bridge/epoch";
 const BRIDGE_BURN_REF_DOMAIN: &[u8] = b"qtv/bridge/burn-ref/v1";
 const BRIDGE_EXIT_SEEN_TAG: &[u8] = b"qtv/bridge/exitseen/";
@@ -588,6 +589,11 @@ pub fn bridge_guardian_address() -> String {
 
 pub fn bridge_mint_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/mint/system"))
+        .expect("a full hash reaches the address floor")
+}
+
+pub fn bridge_btc_mint_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/mint/btc/system"))
         .expect("a full hash reaches the address floor")
 }
 
@@ -1589,6 +1595,23 @@ impl Ledger {
     pub fn seed_bridge_dest_chain(&mut self, dest_chain: u32) -> (Key, Vec<u8>) {
         let key = stake_singleton_key(BRIDGE_DESTCHAIN_TAG);
         let bytes = to_bytes(&dest_chain);
+        self.write_leaf(key, bytes.clone());
+        (key, bytes)
+    }
+
+    pub fn bridge_bitcoin_anchor(&self) -> Option<crate::bridge_btc::BitcoinAnchor> {
+        self.trie
+            .get(&stake_singleton_key(BRIDGE_BTC_ANCHOR_TAG))
+            .filter(|bytes| !bytes.is_empty())
+            .and_then(|bytes| crate::bridge_btc::BitcoinAnchor::decode(bytes))
+    }
+
+    pub fn seed_bridge_bitcoin_anchor(
+        &mut self,
+        anchor: &crate::bridge_btc::BitcoinAnchor,
+    ) -> (Key, Vec<u8>) {
+        let key = stake_singleton_key(BRIDGE_BTC_ANCHOR_TAG);
+        let bytes = anchor.encode();
         self.write_leaf(key, bytes.clone());
         (key, bytes)
     }

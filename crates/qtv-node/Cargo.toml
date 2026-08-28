@@ -16,6 +16,7 @@ description = "The first in process node that composes the chain crates, the vir
 test-fixtures = []
 
 [dependencies]
+qtv-btc-spv = { path = "../qtv-btc-spv" }
 qtv-idfmt = { path = "../qtv-idfmt" }
 qtv-codec = { path = "../qtv-codec" }
 qtv-account = { path = "../qtv-account" }

@@ -165,6 +165,7 @@ dependencies = [
  "qtv-attest",
  "qtv-bft",
  "qtv-block",
+ "qtv-btc-spv",
  "qtv-codec",
  "qtv-crypto",
  "qtv-governance",
