@@ -3160,6 +3160,27 @@ impl Ledger {
                 });
                 Ok(())
             }
+            Action::BridgeAnchorSet { corridor, anchor } => {
+                match corridor {
+                    0 => {
+                        let a = crate::bridge_btc::BitcoinAnchor::decode(anchor)
+                            .ok_or(EnactError::BadValue)?;
+                        self.seed_bridge_bitcoin_anchor(&a);
+                    }
+                    1 => {
+                        let a = crate::bridge_eth::EthAnchor::decode(anchor)
+                            .ok_or(EnactError::BadValue)?;
+                        self.seed_bridge_eth_anchor(&a);
+                    }
+                    2 => {
+                        let a = crate::bridge_cosmos::CosmosAnchor::decode(anchor)
+                            .ok_or(EnactError::BadValue)?;
+                        self.seed_bridge_cosmos_anchor(&a);
+                    }
+                    _ => return Err(EnactError::BadValue),
+                }
+                Ok(())
+            }
             Action::EpochAdvance => {
                 let next = self.bridge_epoch().checked_add(1).ok_or(EnactError::BadValue)?;
                 self.set_bridge_epoch(next);
@@ -3204,7 +3225,9 @@ impl Ledger {
             return false;
         }
         let ok = match action {
-            Action::CommitteeRotate { .. } | Action::AssetRegister { .. } => {
+            Action::CommitteeRotate { .. }
+            | Action::AssetRegister { .. }
+            | Action::BridgeAnchorSet { .. } => {
                 self.execute_action(action, now, chain_id).is_ok()
             }
             _ => false,
@@ -5878,6 +5901,69 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn a_guardian_enact_installs_a_bridge_anchor_on_a_running_chain() {
+        use qtv_governance::Action;
+        let mut l = Ledger::new();
+        let chain_id = 42u64;
+
+        let btc = crate::bridge_btc::BitcoinAnchor {
+            network: 0,
+            checkpoint_height: 100,
+            checkpoint_hash: [0x11u8; 32],
+            checkpoint_min_work: [0x22u8; 32],
+            asset_id: [0x33u8; 16],
+            deposit_script: vec![0x76, 0xa9, 0x14],
+        };
+        assert!(l.guardian_enact_bridge_action(
+            &Action::BridgeAnchorSet { corridor: 0, anchor: btc.encode() },
+            0,
+            0,
+            chain_id
+        ));
+        assert_eq!(l.bridge_bitcoin_anchor(), Some(btc), "the guardian installed the bitcoin anchor at runtime");
+
+        let eth = crate::bridge_eth::EthAnchor {
+            config_selector: 0,
+            period: 870,
+            sync_committee_root: [0x44u8; 32],
+            deposit_contract: [0x55u8; 20],
+            asset_id: [0x66u8; 16],
+        };
+        assert!(l.guardian_enact_bridge_action(
+            &Action::BridgeAnchorSet { corridor: 1, anchor: eth.encode() },
+            1,
+            0,
+            chain_id
+        ));
+        assert_eq!(l.bridge_eth_anchor(0), Some(eth), "the guardian installed the ethereum anchor at runtime");
+
+        let cosmos = crate::bridge_cosmos::CosmosAnchor {
+            config_selector: 0,
+            trusted_height: 18_400_000,
+            trusted_time: qlc_cosmos::proto::Timestamp { seconds: 1_700_000_000, nanos: 0 },
+            trusted_validators_hash: [0x77u8; 32],
+            asset_id: [0x88u8; 16],
+        };
+        assert!(l.guardian_enact_bridge_action(
+            &Action::BridgeAnchorSet { corridor: 2, anchor: cosmos.encode() },
+            2,
+            0,
+            chain_id
+        ));
+        assert_eq!(l.bridge_cosmos_anchor(0), Some(cosmos), "the guardian installed the cosmos anchor at runtime");
+
+        assert!(
+            !l.guardian_enact_bridge_action(
+                &Action::BridgeAnchorSet { corridor: 9, anchor: vec![0x00] },
+                3,
+                0,
+                chain_id
+            ),
+            "an unknown corridor is refused"
+        );
+    }
+
+    #[test]
     fn the_deposit_burn_settle_cycle_conserves_reserves_for_the_watchtower() {
         let mut l = Ledger::new();
         let asset = [0x5au8; 16];
@@ -6706,6 +6792,7 @@ fn action_kind(action: &Action) -> &'static str {
         Action::GuardianRotate { .. } => "guardian_rotate",
         Action::CommitteeRotate { .. } => "committee_rotate",
         Action::AssetRegister { .. } => "asset_register",
+        Action::BridgeAnchorSet { .. } => "bridge_anchor_set",
         Action::EpochAdvance => "epoch_advance",
         Action::OperatorRevoke { .. } => "operator_revoke",
         Action::FreezeRecovery { .. } => "freeze_recovery",

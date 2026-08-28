@@ -365,6 +365,10 @@ pub enum Action {
         epoch_cap: u128,
         requires_stark: bool,
     },
+    BridgeAnchorSet {
+        corridor: u8,
+        anchor: Vec<u8>,
+    },
     EpochAdvance,
     OperatorRevoke { operator_id: u32 },
     FreezeRecovery {
@@ -389,6 +393,7 @@ impl Action {
             Action::GuardianRotate { .. } => Track::ChainUpgrade,
             Action::CommitteeRotate { .. } => Track::BridgeMigration,
             Action::AssetRegister { .. } => Track::BridgeMigration,
+            Action::BridgeAnchorSet { .. } => Track::BridgeMigration,
             Action::EpochAdvance => Track::BridgeMigration,
             Action::OperatorRevoke { .. } => Track::BridgeMigration,
             Action::FreezeRecovery { .. } => Track::FreezeRecovery,
@@ -451,6 +456,11 @@ impl Encode for Action {
                 encoder.put_u128(*cap);
                 encoder.put_u128(*epoch_cap);
                 encoder.put_u8(*requires_stark as u8);
+            }
+            Action::BridgeAnchorSet { corridor, anchor } => {
+                encoder.put_u8(17);
+                encoder.put_u8(*corridor);
+                encoder.put_bytes(anchor);
             }
             Action::EpochAdvance => {
                 encoder.put_u8(15);
@@ -545,6 +555,10 @@ impl Decode for Action {
             15 => Ok(Action::EpochAdvance),
             16 => Ok(Action::OperatorRevoke {
                 operator_id: decoder.get_u32()?,
+            }),
+            17 => Ok(Action::BridgeAnchorSet {
+                corridor: decoder.get_u8()?,
+                anchor: decoder.get_bytes()?.to_vec(),
             }),
             4 => {
                 let scope_bytes = decoder.get_bytes()?;
