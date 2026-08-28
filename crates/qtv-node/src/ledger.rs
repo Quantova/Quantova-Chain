@@ -261,6 +261,8 @@ const BRIDGE_DESTCHAIN_TAG: &[u8] = b"qtv/bridge/destchain";
 const BRIDGE_ERA_TAG: &[u8] = b"qtv/bridge/era";
 const BRIDGE_BTC_ANCHOR_TAG: &[u8] = b"qtv/bridge/btcanchor";
 const BRIDGE_ETH_ANCHOR_TAG: &[u8] = b"qtv/bridge/ethanchor/";
+const BRIDGE_COSMOS_ANCHOR_TAG: &[u8] = b"qtv/bridge/cosmosanchor/";
+const CHAIN_GENESIS_TIME_TAG: &[u8] = b"qtv/chain/genesistime";
 const BRIDGE_EPOCH_TAG: &[u8] = b"qtv/bridge/epoch";
 const BRIDGE_BURN_REF_DOMAIN: &[u8] = b"qtv/bridge/burn-ref/v1";
 const BRIDGE_EXIT_SEEN_TAG: &[u8] = b"qtv/bridge/exitseen/";
@@ -334,6 +336,13 @@ fn bridge_vault_custody_key(vault: &[u8; 32], asset_id: &[u8; 16]) -> Key {
 fn bridge_eth_anchor_key(selector: u8) -> Key {
     let mut input = Vec::with_capacity(BRIDGE_ETH_ANCHOR_TAG.len() + 1);
     input.extend_from_slice(BRIDGE_ETH_ANCHOR_TAG);
+    input.push(selector);
+    sha3::sha3_256(&input)
+}
+
+fn bridge_cosmos_anchor_key(selector: u8) -> Key {
+    let mut input = Vec::with_capacity(BRIDGE_COSMOS_ANCHOR_TAG.len() + 1);
+    input.extend_from_slice(BRIDGE_COSMOS_ANCHOR_TAG);
     input.push(selector);
     sha3::sha3_256(&input)
 }
@@ -607,6 +616,11 @@ pub fn bridge_btc_mint_address() -> String {
 
 pub fn bridge_eth_mint_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/mint/eth/system"))
+        .expect("a full hash reaches the address floor")
+}
+
+pub fn bridge_cosmos_mint_address() -> String {
+    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/mint/cosmos/system"))
         .expect("a full hash reaches the address floor")
 }
 
@@ -1642,6 +1656,38 @@ impl Ledger {
     ) -> (Key, Vec<u8>) {
         let key = bridge_eth_anchor_key(anchor.config_selector);
         let bytes = anchor.encode();
+        self.write_leaf(key, bytes.clone());
+        (key, bytes)
+    }
+
+    pub fn bridge_cosmos_anchor(&self, selector: u8) -> Option<crate::bridge_cosmos::CosmosAnchor> {
+        self.trie
+            .get(&bridge_cosmos_anchor_key(selector))
+            .filter(|bytes| !bytes.is_empty())
+            .and_then(|bytes| crate::bridge_cosmos::CosmosAnchor::decode(bytes))
+    }
+
+    pub fn seed_bridge_cosmos_anchor(
+        &mut self,
+        anchor: &crate::bridge_cosmos::CosmosAnchor,
+    ) -> (Key, Vec<u8>) {
+        let key = bridge_cosmos_anchor_key(anchor.config_selector);
+        let bytes = anchor.encode();
+        self.write_leaf(key, bytes.clone());
+        (key, bytes)
+    }
+
+    pub fn chain_genesis_time(&self) -> u64 {
+        self.trie
+            .get(&stake_singleton_key(CHAIN_GENESIS_TIME_TAG))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical genesis time"))
+            .unwrap_or(0)
+    }
+
+    pub fn seed_chain_genesis_time(&mut self, genesis_time: u64) -> (Key, Vec<u8>) {
+        let key = stake_singleton_key(CHAIN_GENESIS_TIME_TAG);
+        let bytes = to_bytes(&genesis_time);
         self.write_leaf(key, bytes.clone());
         (key, bytes)
     }

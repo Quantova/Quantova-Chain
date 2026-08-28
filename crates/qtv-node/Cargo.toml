@@ -19,6 +19,7 @@ test-fixtures = []
 qtv-btc-spv = { path = "../qtv-btc-spv" }
 qlc-ethereum = { path = "../qlc-ethereum" }
 q-bls = { path = "../q-bls" }
+qlc-cosmos = { path = "../qlc-cosmos" }
 qtv-idfmt = { path = "../qtv-idfmt" }
 qtv-codec = { path = "../qtv-codec" }
 qtv-account = { path = "../qtv-account" }
@@ -39,3 +40,4 @@ qtv-attest = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "5fe
 qtv-node = { path = ".", features = ["test-fixtures"] }
 qlc-ethereum = { path = "../qlc-ethereum", features = ["test-util"] }
 q-bls = { path = "../q-bls", features = ["test-util"] }
+qlc-cosmos = { path = "../qlc-cosmos", features = ["test-util"] }

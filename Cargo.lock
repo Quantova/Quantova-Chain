@@ -97,6 +97,14 @@ name = "qlc-core"
 version = "0.1.0"
 
 [[package]]
+name = "qlc-cosmos"
+version = "0.1.0"
+dependencies = [
+ "qlc-core",
+ "qlc-stark",
+]
+
+[[package]]
 name = "qlc-ethereum"
 version = "0.1.0"
 dependencies = [
@@ -269,6 +277,7 @@ name = "qtv-node"
 version = "0.1.0"
 dependencies = [
  "q-bls",
+ "qlc-cosmos",
  "qlc-ethereum",
  "qtv-account",
  "qtv-attest",
