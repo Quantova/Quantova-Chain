@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::time::Duration;
+use std::net::{Shutdown, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use qtv_crypto::{ml_dsa, ml_kem};
 
@@ -35,6 +38,35 @@ impl<S: Read + Write> Channel<S> {
     }
 }
 
+fn guarded_handshake<T>(
+    stream: TcpStream,
+    timeout: Duration,
+    body: impl FnOnce(TcpStream) -> Result<T>,
+) -> Result<T> {
+    let done = Arc::new(AtomicBool::new(false));
+    let watchdog = stream.try_clone().ok().map(|socket| {
+        let done = Arc::clone(&done);
+        thread::spawn(move || {
+            let deadline = Instant::now() + timeout;
+            while Instant::now() < deadline {
+                if done.load(Ordering::Relaxed) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            if !done.load(Ordering::Relaxed) {
+                let _ = socket.shutdown(Shutdown::Both);
+            }
+        })
+    });
+    let outcome = body(stream);
+    done.store(true, Ordering::Relaxed);
+    if let Some(handle) = watchdog {
+        let _ = handle.join();
+    }
+    outcome
+}
+
 impl Channel<TcpStream> {
     pub fn accept_with_timeout(
         stream: TcpStream,
@@ -43,7 +75,7 @@ impl Channel<TcpStream> {
     ) -> Result<Self> {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
-        let channel = respond(stream, identity, None)?;
+        let channel = guarded_handshake(stream, timeout, |s| respond(s, identity, None))?;
         channel.set_post_handshake()?;
         Ok(channel)
     }
@@ -55,7 +87,7 @@ impl Channel<TcpStream> {
     ) -> Result<Self> {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
-        let channel = initiate(stream, identity, None)?;
+        let channel = guarded_handshake(stream, timeout, |s| initiate(s, identity, None))?;
         channel.set_post_handshake()?;
         Ok(channel)
     }
@@ -68,7 +100,7 @@ impl Channel<TcpStream> {
     ) -> Result<Self> {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
-        let channel = initiate(stream, identity, Some(peer))?;
+        let channel = guarded_handshake(stream, timeout, |s| initiate(s, identity, Some(peer)))?;
         channel.set_post_handshake()?;
         Ok(channel)
     }
@@ -246,6 +278,35 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "the bounded accept must return near its timeout, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_slow_drip_peer_cannot_outlast_the_total_handshake_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let responder = Identity::from_seed(&[13u8; 32]);
+        let server = thread::spawn(move || {
+            let (stream, _peer) = listener.accept().unwrap();
+            let start = Instant::now();
+            let outcome =
+                Channel::accept_with_timeout(stream, &responder, Duration::from_millis(300));
+            (outcome.is_err(), start.elapsed())
+        });
+
+        let mut drip = TcpStream::connect(address).unwrap();
+        for _ in 0..60 {
+            if drip.write_all(&[0u8]).is_err() || drip.flush().is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        let (errored, elapsed) = server.join().unwrap();
+        assert!(errored, "a slow drip peer must be dropped, not admitted");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the total handshake deadline must fire near its budget, took {elapsed:?}"
         );
     }
 

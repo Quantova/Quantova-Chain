@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,6 +17,8 @@ const HELLO_TAG: &[u8; 8] = b"QTVGEN01";
 const HELLO_LEN: usize = 8 + 32;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+const MAX_HANDSHAKE_INFLIGHT: usize = 64;
 
 const INBOUND_CAP: usize = 4096;
 
@@ -52,35 +56,56 @@ pub fn build_mesh(
     let identity_acc = identity.clone();
     let up_acc = up.clone();
     let peer_ids_acc: Vec<Option<PeerId>> = peer_ids.to_vec();
+    let (worker_tx, worker_rx) = mpsc::channel::<(usize, Channel<TcpStream>)>();
     let acceptor = thread::spawn(move || {
+        let _ = listener.set_nonblocking(true);
         let mut seen = vec![false; n];
         let mut registered = 0usize;
+        let inflight = Arc::new(AtomicUsize::new(0));
         while registered < up_peers {
-            let (stream, _) = match listener.accept() {
-                Ok(pair) => pair,
-                Err(_) => {
-                    thread::sleep(Duration::from_millis(5));
-                    continue;
-                }
-            };
-            let channel = match Channel::accept_with_timeout(stream, &identity_acc, HANDSHAKE_TIMEOUT)
-            {
-                Ok(channel) => channel,
-                Err(_) => continue,
-            };
-            let peer = channel.peer_id().clone();
-            let from = (0..n).find(|&q| {
-                q != idx
-                    && up_acc.get(q).copied().unwrap_or(false)
-                    && peer_ids_acc.get(q).and_then(|p| p.as_ref()) == Some(&peer)
-            });
-            if let Some(from) = from {
-                if !seen[from] {
+            while let Ok((from, channel)) = worker_rx.try_recv() {
+                if from < n && !seen[from] {
                     seen[from] = true;
                     registered += 1;
                     let _ = accepted_tx.send((from, channel));
                 }
             }
+            if registered >= up_peers {
+                break;
+            }
+            let stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+            };
+            if inflight.load(Ordering::Relaxed) >= MAX_HANDSHAKE_INFLIGHT {
+                continue;
+            }
+            inflight.fetch_add(1, Ordering::Relaxed);
+            let identity_w = identity_acc.clone();
+            let up_w = up_acc.clone();
+            let peer_ids_w = peer_ids_acc.clone();
+            let worker_tx_w = worker_tx.clone();
+            let inflight_w = Arc::clone(&inflight);
+            thread::spawn(move || {
+                let _ = stream.set_nonblocking(false);
+                if let Ok(channel) =
+                    Channel::accept_with_timeout(stream, &identity_w, HANDSHAKE_TIMEOUT)
+                {
+                    let peer = channel.peer_id().clone();
+                    let from = (0..n).find(|&q| {
+                        q != idx
+                            && up_w.get(q).copied().unwrap_or(false)
+                            && peer_ids_w.get(q).and_then(|p| p.as_ref()) == Some(&peer)
+                    });
+                    if let Some(from) = from {
+                        let _ = worker_tx_w.send((from, channel));
+                    }
+                }
+                inflight_w.fetch_sub(1, Ordering::Relaxed);
+            });
         }
     });
 
