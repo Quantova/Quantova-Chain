@@ -21,6 +21,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const MAX_HANDSHAKE_INFLIGHT: usize = 64;
 
+const KNOWN_HANDSHAKE_RESERVE: usize = 64;
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 const BOOTSTRAP_DEADLINE: Duration = Duration::from_secs(60);
@@ -148,7 +150,12 @@ pub fn build_mesh(
                 }
             };
             let known = known_ips.contains(&addr.ip());
-            if !known && inflight.load(Ordering::Relaxed) >= MAX_HANDSHAKE_INFLIGHT {
+            let cap = if known {
+                MAX_HANDSHAKE_INFLIGHT + KNOWN_HANDSHAKE_RESERVE
+            } else {
+                MAX_HANDSHAKE_INFLIGHT
+            };
+            if inflight.load(Ordering::Relaxed) >= cap {
                 continue;
             }
             inflight.fetch_add(1, Ordering::Relaxed);
