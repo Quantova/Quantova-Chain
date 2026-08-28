@@ -3879,6 +3879,92 @@ mod tests {
         assert!(ledger.bridge_reference_seen(1, &[0x11; 32]), "the deposit reference is marked against replay");
     }
 
+    fn btc_p2pkh(h: [u8; 20]) -> Vec<u8> {
+        let mut s = vec![0x76, 0xa9, 0x14];
+        s.extend_from_slice(&h);
+        s.extend_from_slice(&[0x88, 0xac]);
+        s
+    }
+
+    fn btc_op_return(r: [u8; 32]) -> Vec<u8> {
+        let mut s = vec![0x6a, 0x20];
+        s.extend_from_slice(&r);
+        s
+    }
+
+    fn btc_raw_tx(outputs: &[(u64, Vec<u8>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.push(0x01);
+        out.extend_from_slice(&[0u8; 36]);
+        out.push(0x00);
+        out.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+        out.push(outputs.len() as u8);
+        for (value, script) in outputs {
+            out.extend_from_slice(&value.to_le_bytes());
+            out.push(script.len() as u8);
+            out.extend_from_slice(script);
+        }
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out
+    }
+
+    fn btc_mine(merkle_root: [u8; 32]) -> qtv_btc_spv::BlockHeader {
+        let mut header = qtv_btc_spv::BlockHeader {
+            version: 1,
+            prev_block: [0u8; 32],
+            merkle_root,
+            timestamp: 1_700_000_000,
+            bits: 0x207f_ffff,
+            nonce: 0,
+        };
+        while !header.meets_pow() {
+            header.nonce = header.nonce.wrapping_add(1);
+        }
+        header
+    }
+
+    #[test]
+    fn a_bitcoin_spv_proof_mints_trustlessly_with_no_operator_set() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        ledger.seed_bridge_dest_chain(BRIDGE_DEST);
+        ledger.seed_bridge_pool_vault(&BRIDGE_VAULT);
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
+
+        let bridge_script = btc_p2pkh([0x11; 20]);
+        let recipient = [0x42u8; 32];
+        let raw = btc_raw_tx(&[(250_000, bridge_script.clone()), (0, btc_op_return(recipient))]);
+        let txid = qtv_btc_spv::tx::Transaction::parse(&raw).unwrap().txid();
+        let header = btc_mine(txid);
+        let anchor = crate::bridge_btc::BitcoinAnchor {
+            network: 255,
+            checkpoint_height: 0,
+            checkpoint_hash: header.block_hash(),
+            checkpoint_min_work: [0u8; 32],
+            asset_id: asset,
+            deposit_script: bridge_script,
+        };
+        ledger.seed_bridge_bitcoin_anchor(&anchor);
+        let proof = crate::bridge_btc::BitcoinMintProof {
+            start_height: 0,
+            headers: vec![header.serialize()],
+            deposit_height: 0,
+            branch: vec![],
+            raw_tx: raw,
+        };
+        let relayer = keypair(410);
+        let tx = system_tx(&relayer, &crate::ledger::bridge_btc_mint_address(), proof.encode(), 0, TRANSFER_METER, &fee);
+        let included = execute_ordered(&mut ledger, &[tx], &fee, 0);
+
+        assert_eq!(included.len(), 1, "the trustless bitcoin mint rides in the block");
+        assert_eq!(ledger.bridged_balance(&asset, &recipient), 250_000, "the proven recipient holds the proven amount with no operator involved");
+        assert_eq!(ledger.bridged_supply(&asset), 250_000);
+        assert!(ledger.bridge_reference_seen(crate::bridge_btc::BITCOIN_MINT_SOURCE_CHAIN, &txid), "the txid is bound against replay");
+        assert!(ledger.bridge_operator_set().is_none(), "no operator set exists yet the deposit minted trustlessly");
+    }
+
     #[test]
     fn a_quorum_signed_for_a_sibling_chain_id_does_not_mint() {
         let fee = FeeParams::devnet();
