@@ -546,7 +546,7 @@ pub fn exit_ack_context(era: &[u8; 32]) -> Vec<u8> {
     ctx
 }
 pub const EXIT_FACT_VERSION: u8 = 1;
-pub const EXIT_FACT_ENCODED_LEN: usize = 106;
+pub const EXIT_FACT_ENCODED_LEN: usize = 138;
 pub const ARTIFACT_EXIT_ACK: u8 = 0x03;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -579,7 +579,8 @@ pub struct ExitFact {
     pub dest_chain: u32,
     pub asset_id: [u8; 16],
     pub amount: u128,
-    pub beneficiary: [u8; 32],
+    pub holder: [u8; 32],
+    pub destination: [u8; 32],
     pub burn_ref: [u8; 32],
     pub outcome: ExitOutcome,
 }
@@ -592,7 +593,8 @@ impl ExitFact {
         out.extend_from_slice(&self.dest_chain.to_le_bytes());
         out.extend_from_slice(&self.asset_id);
         out.extend_from_slice(&self.amount.to_le_bytes());
-        out.extend_from_slice(&self.beneficiary);
+        out.extend_from_slice(&self.holder);
+        out.extend_from_slice(&self.destination);
         out.extend_from_slice(&self.burn_ref);
         out.push(self.outcome.tag());
         out
@@ -604,7 +606,8 @@ impl ExitFact {
         let dest_chain = reader.u32()?;
         let asset_id = reader.array::<16>()?;
         let amount = reader.u128()?;
-        let beneficiary = reader.array::<32>()?;
+        let holder = reader.array::<32>()?;
+        let destination = reader.array::<32>()?;
         let burn_ref = reader.array::<32>()?;
         let outcome = ExitOutcome::from_tag(reader.u8()?)?;
         Some(ExitFact {
@@ -613,7 +616,8 @@ impl ExitFact {
             dest_chain,
             asset_id,
             amount,
-            beneficiary,
+            holder,
+            destination,
             burn_ref,
             outcome,
         })
@@ -639,7 +643,8 @@ impl ExitFact {
             && self.dest_chain != 0
             && self.amount != 0
             && self.asset_id != [0u8; 16]
-            && self.beneficiary != [0u8; 32]
+            && self.holder != [0u8; 32]
+            && self.destination != [0u8; 32]
             && self.burn_ref != [0u8; 32]
     }
 }
@@ -1387,7 +1392,8 @@ mod tests {
             dest_chain: 9000,
             asset_id: [3u8; 16],
             amount: 1_100_000,
-            beneficiary: [5u8; 32],
+            holder: [4u8; 32],
+            destination: [5u8; 32],
             burn_ref: [9u8; 32],
             outcome,
         }
@@ -1428,7 +1434,8 @@ mod tests {
             dest_chain: 9000,
             asset_id: [0x3; 16],
             amount: 1_100_000,
-            beneficiary: [0x5; 32],
+            holder: [0x4; 32],
+            destination: [0x5; 32],
             burn_ref: [0x9; 32],
             outcome: ExitOutcome::Slash,
         };
@@ -1439,9 +1446,10 @@ mod tests {
         assert_eq!(&bytes[5..9], 9000u32.to_le_bytes());
         assert_eq!(&bytes[9..25], [0x3u8; 16]);
         assert_eq!(&bytes[25..41], 1_100_000u128.to_le_bytes());
-        assert_eq!(&bytes[41..73], [0x5u8; 32]);
-        assert_eq!(&bytes[73..105], [0x9u8; 32]);
-        assert_eq!(bytes[105], 2, "the slash outcome rides in the final byte");
+        assert_eq!(&bytes[41..73], [0x4u8; 32]);
+        assert_eq!(&bytes[73..105], [0x5u8; 32]);
+        assert_eq!(&bytes[105..137], [0x9u8; 32]);
+        assert_eq!(bytes[137], 2, "the slash outcome rides in the final byte");
         let preimage = fact.ack_preimage(0x0123_4567_89AB_CDEF);
         assert_eq!(
             preimage.len(),
@@ -1583,7 +1591,8 @@ mod tests {
             dest_chain: 0,
             asset_id: [0u8; 16],
             amount: 0,
-            beneficiary: [0u8; 32],
+            holder: [0u8; 32],
+            destination: [0u8; 32],
             burn_ref: [0u8; 32],
             outcome: ExitOutcome::Settle,
         };

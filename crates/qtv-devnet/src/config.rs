@@ -139,6 +139,7 @@ impl DevnetConfig {
             bridge_era: self.bridge_era,
             bridge_bitcoin_anchor: None,
             bridge_eth_anchors: Vec::new(),
+            bridge_cosmos_anchor: None,
         }
     }
 }

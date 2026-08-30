@@ -501,7 +501,10 @@ const BRIDGE_LAST_LIFT_TAG: &[u8] = b"qtv/bridge/lastlift";
 const BRIDGE_VAULT_TAG: &[u8] = b"qtv/bridge/vault";
 const BRIDGE_GATEWAY_TAG: &[u8] = b"qtv/bridge/gateway";
 const BRIDGE_EXITS_TAG: &[u8] = b"qtv/bridge/exits";
+const BRIDGE_FEDERATED_TAG: &[u8] = b"qtv/bridge/federated";
 const BRIDGE_PAYOUTCAP_TAG: &[u8] = b"qtv/bridge/payoutcap";
+
+pub const FEDERATED_CORRIDOR_ENABLED: bool = false;
 
 fn is_reserved_pot(id: &[u8; 32]) -> bool {
     const POTS: &[&[u8]] = &[
@@ -1301,6 +1304,19 @@ impl Ledger {
         (stake_singleton_key(BRIDGE_EXITS_TAG), bytes)
     }
 
+    pub fn bridge_federated_enabled(&self) -> bool {
+        match self.trie.get(&stake_singleton_key(BRIDGE_FEDERATED_TAG)) {
+            Some(bytes) => bytes.first() == Some(&1),
+            None => FEDERATED_CORRIDOR_ENABLED,
+        }
+    }
+
+    pub fn seed_bridge_federated_enabled(&mut self, enabled: bool) -> (Key, Vec<u8>) {
+        let bytes = vec![enabled as u8];
+        self.write_leaf(stake_singleton_key(BRIDGE_FEDERATED_TAG), bytes.clone());
+        (stake_singleton_key(BRIDGE_FEDERATED_TAG), bytes)
+    }
+
     pub fn bridge_freeze_with_fee(&mut self, caller: &str, fee: u64, now: u64) -> bool {
         let id = match address_id(caller) {
             Some(id) => id,
@@ -2019,12 +2035,8 @@ impl Ledger {
         if self.bridge_exit_settled(&fact.burn_ref) {
             return false;
         }
-        if !self.outstanding_burn_matches(
-            &fact.burn_ref,
-            &fact.asset_id,
-            fact.amount,
-            &fact.beneficiary,
-        ) {
+        if !self.outstanding_burn_matches(&fact.burn_ref, &fact.asset_id, fact.amount, &fact.holder)
+        {
             return false;
         }
         let held = match self
@@ -2042,13 +2054,13 @@ impl Ledger {
         self.set_bridge_vault_custody(&vault, &fact.asset_id, held);
         self.record_bridge_settle_event(
             &fact.asset_id,
-            &fact.beneficiary,
+            &fact.destination,
             fact.amount,
             &fact.burn_ref,
         );
         self.record_side_event(SideEvent::BridgeSettle {
             asset_id: fact.asset_id,
-            beneficiary: fact.beneficiary,
+            beneficiary: fact.destination,
             amount: fact.amount,
             burn_ref: fact.burn_ref,
         });
@@ -2076,12 +2088,8 @@ impl Ledger {
         if self.bridge_exit_settled(&fact.burn_ref) {
             return false;
         }
-        if !self.outstanding_burn_matches(
-            &fact.burn_ref,
-            &fact.asset_id,
-            fact.amount,
-            &fact.beneficiary,
-        ) {
+        if !self.outstanding_burn_matches(&fact.burn_ref, &fact.asset_id, fact.amount, &fact.holder)
+        {
             return false;
         }
         let epoch = self.bridge_epoch();
@@ -2116,7 +2124,7 @@ impl Ledger {
             return false;
         }
         let credited = match self
-            .bridged_balance(&fact.asset_id, &fact.beneficiary)
+            .bridged_balance(&fact.asset_id, &fact.holder)
             .checked_add(fact.amount)
         {
             Some(credited) => credited,
@@ -2124,7 +2132,7 @@ impl Ledger {
         };
         self.mark_bridge_exit_settled(&fact.burn_ref);
         self.consume_outstanding_burn(&fact.burn_ref);
-        self.set_bridged_balance(&fact.asset_id, &fact.beneficiary, credited);
+        self.set_bridged_balance(&fact.asset_id, &fact.holder, credited);
         self.set_bridged_asset(
             &fact.asset_id,
             &QAsset {
@@ -2134,15 +2142,10 @@ impl Ledger {
         );
         self.set_bridge_epoch_paid(&fact.asset_id, epoch, new_asset_paid);
         self.set_bridge_epoch_paid_global(epoch, new_global_paid);
-        self.record_bridge_slash_event(
-            &fact.asset_id,
-            &fact.beneficiary,
-            fact.amount,
-            &fact.burn_ref,
-        );
+        self.record_bridge_slash_event(&fact.asset_id, &fact.holder, fact.amount, &fact.burn_ref);
         self.record_side_event(SideEvent::BridgeSlash {
             asset_id: fact.asset_id,
-            beneficiary: fact.beneficiary,
+            beneficiary: fact.holder,
             amount: fact.amount,
             burn_ref: fact.burn_ref,
         });
@@ -6565,7 +6568,8 @@ mod stake_state_tests {
             dest_chain: 9_000,
             asset_id: asset,
             amount: 500,
-            beneficiary: holder,
+            holder,
+            destination: [0xEEu8; 32],
             burn_ref: [0x07u8; 32],
             outcome: crate::bridge::ExitOutcome::Settle,
         };
@@ -6587,7 +6591,8 @@ mod stake_state_tests {
             dest_chain: 9_000,
             asset_id: asset,
             amount: 500,
-            beneficiary: holder,
+            holder,
+            destination: [0xEEu8; 32],
             burn_ref: [0x08u8; 32],
             outcome: crate::bridge::ExitOutcome::Slash,
         };
@@ -6756,7 +6761,8 @@ mod stake_state_tests {
             dest_chain: chain_id as u32,
             asset_id: asset,
             amount: 400,
-            beneficiary: holder,
+            holder,
+            destination: [0xEEu8; 32],
             burn_ref,
             outcome: crate::bridge::ExitOutcome::Settle,
         };
@@ -6770,6 +6776,205 @@ mod stake_state_tests {
             "custody and supply realign once the exit settles on the source chain"
         );
         assert!(l.bridge_reserves_conserved(&asset));
+    }
+
+    #[test]
+    fn a_bridge_exit_conserves_one_to_one_crediting_the_holder_not_the_destination() {
+        let mut l = Ledger::new();
+        let asset = [0x7au8; 16];
+        let holder = [0x42u8; 32];
+        let destination = [0x99u8; 32];
+        let vault = [0x0bu8; 32];
+        let chain_id = 9_000u64;
+        l.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
+        l.seed_bridge_pool_vault(&vault);
+        l.seed_bridge_exits_enabled(true);
+        l.seed_bridge_payout_cap(10_000_000);
+
+        assert!(l.bridge_mint(&crate::bridge::Fact {
+            version: crate::bridge::FACT_VERSION,
+            source_chain: 1,
+            dest_chain: chain_id as u32,
+            route_id: 0,
+            direction: crate::bridge::Direction::Deposit,
+            nonce: 1,
+            source_ref: [0x01u8; 32],
+            asset_id: asset,
+            amount: 1_000,
+            recipient: holder,
+            finality_depth: 6,
+            observed_height: 10,
+            expiry_height: u64::MAX,
+        }));
+        assert_eq!(l.bridge_reserve_state(&asset), Some((1_000, 1_000)));
+
+        let settle_index = l.block_events().len() as u64;
+        assert!(l.bridge_burn(&asset, &holder, 400, &destination, chain_id, 7));
+        let settle_ref = bridge_burn_ref(
+            chain_id,
+            &asset,
+            &holder,
+            400,
+            &destination,
+            7,
+            settle_index,
+        );
+        assert_eq!(
+            l.bridge_reserve_state(&asset),
+            Some((1_000, 600)),
+            "the burn retires wrapped supply while the native custody stays held"
+        );
+
+        let swapped = crate::bridge::ExitFact {
+            version: crate::bridge::EXIT_FACT_VERSION,
+            corridor: 1,
+            dest_chain: chain_id as u32,
+            asset_id: asset,
+            amount: 400,
+            holder: destination,
+            destination: holder,
+            burn_ref: settle_ref,
+            outcome: crate::bridge::ExitOutcome::Settle,
+        };
+        assert!(
+            !l.bridge_settle(&swapped),
+            "a settle keyed by the foreign destination cannot match the on-chain holder"
+        );
+        assert_eq!(l.bridge_reserve_state(&asset), Some((1_000, 600)));
+
+        let settle = crate::bridge::ExitFact {
+            version: crate::bridge::EXIT_FACT_VERSION,
+            corridor: 1,
+            dest_chain: chain_id as u32,
+            asset_id: asset,
+            amount: 400,
+            holder,
+            destination,
+            burn_ref: settle_ref,
+            outcome: crate::bridge::ExitOutcome::Settle,
+        };
+        let side_before = l.side_events().len();
+        assert!(l.bridge_settle(&settle));
+        assert_eq!(
+            l.bridge_reserve_state(&asset),
+            Some((600, 600)),
+            "the settle debits custody by the amount and leaves supply where the burn left it"
+        );
+        assert_eq!(
+            l.bridged_balance(&asset, &destination),
+            0,
+            "the settle credits no on-chain balance to the foreign destination"
+        );
+        match l.side_events()[side_before..]
+            .iter()
+            .find(|e| matches!(e, SideEvent::BridgeSettle { .. }))
+        {
+            Some(SideEvent::BridgeSettle { beneficiary, .. }) => assert_eq!(
+                *beneficiary, destination,
+                "the settle proof targets the foreign destination"
+            ),
+            _ => panic!("the settle emits a bridge settle side event"),
+        }
+
+        let slash_index = l.block_events().len() as u64;
+        let pre_supply = l.bridged_supply(&asset);
+        assert!(l.bridge_burn(&asset, &holder, 200, &destination, chain_id, 8));
+        let slash_ref =
+            bridge_burn_ref(chain_id, &asset, &holder, 200, &destination, 8, slash_index);
+        assert_eq!(l.bridged_supply(&asset), pre_supply - 200);
+
+        let wrong_holder = crate::bridge::ExitFact {
+            version: crate::bridge::EXIT_FACT_VERSION,
+            corridor: 1,
+            dest_chain: chain_id as u32,
+            asset_id: asset,
+            amount: 200,
+            holder: destination,
+            destination: holder,
+            burn_ref: slash_ref,
+            outcome: crate::bridge::ExitOutcome::Slash,
+        };
+        assert!(
+            !l.bridge_slash(&wrong_holder),
+            "a slash that would credit a non-holder is refused"
+        );
+        assert_eq!(l.bridged_supply(&asset), pre_supply - 200);
+
+        let holder_before = l.bridged_balance(&asset, &holder);
+        let slash = crate::bridge::ExitFact {
+            version: crate::bridge::EXIT_FACT_VERSION,
+            corridor: 1,
+            dest_chain: chain_id as u32,
+            asset_id: asset,
+            amount: 200,
+            holder,
+            destination,
+            burn_ref: slash_ref,
+            outcome: crate::bridge::ExitOutcome::Slash,
+        };
+        let side_before = l.side_events().len();
+        assert!(l.bridge_slash(&slash));
+        assert_eq!(
+            l.bridged_supply(&asset),
+            pre_supply,
+            "the slash re-mints exactly the burned amount so supply returns to its pre-burn value"
+        );
+        assert_eq!(
+            l.bridged_balance(&asset, &holder),
+            holder_before + 200,
+            "the re-mint credits the on-chain holder"
+        );
+        assert_eq!(
+            l.bridged_balance(&asset, &destination),
+            0,
+            "the re-mint credits no balance to the foreign destination"
+        );
+        match l.side_events()[side_before..]
+            .iter()
+            .find(|e| matches!(e, SideEvent::BridgeSlash { .. }))
+        {
+            Some(SideEvent::BridgeSlash { beneficiary, .. }) => assert_eq!(
+                *beneficiary, holder,
+                "the slash refund is owed to the on-chain holder"
+            ),
+            _ => panic!("the slash emits a bridge slash side event"),
+        }
+    }
+
+    #[test]
+    fn a_slash_beyond_the_vault_custody_is_refused() {
+        let mut l = Ledger::new();
+        let asset = [0x7bu8; 16];
+        let holder = [0x43u8; 32];
+        let destination = [0x9au8; 32];
+        let vault = [0x0cu8; 32];
+        l.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
+        l.seed_bridge_pool_vault(&vault);
+        l.seed_bridge_exits_enabled(true);
+        l.seed_bridge_payout_cap(10_000_000);
+
+        l.seed_outstanding_burn(&[0x51u8; 32], &asset, 500, &holder);
+        let slash = crate::bridge::ExitFact {
+            version: crate::bridge::EXIT_FACT_VERSION,
+            corridor: 1,
+            dest_chain: 9_000,
+            asset_id: asset,
+            amount: 500,
+            holder,
+            destination,
+            burn_ref: [0x51u8; 32],
+            outcome: crate::bridge::ExitOutcome::Slash,
+        };
+        assert!(
+            !l.bridge_slash(&slash),
+            "a re-mint above the vault custody is refused so wrapped supply is never unbacked"
+        );
+        assert_eq!(
+            l.bridged_supply(&asset),
+            0,
+            "the refused slash mints no supply"
+        );
+        assert_eq!(l.bridged_balance(&asset, &holder), 0);
     }
 
     #[test]
@@ -6802,7 +7007,8 @@ mod stake_state_tests {
                 dest_chain: 9_000,
                 asset_id: asset,
                 amount,
-                beneficiary,
+                holder: beneficiary,
+                destination: [0xEEu8; 32],
                 burn_ref,
                 outcome: crate::bridge::ExitOutcome::Settle,
             };
@@ -6812,7 +7018,8 @@ mod stake_state_tests {
                 dest_chain: 9_000,
                 asset_id: asset,
                 amount,
-                beneficiary,
+                holder: beneficiary,
+                destination: [0xEEu8; 32],
                 burn_ref,
                 outcome: crate::bridge::ExitOutcome::Slash,
             };
