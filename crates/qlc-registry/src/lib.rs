@@ -2,7 +2,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 pub mod corridor;
 pub mod finality;
 pub mod network;
@@ -25,52 +24,236 @@ pub struct Asset {
 
 pub fn seed_assets() -> Vec<Asset> {
     vec![
-        Asset { origin_chain: 0, symbol: "BTC", tag: "qBTC.btc" },
-        Asset { origin_chain: 2, symbol: "ETH", tag: "qETH.eth" },
-        Asset { origin_chain: 2, symbol: "USDT", tag: "qUSDT.eth" },
-        Asset { origin_chain: 2, symbol: "USDC", tag: "qUSDC.eth" },
-        Asset { origin_chain: 2, symbol: "LINK", tag: "qLINK.eth" },
-        Asset { origin_chain: 2, symbol: "SHIB", tag: "qSHIB.eth" },
-        Asset { origin_chain: 2, symbol: "UNI", tag: "qUNI.eth" },
-        Asset { origin_chain: 3, symbol: "USDT", tag: "qUSDT.bsc" },
-        Asset { origin_chain: 3, symbol: "BNB", tag: "qBNB.bsc" },
-        Asset { origin_chain: 3, symbol: "LINK", tag: "qLINK.bsc" },
-        Asset { origin_chain: 3, symbol: "FDUSD", tag: "qFDUSD.bsc" },
-        Asset { origin_chain: 3, symbol: "TUSD", tag: "qTUSD.bsc" },
-        Asset { origin_chain: 22, symbol: "USDT", tag: "qUSDT.sol" },
-        Asset { origin_chain: 22, symbol: "SOL", tag: "qSOL.sol" },
-        Asset { origin_chain: 22, symbol: "USDC", tag: "qUSDC.sol" },
-        Asset { origin_chain: 22, symbol: "RENDER", tag: "qRENDER.sol" },
-        Asset { origin_chain: 22, symbol: "BONK", tag: "qBONK.sol" },
-        Asset { origin_chain: 22, symbol: "WIF", tag: "qWIF.sol" },
-        Asset { origin_chain: 23, symbol: "USDT", tag: "qUSDT.tron" },
-        Asset { origin_chain: 23, symbol: "TRX", tag: "qTRX.tron" },
-        Asset { origin_chain: 23, symbol: "TUSD", tag: "qTUSD.tron" },
-        Asset { origin_chain: 23, symbol: "XAUT", tag: "qXAUT.tron" },
-        Asset { origin_chain: 4, symbol: "USDT", tag: "qUSDT.poly" },
-        Asset { origin_chain: 4, symbol: "USDC", tag: "qUSDC.poly" },
-        Asset { origin_chain: 4, symbol: "LINK", tag: "qLINK.poly" },
-        Asset { origin_chain: 4, symbol: "UNI", tag: "qUNI.poly" },
-        Asset { origin_chain: 4, symbol: "AAVE", tag: "qAAVE.poly" },
-        Asset { origin_chain: 4, symbol: "POL", tag: "qPOL.poly" },
-        Asset { origin_chain: 6, symbol: "ETH", tag: "qETH.arb" },
-        Asset { origin_chain: 6, symbol: "USDT", tag: "qUSDT.arb" },
-        Asset { origin_chain: 6, symbol: "USDC", tag: "qUSDC.arb" },
-        Asset { origin_chain: 6, symbol: "LINK", tag: "qLINK.arb" },
-        Asset { origin_chain: 6, symbol: "UNI", tag: "qUNI.arb" },
-        Asset { origin_chain: 6, symbol: "AAVE", tag: "qAAVE.arb" },
-        Asset { origin_chain: 8, symbol: "ETH", tag: "qETH.base" },
-        Asset { origin_chain: 8, symbol: "USDC", tag: "qUSDC.base" },
-        Asset { origin_chain: 8, symbol: "LINK", tag: "qLINK.base" },
-        Asset { origin_chain: 8, symbol: "AERO", tag: "qAERO.base" },
-        Asset { origin_chain: 8, symbol: "VIRTUAL", tag: "qVIRTUAL.base" },
-        Asset { origin_chain: 8, symbol: "wstETH", tag: "qwstETH.base" },
-        Asset { origin_chain: 16, symbol: "ATOM", tag: "qATOM.atom" },
-        Asset { origin_chain: 34, symbol: "XMR", tag: "qXMR.xmr" },
-        Asset { origin_chain: 35, symbol: "LTC", tag: "qLTC.ltc" },
-        Asset { origin_chain: 36, symbol: "DOGE", tag: "qDOGE.doge" },
-        Asset { origin_chain: 37, symbol: "ZEC", tag: "qZEC.zec" },
-        Asset { origin_chain: 38, symbol: "USDC", tag: "qUSDC.cctp" },
+        Asset {
+            origin_chain: 0,
+            symbol: "BTC",
+            tag: "qBTC.btc",
+        },
+        Asset {
+            origin_chain: 2,
+            symbol: "ETH",
+            tag: "qETH.eth",
+        },
+        Asset {
+            origin_chain: 2,
+            symbol: "USDT",
+            tag: "qUSDT.eth",
+        },
+        Asset {
+            origin_chain: 2,
+            symbol: "USDC",
+            tag: "qUSDC.eth",
+        },
+        Asset {
+            origin_chain: 2,
+            symbol: "LINK",
+            tag: "qLINK.eth",
+        },
+        Asset {
+            origin_chain: 2,
+            symbol: "SHIB",
+            tag: "qSHIB.eth",
+        },
+        Asset {
+            origin_chain: 2,
+            symbol: "UNI",
+            tag: "qUNI.eth",
+        },
+        Asset {
+            origin_chain: 3,
+            symbol: "USDT",
+            tag: "qUSDT.bsc",
+        },
+        Asset {
+            origin_chain: 3,
+            symbol: "BNB",
+            tag: "qBNB.bsc",
+        },
+        Asset {
+            origin_chain: 3,
+            symbol: "LINK",
+            tag: "qLINK.bsc",
+        },
+        Asset {
+            origin_chain: 3,
+            symbol: "FDUSD",
+            tag: "qFDUSD.bsc",
+        },
+        Asset {
+            origin_chain: 3,
+            symbol: "TUSD",
+            tag: "qTUSD.bsc",
+        },
+        Asset {
+            origin_chain: 22,
+            symbol: "USDT",
+            tag: "qUSDT.sol",
+        },
+        Asset {
+            origin_chain: 22,
+            symbol: "SOL",
+            tag: "qSOL.sol",
+        },
+        Asset {
+            origin_chain: 22,
+            symbol: "USDC",
+            tag: "qUSDC.sol",
+        },
+        Asset {
+            origin_chain: 22,
+            symbol: "RENDER",
+            tag: "qRENDER.sol",
+        },
+        Asset {
+            origin_chain: 22,
+            symbol: "BONK",
+            tag: "qBONK.sol",
+        },
+        Asset {
+            origin_chain: 22,
+            symbol: "WIF",
+            tag: "qWIF.sol",
+        },
+        Asset {
+            origin_chain: 23,
+            symbol: "USDT",
+            tag: "qUSDT.tron",
+        },
+        Asset {
+            origin_chain: 23,
+            symbol: "TRX",
+            tag: "qTRX.tron",
+        },
+        Asset {
+            origin_chain: 23,
+            symbol: "TUSD",
+            tag: "qTUSD.tron",
+        },
+        Asset {
+            origin_chain: 23,
+            symbol: "XAUT",
+            tag: "qXAUT.tron",
+        },
+        Asset {
+            origin_chain: 4,
+            symbol: "USDT",
+            tag: "qUSDT.poly",
+        },
+        Asset {
+            origin_chain: 4,
+            symbol: "USDC",
+            tag: "qUSDC.poly",
+        },
+        Asset {
+            origin_chain: 4,
+            symbol: "LINK",
+            tag: "qLINK.poly",
+        },
+        Asset {
+            origin_chain: 4,
+            symbol: "UNI",
+            tag: "qUNI.poly",
+        },
+        Asset {
+            origin_chain: 4,
+            symbol: "AAVE",
+            tag: "qAAVE.poly",
+        },
+        Asset {
+            origin_chain: 4,
+            symbol: "POL",
+            tag: "qPOL.poly",
+        },
+        Asset {
+            origin_chain: 6,
+            symbol: "ETH",
+            tag: "qETH.arb",
+        },
+        Asset {
+            origin_chain: 6,
+            symbol: "USDT",
+            tag: "qUSDT.arb",
+        },
+        Asset {
+            origin_chain: 6,
+            symbol: "USDC",
+            tag: "qUSDC.arb",
+        },
+        Asset {
+            origin_chain: 6,
+            symbol: "LINK",
+            tag: "qLINK.arb",
+        },
+        Asset {
+            origin_chain: 6,
+            symbol: "UNI",
+            tag: "qUNI.arb",
+        },
+        Asset {
+            origin_chain: 6,
+            symbol: "AAVE",
+            tag: "qAAVE.arb",
+        },
+        Asset {
+            origin_chain: 8,
+            symbol: "ETH",
+            tag: "qETH.base",
+        },
+        Asset {
+            origin_chain: 8,
+            symbol: "USDC",
+            tag: "qUSDC.base",
+        },
+        Asset {
+            origin_chain: 8,
+            symbol: "LINK",
+            tag: "qLINK.base",
+        },
+        Asset {
+            origin_chain: 8,
+            symbol: "AERO",
+            tag: "qAERO.base",
+        },
+        Asset {
+            origin_chain: 8,
+            symbol: "VIRTUAL",
+            tag: "qVIRTUAL.base",
+        },
+        Asset {
+            origin_chain: 8,
+            symbol: "wstETH",
+            tag: "qwstETH.base",
+        },
+        Asset {
+            origin_chain: 16,
+            symbol: "ATOM",
+            tag: "qATOM.atom",
+        },
+        Asset {
+            origin_chain: 34,
+            symbol: "XMR",
+            tag: "qXMR.xmr",
+        },
+        Asset {
+            origin_chain: 35,
+            symbol: "LTC",
+            tag: "qLTC.ltc",
+        },
+        Asset {
+            origin_chain: 36,
+            symbol: "DOGE",
+            tag: "qDOGE.doge",
+        },
+        Asset {
+            origin_chain: 37,
+            symbol: "ZEC",
+            tag: "qZEC.zec",
+        },
+        Asset {
+            origin_chain: 38,
+            symbol: "USDC",
+            tag: "qUSDC.cctp",
+        },
     ]
 }
 

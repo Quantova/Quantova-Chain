@@ -143,11 +143,23 @@ mod tests {
         }
         let mut guard = SignGuard::open(&path).unwrap();
         assert_eq!(guard.mark(), Some((5, 2)));
-        assert!(!guard.try_sign(5, 2).unwrap(), "the exact height and view it signed");
-        assert!(!guard.try_sign(5, 1).unwrap(), "a lower view at the same height");
+        assert!(
+            !guard.try_sign(5, 2).unwrap(),
+            "the exact height and view it signed"
+        );
+        assert!(
+            !guard.try_sign(5, 1).unwrap(),
+            "a lower view at the same height"
+        );
         assert!(!guard.try_sign(4, 9).unwrap(), "a lower height");
-        assert!(guard.try_sign(5, 3).unwrap(), "a higher view advances the watermark");
-        assert!(guard.try_sign(6, 0).unwrap(), "a higher height advances the watermark");
+        assert!(
+            guard.try_sign(5, 3).unwrap(),
+            "a higher view advances the watermark"
+        );
+        assert!(
+            guard.try_sign(6, 0).unwrap(),
+            "a higher height advances the watermark"
+        );
         assert_eq!(guard.mark(), Some((6, 0)));
         cleanup(&path);
     }
@@ -157,7 +169,11 @@ mod tests {
         let path = temp_path("truncated");
         std::fs::write(&path, [0u8; 9]).unwrap();
         let err = SignGuard::open(&path).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "a corrupt watermark fails closed");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::InvalidData,
+            "a corrupt watermark fails closed"
+        );
         cleanup(&path);
     }
 
@@ -172,7 +188,11 @@ mod tests {
         bytes[0] ^= 1;
         std::fs::write(&path, bytes).unwrap();
         let err = SignGuard::open(&path).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "a bit-flip that lowers the mark is detected");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::InvalidData,
+            "a bit-flip that lowers the mark is detected"
+        );
         cleanup(&path);
     }
 
@@ -186,12 +206,23 @@ mod tests {
 
         let mut guard = SignGuard::open(&path).unwrap();
         assert_eq!(guard.mark(), Some((7, 3)), "a legacy mark loads");
-        assert!(!guard.try_sign(7, 3).unwrap(), "and still refuses what it already signed");
+        assert!(
+            !guard.try_sign(7, 3).unwrap(),
+            "and still refuses what it already signed"
+        );
         assert!(guard.try_sign(8, 0).unwrap());
 
         let reopened = SignGuard::open(&path).unwrap();
-        assert_eq!(reopened.mark(), Some((8, 0)), "the upgraded checksummed mark round trips");
-        assert_eq!(std::fs::read(&path).unwrap().len(), 20, "the file upgraded to the checksummed format");
+        assert_eq!(
+            reopened.mark(),
+            Some((8, 0)),
+            "the upgraded checksummed mark round trips"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap().len(),
+            20,
+            "the file upgraded to the checksummed format"
+        );
         cleanup(&path);
     }
 

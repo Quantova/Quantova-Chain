@@ -10,8 +10,7 @@ use qtv_attest::params::ATTEST_CONTEXT;
 
 fn subject_is_view_change(block_bytes: &[u8]) -> bool {
     let len = block_bytes.len();
-    len >= 8
-        && block_bytes[len - 8..] == crate::consensus::VIEW_CHANGE_SUBJECT_COST.to_le_bytes()
+    len >= 8 && block_bytes[len - 8..] == crate::consensus::VIEW_CHANGE_SUBJECT_COST.to_le_bytes()
 }
 
 fn attestation_message(
@@ -312,7 +311,9 @@ mod tests {
             .is_none());
         let flagged = pool
             .observe(&address, 1, 1, 0, g2, block_b.to_bytes(), b.sig.to_vec())
-            .expect("a conflicting block in the same view is a double vote whatever committee it names");
+            .expect(
+                "a conflicting block in the same view is a double vote whatever committee it names",
+            );
         assert_eq!((flagged.committee_a, flagged.committee_b), (g1, g2));
         assert!(
             flagged.attributes(CHAIN_ID, attester.attest_public_key()),
@@ -331,7 +332,15 @@ mod tests {
 
         let mut pool = EvidencePool::new();
         assert!(pool
-            .observe(&address, 1, 1, 3, [0u8; 32], block_a.to_bytes(), a.sig.to_vec())
+            .observe(
+                &address,
+                1,
+                1,
+                3,
+                [0u8; 32],
+                block_a.to_bytes(),
+                a.sig.to_vec()
+            )
             .is_none());
         for v in 0..super::MAX_HEIGHT_VIEW + 10 {
             if v == 3 {
@@ -339,10 +348,26 @@ mod tests {
             }
             let filler = Block::new(1, [(v % 251) as u8 + 3; 32], Parent::Genesis);
             let f = attester.attest(CHAIN_ID, 1, 1, v, [0u8; 32], filler, &beacon);
-            let _ = pool.observe(&address, 1, 1, v, [0u8; 32], filler.to_bytes(), f.sig.to_vec());
+            let _ = pool.observe(
+                &address,
+                1,
+                1,
+                v,
+                [0u8; 32],
+                filler.to_bytes(),
+                f.sig.to_vec(),
+            );
         }
         let flagged = pool
-            .observe(&address, 1, 1, 3, [0u8; 32], block_b.to_bytes(), b.sig.to_vec())
+            .observe(
+                &address,
+                1,
+                1,
+                3,
+                [0u8; 32],
+                block_b.to_bytes(),
+                b.sig.to_vec(),
+            )
             .expect("the stored view 3 vote was not evicted by the flood");
         assert_eq!((flagged.view_a, flagged.view_b), (3, 3));
         assert!(flagged.attributes(CHAIN_ID, attester.attest_public_key()));
@@ -359,10 +384,26 @@ mod tests {
 
         let mut pool = EvidencePool::new();
         assert!(pool
-            .observe(&address, 1, 1, 0, [0u8; 32], block_a.to_bytes(), a.sig.to_vec())
+            .observe(
+                &address,
+                1,
+                1,
+                0,
+                [0u8; 32],
+                block_a.to_bytes(),
+                a.sig.to_vec()
+            )
             .is_none());
         let flagged = pool
-            .observe(&address, 1, 1, 0, [0u8; 32], block_b.to_bytes(), b.sig.to_vec())
+            .observe(
+                &address,
+                1,
+                1,
+                0,
+                [0u8; 32],
+                block_b.to_bytes(),
+                b.sig.to_vec(),
+            )
             .expect("a conflicting block in the same view is a genuine double vote");
         assert_eq!((flagged.view_a, flagged.view_b), (0, 0));
         assert!(
@@ -384,13 +425,37 @@ mod tests {
 
         let mut pool = EvidencePool::new();
         assert!(pool
-            .observe(&address, 1, 1, 5, [0u8; 32], high.to_bytes(), h.sig.to_vec())
+            .observe(
+                &address,
+                1,
+                1,
+                5,
+                [0u8; 32],
+                high.to_bytes(),
+                h.sig.to_vec()
+            )
             .is_none());
         assert!(pool
-            .observe(&address, 1, 1, 2, [0u8; 32], block_a.to_bytes(), a.sig.to_vec())
+            .observe(
+                &address,
+                1,
+                1,
+                2,
+                [0u8; 32],
+                block_a.to_bytes(),
+                a.sig.to_vec()
+            )
             .is_none());
         let flagged = pool
-            .observe(&address, 1, 1, 2, [0u8; 32], block_b.to_bytes(), b.sig.to_vec())
+            .observe(
+                &address,
+                1,
+                1,
+                2,
+                [0u8; 32],
+                block_b.to_bytes(),
+                b.sig.to_vec(),
+            )
             .expect("the lower view double sign is still attributed under the higher view vote");
         assert_eq!((flagged.view_a, flagged.view_b), (2, 2));
         assert!(flagged.attributes(CHAIN_ID, attester.attest_public_key()));
@@ -407,14 +472,33 @@ mod tests {
 
         let mut pool = EvidencePool::new();
         assert!(pool
-            .observe(&address, 1, 1, 0, [0u8; 32], block_a.to_bytes(), a.sig.to_vec())
+            .observe(
+                &address,
+                1,
+                1,
+                0,
+                [0u8; 32],
+                block_a.to_bytes(),
+                a.sig.to_vec()
+            )
             .is_none());
         assert!(
-            pool.observe(&address, 1, 1, 1, [0u8; 32], block_b.to_bytes(), b.sig.to_vec())
-                .is_none(),
+            pool.observe(
+                &address,
+                1,
+                1,
+                1,
+                [0u8; 32],
+                block_b.to_bytes(),
+                b.sig.to_vec()
+            )
+            .is_none(),
             "a higher view re vote is a justified vote change"
         );
-        assert!(pool.drain().is_empty(), "no evidence is attributed for a view change");
+        assert!(
+            pool.drain().is_empty(),
+            "no evidence is attributed for a view change"
+        );
 
         let hand_built = Equivocation {
             offender: address,
@@ -447,11 +531,27 @@ mod tests {
 
         let mut pool = EvidencePool::new();
         assert!(pool
-            .observe(&address, 1, 1, 2, [0u8; 32], block_b.to_bytes(), b.sig.to_vec())
+            .observe(
+                &address,
+                1,
+                1,
+                2,
+                [0u8; 32],
+                block_b.to_bytes(),
+                b.sig.to_vec()
+            )
             .is_none());
         assert!(
-            pool.observe(&address, 1, 1, 0, [0u8; 32], block_a.to_bytes(), a.sig.to_vec())
-                .is_none(),
+            pool.observe(
+                &address,
+                1,
+                1,
+                0,
+                [0u8; 32],
+                block_a.to_bytes(),
+                a.sig.to_vec()
+            )
+            .is_none(),
             "an older view arriving after the node advanced is not evidence"
         );
         assert!(pool.drain().is_empty());
@@ -468,15 +568,41 @@ mod tests {
 
         let mut pool = EvidencePool::new();
         assert!(pool
-            .observe(&address, 1, 1, 0, [0u8; 32], block_a.to_bytes(), a.sig.to_vec())
+            .observe(
+                &address,
+                1,
+                1,
+                0,
+                [0u8; 32],
+                block_a.to_bytes(),
+                a.sig.to_vec()
+            )
             .is_none());
         let flagged = pool
-            .observe(&address, 1, 1, 0, [0u8; 32], block_b.to_bytes(), b.sig.to_vec())
+            .observe(
+                &address,
+                1,
+                1,
+                0,
+                [0u8; 32],
+                block_b.to_bytes(),
+                b.sig.to_vec(),
+            )
             .expect("the conflicting attestation is flagged");
         assert!(flagged.attributes(CHAIN_ID, attester.attest_public_key()));
-        assert!(pool
-            .observe(&address, 1, 1, 0, [0u8; 32], block_b.to_bytes(), b.sig.to_vec())
-            .is_none(), "a validator is flagged only once");
+        assert!(
+            pool.observe(
+                &address,
+                1,
+                1,
+                0,
+                [0u8; 32],
+                block_b.to_bytes(),
+                b.sig.to_vec()
+            )
+            .is_none(),
+            "a validator is flagged only once"
+        );
         assert_eq!(pool.drain().len(), 1);
     }
 
@@ -489,7 +615,15 @@ mod tests {
 
         for height in 1..=10_000u64 {
             let att = attester.attest(CHAIN_ID, height, 1, 0, [0u8; 32], block, &beacon);
-            let _ = pool.observe(&address, height, 1, 0, [0u8; 32], block.to_bytes(), att.sig.to_vec());
+            let _ = pool.observe(
+                &address,
+                height,
+                1,
+                0,
+                [0u8; 32],
+                block.to_bytes(),
+                att.sig.to_vec(),
+            );
         }
 
         assert!(

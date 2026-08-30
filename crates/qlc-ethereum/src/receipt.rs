@@ -176,8 +176,16 @@ mod tests {
     #[test]
     fn a_receipt_with_two_deposit_logs_is_refused() {
         let asset = [0x11; 16];
-        let log_a = encode_log(&contract(), &[deposit_topic(), [0x5c; 32]], &deposit_data(10, &asset));
-        let log_b = encode_log(&contract(), &[deposit_topic(), [0x6d; 32]], &deposit_data(20, &asset));
+        let log_a = encode_log(
+            &contract(),
+            &[deposit_topic(), [0x5c; 32]],
+            &deposit_data(10, &asset),
+        );
+        let log_b = encode_log(
+            &contract(),
+            &[deposit_topic(), [0x6d; 32]],
+            &deposit_data(20, &asset),
+        );
         let bytes = rlp::encode_list(&[
             rlp::encode_bytes(&[1u8]),
             rlp::encode_uint(21000),

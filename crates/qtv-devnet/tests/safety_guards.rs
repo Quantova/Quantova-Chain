@@ -16,8 +16,15 @@ fn a_restarted_devnode_refuses_to_re_sign_a_height_it_already_signed() {
         let mut node = DevNode::open(&cfg.nodes[0], &cfg).expect("open");
         let selection = node.select().expect("a committee is selected");
         let _ = node.enter_round(&selection, true);
-        assert_eq!(node.height(), 1, "the node signed height one but did not finalise it");
-        assert!(node.fatal().is_none(), "signing the first height is permitted");
+        assert_eq!(
+            node.height(),
+            1,
+            "the node signed height one but did not finalise it"
+        );
+        assert!(
+            node.fatal().is_none(),
+            "signing the first height is permitted"
+        );
     }
 
     let mut restarted = DevNode::open(&cfg.nodes[0], &cfg).expect("reopen");
@@ -29,7 +36,10 @@ fn a_restarted_devnode_refuses_to_re_sign_a_height_it_already_signed() {
     let selection = restarted.select().expect("a committee is selected");
     let _ = restarted.enter_round(&selection, true);
     assert!(
-        matches!(restarted.fatal(), Some(Fatal::DoubleSignRefused { height: 1, .. })),
+        matches!(
+            restarted.fatal(),
+            Some(Fatal::DoubleSignRefused { height: 1, .. })
+        ),
         "the persisted watermark did not refuse re signing a height already signed, got {:?}",
         restarted.fatal()
     );
@@ -68,5 +78,8 @@ fn a_conflicting_certificate_halts_the_running_devnode() {
         matches!(fatal, Fatal::FinalityViolation { height: 1, .. }),
         "expected a finality violation, got {fatal:?}"
     );
-    assert!(node.fatal().is_some(), "the node stays halted after the violation");
+    assert!(
+        node.fatal().is_some(),
+        "the node stays halted after the violation"
+    );
 }

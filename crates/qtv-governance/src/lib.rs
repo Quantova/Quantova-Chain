@@ -353,12 +353,24 @@ impl Decode for CommitteeRotation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    Activate { feature: Vec<u8>, version: u64 },
-    Mint { to: Vec<u8>, amount: u64 },
-    BridgeMigration { vault: Vec<u8> },
+    Activate {
+        feature: Vec<u8>,
+        version: u64,
+    },
+    Mint {
+        to: Vec<u8>,
+        amount: u64,
+    },
+    BridgeMigration {
+        vault: Vec<u8>,
+    },
     BridgeUnfreeze,
-    GuardianRotate { set: GuardianSet },
-    CommitteeRotate { rotation: CommitteeRotation },
+    GuardianRotate {
+        set: GuardianSet,
+    },
+    CommitteeRotate {
+        rotation: CommitteeRotation,
+    },
     AssetRegister {
         asset_id: [u8; 16],
         cap: u128,
@@ -370,17 +382,32 @@ pub enum Action {
         anchor: Vec<u8>,
     },
     EpochAdvance,
-    OperatorRevoke { operator_id: u32 },
+    OperatorRevoke {
+        operator_id: u32,
+    },
     FreezeRecovery {
         scope: [u8; 32],
         victim: Vec<u8>,
         seizures: Vec<Seizure>,
     },
-    Freeze { targets: Vec<Vec<u8>> },
-    Blacklist { target: Vec<u8> },
-    Parameter { key: Vec<u8>, value: Vec<u8> },
-    Spend { from: Vec<u8>, to: Vec<u8>, amount: u64 },
-    Unfreeze { targets: Vec<Vec<u8>> },
+    Freeze {
+        targets: Vec<Vec<u8>>,
+    },
+    Blacklist {
+        target: Vec<u8>,
+    },
+    Parameter {
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Spend {
+        from: Vec<u8>,
+        to: Vec<u8>,
+        amount: u64,
+    },
+    Unfreeze {
+        targets: Vec<Vec<u8>>,
+    },
 }
 
 impl Action {
@@ -562,7 +589,9 @@ impl Decode for Action {
             }),
             4 => {
                 let scope_bytes = decoder.get_bytes()?;
-                let scope: [u8; 32] = scope_bytes.try_into().map_err(|_| Error::UnknownTag { tag })?;
+                let scope: [u8; 32] = scope_bytes
+                    .try_into()
+                    .map_err(|_| Error::UnknownTag { tag })?;
                 let victim = Vec::<u8>::decode(decoder)?;
                 let count = u64::decode(decoder)?;
                 let mut seizures =
@@ -578,8 +607,11 @@ impl Decode for Action {
             }
             5 => {
                 let count = u64::decode(decoder)?;
-                let mut targets =
-                    Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_BYTES_VEC)?);
+                let mut targets = Vec::with_capacity(bounded_capacity(
+                    decoder.remaining(),
+                    count,
+                    MIN_BYTES_VEC,
+                )?);
                 for _ in 0..count {
                     targets.push(Vec::<u8>::decode(decoder)?);
                 }
@@ -599,8 +631,11 @@ impl Decode for Action {
             }),
             10 => {
                 let count = u64::decode(decoder)?;
-                let mut targets =
-                    Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_BYTES_VEC)?);
+                let mut targets = Vec::with_capacity(bounded_capacity(
+                    decoder.remaining(),
+                    count,
+                    MIN_BYTES_VEC,
+                )?);
                 for _ in 0..count {
                     targets.push(Vec::<u8>::decode(decoder)?);
                 }
@@ -649,7 +684,12 @@ pub enum Violation {
     BlacklistTouchesProtected,
 }
 
-pub fn check_enactment<F>(track: Track, action: &Action, scope_ok: bool, is_protected: F) -> Result<(), Violation>
+pub fn check_enactment<F>(
+    track: Track,
+    action: &Action,
+    scope_ok: bool,
+    is_protected: F,
+) -> Result<(), Violation>
 where
     F: Fn(&[u8]) -> bool,
 {
@@ -793,7 +833,8 @@ impl Referendum {
     }
 
     pub fn decides_at(&self) -> u64 {
-        self.submitted_at.saturating_add(self.track.period_seconds())
+        self.submitted_at
+            .saturating_add(self.track.period_seconds())
     }
 
     pub fn ready(&self, now: u64) -> bool {
@@ -846,7 +887,8 @@ impl Decode for Referendum {
         let submitted_at = decoder.get_u64()?;
         let tally = Tally::decode(decoder)?;
         let status_code = decoder.get_u8()?;
-        let status = Status::from_code(status_code).ok_or(Error::UnknownTag { tag: status_code })?;
+        let status =
+            Status::from_code(status_code).ok_or(Error::UnknownTag { tag: status_code })?;
         let killed = decoder.get_u8()? != 0;
         Ok(Referendum {
             id,
@@ -1010,8 +1052,14 @@ mod tests {
             r.resolve(1_000 + 3 * DAY_SECONDS - 1, 100_000),
             Status::Deciding
         );
-        assert_eq!(r.resolve(1_000 + 3 * DAY_SECONDS, 100_000), Status::Approved);
-        assert_eq!(r.resolve(1_000 + 30 * DAY_SECONDS, 100_000), Status::Approved);
+        assert_eq!(
+            r.resolve(1_000 + 3 * DAY_SECONDS, 100_000),
+            Status::Approved
+        );
+        assert_eq!(
+            r.resolve(1_000 + 30 * DAY_SECONDS, 100_000),
+            Status::Approved
+        );
 
         let mut thin = Referendum::open(2, Track::Mint, vec![2; 32], 0);
         thin.tally.record(true, 39_999);
@@ -1087,7 +1135,8 @@ mod tests {
             targets: vec![vec![1; 32]],
         };
         assert_eq!(
-            check_enactment(Track::BlacklistKill, &freeze, true, |addr| addr == [1u8; 32]),
+            check_enactment(Track::BlacklistKill, &freeze, true, |addr| addr
+                == [1u8; 32]),
             Err(Violation::FreezeTouchesProtected)
         );
         assert_eq!(
@@ -1095,9 +1144,12 @@ mod tests {
             Ok(())
         );
 
-        let blacklist = Action::Blacklist { target: vec![5; 32] };
+        let blacklist = Action::Blacklist {
+            target: vec![5; 32],
+        };
         assert_eq!(
-            check_enactment(Track::BlacklistKill, &blacklist, true, |addr| addr == [5u8; 32]),
+            check_enactment(Track::BlacklistKill, &blacklist, true, |addr| addr
+                == [5u8; 32]),
             Err(Violation::BlacklistTouchesProtected)
         );
         assert_eq!(
@@ -1195,7 +1247,10 @@ mod tests {
     #[test]
     fn every_action_round_trips_through_the_codec() {
         let actions = [
-            Action::Activate { feature: b"parallel_state".to_vec(), version: 2 },
+            Action::Activate {
+                feature: b"parallel_state".to_vec(),
+                version: 2,
+            },
             Action::Mint {
                 to: vec![9; 32],
                 amount: 12_345,
@@ -1247,7 +1302,9 @@ mod tests {
             Action::Freeze {
                 targets: vec![vec![1; 32], vec![2; 32]],
             },
-            Action::Blacklist { target: vec![5; 32] },
+            Action::Blacklist {
+                target: vec![5; 32],
+            },
             Action::Parameter {
                 key: b"price".to_vec(),
                 value: 70_000_000u128.to_le_bytes().to_vec(),
@@ -1272,21 +1329,33 @@ mod tests {
         let members = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
         let caucus = GuardianSet::new(members.clone(), 2);
         assert!(caucus.well_formed());
-        assert!(!caucus.authorizes(&[[1u8; 32]]), "one guardian is not a caucus");
+        assert!(
+            !caucus.authorizes(&[[1u8; 32]]),
+            "one guardian is not a caucus"
+        );
         assert!(
             !caucus.authorizes(&[[1u8; 32], [1u8; 32]]),
             "one guardian named twice is still one key"
         );
         assert!(caucus.authorizes(&[[1u8; 32], [2u8; 32]]));
-        assert!(!caucus.authorizes(&[[1u8; 32], [9u8; 32]]), "an outsider carries no weight");
+        assert!(
+            !caucus.authorizes(&[[1u8; 32], [9u8; 32]]),
+            "an outsider carries no weight"
+        );
         assert!(caucus.authorizes(&[[3u8; 32], [1u8; 32], [2u8; 32]]));
 
         let single = GuardianSet::new(members, 1);
-        assert!(!single.well_formed(), "a threshold of one is never a well formed caucus");
+        assert!(
+            !single.well_formed(),
+            "a threshold of one is never a well formed caucus"
+        );
         assert!(!single.authorizes(&[[1u8; 32]]));
 
         let short = GuardianSet::new(vec![[1u8; 32]], 2);
-        assert!(!short.well_formed(), "a threshold above the membership is not well formed");
+        assert!(
+            !short.well_formed(),
+            "a threshold above the membership is not well formed"
+        );
     }
 
     #[test]
@@ -1300,11 +1369,18 @@ mod tests {
     fn an_early_bridge_unfreeze_rides_the_blacklist_kill_track() {
         assert_eq!(Action::BridgeUnfreeze.track(), Track::BlacklistKill);
         assert_eq!(
-            check_enactment(Track::BlacklistKill, &Action::BridgeUnfreeze, true, |_| false),
+            check_enactment(Track::BlacklistKill, &Action::BridgeUnfreeze, true, |_| {
+                false
+            }),
             Ok(())
         );
         assert_eq!(
-            check_enactment(Track::BridgeMigration, &Action::BridgeUnfreeze, true, |_| false),
+            check_enactment(
+                Track::BridgeMigration,
+                &Action::BridgeUnfreeze,
+                true,
+                |_| false
+            ),
             Err(Violation::WrongTrack)
         );
     }

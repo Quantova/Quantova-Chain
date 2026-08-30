@@ -49,10 +49,18 @@ fn a_node_that_missed_a_stretch_catches_up_and_matches() {
     devnet.sync().expect("catch up sync");
 
     assert_eq!(devnet.node(lagging).height(), tip);
-    let lagging_headers: Vec<[u8; 32]> =
-        devnet.node(lagging).chain().iter().map(|b| b.header_hash()).collect();
-    let leader_headers: Vec<[u8; 32]> =
-        devnet.node(0).chain().iter().map(|b| b.header_hash()).collect();
+    let lagging_headers: Vec<[u8; 32]> = devnet
+        .node(lagging)
+        .chain()
+        .iter()
+        .map(|b| b.header_hash())
+        .collect();
+    let leader_headers: Vec<[u8; 32]> = devnet
+        .node(0)
+        .chain()
+        .iter()
+        .map(|b| b.header_hash())
+        .collect();
     assert_eq!(
         lagging_headers, leader_headers,
         "the synced chain diverged from the peer that never left"

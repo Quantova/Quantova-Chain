@@ -50,11 +50,7 @@ fn a_silent_first_leader_is_routed_around_by_a_view_change() {
 
     let reference = header_chain(devnet.node(0));
     for i in 1..devnet.len() {
-        assert_eq!(
-            header_chain(devnet.node(i)),
-            reference,
-            "node {i} diverged"
-        );
+        assert_eq!(header_chain(devnet.node(i)), reference, "node {i} diverged");
     }
 
     let finalized = devnet.node(0).chain().last().expect("a finalized block");

@@ -144,17 +144,15 @@ pub fn reconstruct_block(
 pub const SHARD_TARGET: usize = 1 << 18;
 
 pub fn coding_params(payload_len: usize) -> (usize, usize) {
-    let k = payload_len.div_ceil(SHARD_TARGET).clamp(2, erasure::MAX_SHARDS / 2);
+    let k = payload_len
+        .div_ceil(SHARD_TARGET)
+        .clamp(2, erasure::MAX_SHARDS / 2);
     let n = (2 * k).min(erasure::MAX_SHARDS);
     (k, n)
 }
 
 pub fn code_proposal(proposal: &Proposal) -> Result<Vec<CodedProposal>, CodedError> {
-    let block = ChainBlock::new(
-        proposal.header.clone(),
-        Vec::new(),
-        proposal.body.clone(),
-    );
+    let block = ChainBlock::new(proposal.header.clone(), Vec::new(), proposal.body.clone());
     let (k, n) = coding_params(to_bytes(&block).len());
     let coded = code_block(&block, k, n)?;
     let commitment = coded.commitment().clone();
@@ -290,7 +288,11 @@ impl ProposalAssembler {
                 return None;
             }
         }
-        let overhead = if is_new { self.pending[&key].overhead } else { 0 };
+        let overhead = if is_new {
+            self.pending[&key].overhead
+        } else {
+            0
+        };
         let weight = piece_weight(&shard, &proof) + overhead;
         if weight > self.max_bytes {
             if is_new {
@@ -513,7 +515,8 @@ mod tests {
         let block = sample_block(50);
         let coded = code_block(&block, 16, 32).expect("code");
         let picks = [0, 2, 5, 6, 9, 10, 13, 14, 18, 21, 22, 25, 26, 29, 30, 31];
-        let pieces: Vec<(Shard, ShardProof)> = picks.iter().map(|&i| coded.piece(i).unwrap()).collect();
+        let pieces: Vec<(Shard, ShardProof)> =
+            picks.iter().map(|&i| coded.piece(i).unwrap()).collect();
         let out = reconstruct_block(
             coded.header(),
             &coded.header_hash(),
@@ -597,7 +600,11 @@ mod tests {
     fn same_proposal(rebuilt: &Proposal, original: &Proposal) {
         assert_eq!(rebuilt.view, original.view, "the view differed");
         assert_eq!(rebuilt.header, original.header, "the header differed");
-        assert_eq!(rebuilt.body.len(), original.body.len(), "the body length differed");
+        assert_eq!(
+            rebuilt.body.len(),
+            original.body.len(),
+            "the body length differed"
+        );
         for (a, b) in rebuilt.body.iter().zip(original.body.iter()) {
             assert_eq!(a.id(), b.id(), "a body transaction differed");
         }
@@ -638,7 +645,10 @@ mod tests {
                 None => assert!(fed + 1 < k, "reassembly did not complete at k shards"),
             }
         }
-        same_proposal(&rebuilt.expect("k shards reconstruct the proposal"), &proposal);
+        same_proposal(
+            &rebuilt.expect("k shards reconstruct the proposal"),
+            &proposal,
+        );
     }
 
     #[test]
@@ -661,17 +671,16 @@ mod tests {
                 rebuilt = Some(result.expect("the clean k reconstruct"));
             }
         }
-        same_proposal(&rebuilt.expect("the clean k reconstruct the proposal"), &proposal);
+        same_proposal(
+            &rebuilt.expect("the clean k reconstruct the proposal"),
+            &proposal,
+        );
     }
 
     #[test]
     fn each_coded_proposal_shard_fits_one_record() {
         let proposal = sample_proposal(800, 0);
-        let block = ChainBlock::new(
-            proposal.header.clone(),
-            Vec::new(),
-            proposal.body.clone(),
-        );
+        let block = ChainBlock::new(proposal.header.clone(), Vec::new(), proposal.body.clone());
         let block_len = to_bytes(&block).len();
         let record_bound = 1usize << 20;
         assert!(
@@ -723,14 +732,20 @@ mod tests {
         let piece = super::piece_weight(&one.shard, &one.proof);
         assert!(piece > 0, "a shard carries bytes");
 
-        assert!(one.commitment.k > 1, "the shard must not complete on its own");
+        assert!(
+            one.commitment.k > 1,
+            "the shard must not complete on its own"
+        );
         let budget = piece * 4 + piece / 2;
         let mut assembler = ProposalAssembler::with_byte_budget(budget);
         for view in 0..256u64 {
             let mut coded = shards[0].clone();
             coded.view = view;
             let admitted = assembler.admit(coded);
-            assert!(admitted.is_none(), "a lone shard never completes a k>1 proposal");
+            assert!(
+                admitted.is_none(),
+                "a lone shard never completes a k>1 proposal"
+            );
             assert!(
                 assembler.buffered_bytes() <= budget,
                 "held bytes {} breached the ceiling {budget} at view {view}",
@@ -769,7 +784,10 @@ mod tests {
                 rebuilt = Some(result.expect("the clean k reconstruct"));
             }
         }
-        same_proposal(&rebuilt.expect("the clean k reconstruct the proposal"), &proposal);
+        same_proposal(
+            &rebuilt.expect("the clean k reconstruct the proposal"),
+            &proposal,
+        );
     }
 
     #[test]
@@ -778,8 +796,15 @@ mod tests {
         let shards = code_proposal(&proposal).expect("code the proposal");
 
         let honest = &shards[0].commitment;
-        assert_eq!(honest.n, honest.k * 2, "the honest coder emits n equal to twice k");
-        assert!(commitment_in_bounds(honest), "the honest commitment stays in bounds");
+        assert_eq!(
+            honest.n,
+            honest.k * 2,
+            "the honest coder emits n equal to twice k"
+        );
+        assert!(
+            commitment_in_bounds(honest),
+            "the honest commitment stays in bounds"
+        );
 
         let mut hostile = shards[0].clone();
         hostile.commitment.k = 1;
@@ -790,8 +815,15 @@ mod tests {
         );
 
         let mut assembler = ProposalAssembler::new();
-        assert!(assembler.admit(hostile).is_none(), "the assembler drops a lopsided shard");
-        assert_eq!(assembler.buffered_bytes(), 0, "no piece buffers for a refused commitment");
+        assert!(
+            assembler.admit(hostile).is_none(),
+            "the assembler drops a lopsided shard"
+        );
+        assert_eq!(
+            assembler.buffered_bytes(),
+            0,
+            "no piece buffers for a refused commitment"
+        );
     }
 
     #[test]
@@ -857,7 +889,10 @@ mod tests {
 
         let heavy = heavy_justification();
         let jbytes = crate::wire::coded_overhead(&base.header, &base.commitment, &heavy);
-        assert!(jbytes > piece * 8, "the justification must dominate a shard piece");
+        assert!(
+            jbytes > piece * 8,
+            "the justification must dominate a shard piece"
+        );
 
         let budget = jbytes + piece * 4;
         let mut assembler = ProposalAssembler::with_byte_budget(budget);

@@ -255,7 +255,10 @@ fn decode_validator_set(cursor: &mut Cursor) -> Option<ValidatorSet> {
     for _ in 0..count {
         let pubkey = cursor.arr32()?;
         let voting_power = cursor.u64()?;
-        validators.push(ValidatorInfo { pubkey, voting_power });
+        validators.push(ValidatorInfo {
+            pubkey,
+            voting_power,
+        });
     }
     Some(ValidatorSet { validators })
 }
@@ -471,8 +474,15 @@ mod tests {
             version_app: 2,
             chain_id: "cosmoshub-4".to_string(),
             height: 18_500_000,
-            time: Timestamp { seconds: 1_700_000_000, nanos: 9 },
-            last_block_id: BlockId { hash: vec![0xaa; 32], part_total: 1, part_hash: vec![0xbb; 32] },
+            time: Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 9,
+            },
+            last_block_id: BlockId {
+                hash: vec![0xaa; 32],
+                part_total: 1,
+                part_hash: vec![0xbb; 32],
+            },
             last_commit_hash: vec![0x01; 32],
             data_hash: vec![0x02; 32],
             validators_hash: vec![0x03; 32],
@@ -489,24 +499,37 @@ mod tests {
         Commit {
             height: 18_500_000,
             round: 0,
-            block_id: BlockId { hash: vec![0xcc; 32], part_total: 1, part_hash: vec![0xdd; 32] },
+            block_id: BlockId {
+                hash: vec![0xcc; 32],
+                part_total: 1,
+                part_hash: vec![0xdd; 32],
+            },
             signatures: vec![
                 CommitSig {
                     flag: BlockIdFlag::Commit,
                     validator_address: [0x11; 20],
-                    timestamp: Timestamp { seconds: 1_700_000_001, nanos: 1 },
+                    timestamp: Timestamp {
+                        seconds: 1_700_000_001,
+                        nanos: 1,
+                    },
                     signature: vec![0x7a; 64],
                 },
                 CommitSig {
                     flag: BlockIdFlag::Absent,
                     validator_address: [0x22; 20],
-                    timestamp: Timestamp { seconds: 1_700_000_001, nanos: 2 },
+                    timestamp: Timestamp {
+                        seconds: 1_700_000_001,
+                        nanos: 2,
+                    },
                     signature: vec![],
                 },
                 CommitSig {
                     flag: BlockIdFlag::Nil,
                     validator_address: [0x33; 20],
-                    timestamp: Timestamp { seconds: 1_700_000_001, nanos: 3 },
+                    timestamp: Timestamp {
+                        seconds: 1_700_000_001,
+                        nanos: 3,
+                    },
                     signature: vec![0x9b; 64],
                 },
             ],
@@ -517,10 +540,18 @@ mod tests {
         ExistenceProof {
             key: b"bridge/deposits/0x1a2b".to_vec(),
             value: vec![0x5c; 64],
-            leaf: LeafOp { prefix: vec![0x00, 0x02, 0x00] },
+            leaf: LeafOp {
+                prefix: vec![0x00, 0x02, 0x00],
+            },
             path: vec![
-                InnerOp { prefix: vec![0x01, 0x0a], suffix: vec![0x1b, 0x2c] },
-                InnerOp { prefix: vec![0x01], suffix: vec![0x33, 0x44, 0x55] },
+                InnerOp {
+                    prefix: vec![0x01, 0x0a],
+                    suffix: vec![0x1b, 0x2c],
+                },
+                InnerOp {
+                    prefix: vec![0x01],
+                    suffix: vec![0x33, 0x44, 0x55],
+                },
             ],
             store: Some(Box::new(ExistenceProof {
                 key: b"bridge".to_vec(),
@@ -548,7 +579,10 @@ mod tests {
         let anchor = CosmosAnchor {
             config_selector: 2,
             trusted_height: 18_400_000,
-            trusted_time: Timestamp { seconds: 1_699_990_000, nanos: 123 },
+            trusted_time: Timestamp {
+                seconds: 1_699_990_000,
+                nanos: 123,
+            },
             trusted_validators_hash: [0x9a; 32],
             asset_id: *b"qATOM.atom\0\0\0\0\0\0",
         };
@@ -560,7 +594,10 @@ mod tests {
         let anchor = CosmosAnchor {
             config_selector: 0,
             trusted_height: 1,
-            trusted_time: Timestamp { seconds: 2, nanos: 3 },
+            trusted_time: Timestamp {
+                seconds: 2,
+                nanos: 3,
+            },
             trusted_validators_hash: [1; 32],
             asset_id: [2; 16],
         };
@@ -597,7 +634,10 @@ mod tests {
         let mut proof = dummy_proof();
         proof.signing_set = ValidatorSet {
             validators: (0..(MAX_COSMOS_SIGNERS + 1))
-                .map(|i| ValidatorInfo { pubkey: [i as u8; 32], voting_power: 1 })
+                .map(|i| ValidatorInfo {
+                    pubkey: [i as u8; 32],
+                    voting_power: 1,
+                })
                 .collect(),
         };
         assert_eq!(
@@ -614,7 +654,10 @@ mod tests {
             .map(|i| CommitSig {
                 flag: BlockIdFlag::Commit,
                 validator_address: [i as u8; 20],
-                timestamp: Timestamp { seconds: 1, nanos: 0 },
+                timestamp: Timestamp {
+                    seconds: 1,
+                    nanos: 0,
+                },
                 signature: vec![0x11; 64],
             })
             .collect();

@@ -8,9 +8,9 @@ use qtv_attest::{Attester, Beacon, Block, CommitteeCommitment, Parent};
 use qtv_block::{empty_transaction_root, Header};
 use qtv_node::fee::FeeParams;
 
+use qtv_devnet::coded::code_proposal;
 use qtv_devnet::discovery::PeerEntry;
 use qtv_devnet::node::node_identity;
-use qtv_devnet::coded::code_proposal;
 use qtv_devnet::wire::{certificate_from_bytes, certificate_to_bytes, Message, Proposal};
 
 use support::{transfer, user};
@@ -104,7 +104,9 @@ fn a_coded_proposal_shard_round_trips_and_still_verifies() {
             assert_eq!(decoded.shard, shard.shard);
             assert_eq!(decoded.proof, shard.proof);
             assert!(decoded.justification.is_empty());
-            assert!(decoded.commitment.verify_shard(&decoded.shard, &decoded.proof));
+            assert!(decoded
+                .commitment
+                .verify_shard(&decoded.shard, &decoded.proof));
         }
         _ => panic!("decoded a different message"),
     }
@@ -190,7 +192,9 @@ fn a_certificate_carrying_block_round_trips_and_still_verifies() {
     let cert_bytes = certificate_to_bytes(&cert);
     let decoded = certificate_from_bytes(&cert_bytes).expect("cert decodes");
     assert_eq!(decoded.digest(), cert.digest());
-    assert!(decoded.verify(CHAIN_ID, &commitment, &beacon, 3).is_verified());
+    assert!(decoded
+        .verify(CHAIN_ID, &commitment, &beacon, 3)
+        .is_verified());
 
     let header = Header::new(
         1,

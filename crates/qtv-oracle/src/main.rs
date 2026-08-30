@@ -3,15 +3,15 @@ use std::fs;
 use std::io::Read;
 
 use qtv_account::{address_for_key, derive};
-use qtv_governance::Action;
-use qtv_node::node::{build_guardian_enact_tx, guardian_enact_challenge};
+use qtv_codec::to_bytes;
 use qtv_crypto::ml_dsa::{self, SECRET_KEY_BYTES};
+use qtv_governance::Action;
 use qtv_node::bridge::{
-    operator_pop_challenge, quorum_attests, Attestation, Direction, Fact, MintArtifact,
-    attest_context, OperatorSet, SignerSig, FACT_VERSION, POP_DOMAIN,
+    attest_context, operator_pop_challenge, quorum_attests, Attestation, Direction, Fact,
+    MintArtifact, OperatorSet, SignerSig, FACT_VERSION, POP_DOMAIN,
 };
 use qtv_node::ledger::bridge_mint_address;
-use qtv_codec::to_bytes;
+use qtv_node::node::{build_guardian_enact_tx, guardian_enact_challenge};
 use qtv_tx::{sign, Body, Call};
 
 const MINT_METER: u64 = 5_000_000;
@@ -59,8 +59,13 @@ fn keygen(a: &[String]) {
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&urandom(32));
         let (pk, sk) = ml_dsa::keygen(&seed);
-        let pop = ml_dsa::sign(&sk, &operator_pop_challenge(id, &pk, chain_id), POP_DOMAIN, &[0u8; 32])
-            .expect("pop");
+        let pop = ml_dsa::sign(
+            &sk,
+            &operator_pop_challenge(id, &pk, chain_id),
+            POP_DOMAIN,
+            &[0u8; 32],
+        )
+        .expect("pop");
         secrets.push_str(&format!("{id} {}\n", hexs(&sk)));
         committee.push_str(&format!("{id} {} {}\n", hexs(&pk), hexs(&pop)));
     }
@@ -117,7 +122,8 @@ fn mint(a: &[String]) {
         }
         let id: u32 = p[0].parse().expect("operator id");
         let sk: [u8; SECRET_KEY_BYTES] = unhex(p[1]).try_into().expect("secret key length");
-        let sig = ml_dsa::sign(&sk, &preimage, &attest_context(&era), &[0u8; 32]).expect("attest sign");
+        let sig =
+            ml_dsa::sign(&sk, &preimage, &attest_context(&era), &[0u8; 32]).expect("attest sign");
         signatures.push(SignerSig {
             operator_id: id,
             signature: sig.to_vec(),
@@ -146,7 +152,12 @@ fn check(a: &[String]) {
     let chain_id: u64 = a[3].parse().expect("chain_id");
     let era: [u8; 32] = unhex(&a[4]).try_into().expect("era 32 bytes");
     let mut lines = committee.lines();
-    let threshold: u32 = lines.next().expect("threshold").trim().parse().expect("threshold");
+    let threshold: u32 = lines
+        .next()
+        .expect("threshold")
+        .trim()
+        .parse()
+        .expect("threshold");
     let mut operators: Vec<(u32, Vec<u8>)> = Vec::new();
     for line in lines {
         let p: Vec<&str> = line.split_whitespace().collect();
@@ -177,9 +188,17 @@ fn guardian_keygen(a: &[String]) {
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&urandom(32));
     let (pk, sk) = ml_dsa::keygen(&seed);
-    fs::write(format!("{prefix}.gsecret"), format!("{} {}\n", hexs(&pk), hexs(&sk))).expect("write gsecret");
+    fs::write(
+        format!("{prefix}.gsecret"),
+        format!("{} {}\n", hexs(&pk), hexs(&sk)),
+    )
+    .expect("write gsecret");
     let mid = guardian_member_id_hex(&pk);
-    fs::write(format!("{prefix}.gpub"), format!("scheme 1\nmember_id {mid}\npubkey {}\n", hexs(&pk))).expect("write gpub");
+    fs::write(
+        format!("{prefix}.gpub"),
+        format!("scheme 1\nmember_id {mid}\npubkey {}\n", hexs(&pk)),
+    )
+    .expect("write gpub");
     eprintln!("wrote {prefix}.gsecret + {prefix}.gpub  (member_id {mid})");
 }
 
@@ -197,7 +216,12 @@ fn guardian_enact_asset(a: &[String]) {
     let relayer_index: u64 = a[8].parse().expect("relayer_index");
     let fee: u128 = a[9].parse().expect("fee");
     let era: [u8; 32] = unhex(&a[10]).try_into().expect("era 32 bytes");
-    let action = Action::AssetRegister { asset_id, cap, epoch_cap, requires_stark };
+    let action = Action::AssetRegister {
+        asset_id,
+        cap,
+        epoch_cap,
+        requires_stark,
+    };
     let challenge = guardian_enact_challenge(chain_id, &era, enact_nonce, &action);
     let mut approvals: Vec<(u8, Vec<u8>, Vec<u8>)> = Vec::new();
     for path in a[0].split(',') {
@@ -205,11 +229,21 @@ fn guardian_enact_asset(a: &[String]) {
         let parts: Vec<&str> = gsecret.split_whitespace().collect();
         let pk = unhex(parts[0]);
         let sk: [u8; SECRET_KEY_BYTES] = unhex(parts[1]).try_into().expect("secret key length");
-        let sig = ml_dsa::sign(&sk, &challenge, GUARDIAN_DOMAIN, &[0u8; 32]).expect("guardian sign");
+        let sig =
+            ml_dsa::sign(&sk, &challenge, GUARDIAN_DOMAIN, &[0u8; 32]).expect("guardian sign");
         approvals.push((1, pk, sig.to_vec()));
     }
     let relayer = derive(&relayer_seed, relayer_index);
-    let tx = build_guardian_enact_tx(&action, chain_id, enact_nonce, approvals, &relayer, 0, MINT_METER, fee);
+    let tx = build_guardian_enact_tx(
+        &action,
+        chain_id,
+        enact_nonce,
+        approvals,
+        &relayer,
+        0,
+        MINT_METER,
+        fee,
+    );
     println!("{}", hexs(&to_bytes(&tx)));
 }
 

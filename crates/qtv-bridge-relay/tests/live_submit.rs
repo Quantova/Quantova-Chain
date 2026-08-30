@@ -28,7 +28,8 @@ fn read_request(stream: &mut TcpStream) -> String {
                 .lines()
                 .find_map(|l| {
                     let l = l.to_ascii_lowercase();
-                    l.strip_prefix("content-length:").map(|v| v.trim().to_string())
+                    l.strip_prefix("content-length:")
+                        .map(|v| v.trim().to_string())
                 })
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(0);
@@ -84,7 +85,8 @@ fn spawn_gateway(captured: Arc<Mutex<Option<String>>>) -> u16 {
                     if let Some(hex) = extract_tx_hex(&request) {
                         *captured.lock().unwrap() = Some(hex);
                     }
-                    "{\"verdict\":\"accepted\",\"state\":\"fresh\",\"tx_id\":\"Qtxabc\"}".to_string()
+                    "{\"verdict\":\"accepted\",\"state\":\"fresh\",\"tx_id\":\"Qtxabc\"}"
+                        .to_string()
                 }
                 _ => "{\"error\":\"unknown_method\",\"message\":\"x\"}".to_string(),
             };
@@ -117,7 +119,11 @@ fn the_relay_submits_a_bitcoin_mint_over_the_gateway_wire_targeting_the_mint_add
         "the gateway accepted the trustless mint submission"
     );
 
-    let hex = captured.lock().unwrap().clone().expect("the gateway received a submission");
+    let hex = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the gateway received a submission");
     let bytes = parse_hex(&hex);
     let wrapper = wrapper_from_bytes(&bytes).expect("the submitted bytes decode on the wire");
     assert_eq!(
@@ -125,7 +131,15 @@ fn the_relay_submits_a_bitcoin_mint_over_the_gateway_wire_targeting_the_mint_add
         Corridor::Bitcoin.mint_address(),
         "the submitted tx targets the bitcoin mint address"
     );
-    assert_eq!(wrapper.body().call().args(), proof.as_slice(), "the raw proof rode untouched");
-    assert_eq!(wrapper.body().nonce(), 4, "the relay used the gateway reported nonce");
+    assert_eq!(
+        wrapper.body().call().args(),
+        proof.as_slice(),
+        "the raw proof rode untouched"
+    );
+    assert_eq!(
+        wrapper.body().nonce(),
+        4,
+        "the relay used the gateway reported nonce"
+    );
     assert_eq!(signed.from, qcore::account_address(&[0x2a; 32], 0));
 }

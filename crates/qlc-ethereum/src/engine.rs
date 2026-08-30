@@ -13,24 +13,36 @@ use crate::mpt;
 use crate::receipt::{self, RawDeposit};
 use crate::rlp;
 use crate::ssz;
-use qlc_stark::shake256_256;
 use qlc_core::VerifiedEvent;
 use qlc_stark::corridors::{evm_light_client, EventClaim, ProofStatement};
+use qlc_stark::shake256_256;
 use qlc_stark::StarkStatement;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EthError {
     NotBeaconChain,
-    InvalidParticipationLength { got: usize, expected: usize },
-    InsufficientParticipation { got: usize, needed: usize },
+    InvalidParticipationLength {
+        got: usize,
+        expected: usize,
+    },
+    InsufficientParticipation {
+        got: usize,
+        needed: usize,
+    },
     WrongPeriod,
-    InconsistentSlots { signature_slot: u64, attested_slot: u64 },
+    InconsistentSlots {
+        signature_slot: u64,
+        attested_slot: u64,
+    },
     BadFinalityProof,
     BadExecutionProof,
     BadSyncCommitteeProof,
     BadSignature,
     MissingReceipt,
-    CapExceeded { amount: u128, cap: u128 },
+    CapExceeded {
+        amount: u128,
+        cap: u128,
+    },
     UnconfiguredDepositContract,
     Receipt(receipt::ReceiptError),
     Mpt(mpt::MptError),
@@ -235,7 +247,9 @@ fn verify_sync_aggregate(
             needed,
         });
     }
-    let fork_version = store.config.fork_version_at_slot(signature_slot.saturating_sub(1));
+    let fork_version = store
+        .config
+        .fork_version_at_slot(signature_slot.saturating_sub(1));
     let domain = compute_domain(
         DOMAIN_SYNC_COMMITTEE,
         fork_version.0,
@@ -296,7 +310,9 @@ fn verify_deposit_core(
     }
     if update.signature_slot < update.attested_header.slot
         || store.config.sync_committee_period(update.signature_slot)
-            != store.config.sync_committee_period(update.attested_header.slot)
+            != store
+                .config
+                .sync_committee_period(update.attested_header.slot)
     {
         return Err(EthError::InconsistentSlots {
             signature_slot: update.signature_slot,
@@ -417,7 +433,11 @@ pub fn apply_sync_committee_update(
     if !store.config.verifies_beacon_sync_committee() {
         return Err(EthError::NotBeaconChain);
     }
-    if store.config.sync_committee_period(update.attested_header.slot) != store.period {
+    if store
+        .config
+        .sync_committee_period(update.attested_header.slot)
+        != store.period
+    {
         return Err(EthError::WrongPeriod);
     }
     verify_sync_aggregate(
@@ -531,11 +551,15 @@ mod tests {
     }
 
     const TEST_DEPOSIT_CONTRACT: [u8; 20] = [
-        0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x71, 0x82, 0x93, 0xa4,
-        0xb5, 0xc6, 0xd7, 0xe8, 0xf9, 0x0a, 0x1b, 0x2c, 0x3d, 0x4e,
+        0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x71, 0x82, 0x93, 0xa4, 0xb5, 0xc6, 0xd7, 0xe8, 0xf9,
+        0x0a, 0x1b, 0x2c, 0x3d, 0x4e,
     ];
 
-    fn build_fixture_for(mut cfg: EvmChainConfig, amount: u128, participation: Vec<bool>) -> Fixture {
+    fn build_fixture_for(
+        mut cfg: EvmChainConfig,
+        amount: u128,
+        participation: Vec<bool>,
+    ) -> Fixture {
         cfg.deposit_contract = TEST_DEPOSIT_CONTRACT;
         let recipient = [0x5c; 32];
         let asset_id = [0x77; 16];
@@ -627,9 +651,7 @@ mod tests {
         };
         let finalized_root = finalized_header.hash_tree_root();
 
-        let finality_branch: Vec<[u8; 32]> = (0..fin_depth)
-            .map(|i| [0xf0 + i as u8; 32])
-            .collect();
+        let finality_branch: Vec<[u8; 32]> = (0..fin_depth).map(|i| [0xf0 + i as u8; 32]).collect();
         let attested_state_root =
             ssz::merkle_root_from_branch(&finalized_root, &finality_branch, fin_index);
 
@@ -924,8 +946,7 @@ mod tests {
             state_root,
             body_root: [0x02; 32],
         };
-        let store =
-            bootstrap(cfg, PERIOD, checkpoint, committee.clone(), branch.clone()).unwrap();
+        let store = bootstrap(cfg, PERIOD, checkpoint, committee.clone(), branch.clone()).unwrap();
         assert_eq!(store.current_sync_committee(), &committee);
         assert_eq!(store.next_sync_committee(), None);
 
@@ -1000,7 +1021,10 @@ mod tests {
         let lowered = lower_to_stark(&statement);
         assert_eq!(lowered.kind, qlc_stark::StatementKind::EvmLightClient);
         assert_eq!(lowered.corridor_id, 2);
-        assert_eq!(lowered.public_input_digest, shake256_256(&statement.encode()));
+        assert_eq!(
+            lowered.public_input_digest,
+            shake256_256(&statement.encode())
+        );
     }
 
     #[test]
@@ -1083,8 +1107,8 @@ mod tests {
     fn a_receipt_from_another_bridge_contract_carries_no_trustless_deposit() {
         let mut f = build_fixture(1_000u128, full_participation());
         f.store.config.deposit_contract = [
-            0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00,
-            0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00,
+            0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0x99, 0x88, 0x77, 0x66,
+            0x55, 0x44, 0x33, 0x22, 0x11, 0x00,
         ];
         assert_eq!(
             verify_trustless_deposit(&f.store, &f.update, &f.deposit, &HashCommitmentBls),
@@ -1175,7 +1199,10 @@ mod tests {
         let f = build_fixture(cap + 1, full_participation());
         assert_eq!(
             verify_trustless_deposit(&f.store, &f.update, &f.deposit, &HashCommitmentBls),
-            Err(EthError::CapExceeded { amount: cap + 1, cap })
+            Err(EthError::CapExceeded {
+                amount: cap + 1,
+                cap
+            })
         );
     }
 
@@ -1186,7 +1213,10 @@ mod tests {
         let f = build_fixture(1_000u128, participation);
         assert_eq!(
             verify_trustless_deposit(&f.store, &f.update, &f.deposit, &HashCommitmentBls),
-            Err(EthError::InsufficientParticipation { got: 300, needed: 342 })
+            Err(EthError::InsufficientParticipation {
+                got: 300,
+                needed: 342
+            })
         );
     }
 }

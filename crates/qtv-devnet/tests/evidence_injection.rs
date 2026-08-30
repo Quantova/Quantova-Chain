@@ -26,7 +26,10 @@ fn the_leader_carries_attributed_evidence_into_the_block_it_produces() {
 
     let reveals: Vec<_> = open()
         .iter()
-        .map(|node| node.own_reveal_note().expect("a selected validator publishes"))
+        .map(|node| {
+            node.own_reveal_note()
+                .expect("a selected validator publishes")
+        })
         .collect();
     let mut leader = open().into_iter().next().expect("the leader node");
     for note in &reveals {
@@ -60,16 +63,35 @@ fn the_leader_carries_attributed_evidence_into_the_block_it_produces() {
         .iter()
         .filter(|w| w.body().call().target() == evidence_address())
         .count();
-    assert_eq!(carried, 1, "the produced block carries the attributed evidence");
+    assert_eq!(
+        carried, 1,
+        "the produced block carries the attributed evidence"
+    );
 
-    let fresh = open().into_iter().next().expect("a node that saw no attestation");
+    let fresh = open()
+        .into_iter()
+        .next()
+        .expect("a node that saw no attestation");
     assert!(!fresh.ledger().is_validator_banned(&offender));
     let mut ledger = fresh.ledger().clone();
-    let included = execute_ordered(&mut ledger, &proposal.body, &cfg.fee_params, day_of_height(height));
-    assert_eq!(included.len(), proposal.body.len(), "the whole body is included");
+    let included = execute_ordered(
+        &mut ledger,
+        &proposal.body,
+        &cfg.fee_params,
+        day_of_height(height),
+    );
+    assert_eq!(
+        included.len(),
+        proposal.body.len(),
+        "the whole body is included"
+    );
     assert!(
         ledger.is_validator_banned(&offender),
         "the offender is slashed by the carried evidence"
     );
-    assert_eq!(ledger.staked_weight(&offender), 0, "the offender's stake is slashed");
+    assert_eq!(
+        ledger.staked_weight(&offender),
+        0,
+        "the offender's stake is slashed"
+    );
 }

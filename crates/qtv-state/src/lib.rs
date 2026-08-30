@@ -241,7 +241,9 @@ impl Trie {
     }
 
     pub fn take_persist_dirty(&mut self) -> Vec<Key> {
-        std::mem::take(&mut self.persist_dirty).into_iter().collect()
+        std::mem::take(&mut self.persist_dirty)
+            .into_iter()
+            .collect()
     }
 
     pub fn clear_persist_dirty(&mut self) {
@@ -553,8 +555,15 @@ mod incremental {
 
         assert!(trie.remove(&key), "the leaf was present and removed");
         assert!(trie.get(&key).is_none(), "the slot is freed after removal");
-        assert_eq!(trie.root(), before, "removal returns the root to its prior value");
-        assert!(!trie.remove(&key), "removing an absent key reports nothing removed");
+        assert_eq!(
+            trie.root(),
+            before,
+            "removal returns the root to its prior value"
+        );
+        assert!(
+            !trie.remove(&key),
+            "removing an absent key reports nothing removed"
+        );
     }
 
     #[test]

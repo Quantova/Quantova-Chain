@@ -275,7 +275,11 @@ pub struct MintArtifact {
 impl MintArtifact {
     pub fn encode(&self) -> Vec<u8> {
         let attestation = self.attestation.encode();
-        let stark = self.stark.as_ref().map(StarkEnvelope::encode).unwrap_or_default();
+        let stark = self
+            .stark
+            .as_ref()
+            .map(StarkEnvelope::encode)
+            .unwrap_or_default();
         let mut out = Vec::with_capacity(8 + attestation.len() + stark.len());
         out.extend_from_slice(&(attestation.len() as u32).to_le_bytes());
         out.extend_from_slice(&attestation);
@@ -328,7 +332,12 @@ pub fn operator_pop_ok(operator_id: u32, public_key: &[u8], pop: &[u8], chain_id
         Ok(sig) => sig,
         Err(_) => return false,
     };
-    ml_dsa::verify(pk, &operator_pop_challenge(operator_id, public_key, chain_id), sig, POP_DOMAIN)
+    ml_dsa::verify(
+        pk,
+        &operator_pop_challenge(operator_id, public_key, chain_id),
+        sig,
+        POP_DOMAIN,
+    )
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -414,7 +423,12 @@ thread_local! {
     pub(crate) static VERIFY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn verify_signature(pk: &[u8; PUBLIC_KEY_BYTES], message: &[u8], sig: &[u8; SIGNATURE_BYTES], era: &[u8; 32]) -> bool {
+fn verify_signature(
+    pk: &[u8; PUBLIC_KEY_BYTES],
+    message: &[u8],
+    sig: &[u8; SIGNATURE_BYTES],
+    era: &[u8; 32],
+) -> bool {
     #[cfg(test)]
     VERIFY_CALLS.with(|c| c.set(c.get() + 1));
     ml_dsa::verify(pk, message, sig, &attest_context(era))
@@ -760,7 +774,12 @@ mod tests {
         }
     }
 
-    fn operator(index: u64) -> ([u8; PUBLIC_KEY_BYTES], [u8; qtv_crypto::ml_dsa::SECRET_KEY_BYTES]) {
+    fn operator(
+        index: u64,
+    ) -> (
+        [u8; PUBLIC_KEY_BYTES],
+        [u8; qtv_crypto::ml_dsa::SECRET_KEY_BYTES],
+    ) {
         let mut seed = [0u8; 32];
         seed[..8].copy_from_slice(&index.to_le_bytes());
         ml_dsa::keygen(&seed)
@@ -770,9 +789,14 @@ mod tests {
     const TEST_ERA: [u8; 32] = [0x5Au8; 32];
 
     fn sign_fact(sk: &[u8; qtv_crypto::ml_dsa::SECRET_KEY_BYTES], fact: &Fact) -> Vec<u8> {
-        ml_dsa::sign(sk, &fact.attest_preimage(TEST_CHAIN_ID), &attest_context(&TEST_ERA), &[0u8; 32])
-            .expect("the fact preimage stays within the length bound")
-            .to_vec()
+        ml_dsa::sign(
+            sk,
+            &fact.attest_preimage(TEST_CHAIN_ID),
+            &attest_context(&TEST_ERA),
+            &[0u8; 32],
+        )
+        .expect("the fact preimage stays within the length bound")
+        .to_vec()
     }
 
     #[test]
@@ -826,9 +850,19 @@ mod tests {
         let fact = sample_fact();
         let attestation = Attestation {
             fact: fact.clone(),
-            signatures: vec![SignerSig { operator_id: 0, signature: sign_fact(&sk, &fact) }],
+            signatures: vec![SignerSig {
+                operator_id: 0,
+                signature: sign_fact(&sk, &fact),
+            }],
         };
-        assert!(MintArtifact::decode(&MintArtifact { attestation: attestation.clone(), stark: None }.encode()).is_some());
+        assert!(MintArtifact::decode(
+            &MintArtifact {
+                attestation: attestation.clone(),
+                stark: None
+            }
+            .encode()
+        )
+        .is_some());
 
         let mut padded_attestation = attestation.encode();
         padded_attestation.push(0u8);
@@ -841,7 +875,10 @@ mod tests {
             "a trailing byte inside the attestation sub-frame is rejected"
         );
 
-        let stark = StarkEnvelope { statement_digest: fact.statement_digest(0), proof: vec![1, 2, 3] };
+        let stark = StarkEnvelope {
+            statement_digest: fact.statement_digest(0),
+            proof: vec![1, 2, 3],
+        };
         let mut padded_stark = stark.encode();
         padded_stark.push(0u8);
         let attestation_bytes = attestation.encode();
@@ -879,9 +916,21 @@ mod tests {
                 },
             ],
         };
-        assert!(quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
+        assert!(quorum_attests(
+            &set,
+            &attestation,
+            fact.dest_chain,
+            TEST_CHAIN_ID,
+            &TEST_ERA
+        ));
         assert!(
-            !quorum_attests(&set, &attestation, fact.dest_chain + 1, TEST_CHAIN_ID, &TEST_ERA),
+            !quorum_attests(
+                &set,
+                &attestation,
+                fact.dest_chain + 1,
+                TEST_CHAIN_ID,
+                &TEST_ERA
+            ),
             "a fact bound for another chain does not attest here"
         );
     }
@@ -894,17 +943,31 @@ mod tests {
         let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 2);
         let chain_a = TEST_CHAIN_ID;
         let chain_b = TEST_CHAIN_ID ^ (1u64 << 40);
-        assert_eq!(chain_a as u32, chain_b as u32, "the two siblings share the low 32 bits");
+        assert_eq!(
+            chain_a as u32, chain_b as u32,
+            "the two siblings share the low 32 bits"
+        );
         let sign_a = |sk: &[u8; qtv_crypto::ml_dsa::SECRET_KEY_BYTES]| {
-            ml_dsa::sign(sk, &fact.attest_preimage(chain_a), &attest_context(&TEST_ERA), &[0u8; 32])
-                .expect("the fact preimage stays within the length bound")
-                .to_vec()
+            ml_dsa::sign(
+                sk,
+                &fact.attest_preimage(chain_a),
+                &attest_context(&TEST_ERA),
+                &[0u8; 32],
+            )
+            .expect("the fact preimage stays within the length bound")
+            .to_vec()
         };
         let attestation = Attestation {
             fact: fact.clone(),
             signatures: vec![
-                SignerSig { operator_id: 0, signature: sign_a(&sk0) },
-                SignerSig { operator_id: 1, signature: sign_a(&sk1) },
+                SignerSig {
+                    operator_id: 0,
+                    signature: sign_a(&sk0),
+                },
+                SignerSig {
+                    operator_id: 1,
+                    signature: sign_a(&sk1),
+                },
             ],
         };
         assert!(
@@ -926,15 +989,26 @@ mod tests {
         let era_a = [0x11u8; 32];
         let era_b = [0x22u8; 32];
         let sign_a = |sk: &[u8; qtv_crypto::ml_dsa::SECRET_KEY_BYTES]| {
-            ml_dsa::sign(sk, &fact.attest_preimage(TEST_CHAIN_ID), &attest_context(&era_a), &[0u8; 32])
-                .expect("the fact preimage stays within the length bound")
-                .to_vec()
+            ml_dsa::sign(
+                sk,
+                &fact.attest_preimage(TEST_CHAIN_ID),
+                &attest_context(&era_a),
+                &[0u8; 32],
+            )
+            .expect("the fact preimage stays within the length bound")
+            .to_vec()
         };
         let attestation = Attestation {
             fact: fact.clone(),
             signatures: vec![
-                SignerSig { operator_id: 0, signature: sign_a(&sk0) },
-                SignerSig { operator_id: 1, signature: sign_a(&sk1) },
+                SignerSig {
+                    operator_id: 0,
+                    signature: sign_a(&sk0),
+                },
+                SignerSig {
+                    operator_id: 1,
+                    signature: sign_a(&sk1),
+                },
             ],
         };
         assert!(
@@ -986,7 +1060,13 @@ mod tests {
                 signature: sign_fact(&sk0, &fact),
             }],
         };
-        assert!(!quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
+        assert!(!quorum_attests(
+            &set,
+            &attestation,
+            fact.dest_chain,
+            TEST_CHAIN_ID,
+            &TEST_ERA
+        ));
     }
 
     #[test]
@@ -997,14 +1077,35 @@ mod tests {
         let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 2);
         let mut signatures = Vec::new();
         for _ in 0..500 {
-            signatures.push(SignerSig { operator_id: 0, signature: vec![0u8; SIGNATURE_BYTES] });
-            signatures.push(SignerSig { operator_id: 1, signature: vec![7u8; SIGNATURE_BYTES] });
-            signatures.push(SignerSig { operator_id: 9, signature: vec![3u8; SIGNATURE_BYTES] });
+            signatures.push(SignerSig {
+                operator_id: 0,
+                signature: vec![0u8; SIGNATURE_BYTES],
+            });
+            signatures.push(SignerSig {
+                operator_id: 1,
+                signature: vec![7u8; SIGNATURE_BYTES],
+            });
+            signatures.push(SignerSig {
+                operator_id: 9,
+                signature: vec![3u8; SIGNATURE_BYTES],
+            });
         }
-        signatures.push(SignerSig { operator_id: 0, signature: sign_fact(&sk0, &fact) });
-        let attestation = Attestation { fact: fact.clone(), signatures };
+        signatures.push(SignerSig {
+            operator_id: 0,
+            signature: sign_fact(&sk0, &fact),
+        });
+        let attestation = Attestation {
+            fact: fact.clone(),
+            signatures,
+        };
         VERIFY_CALLS.with(|c| c.set(0));
-        let _ = quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA);
+        let _ = quorum_attests(
+            &set,
+            &attestation,
+            fact.dest_chain,
+            TEST_CHAIN_ID,
+            &TEST_ERA,
+        );
         let calls = VERIFY_CALLS.with(|c| c.get());
         assert!(
             calls <= set.operators.len(),
@@ -1033,7 +1134,13 @@ mod tests {
                 },
             ],
         };
-        assert!(!quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
+        assert!(!quorum_attests(
+            &set,
+            &attestation,
+            fact.dest_chain,
+            TEST_CHAIN_ID,
+            &TEST_ERA
+        ));
     }
 
     #[test]
@@ -1045,12 +1152,24 @@ mod tests {
         let attestation = Attestation {
             fact: fact.clone(),
             signatures: vec![
-                SignerSig { operator_id: 0, signature: signature.clone() },
-                SignerSig { operator_id: 1, signature },
+                SignerSig {
+                    operator_id: 0,
+                    signature: signature.clone(),
+                },
+                SignerSig {
+                    operator_id: 1,
+                    signature,
+                },
             ],
         };
         assert!(
-            !quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA),
+            !quorum_attests(
+                &set,
+                &attestation,
+                fact.dest_chain,
+                TEST_CHAIN_ID,
+                &TEST_ERA
+            ),
             "one public key under two ids fills only one slot"
         );
     }
@@ -1077,7 +1196,13 @@ mod tests {
             fact: tampered,
             signatures: std::mem::take(&mut signatures),
         };
-        assert!(!quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
+        assert!(!quorum_attests(
+            &set,
+            &attestation,
+            fact.dest_chain,
+            TEST_CHAIN_ID,
+            &TEST_ERA
+        ));
     }
 
     #[test]
@@ -1094,7 +1219,13 @@ mod tests {
                 signature: sign_fact(&skx, &fact),
             }],
         };
-        assert!(!quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
+        assert!(!quorum_attests(
+            &set,
+            &attestation,
+            fact.dest_chain,
+            TEST_CHAIN_ID,
+            &TEST_ERA
+        ));
     }
 
     #[test]
@@ -1104,7 +1235,10 @@ mod tests {
             statement_digest: fact.statement_digest(0),
             proof: vec![7u8; 16],
         };
-        assert_eq!(check_stark(&fact, Some(&bound), 0), StarkCheck::BoundUnverified);
+        assert_eq!(
+            check_stark(&fact, Some(&bound), 0),
+            StarkCheck::BoundUnverified
+        );
         assert_eq!(check_stark(&fact, Some(&bound), 1), StarkCheck::Unbound);
         assert_eq!(check_stark(&fact, None, 0), StarkCheck::Absent);
     }
@@ -1117,31 +1251,56 @@ mod tests {
 
         let mut revoked = OperatorSet::new(vec![(0, vec![1, 2, 3]), (5, vec![9, 9])], 2);
         assert!(revoked.revoke(5));
-        assert!(!revoked.revoke(5), "a second revocation of the same id is a no op");
+        assert!(
+            !revoked.revoke(5),
+            "a second revocation of the same id is a no op"
+        );
         assert!(!revoked.revoke(7), "an unknown id cannot be revoked");
         let bytes = qtv_codec::to_bytes(&revoked);
-        assert_eq!(qtv_codec::from_bytes::<OperatorSet>(&bytes).unwrap(), revoked);
+        assert_eq!(
+            qtv_codec::from_bytes::<OperatorSet>(&bytes).unwrap(),
+            revoked
+        );
     }
 
     #[test]
     fn an_operator_pop_binds_the_key_to_its_id() {
         let (pk, sk) = operator(30);
-        let pop = ml_dsa::sign(&sk, &operator_pop_challenge(4, &pk, 7), POP_DOMAIN, &[0u8; 32])
-            .expect("the pop challenge stays within the length bound")
-            .to_vec();
+        let pop = ml_dsa::sign(
+            &sk,
+            &operator_pop_challenge(4, &pk, 7),
+            POP_DOMAIN,
+            &[0u8; 32],
+        )
+        .expect("the pop challenge stays within the length bound")
+        .to_vec();
         assert!(operator_pop_ok(4, &pk, &pop, 7));
-        assert!(!operator_pop_ok(5, &pk, &pop, 7), "the pop is bound to the operator id it signed");
+        assert!(
+            !operator_pop_ok(5, &pk, &pop, 7),
+            "the pop is bound to the operator id it signed"
+        );
         let (other_pk, _other_sk) = operator(31);
-        assert!(!operator_pop_ok(4, &other_pk, &pop, 7), "the pop is bound to its own public key");
-        assert!(!operator_pop_ok(4, &pk, &[0u8; SIGNATURE_BYTES], 7), "a forged pop never verifies");
+        assert!(
+            !operator_pop_ok(4, &other_pk, &pop, 7),
+            "the pop is bound to its own public key"
+        );
+        assert!(
+            !operator_pop_ok(4, &pk, &[0u8; SIGNATURE_BYTES], 7),
+            "a forged pop never verifies"
+        );
     }
 
     #[test]
     fn an_operator_pop_binds_the_chain_it_was_signed_under() {
         let (pk, sk) = operator(32);
-        let pop = ml_dsa::sign(&sk, &operator_pop_challenge(4, &pk, 100), POP_DOMAIN, &[0u8; 32])
-            .expect("the pop challenge stays within the length bound")
-            .to_vec();
+        let pop = ml_dsa::sign(
+            &sk,
+            &operator_pop_challenge(4, &pk, 100),
+            POP_DOMAIN,
+            &[0u8; 32],
+        )
+        .expect("the pop challenge stays within the length bound")
+        .to_vec();
         assert!(operator_pop_ok(4, &pk, &pop, 100));
         assert!(
             !operator_pop_ok(4, &pk, &pop, 101),
@@ -1162,23 +1321,47 @@ mod tests {
         let attestation = Attestation {
             fact: fact.clone(),
             signatures: vec![
-                SignerSig { operator_id: 0, signature: sign_fact(&sk0, &fact) },
-                SignerSig { operator_id: 1, signature: sign_fact(&sk1, &fact) },
+                SignerSig {
+                    operator_id: 0,
+                    signature: sign_fact(&sk0, &fact),
+                },
+                SignerSig {
+                    operator_id: 1,
+                    signature: sign_fact(&sk1, &fact),
+                },
             ],
         };
-        assert!(quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
+        assert!(quorum_attests(
+            &set,
+            &attestation,
+            fact.dest_chain,
+            TEST_CHAIN_ID,
+            &TEST_ERA
+        ));
 
         assert!(set.revoke(1));
         assert!(
-            !quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA),
+            !quorum_attests(
+                &set,
+                &attestation,
+                fact.dest_chain,
+                TEST_CHAIN_ID,
+                &TEST_ERA
+            ),
             "a revoked key drops below the threshold"
         );
 
         let healed = Attestation {
             fact: fact.clone(),
             signatures: vec![
-                SignerSig { operator_id: 0, signature: sign_fact(&sk0, &fact) },
-                SignerSig { operator_id: 2, signature: sign_fact(&sk2, &fact) },
+                SignerSig {
+                    operator_id: 0,
+                    signature: sign_fact(&sk0, &fact),
+                },
+                SignerSig {
+                    operator_id: 2,
+                    signature: sign_fact(&sk2, &fact),
+                },
             ],
         };
         assert!(
@@ -1210,10 +1393,19 @@ mod tests {
         }
     }
 
-    fn sign_exit(sk: &[u8; qtv_crypto::ml_dsa::SECRET_KEY_BYTES], fact: &ExitFact, chain_id: u64) -> Vec<u8> {
-        ml_dsa::sign(sk, &fact.ack_preimage(chain_id), &exit_ack_context(&TEST_ERA), &[0u8; 32])
-            .expect("the exit preimage stays within the length bound")
-            .to_vec()
+    fn sign_exit(
+        sk: &[u8; qtv_crypto::ml_dsa::SECRET_KEY_BYTES],
+        fact: &ExitFact,
+        chain_id: u64,
+    ) -> Vec<u8> {
+        ml_dsa::sign(
+            sk,
+            &fact.ack_preimage(chain_id),
+            &exit_ack_context(&TEST_ERA),
+            &[0u8; 32],
+        )
+        .expect("the exit preimage stays within the length bound")
+        .to_vec()
     }
 
     #[test]
@@ -1251,9 +1443,15 @@ mod tests {
         assert_eq!(&bytes[73..105], [0x9u8; 32]);
         assert_eq!(bytes[105], 2, "the slash outcome rides in the final byte");
         let preimage = fact.ack_preimage(0x0123_4567_89AB_CDEF);
-        assert_eq!(preimage.len(), EXIT_ACK_DOMAIN.len() + EXIT_FACT_ENCODED_LEN + 8);
+        assert_eq!(
+            preimage.len(),
+            EXIT_ACK_DOMAIN.len() + EXIT_FACT_ENCODED_LEN + 8
+        );
         assert!(preimage.starts_with(EXIT_ACK_DOMAIN));
-        assert_eq!(&preimage[EXIT_ACK_DOMAIN.len() + EXIT_FACT_ENCODED_LEN..], 0x0123_4567_89AB_CDEFu64.to_le_bytes());
+        assert_eq!(
+            &preimage[EXIT_ACK_DOMAIN.len() + EXIT_FACT_ENCODED_LEN..],
+            0x0123_4567_89AB_CDEFu64.to_le_bytes()
+        );
     }
 
     #[test]
@@ -1262,9 +1460,15 @@ mod tests {
         let (_pk, sk) = operator(60);
         let attestation = ExitAttestation {
             fact: fact.clone(),
-            signatures: vec![SignerSig { operator_id: 0, signature: sign_exit(&sk, &fact, 7) }],
+            signatures: vec![SignerSig {
+                operator_id: 0,
+                signature: sign_exit(&sk, &fact, 7),
+            }],
         };
-        assert_eq!(ExitAttestation::decode(&attestation.encode()), Some(attestation));
+        assert_eq!(
+            ExitAttestation::decode(&attestation.encode()),
+            Some(attestation)
+        );
     }
 
     #[test]
@@ -1273,15 +1477,30 @@ mod tests {
         let (pk0, sk0) = operator(50);
         let (pk1, sk1) = operator(51);
         let (pk2, _sk2) = operator(52);
-        let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec()), (2, pk2.to_vec())], 2);
+        let set = OperatorSet::new(
+            vec![(0, pk0.to_vec()), (1, pk1.to_vec()), (2, pk2.to_vec())],
+            2,
+        );
         let attestation = ExitAttestation {
             fact: fact.clone(),
             signatures: vec![
-                SignerSig { operator_id: 0, signature: sign_exit(&sk0, &fact, TEST_CHAIN_ID) },
-                SignerSig { operator_id: 1, signature: sign_exit(&sk1, &fact, TEST_CHAIN_ID) },
+                SignerSig {
+                    operator_id: 0,
+                    signature: sign_exit(&sk0, &fact, TEST_CHAIN_ID),
+                },
+                SignerSig {
+                    operator_id: 1,
+                    signature: sign_exit(&sk1, &fact, TEST_CHAIN_ID),
+                },
             ],
         };
-        assert!(exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
+        assert!(exit_quorum_attests(
+            &set,
+            &attestation,
+            fact.dest_chain,
+            TEST_CHAIN_ID,
+            &TEST_ERA
+        ));
     }
 
     #[test]
@@ -1292,15 +1511,30 @@ mod tests {
         let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 2);
         let chain_a = TEST_CHAIN_ID;
         let chain_b = TEST_CHAIN_ID ^ (1u64 << 40);
-        assert_eq!(chain_a as u32, chain_b as u32, "the two siblings share the low 32 bits");
+        assert_eq!(
+            chain_a as u32, chain_b as u32,
+            "the two siblings share the low 32 bits"
+        );
         let attestation = ExitAttestation {
             fact: fact.clone(),
             signatures: vec![
-                SignerSig { operator_id: 0, signature: sign_exit(&sk0, &fact, chain_a) },
-                SignerSig { operator_id: 1, signature: sign_exit(&sk1, &fact, chain_a) },
+                SignerSig {
+                    operator_id: 0,
+                    signature: sign_exit(&sk0, &fact, chain_a),
+                },
+                SignerSig {
+                    operator_id: 1,
+                    signature: sign_exit(&sk1, &fact, chain_a),
+                },
             ],
         };
-        assert!(exit_quorum_attests(&set, &attestation, fact.dest_chain, chain_a, &TEST_ERA));
+        assert!(exit_quorum_attests(
+            &set,
+            &attestation,
+            fact.dest_chain,
+            chain_a,
+            &TEST_ERA
+        ));
         assert!(
             !exit_quorum_attests(&set, &attestation, fact.dest_chain, chain_b, &TEST_ERA),
             "a sibling sharing the u32 dest chain refuses the exit replay"
@@ -1316,12 +1550,24 @@ mod tests {
         let attestation = ExitAttestation {
             fact: fact.clone(),
             signatures: vec![
-                SignerSig { operator_id: 0, signature: sign_exit(&sk0, &fact, TEST_CHAIN_ID) },
-                SignerSig { operator_id: 1, signature: sign_exit(&sk1, &fact, TEST_CHAIN_ID) },
+                SignerSig {
+                    operator_id: 0,
+                    signature: sign_exit(&sk0, &fact, TEST_CHAIN_ID),
+                },
+                SignerSig {
+                    operator_id: 1,
+                    signature: sign_exit(&sk1, &fact, TEST_CHAIN_ID),
+                },
             ],
         };
         assert!(
-            !exit_quorum_attests(&set, &attestation, fact.dest_chain + 1, TEST_CHAIN_ID, &TEST_ERA),
+            !exit_quorum_attests(
+                &set,
+                &attestation,
+                fact.dest_chain + 1,
+                TEST_CHAIN_ID,
+                &TEST_ERA
+            ),
             "a fact bound for another dest chain does not ack here"
         );
     }
@@ -1341,14 +1587,23 @@ mod tests {
             burn_ref: [0u8; 32],
             outcome: ExitOutcome::Settle,
         };
-        let attestation = ExitAttestation { fact: empty, signatures: vec![] };
+        let attestation = ExitAttestation {
+            fact: empty,
+            signatures: vec![],
+        };
         assert!(
             !exit_quorum_attests(&set, &attestation, 9000, TEST_CHAIN_ID, &TEST_ERA),
             "an empty prove nothing attestation never acks"
         );
         let zero_threshold = OperatorSet::new(vec![(0, pk0.to_vec())], 0);
         assert!(
-            !exit_quorum_attests(&zero_threshold, &attestation, 9000, TEST_CHAIN_ID, &TEST_ERA),
+            !exit_quorum_attests(
+                &zero_threshold,
+                &attestation,
+                9000,
+                TEST_CHAIN_ID,
+                &TEST_ERA
+            ),
             "a zero threshold set never acks"
         );
     }
@@ -1363,11 +1618,23 @@ mod tests {
         let attestation = ExitAttestation {
             fact: fact.clone(),
             signatures: vec![
-                SignerSig { operator_id: 0, signature: signature.clone() },
-                SignerSig { operator_id: 0, signature },
+                SignerSig {
+                    operator_id: 0,
+                    signature: signature.clone(),
+                },
+                SignerSig {
+                    operator_id: 0,
+                    signature,
+                },
             ],
         };
-        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
+        assert!(!exit_quorum_attests(
+            &set,
+            &attestation,
+            fact.dest_chain,
+            TEST_CHAIN_ID,
+            &TEST_ERA
+        ));
     }
 
     #[test]
@@ -1379,12 +1646,24 @@ mod tests {
         let attestation = ExitAttestation {
             fact: fact.clone(),
             signatures: vec![
-                SignerSig { operator_id: 0, signature: signature.clone() },
-                SignerSig { operator_id: 1, signature },
+                SignerSig {
+                    operator_id: 0,
+                    signature: signature.clone(),
+                },
+                SignerSig {
+                    operator_id: 1,
+                    signature,
+                },
             ],
         };
         assert!(
-            !exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA),
+            !exit_quorum_attests(
+                &set,
+                &attestation,
+                fact.dest_chain,
+                TEST_CHAIN_ID,
+                &TEST_ERA
+            ),
             "one public key under two ids fills only one slot"
         );
     }
@@ -1397,9 +1676,18 @@ mod tests {
         let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 2);
         let attestation = ExitAttestation {
             fact: fact.clone(),
-            signatures: vec![SignerSig { operator_id: 0, signature: sign_exit(&sk0, &fact, TEST_CHAIN_ID) }],
+            signatures: vec![SignerSig {
+                operator_id: 0,
+                signature: sign_exit(&sk0, &fact, TEST_CHAIN_ID),
+            }],
         };
-        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
+        assert!(!exit_quorum_attests(
+            &set,
+            &attestation,
+            fact.dest_chain,
+            TEST_CHAIN_ID,
+            &TEST_ERA
+        ));
     }
 
     #[test]
@@ -1411,9 +1699,18 @@ mod tests {
         let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 1);
         let attestation = ExitAttestation {
             fact: fact.clone(),
-            signatures: vec![SignerSig { operator_id: 0, signature: sign_exit(&skx, &fact, TEST_CHAIN_ID) }],
+            signatures: vec![SignerSig {
+                operator_id: 0,
+                signature: sign_exit(&skx, &fact, TEST_CHAIN_ID),
+            }],
         };
-        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
+        assert!(!exit_quorum_attests(
+            &set,
+            &attestation,
+            fact.dest_chain,
+            TEST_CHAIN_ID,
+            &TEST_ERA
+        ));
     }
 
     #[test]
@@ -1423,12 +1720,27 @@ mod tests {
         let (pk1, sk1) = operator(51);
         let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 2);
         let signatures = vec![
-            SignerSig { operator_id: 0, signature: sign_exit(&sk0, &fact, TEST_CHAIN_ID) },
-            SignerSig { operator_id: 1, signature: sign_exit(&sk1, &fact, TEST_CHAIN_ID) },
+            SignerSig {
+                operator_id: 0,
+                signature: sign_exit(&sk0, &fact, TEST_CHAIN_ID),
+            },
+            SignerSig {
+                operator_id: 1,
+                signature: sign_exit(&sk1, &fact, TEST_CHAIN_ID),
+            },
         ];
         let mut tampered = fact.clone();
         tampered.amount += 1;
-        let attestation = ExitAttestation { fact: tampered, signatures };
-        assert!(!exit_quorum_attests(&set, &attestation, fact.dest_chain, TEST_CHAIN_ID, &TEST_ERA));
+        let attestation = ExitAttestation {
+            fact: tampered,
+            signatures,
+        };
+        assert!(!exit_quorum_attests(
+            &set,
+            &attestation,
+            fact.dest_chain,
+            TEST_CHAIN_ID,
+            &TEST_ERA
+        ));
     }
 }

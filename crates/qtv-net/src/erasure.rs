@@ -477,7 +477,10 @@ mod tests {
         let n = 32;
         let coded = encode(&data, k, n).expect("encode");
         let picks = [1, 3, 4, 7, 8, 11, 12, 15, 17, 19, 20, 23, 24, 27, 28, 31];
-        let chosen: Vec<Shard> = picks.iter().map(|&i| coded.shard(i).unwrap().clone()).collect();
+        let chosen: Vec<Shard> = picks
+            .iter()
+            .map(|&i| coded.shard(i).unwrap().clone())
+            .collect();
         let out = reconstruct(coded.commitment(), &chosen).expect("reconstruct");
         assert_eq!(out, data);
     }

@@ -60,10 +60,15 @@ fn a_node_restarting_within_an_epoch_rebuilds_peers_rotated_roots_from_the_chain
     let mut devnet = Devnet::over_duplex(config_with_slots(&base, &online, slots)).expect("devnet");
 
     for _ in 0..6u64 {
-        devnet.step().expect("the committee finalises across the rotation");
+        devnet
+            .step()
+            .expect("the committee finalises across the rotation");
     }
     let index = devnet.len() - 1;
-    assert!(devnet.node(index).epoch() >= 1, "the node has crossed a boundary");
+    assert!(
+        devnet.node(index).epoch() >= 1,
+        "the node has crossed a boundary"
+    );
     assert!(
         !devnet.node(index).collected_registration_ids().is_empty(),
         "before the restart the node holds the peers rotated roots"
@@ -72,21 +77,37 @@ fn a_node_restarting_within_an_epoch_rebuilds_peers_rotated_roots_from_the_chain
     let head_before = devnet.node(index).head_hash();
     let height_before = devnet.node(index).height();
 
-    devnet.restart_node(index).expect("reopened across the boundary from the store");
+    devnet
+        .restart_node(index)
+        .expect("reopened across the boundary from the store");
 
-    assert_eq!(devnet.node(index).head_hash(), head_before, "the head reloaded");
-    assert_eq!(devnet.node(index).height(), height_before, "the height reloaded");
+    assert_eq!(
+        devnet.node(index).head_hash(),
+        head_before,
+        "the head reloaded"
+    );
+    assert_eq!(
+        devnet.node(index).height(),
+        height_before,
+        "the height reloaded"
+    );
     let rebuilt = devnet.node(index).collected_registration_ids();
     assert!(
         !rebuilt.is_empty(),
         "the restarted node rebuilt the peers rotated roots from chain history"
     );
     for id in &rebuilt {
-        assert_ne!(*id, devnet.node(index).id(), "a rebuilt root is a peer, not the node's own");
+        assert_ne!(
+            *id,
+            devnet.node(index).id(),
+            "a rebuilt root is a peer, not the node's own"
+        );
     }
 
     for _ in 0..3u64 {
-        devnet.step().expect("the restarted node keeps finalising within the epoch");
+        devnet
+            .step()
+            .expect("the restarted node keeps finalising within the epoch");
     }
     let restarted_tail = header_chain(devnet.node(index));
     let peer_tail: Vec<[u8; 32]> = devnet

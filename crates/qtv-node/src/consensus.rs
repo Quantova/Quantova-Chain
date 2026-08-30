@@ -3,7 +3,7 @@
 
 use qtv_attest::aggregate::aggregate;
 use qtv_attest::committee::MemberKey;
-use qtv_attest::{CommitteeDigest, Attestation, Attester, Certificate, CommitteeCommitment};
+use qtv_attest::{Attestation, Attester, Certificate, CommitteeCommitment, CommitteeDigest};
 use qtv_crypto::ml_dsa::PublicKey;
 use qtv_sampler::committee::{CommitteeView, PublishedReveal};
 use qtv_sampler::onetime::Root;
@@ -398,7 +398,10 @@ impl Consensus {
         let commitment = CommitteeCommitment::from_member_keys(slot, member_keys, self.budget)
             .with_total_weight(registered_weight);
         let leader = view.elect_leader(&committee, beacon, slot)?.id;
-        let total: u128 = weights.iter().map(|&w| w as u128).fold(0u128, u128::saturating_add);
+        let total: u128 = weights
+            .iter()
+            .map(|&w| w as u128)
+            .fold(0u128, u128::saturating_add);
         let saturated = total > 0
             && weights
                 .iter()
@@ -428,7 +431,8 @@ impl Consensus {
         block: Block,
         beacon: &Beacon,
     ) -> Attestation {
-        self.own.attest(self.chain_id, height, slot, view, committee, block, beacon)
+        self.own
+            .attest(self.chain_id, height, slot, view, committee, block, beacon)
     }
 
     pub fn finalize(
@@ -507,7 +511,12 @@ mod tests {
             Sim { attesters, online }
         }
 
-        fn published(&self, consensus: &Consensus, beacon: &Beacon, slot: u64) -> Vec<PublishedReveal> {
+        fn published(
+            &self,
+            consensus: &Consensus,
+            beacon: &Beacon,
+            slot: u64,
+        ) -> Vec<PublishedReveal> {
             self.attesters
                 .iter()
                 .filter_map(|(id, attester)| {
@@ -534,7 +543,17 @@ mod tests {
                 .iter()
                 .filter(|id| self.online.get(id).copied().unwrap_or(false))
                 .filter_map(|id| self.attesters.get(id))
-                .map(|a| a.attest(CHAIN_ID, height, slot, 0, selection.commitment.digest(), block, beacon))
+                .map(|a| {
+                    a.attest(
+                        CHAIN_ID,
+                        height,
+                        slot,
+                        0,
+                        selection.commitment.digest(),
+                        block,
+                        beacon,
+                    )
+                })
                 .collect()
         }
     }
@@ -647,8 +666,11 @@ mod tests {
         let sim = Sim::new(&validators);
         let beacon = genesis_beacon();
         let full = sim.published(&consensus, &beacon, 1);
-        let two: Vec<PublishedReveal> =
-            full.iter().cloned().filter(|r| r.id == 1 || r.id == 2).collect();
+        let two: Vec<PublishedReveal> = full
+            .iter()
+            .cloned()
+            .filter(|r| r.id == 1 || r.id == 2)
+            .collect();
         let three: Vec<PublishedReveal> = full
             .iter()
             .cloned()
@@ -672,13 +694,25 @@ mod tests {
         assert_eq!(selection.tau, 3);
         let mk_a = || block_for(1);
         let mk_b = || Block::new(1, header_value(&[42u8; 32]), Parent::Genesis);
-        let att =
-            |id: u64, block: Block| sim.attesters.get(&id).unwrap().attest(CHAIN_ID, 1, 1, 0, selection.commitment.digest(), block, &beacon);
+        let att = |id: u64, block: Block| {
+            sim.attesters.get(&id).unwrap().attest(
+                CHAIN_ID,
+                1,
+                1,
+                0,
+                selection.commitment.digest(),
+                block,
+                &beacon,
+            )
+        };
         let atts_a = vec![att(1, mk_a()), att(2, mk_a()), att(4, mk_a())];
         let atts_b = vec![att(3, mk_b()), att(4, mk_b())];
         let cert_a = consensus.finalize(&selection, 1, 1, mk_a(), &beacon, &atts_a);
         let cert_b = consensus.finalize(&selection, 1, 1, mk_b(), &beacon, &atts_b);
-        assert!(cert_b.is_none(), "one honest seat plus the adversary cannot reach the threshold");
+        assert!(
+            cert_b.is_none(),
+            "one honest seat plus the adversary cannot reach the threshold"
+        );
         assert!(
             !(cert_a.is_some() && cert_b.is_some()),
             "two conflicting blocks must never both finalise"
@@ -709,8 +743,11 @@ mod tests {
         let sim = Sim::new(&validators);
         let beacon = genesis_beacon();
         let full = sim.published(&consensus, &beacon, 1);
-        let minority: Vec<PublishedReveal> =
-            full.iter().cloned().filter(|r| r.id == 1 || r.id == 2).collect();
+        let minority: Vec<PublishedReveal> = full
+            .iter()
+            .cloned()
+            .filter(|r| r.id == 1 || r.id == 2)
+            .collect();
         let by_all = consensus.select(&beacon, 1, &full).expect("committee");
         let by_minority = consensus.select(&beacon, 1, &minority).expect("committee");
         assert!(by_all.members.len() as u64 <= by_all.expected);
@@ -776,9 +813,13 @@ mod tests {
         );
         let mut evidence = honest.clone();
         evidence.push(conflict);
-        assert_eq!(equivocation_offenders(CHAIN_ID, &evidence, &roster), vec![2]);
+        assert_eq!(
+            equivocation_offenders(CHAIN_ID, &evidence, &roster),
+            vec![2]
+        );
 
-        let mut forged_a = sim.attesters[&3].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_for(1), &beacon);
+        let mut forged_a =
+            sim.attesters[&3].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_for(1), &beacon);
         let mut forged_b = sim.attesters[&3].attest(
             CHAIN_ID,
             1,
@@ -811,7 +852,8 @@ mod tests {
             .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], value_a, &beacon))
             .collect();
         for id in [2u64, 3, 4] {
-            evidence.push(sim.attesters[&id].attest(CHAIN_ID, 1, 1, 1, [0u8; 32], value_b, &beacon));
+            evidence
+                .push(sim.attesters[&id].attest(CHAIN_ID, 1, 1, 1, [0u8; 32], value_b, &beacon));
         }
         assert_eq!(
             double_finalize_offenders(CHAIN_ID, &evidence, &roster, 3),
@@ -866,7 +908,9 @@ mod tests {
         if let Some(mine) = consensus.published_self(&beacon, slot) {
             published.push(mine);
         }
-        let selection = consensus.select(&beacon, slot, &published).expect("committee");
+        let selection = consensus
+            .select(&beacon, slot, &published)
+            .expect("committee");
         assert_eq!(selection.members, vec![1, 2, 3, 4]);
 
         let mislabelled = PublishedReveal::new(2, peers.attesters[&3].reveal(slot));
@@ -885,9 +929,14 @@ mod tests {
             consensus.published_self(&beacon, slot).unwrap(),
             PublishedReveal::new(3, peers.attesters[&3].reveal(slot)),
         ];
-        let liveness = consensus.select(&beacon, slot, &only_two).expect("committee");
+        let liveness = consensus
+            .select(&beacon, slot, &only_two)
+            .expect("committee");
         assert!(liveness.members.contains(&1) && liveness.members.contains(&3));
-        assert!(!liveness.members.contains(&4), "a silent validator was admitted");
+        assert!(
+            !liveness.members.contains(&4),
+            "a silent validator was admitted"
+        );
     }
 
     #[test]
@@ -916,7 +965,17 @@ mod tests {
             .iter()
             .filter(|(id, _)| selection.members.contains(id))
             .take(3)
-            .map(|(_, a)| a.attest(CHAIN_ID, 1, 1, 0, selection.commitment.digest(), block, &beacon))
+            .map(|(_, a)| {
+                a.attest(
+                    CHAIN_ID,
+                    1,
+                    1,
+                    0,
+                    selection.commitment.digest(),
+                    block,
+                    &beacon,
+                )
+            })
             .collect();
         let depth = atts[0].membership.path.siblings.len();
         atts[0].membership = Credential {
@@ -956,8 +1015,12 @@ mod tests {
 
         for slot in 1..=8 {
             let published = sim.published(&reweighted, &beacon, slot);
-            let a = reweighted.select(&beacon, slot, &published).map(|s| (s.members, s.leader));
-            let b = fresh.select(&beacon, slot, &published).map(|s| (s.members, s.leader));
+            let a = reweighted
+                .select(&beacon, slot, &published)
+                .map(|s| (s.members, s.leader));
+            let b = fresh
+                .select(&beacon, slot, &published)
+                .map(|s| (s.members, s.leader));
             assert_eq!(a, b, "committee differs at slot {slot}");
         }
 

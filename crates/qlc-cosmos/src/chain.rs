@@ -23,7 +23,11 @@ pub const DEFAULT_TRUSTING_PERIOD_SECS: u64 = 1_209_600;
 pub const DEFAULT_MAX_CLOCK_DRIFT_SECS: u64 = 10;
 
 impl ChainConfig {
-    pub const fn new(chain_id: &'static str, corridor_id: u32, confirmation_depth: u32) -> ChainConfig {
+    pub const fn new(
+        chain_id: &'static str,
+        corridor_id: u32,
+        confirmation_depth: u32,
+    ) -> ChainConfig {
         ChainConfig {
             chain_id,
             corridor_id,

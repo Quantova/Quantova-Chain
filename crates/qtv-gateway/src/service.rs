@@ -36,18 +36,33 @@ pub enum Request {
     Pending,
     Container(String),
     Storage(String),
-    StorageAt { address: String, keys: Vec<[u8; 32]> },
+    StorageAt {
+        address: String,
+        keys: Vec<[u8; 32]>,
+    },
     Supply,
     Events(u64),
     SideEvents(u64),
     FinalizedHead,
     BurnBlock(u64),
     BurnHeightsAfter(u64),
-    BridgedBalance { asset_id: [u8; 16], holder: [u8; 32] },
-    BridgedSupply { asset_id: [u8; 16] },
-    BridgeReserves { asset_id: [u8; 16] },
-    AssetBalance { issuer: [u8; 32], holder: [u8; 32] },
-    AssetSupply { issuer: [u8; 32] },
+    BridgedBalance {
+        asset_id: [u8; 16],
+        holder: [u8; 32],
+    },
+    BridgedSupply {
+        asset_id: [u8; 16],
+    },
+    BridgeReserves {
+        asset_id: [u8; 16],
+    },
+    AssetBalance {
+        issuer: [u8; 32],
+        holder: [u8; 32],
+    },
+    AssetSupply {
+        issuer: [u8; 32],
+    },
     GovernanceReferenda,
     GenesisAccounts,
 }
@@ -95,8 +110,9 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
         "get_transaction" => Ok(Request::Transaction(string_field(body, "tx_id")?)),
         "submit_transaction" => {
             let hex = string_field(body, "tx")?;
-            let bytes = crate::json::from_hex(&hex)
-                .map_err(|e| ClientError::bad("bad_request", format!("the tx field is not hex, {e}")))?;
+            let bytes = crate::json::from_hex(&hex).map_err(|e| {
+                ClientError::bad("bad_request", format!("the tx field is not hex, {e}"))
+            })?;
             Ok(Request::Submit(bytes))
         }
         "get_block" => {
@@ -161,10 +177,9 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
             Ok(Request::BurnBlock(height))
         }
         "burn_heights_after" => {
-            let cursor = body
-                .get("cursor")
-                .and_then(Json::as_u64)
-                .ok_or_else(|| ClientError::bad("bad_request", "burn_heights_after needs a cursor"))?;
+            let cursor = body.get("cursor").and_then(Json::as_u64).ok_or_else(|| {
+                ClientError::bad("bad_request", "burn_heights_after needs a cursor")
+            })?;
             Ok(Request::BurnHeightsAfter(cursor))
         }
         other => Err(ClientError {
@@ -200,12 +215,12 @@ fn key_list(body: &Json) -> Result<Vec<[u8; 32]>, ClientError> {
         let hex = item
             .as_str()
             .ok_or_else(|| ClientError::bad("bad_request", "a storage key is not a hex string"))?;
-        let bytes = crate::json::from_hex(hex)
-            .map_err(|e| ClientError::bad("bad_request", format!("a storage key is not hex, {e}")))?;
-        let key: [u8; 32] = bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| ClientError::bad("bad_request", "a storage key is not thirty two bytes"))?;
+        let bytes = crate::json::from_hex(hex).map_err(|e| {
+            ClientError::bad("bad_request", format!("a storage key is not hex, {e}"))
+        })?;
+        let key: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+            ClientError::bad("bad_request", "a storage key is not thirty two bytes")
+        })?;
         keys.push(key);
     }
     Ok(keys)
@@ -213,12 +228,20 @@ fn key_list(body: &Json) -> Result<Vec<[u8; 32]>, ClientError> {
 
 fn storage_at(node: &DevNode, address: &str, keys: &[[u8; 32]]) -> Result<Json, ClientError> {
     if qtv_idfmt::parse_address(address).is_err() {
-        return Err(ClientError::bad("bad_address", "the address is not a q1 address"));
+        return Err(ClientError::bad(
+            "bad_address",
+            "the address is not a q1 address",
+        ));
     }
     let all = node
         .ledger()
         .contract_storage_at_capped(address)
-        .ok_or_else(|| ClientError::bad("storage_too_large", "the contract storage is too large to serve over rpc"))?;
+        .ok_or_else(|| {
+            ClientError::bad(
+                "storage_too_large",
+                "the contract storage is too large to serve over rpc",
+            )
+        })?;
     let slots: Vec<Json> = keys
         .iter()
         .filter_map(|key| {
@@ -263,7 +286,11 @@ fn issuer_id(body: &Json) -> Result<[u8; 32], ClientError> {
     hex_bytes::<32>(body, "issuer")
 }
 
-pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result<Json, ClientError> {
+pub fn handle(
+    ctx: &NodeContext,
+    node: &mut DevNode,
+    request: Request,
+) -> Result<Json, ClientError> {
     match request {
         Request::NodeInfo => Ok(node_info(ctx, node)),
         Request::Head => Ok(head(node)),
@@ -284,7 +311,9 @@ pub fn handle(ctx: &NodeContext, node: &mut DevNode, request: Request) -> Result
         Request::FinalizedHead => Ok(finalized_head(node)),
         Request::BurnBlock(height) => burn_block(node, height),
         Request::BurnHeightsAfter(cursor) => Ok(burn_heights_after(node, cursor)),
-        Request::BridgedBalance { asset_id, holder } => Ok(bridged_balance(node, &asset_id, &holder)),
+        Request::BridgedBalance { asset_id, holder } => {
+            Ok(bridged_balance(node, &asset_id, &holder))
+        }
         Request::BridgedSupply { asset_id } => Ok(bridged_supply(node, &asset_id)),
         Request::BridgeReserves { asset_id } => Ok(bridge_reserves(node, &asset_id)),
         Request::AssetBalance { issuer, holder } => Ok(asset_balance(node, &issuer, &holder)),
@@ -303,7 +332,10 @@ fn bridged_balance(node: &DevNode, asset_id: &[u8; 16], holder: &[u8; 32]) -> Js
             "holder_address",
             Json::str(qtv_idfmt::render_address(holder).unwrap_or_default()),
         ),
-        ("balance", amount_str(ledger.bridged_balance(asset_id, holder))),
+        (
+            "balance",
+            amount_str(ledger.bridged_balance(asset_id, holder)),
+        ),
         ("supply", amount_str(ledger.bridged_supply(asset_id))),
     ])
 }
@@ -317,7 +349,10 @@ fn bridge_reserves(node: &DevNode, asset_id: &[u8; 16]) -> Json {
         ("custody", amount_str(custody)),
         ("supply", amount_str(supply)),
         ("outstanding", amount_str(outstanding)),
-        ("conserved", Json::Bool(ledger.bridge_reserves_conserved(asset_id))),
+        (
+            "conserved",
+            Json::Bool(ledger.bridge_reserves_conserved(asset_id)),
+        ),
     ])
 }
 
@@ -332,7 +367,10 @@ fn asset_balance(node: &DevNode, issuer: &[u8; 32], holder: &[u8; 32]) -> Json {
             "holder",
             Json::str(qtv_idfmt::render_address(holder).unwrap_or_default()),
         ),
-        ("balance", amount_str(ledger.asset_balance_by_issuer(issuer, holder))),
+        (
+            "balance",
+            amount_str(ledger.asset_balance_by_issuer(issuer, holder)),
+        ),
         ("supply", amount_str(ledger.asset_supply_by_issuer(issuer))),
     ])
 }
@@ -488,7 +526,10 @@ fn chain_params() -> Json {
             object(vec![
                 ("code", Json::Int(u64::from(track.code()))),
                 ("deposit", Json::Int(track.deposit())),
-                ("threshold_bps", Json::Int(qtv_governance::THRESHOLD_BPS as u64)),
+                (
+                    "threshold_bps",
+                    Json::Int(qtv_governance::THRESHOLD_BPS as u64),
+                ),
                 ("period_seconds", Json::Int(track.period_seconds())),
             ])
         })
@@ -555,7 +596,10 @@ fn node_info(ctx: &NodeContext, node: &DevNode) -> Json {
         (
             "fee",
             object(vec![
-                ("transfer_micro_usd", Json::str(fee.transfer_micro_usd.to_string())),
+                (
+                    "transfer_micro_usd",
+                    Json::str(fee.transfer_micro_usd.to_string()),
+                ),
                 (
                     "rate_micro_usd_per_qtov",
                     Json::str(fee.rate_micro_usd_per_qtov.to_string()),
@@ -572,7 +616,9 @@ fn head(node: &DevNode) -> Json {
     let head_height = node.height().saturating_sub(1);
     let q_root = node.ledger().q_root_id();
     let block = if head_height >= qtv_bft::params::MIN_HEIGHT {
-        Json::str(qtv_idfmt::render_block(&node.head_hash()).expect("a header hash is digest length"))
+        Json::str(
+            qtv_idfmt::render_block(&node.head_hash()).expect("a header hash is digest length"),
+        )
     } else {
         Json::Null
     };
@@ -630,7 +676,12 @@ fn system_addrs() -> &'static SystemAddrs {
     })
 }
 
-fn tx_kind(node: &DevNode, sender: &str, target: &str, nonce: u64) -> (&'static str, Option<String>) {
+fn tx_kind(
+    node: &DevNode,
+    sender: &str,
+    target: &str,
+    nonce: u64,
+) -> (&'static str, Option<String>) {
     let s = system_addrs();
     if target == s.deploy {
         return ("deploy", qtv_node::ledger::contract_address(sender, nonce));
@@ -679,8 +730,14 @@ fn tx_fields(node: &DevNode, wrapper: &Wrapper) -> Vec<(&'static str, Json)> {
         ("nonce", Json::Int(body.nonce())),
         ("meter_limit", Json::Int(body.meter_limit())),
         ("scheme", Json::Int(u64::from(wrapper.scheme()))),
-        ("signature", Json::str(crate::json::to_hex(wrapper.signature()))),
-        ("raw", Json::str(crate::json::to_hex(&qtv_codec::to_bytes(wrapper)))),
+        (
+            "signature",
+            Json::str(crate::json::to_hex(wrapper.signature())),
+        ),
+        (
+            "raw",
+            Json::str(crate::json::to_hex(&qtv_codec::to_bytes(wrapper))),
+        ),
     ];
     if let Some(contract) = contract {
         fields.push(("contract", Json::str(contract)));
@@ -856,7 +913,10 @@ fn side_event_json(index: u64, event: &SideEvent) -> Json {
         } => {
             set(&mut fields, "ref", Json::Int(*referendum));
             fields.push(("action", Json::str(*action)));
-            fields.push(("proposal_hash", Json::str(crate::json::to_hex(proposal_hash))));
+            fields.push((
+                "proposal_hash",
+                Json::str(crate::json::to_hex(proposal_hash)),
+            ));
         }
         SideEvent::Mint { to, amount } => {
             set(&mut fields, "target", Json::str(to));
@@ -1038,7 +1098,10 @@ fn side_event_json(index: u64, event: &SideEvent) -> Json {
 
 fn container(node: &DevNode, address: &str) -> Result<Json, ClientError> {
     if qtv_idfmt::parse_address(address).is_err() {
-        return Err(ClientError::bad("bad_address", "the address is not a q1 address"));
+        return Err(ClientError::bad(
+            "bad_address",
+            "the address is not a q1 address",
+        ));
     }
     match node.ledger().contract_code_at(address) {
         Some(code) => Ok(object(vec![
@@ -1052,12 +1115,20 @@ fn container(node: &DevNode, address: &str) -> Result<Json, ClientError> {
 
 fn storage(node: &DevNode, address: &str) -> Result<Json, ClientError> {
     if qtv_idfmt::parse_address(address).is_err() {
-        return Err(ClientError::bad("bad_address", "the address is not a q1 address"));
+        return Err(ClientError::bad(
+            "bad_address",
+            "the address is not a q1 address",
+        ));
     }
     let all = node
         .ledger()
         .contract_storage_at_capped(address)
-        .ok_or_else(|| ClientError::bad("storage_too_large", "the contract storage is too large to serve over rpc"))?;
+        .ok_or_else(|| {
+            ClientError::bad(
+                "storage_too_large",
+                "the contract storage is too large to serve over rpc",
+            )
+        })?;
     let total = all.len();
     let slots: Vec<Json> = all
         .into_iter()
@@ -1162,8 +1233,7 @@ fn block(node: &DevNode, selector: BlockSelector) -> Result<Json, ClientError> {
         (
             "q_root",
             Json::str(
-                qtv_idfmt::render_state(header.q_root())
-                    .expect("a state root is digest length"),
+                qtv_idfmt::render_state(header.q_root()).expect("a state root is digest length"),
             ),
         ),
         (
@@ -1207,7 +1277,11 @@ mod storage_at_tests {
         match request {
             Request::StorageAt { address, keys } => {
                 assert_eq!(address, "q1abc", "the address is read");
-                assert_eq!(keys, vec![[0x11u8; 32]], "the key decodes to thirty two bytes");
+                assert_eq!(
+                    keys,
+                    vec![[0x11u8; 32]],
+                    "the key decodes to thirty two bytes"
+                );
             }
             _ => panic!("get_storage_at parses to a StorageAt request"),
         }
@@ -1226,7 +1300,10 @@ mod storage_at_tests {
     #[test]
     fn get_storage_at_caps_the_number_of_keys() {
         let one = format!("\"{}\"", "11".repeat(32));
-        let many = std::iter::repeat(one).take(MAX_STORAGE_KEYS + 1).collect::<Vec<_>>().join(",");
+        let many = std::iter::repeat(one)
+            .take(MAX_STORAGE_KEYS + 1)
+            .collect::<Vec<_>>()
+            .join(",");
         let body = crate::json::parse(&format!("{{\"address\":\"q1abc\",\"keys\":[{many}]}}"))
             .expect("the body parses");
         assert!(

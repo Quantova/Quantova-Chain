@@ -40,7 +40,11 @@ pub struct Devnet<S> {
 impl Devnet<DuplexStream> {
     pub fn over_duplex(config: DevnetConfig) -> Result<Self, RoundError> {
         let n = config.nodes.len();
-        let identities: Vec<Identity> = config.nodes.iter().map(|c| p2p_identity(&c.secret)).collect();
+        let identities: Vec<Identity> = config
+            .nodes
+            .iter()
+            .map(|c| p2p_identity(&c.secret))
+            .collect();
         let addresses: Vec<String> = config.nodes.iter().map(|c| c.address.clone()).collect();
         let bootstrap = bootstrap_adjacency(&config);
 
@@ -146,7 +150,11 @@ impl Devnet<DuplexStream> {
 impl<S> Devnet<S> {
     pub fn from_parts(config: DevnetConfig, mesh: Mesh<S>) -> Result<Self, RoundError> {
         let n = config.nodes.len();
-        let identities: Vec<Identity> = config.nodes.iter().map(|c| p2p_identity(&c.secret)).collect();
+        let identities: Vec<Identity> = config
+            .nodes
+            .iter()
+            .map(|c| p2p_identity(&c.secret))
+            .collect();
         let mut nodes = Vec::with_capacity(n);
         for node_config in &config.nodes {
             nodes.push(DevNode::open(node_config, &config)?);

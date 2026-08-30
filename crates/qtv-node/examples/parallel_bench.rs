@@ -159,9 +159,14 @@ fn measure_vm(inputs: &[(u64, u64, u64, u64)], threads: usize) -> (f64, f64) {
                                     break;
                                 }
                                 let (sender, recipient, amount, fee) = inputs[i];
-                                let out =
-                                    execute_transfer(sender, recipient, amount, fee, TRANSFER_METER)
-                                        .expect("a funded transfer runs clean");
+                                let out = execute_transfer(
+                                    sender,
+                                    recipient,
+                                    amount,
+                                    fee,
+                                    TRANSFER_METER,
+                                )
+                                .expect("a funded transfer runs clean");
                                 acc = acc.wrapping_add(out.sender_balance);
                             }
                             acc
@@ -262,7 +267,10 @@ fn main() {
     };
     println!("against the {TARGET_TPS:.0} tx/s target");
     verdict(&format!("{threads} threads"), par_independent);
-    verdict(&format!("the 50% core floor ({floor_threads} threads)"), par_floor);
+    verdict(
+        &format!("the 50% core floor ({floor_threads} threads)"),
+        par_floor,
+    );
     println!();
 
     println!("virtual machine execution component (transfer only, the ~10 us/tx figure)");

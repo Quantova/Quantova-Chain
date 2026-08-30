@@ -31,7 +31,13 @@ fn a_genesis_of_independent_registrations_finalises_and_reproduces_no_peer_secre
 
     let specs: Vec<ValidatorSpec> = (0..n)
         .map(|i| {
-            ValidatorSpec::from_secret(i as u64 + 1, VALIDATOR_STAKE, true, &secrets[i], DEFAULT_SLOTS)
+            ValidatorSpec::from_secret(
+                i as u64 + 1,
+                VALIDATOR_STAKE,
+                true,
+                &secrets[i],
+                DEFAULT_SLOTS,
+            )
         })
         .collect();
 
@@ -102,7 +108,17 @@ fn a_genesis_of_independent_registrations_finalises_and_reproduces_no_peer_secre
             "node {i} finalised a different chain"
         );
         for finalized in devnet.node(i).chain() {
-            assert!(finalized.attesters.len() >= 3, "at least a two thirds quorum attested"); assert!(finalized.attesters.iter().all(|a| [1u64, 2, 3, 4].contains(a)), "every attester is a committee member");
+            assert!(
+                finalized.attesters.len() >= 3,
+                "at least a two thirds quorum attested"
+            );
+            assert!(
+                finalized
+                    .attesters
+                    .iter()
+                    .all(|a| [1u64, 2, 3, 4].contains(a)),
+                "every attester is a committee member"
+            );
         }
     }
     assert_eq!(devnet.node(0).ledger().balance(&bob.address()), 3 * 1_000);

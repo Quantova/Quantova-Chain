@@ -61,7 +61,9 @@ fn erasure_coding_cuts_the_per_node_block_download() {
         whole_block
     );
 
-    let pieces: Vec<_> = (N - K..N).map(|i| coded.piece(i).expect("index within shard_count")).collect();
+    let pieces: Vec<_> = (N - K..N)
+        .map(|i| coded.piece(i).expect("index within shard_count"))
+        .collect();
     let rebuilt = reconstruct_block(
         coded.header(),
         &coded.header_hash(),

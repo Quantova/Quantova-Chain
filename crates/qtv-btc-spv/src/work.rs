@@ -9,8 +9,12 @@ pub struct U256 {
 }
 
 impl U256 {
-    pub const ZERO: U256 = U256 { limbs: [0, 0, 0, 0] };
-    pub const ONE: U256 = U256 { limbs: [1, 0, 0, 0] };
+    pub const ZERO: U256 = U256 {
+        limbs: [0, 0, 0, 0],
+    };
+    pub const ONE: U256 = U256 {
+        limbs: [1, 0, 0, 0],
+    };
 
     pub fn from_u64(x: u64) -> U256 {
         U256 {
@@ -93,7 +97,10 @@ impl U256 {
     pub fn wrapping_add(&self, other: &U256) -> U256 {
         let mut limbs = [0u64; 4];
         let mut carry = 0u128;
-        for (out, (a, b)) in limbs.iter_mut().zip(self.limbs.iter().zip(other.limbs.iter())) {
+        for (out, (a, b)) in limbs
+            .iter_mut()
+            .zip(self.limbs.iter().zip(other.limbs.iter()))
+        {
             let s = *a as u128 + *b as u128 + carry;
             *out = s as u64;
             carry = s >> 64;
@@ -104,7 +111,10 @@ impl U256 {
     pub fn wrapping_sub(&self, other: &U256) -> U256 {
         let mut limbs = [0u64; 4];
         let mut borrow = 0i128;
-        for (out, (a, b)) in limbs.iter_mut().zip(self.limbs.iter().zip(other.limbs.iter())) {
+        for (out, (a, b)) in limbs
+            .iter_mut()
+            .zip(self.limbs.iter().zip(other.limbs.iter()))
+        {
             let d = *a as i128 - *b as i128 - borrow;
             if d < 0 {
                 *out = (d + (1i128 << 64)) as u64;

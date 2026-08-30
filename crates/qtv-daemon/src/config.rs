@@ -116,7 +116,12 @@ impl NodeSettings {
                 "rpc" => rpc_listen = Some(field.value.clone()),
                 "rpc_allow" => {
                     let mut addrs = Vec::new();
-                    for entry in field.value.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    for entry in field
+                        .value
+                        .split(',')
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                    {
                         if entry.parse::<std::net::IpAddr>().is_err() {
                             return Err(field.error(&format!(
                                 "'rpc_allow' entry '{entry}' is not a bare IP address; \
@@ -167,7 +172,8 @@ fn parse_checkpoint(field: &Field) -> Result<(u64, [u8; 32]), String> {
     let height: u64 = parts[0]
         .parse()
         .map_err(|_| field.error("the checkpoint height is not a number"))?;
-    let bytes = from_hex(parts[1]).map_err(|e| field.error(&format!("the checkpoint value {e}")))?;
+    let bytes =
+        from_hex(parts[1]).map_err(|e| field.error(&format!("the checkpoint value {e}")))?;
     let value = <[u8; 32]>::try_from(bytes.as_slice())
         .map_err(|_| field.error("the checkpoint value must be thirty two bytes"))?;
     Ok((height, value))

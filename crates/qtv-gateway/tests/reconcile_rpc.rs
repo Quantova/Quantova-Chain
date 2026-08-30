@@ -17,7 +17,12 @@ fn unique_base(name: &str) -> std::path::PathBuf {
         .unwrap()
         .as_nanos();
     let mut base = std::env::temp_dir();
-    base.push(format!("qtv-gateway-{}-{}-{}", std::process::id(), name, stamp));
+    base.push(format!(
+        "qtv-gateway-{}-{}-{}",
+        std::process::id(),
+        name,
+        stamp
+    ));
     base
 }
 
@@ -52,7 +57,10 @@ fn config_with_accounts(base: &Path, accounts: Vec<GenesisAccount>) -> DevnetCon
 fn build(method: &str, body: Json) -> Request {
     match build_request(method, &body) {
         Ok(request) => request,
-        Err(err) => panic!("build_request rejected {method}: {} {}", err.code, err.message),
+        Err(err) => panic!(
+            "build_request rejected {method}: {} {}",
+            err.code, err.message
+        ),
     }
 }
 
@@ -112,13 +120,22 @@ fn genesis_accounts_rpc_serves_the_configured_allocations_and_moves_no_root() {
         other => panic!("accounts must be an array, got {other:?}"),
     };
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].get("address").and_then(Json::as_str), Some(first.as_str()));
+    assert_eq!(
+        rows[0].get("address").and_then(Json::as_str),
+        Some(first.as_str())
+    );
     assert_eq!(rows[0].get("balance").and_then(Json::as_str), Some("5000"));
-    assert_eq!(rows[1].get("address").and_then(Json::as_str), Some(second.as_str()));
+    assert_eq!(
+        rows[1].get("address").and_then(Json::as_str),
+        Some(second.as_str())
+    );
     assert_eq!(rows[1].get("balance").and_then(Json::as_str), Some("7000"));
 
     let sum_accounts: u64 = 5_000 + 7_000;
-    assert!(node.genesis_supply() > sum_accounts, "supply also carries the pool and bonds");
+    assert!(
+        node.genesis_supply() > sum_accounts,
+        "supply also carries the pool and bonds"
+    );
 
     assert_eq!(
         root_before,
@@ -153,7 +170,10 @@ fn bridged_balance_rpc_is_wired_read_only_and_accepts_hex_and_q1_holders() {
     ));
     assert_eq!(out.get("balance").and_then(Json::as_str), Some("0"));
     assert_eq!(out.get("supply").and_then(Json::as_str), Some("0"));
-    assert_eq!(out.get("asset_id").and_then(Json::as_str), Some(asset.as_str()));
+    assert_eq!(
+        out.get("asset_id").and_then(Json::as_str),
+        Some(asset.as_str())
+    );
 
     let holder_q1 = qtv_idfmt::render_address(&[0xCDu8; 32]).unwrap();
     let out_q1 = served(handle(
@@ -167,12 +187,18 @@ fn bridged_balance_rpc_is_wired_read_only_and_accepts_hex_and_q1_holders() {
             ]),
         ),
     ));
-    assert_eq!(out_q1.get("holder").and_then(Json::as_str), Some(holder_hex.as_str()));
+    assert_eq!(
+        out_q1.get("holder").and_then(Json::as_str),
+        Some(holder_hex.as_str())
+    );
 
     let supply = served(handle(
         &ctx,
         &mut node,
-        build("get_bridged_supply", object(vec![("asset_id", Json::str(&asset))])),
+        build(
+            "get_bridged_supply",
+            object(vec![("asset_id", Json::str(&asset))]),
+        ),
     ));
     assert_eq!(supply.get("registered"), Some(&Json::Bool(false)));
     assert_eq!(supply.get("supply").and_then(Json::as_str), Some("0"));

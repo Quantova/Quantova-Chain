@@ -53,7 +53,8 @@ fn block_content_cannot_shift_the_next_beacon() {
     let params = FeeParams::devnet();
     let rounds = 8;
 
-    let (seeds_a, hashes_a) = beacon_track("grind-a", &params, |round| 1_000 + round as u64, rounds);
+    let (seeds_a, hashes_a) =
+        beacon_track("grind-a", &params, |round| 1_000 + round as u64, rounds);
     let (seeds_b, hashes_b) =
         beacon_track("grind-b", &params, |round| 7_777 + 3 * round as u64, rounds);
 

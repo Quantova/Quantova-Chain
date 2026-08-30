@@ -35,7 +35,13 @@ fn main() {
 
     let fee = FeeParams::devnet().transfer_fee();
     let call = transfer_call(&recipient.address(), amount);
-    let body = Body::new(sender.address(), nonce, TRANSFER_METER, u128::from(fee), call);
+    let body = Body::new(
+        sender.address(),
+        nonce,
+        TRANSFER_METER,
+        u128::from(fee),
+        call,
+    );
     let wrapper = sign(&sender, &body);
 
     let encoded = qtv_codec::to_bytes(&wrapper);

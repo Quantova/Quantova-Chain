@@ -3,10 +3,10 @@
 
 use std::path::PathBuf;
 
-use qtv_node::consensus::ValidatorRegistration;
-use qtv_node::fee::FeeParams;
 use qtv_governance::GuardianSet;
 use qtv_node::bridge::OperatorSet;
+use qtv_node::consensus::ValidatorRegistration;
+use qtv_node::fee::FeeParams;
 use qtv_node::node::{Genesis, GenesisAccount, GenesisBridgedAsset, ValidatorSpec};
 
 #[derive(Clone)]

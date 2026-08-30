@@ -41,7 +41,8 @@ fn faults_degrade_honestly_over_real_sockets() {
         base.heights as usize, healthy.heights,
         "the healthy baseline finalises the whole run"
     );
-    base.finality().expect("the baseline has a finality distribution");
+    base.finality()
+        .expect("the baseline has a finality distribution");
     for report in &healthy_reports {
         assert_eq!(
             report.block_hashes, base.block_hashes,

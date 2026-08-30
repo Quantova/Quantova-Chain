@@ -9,23 +9,11 @@ pub const LENGTH_WIDTH: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    Truncated {
-        needed: usize,
-        found: usize,
-    },
-    LengthOverrun {
-        length: u64,
-        found: usize,
-    },
-    TrailingBytes {
-        count: usize,
-    },
-    InvalidOption {
-        byte: u8,
-    },
-    UnknownTag {
-        tag: u8,
-    },
+    Truncated { needed: usize, found: usize },
+    LengthOverrun { length: u64, found: usize },
+    TrailingBytes { count: usize },
+    InvalidOption { byte: u8 },
+    UnknownTag { tag: u8 },
 }
 
 impl fmt::Display for Error {

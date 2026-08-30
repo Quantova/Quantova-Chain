@@ -171,7 +171,10 @@ impl Parser {
         }
     }
 
-    fn nested(&mut self, parse_container: fn(&mut Self) -> Result<Json, String>) -> Result<Json, String> {
+    fn nested(
+        &mut self,
+        parse_container: fn(&mut Self) -> Result<Json, String>,
+    ) -> Result<Json, String> {
         if self.depth >= MAX_DEPTH {
             return Err("the JSON nests deeper than the gateway allows".to_string());
         }
@@ -380,7 +383,10 @@ mod tests {
     fn a_body_with_too_many_elements_is_refused() {
         let over = format!("[{}]", vec!["1"; MAX_NODES + 16].join(","));
         let result = parse(&over);
-        assert!(result.is_err(), "an element count past the node budget must be refused");
+        assert!(
+            result.is_err(),
+            "an element count past the node budget must be refused"
+        );
         assert!(
             result.unwrap_err().contains("more elements"),
             "the refusal names the element budget"
@@ -394,11 +400,17 @@ mod tests {
             ("height", Json::Int(42)),
             ("balance", Json::str("100000000000")),
             ("ok", Json::Bool(true)),
-            ("ids", Json::Array(vec![Json::str("qtx1a"), Json::str("qtx1b")])),
+            (
+                "ids",
+                Json::Array(vec![Json::str("qtx1a"), Json::str("qtx1b")]),
+            ),
         ]);
         let text = value.render();
         let back = parse(&text).expect("parse");
-        assert_eq!(back.get("chain_id").and_then(Json::as_str), Some("Q-test-net-1"));
+        assert_eq!(
+            back.get("chain_id").and_then(Json::as_str),
+            Some("Q-test-net-1")
+        );
         assert_eq!(back.get("height").and_then(Json::as_u64), Some(42));
         assert_eq!(field_count(&back), 5);
     }

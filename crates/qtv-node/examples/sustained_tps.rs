@@ -82,7 +82,9 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let count: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(100_000);
     let duration_secs: u64 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(3600);
-    let cores = thread::available_parallelism().map(|p| p.get()).unwrap_or(1);
+    let cores = thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1);
     let threads: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(cores);
 
     let fee = FeeParams::devnet();
@@ -92,7 +94,11 @@ fn main() {
     for sender in &senders {
         base.set_account(
             &sender.address(),
-            &Account::funded(SENDER_BALANCE, sender.scheme(), sender.public_key().to_vec()),
+            &Account::funded(
+                SENDER_BALANCE,
+                sender.scheme(),
+                sender.public_key().to_vec(),
+            ),
         );
     }
     let _ = base.q_root();
@@ -151,7 +157,11 @@ fn main() {
 
     let (mn, p5, md, mx) = stats(&samples);
     let held = p5;
-    let verdict = if held >= TARGET_TPS { "HOLDS ABOVE" } else { "BELOW" };
+    let verdict = if held >= TARGET_TPS {
+        "HOLDS ABOVE"
+    } else {
+        "BELOW"
+    };
     println!();
     println!(
         "SUSTAINED over {duration_secs}s, {rounds} rounds: min {mn:.0}  p5 {p5:.0}  median {md:.0}  max {mx:.0} tx/s"

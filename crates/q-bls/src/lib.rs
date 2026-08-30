@@ -74,12 +74,9 @@ mod tests {
     const PK_B: &str = "0xb301803f8b5ac4a1133581fc676dfedc60d891dd5fa99028805e5ea5b08d3491af75d0707adab3b70c6a6a580217bf81";
     const PK_C: &str = "0xb53d21a4cfd562c469cc81514d4ce5a6b577d8403d32a394dc265dd190b47fa9f829fdd7963afdf972e5e77854051f6f";
 
-    const MESSAGE_ABAB: &str =
-        "0xabababababababababababababababababababababababababababababababab";
-    const MESSAGE_5656: &str =
-        "0x5656565656565656565656565656565656565656565656565656565656565656";
-    const MESSAGE_ZERO: &str =
-        "0x0000000000000000000000000000000000000000000000000000000000000000";
+    const MESSAGE_ABAB: &str = "0xabababababababababababababababababababababababababababababababab";
+    const MESSAGE_5656: &str = "0x5656565656565656565656565656565656565656565656565656565656565656";
+    const MESSAGE_ZERO: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
     const AGGREGATE_ABAB_VALID: &str = "0x9712c3edd73a209c742b8250759db12549b3eaf43b5ca61376d9f30e2747dbcf842d8b2ac0901d2a093713e20284a7670fcf6954e9ab93de991bb9b313e664785a075fc285806fa5224c82bde146561b446ccfc706a64b8579513cfc4ff1d930";
     const AGGREGATE_ABAB_TAMPERED: &str = "0x9712c3edd73a209c742b8250759db12549b3eaf43b5ca61376d9f30e2747dbcf842d8b2ac0901d2a093713e20284a7670fcf6954e9ab93de991bb9b313e664785a075fc285806fa5224c82bde146561b446ccfc706a64b8579513cfcffffffff";
@@ -128,26 +125,22 @@ mod tests {
     #[test]
     fn an_empty_committee_never_verifies() {
         let aggregate = signature(AGGREGATE_ABAB_VALID);
-        assert!(
-            !Bls12381AggregateVerifier::new().fast_aggregate_verify(
-                &[],
-                &message(MESSAGE_ABAB),
-                &aggregate
-            )
-        );
+        assert!(!Bls12381AggregateVerifier::new().fast_aggregate_verify(
+            &[],
+            &message(MESSAGE_ABAB),
+            &aggregate
+        ));
     }
 
     #[test]
     fn a_malformed_pubkey_fails_closed() {
         let keys = vec![BlsPubkey([0xff; 48])];
         let aggregate = signature(SIGNATURE_ZERO_SINGLE);
-        assert!(
-            !Bls12381AggregateVerifier::new().fast_aggregate_verify(
-                &keys,
-                &message(MESSAGE_ZERO),
-                &aggregate
-            )
-        );
+        assert!(!Bls12381AggregateVerifier::new().fast_aggregate_verify(
+            &keys,
+            &message(MESSAGE_ZERO),
+            &aggregate
+        ));
     }
 }
 

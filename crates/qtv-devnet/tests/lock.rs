@@ -19,7 +19,10 @@ fn open_nodes(config: &DevnetConfig) -> Vec<DevNode> {
         .iter()
         .map(|node| DevNode::open(node, config).expect("node opens"))
         .collect();
-    let notes: Vec<_> = nodes.iter().filter_map(|node| node.own_reveal_note()).collect();
+    let notes: Vec<_> = nodes
+        .iter()
+        .filter_map(|node| node.own_reveal_note())
+        .collect();
     for node in &mut nodes {
         for note in &notes {
             node.collect_reveal(note.clone());
@@ -54,8 +57,8 @@ fn lock_victim_on_proposal(
     victim: usize,
     proposal: &qtv_devnet::wire::Proposal,
 ) {
-    let victim_prevote =
-        prevote_of(nodes[victim].on_proposal(selection, leader, proposal.clone())).expect("victim prevotes");
+    let victim_prevote = prevote_of(nodes[victim].on_proposal(selection, leader, proposal.clone()))
+        .expect("victim prevotes");
     let mut polka = vec![victim_prevote];
     for i in 0..nodes.len() {
         if i == victim {
@@ -111,7 +114,11 @@ fn a_polka_locked_validator_refuses_a_conflict() {
     let proposal_b = nodes[l2_idx]
         .build_justified_proposal(&selection, 2)
         .expect("a quorum justifies a proposal");
-    assert_ne!(header_value(&proposal_b.header.hash()), value_a, "B competes with A");
+    assert_ne!(
+        header_value(&proposal_b.header.hash()),
+        value_a,
+        "B competes with A"
+    );
 
     let _ = records;
     let out = nodes[victim].on_proposal(&selection, l2, proposal_b);
@@ -155,6 +162,9 @@ fn a_validator_without_a_lock_prevotes_a_justified_proposal() {
     let value = header_value(&justified.header.hash());
 
     let out = nodes[follower].on_proposal(&selection, l2, justified);
-    assert!(prevote_of(out).is_some(), "the unlocked follower prevotes the justified proposal");
+    assert!(
+        prevote_of(out).is_some(),
+        "the unlocked follower prevotes the justified proposal"
+    );
     assert_eq!(nodes[follower].staged_value(), Some(value));
 }

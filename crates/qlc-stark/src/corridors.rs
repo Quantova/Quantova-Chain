@@ -50,9 +50,7 @@ impl EventClaim {
 pub fn is_proof_corridor(kind: StatementKind) -> bool {
     matches!(
         kind,
-        StatementKind::BitcoinSpv
-            | StatementKind::EvmLightClient
-            | StatementKind::CosmosTendermint
+        StatementKind::BitcoinSpv | StatementKind::EvmLightClient | StatementKind::CosmosTendermint
     )
 }
 

@@ -83,7 +83,9 @@ fn reduce_bits(bytes_le: &[u8]) -> [u64; 4] {
 
 impl Scalar {
     pub const fn zero() -> Scalar {
-        Scalar { limbs: [0, 0, 0, 0] }
+        Scalar {
+            limbs: [0, 0, 0, 0],
+        }
     }
 
     pub fn from_u64(n: u64) -> Scalar {

@@ -257,7 +257,13 @@ fn a_raw_byte_signed_transaction_verifies() {
     let account = derive(&master(), 0);
     let target = derive(&master(), 1);
     let call = Call::new(target.address().to_ascii_lowercase(), vec![1, 2, 3]);
-    let body = Body::new(account.address().to_ascii_lowercase(), 7, 21_000, 1_000_000, call);
+    let body = Body::new(
+        account.address().to_ascii_lowercase(),
+        7,
+        21_000,
+        1_000_000,
+        call,
+    );
     let wrapper = sign(&account, &body);
     assert!(
         verify(&wrapper, account.public_key()),

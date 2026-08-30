@@ -17,7 +17,11 @@ fn a_genesis_parent_with_a_nonzero_value_is_refused() {
     let bytes = Message::Attest(Box::new(attestation)).encode();
 
     let pv_start = 1 + 8 + 8 + 8 + 8 + (8 + 32) + 8 + 32 + 1;
-    assert_eq!(bytes[pv_start - 1], 0, "the encoder wrote the genesis parent tag");
+    assert_eq!(
+        bytes[pv_start - 1],
+        0,
+        "the encoder wrote the genesis parent tag"
+    );
 
     let mut mutated = bytes.clone();
     for slot in mutated[pv_start..pv_start + 32].iter_mut() {
@@ -30,7 +34,10 @@ fn a_genesis_parent_with_a_nonzero_value_is_refused() {
         "the canonical frame still hashes to itself"
     );
 
-    assert!(Message::decode(&bytes).is_ok(), "the canonical frame decodes");
+    assert!(
+        Message::decode(&bytes).is_ok(),
+        "the canonical frame decodes"
+    );
     assert!(
         Message::decode(&mutated).is_err(),
         "a genesis parent carrying a nonzero value is refused"

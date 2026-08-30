@@ -5,7 +5,7 @@ use crate::bridge::{Direction, Fact, FACT_VERSION};
 use qtv_btc_spv::chain::Checkpoint;
 use qtv_btc_spv::{
     network_params, verify_chain, verify_trustless_deposit, BlockHeader, MerkleStep, Network,
-    NetworkParams, U256, HEADER_LEN, MAX_MERKLE_BRANCH,
+    NetworkParams, HEADER_LEN, MAX_MERKLE_BRANCH, U256,
 };
 
 pub const MAX_BTC_HEADERS: usize = 4096;
@@ -153,7 +153,10 @@ impl BitcoinMintProof {
         for _ in 0..step_count {
             let hash: [u8; 32] = cursor.take(32)?.try_into().ok()?;
             let sibling_on_left = cursor.u8()? != 0;
-            branch.push(MerkleStep { hash, sibling_on_left });
+            branch.push(MerkleStep {
+                hash,
+                sibling_on_left,
+            });
         }
         let tx_len = cursor.u32()? as usize;
         if tx_len > MAX_BTC_RAW_TX {
@@ -311,8 +314,12 @@ mod tests {
         let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return(recipient))]);
         let txid = Transaction::parse(&raw).unwrap().txid();
         let header = mine(txid);
-        let fact = verify_bitcoin_mint(&anchor_for(&header, bridge.clone()), &proof_for(&header, raw), 9)
-            .expect("a proven deposit mints");
+        let fact = verify_bitcoin_mint(
+            &anchor_for(&header, bridge.clone()),
+            &proof_for(&header, raw),
+            9,
+        )
+        .expect("a proven deposit mints");
         assert_eq!(fact.amount, 250_000);
         assert_eq!(fact.recipient, recipient);
         assert_eq!(fact.source_ref, txid);
@@ -327,8 +334,14 @@ mod tests {
         let txid = Transaction::parse(&raw).unwrap().txid();
         let header = mine(txid);
         let mut proof = proof_for(&header, raw);
-        proof.branch = vec![MerkleStep { hash: [0x99u8; 32], sibling_on_left: false }];
-        assert_eq!(verify_bitcoin_mint(&anchor_for(&header, bridge), &proof, 9), None);
+        proof.branch = vec![MerkleStep {
+            hash: [0x99u8; 32],
+            sibling_on_left: false,
+        }];
+        assert_eq!(
+            verify_bitcoin_mint(&anchor_for(&header, bridge), &proof, 9),
+            None
+        );
     }
 
     #[test]
@@ -337,7 +350,14 @@ mod tests {
         let raw = raw_deposit_tx(&[(250_000, elsewhere), (0, op_return([0x42u8; 32]))]);
         let txid = Transaction::parse(&raw).unwrap().txid();
         let header = mine(txid);
-        assert_eq!(verify_bitcoin_mint(&anchor_for(&header, p2pkh([0x11; 20])), &proof_for(&header, raw), 9), None);
+        assert_eq!(
+            verify_bitcoin_mint(
+                &anchor_for(&header, p2pkh([0x11; 20])),
+                &proof_for(&header, raw),
+                9
+            ),
+            None
+        );
     }
 
     #[test]
@@ -348,6 +368,9 @@ mod tests {
         let header = mine(txid);
         let mut anchor = anchor_for(&header, bridge);
         anchor.checkpoint_hash = [0xabu8; 32];
-        assert_eq!(verify_bitcoin_mint(&anchor, &proof_for(&header, raw), 9), None);
+        assert_eq!(
+            verify_bitcoin_mint(&anchor, &proof_for(&header, raw), 9),
+            None
+        );
     }
 }

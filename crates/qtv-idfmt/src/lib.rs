@@ -20,24 +20,12 @@ const MAX_ENCODED: usize = 128;
 
 const CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 const BECH32M_CONST: u32 = 734539939;
-const GENERATOR: [u32; 5] = [
-    996825010,
-    642813549,
-    513874426,
-    1027748829,
-    705979059,
-];
+const GENERATOR: [u32; 5] = [996825010, 642813549, 513874426, 1027748829, 705979059];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    TooShort {
-        min: usize,
-        got: usize,
-    },
-    BadLength {
-        expected: usize,
-        got: usize,
-    },
+    TooShort { min: usize, got: usize },
+    BadLength { expected: usize, got: usize },
     WrongPrefix,
     BadChecksum,
     BadChar,

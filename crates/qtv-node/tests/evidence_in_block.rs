@@ -111,12 +111,28 @@ fn a_block_of_valid_evidence_slashes_the_offender_identically_on_every_node() {
     let mut node_two = seeded_ledger(&offender, &offender_pk);
     assert!(!node_one.is_validator_banned(&offender));
 
-    assert_eq!(execute_ordered(&mut node_one, &[tx.clone()], &fee, 0).len(), 1);
-    assert_eq!(execute_ordered(&mut node_two, &[tx.clone()], &fee, 0).len(), 1);
+    assert_eq!(
+        execute_ordered(&mut node_one, &[tx.clone()], &fee, 0).len(),
+        1
+    );
+    assert_eq!(
+        execute_ordered(&mut node_two, &[tx.clone()], &fee, 0).len(),
+        1
+    );
 
-    assert!(node_one.is_validator_banned(&offender), "node one slashed the offender");
-    assert!(node_two.is_validator_banned(&offender), "node two slashed the offender");
-    assert_eq!(node_one.staked_weight(&offender), 0, "the offender's stake is slashed");
+    assert!(
+        node_one.is_validator_banned(&offender),
+        "node one slashed the offender"
+    );
+    assert!(
+        node_two.is_validator_banned(&offender),
+        "node two slashed the offender"
+    );
+    assert_eq!(
+        node_one.staked_weight(&offender),
+        0,
+        "the offender's stake is slashed"
+    );
     assert_eq!(
         node_one.q_root(),
         node_two.q_root(),
