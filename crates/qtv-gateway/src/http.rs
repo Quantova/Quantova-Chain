@@ -169,6 +169,9 @@ impl Limiter {
     }
 
     fn admit_forwarded(&self, ip: IpAddr, per_ip_cap: usize, now: Instant) -> Admit {
+        if ip.is_loopback() {
+            return Admit::Ok;
+        }
         let mut inner = self
             .inner
             .lock()
@@ -642,6 +645,33 @@ mod tests {
         );
         assert_eq!(forwarded_client_ip(&None), None);
         assert_eq!(forwarded_client_ip(&Some("not-an-ip".to_string())), None);
+    }
+
+    #[test]
+    fn a_direct_loopback_client_is_never_rate_limited_or_banned() {
+        let limiter = Limiter::default();
+        let local = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let t = Instant::now();
+        for _ in 0..(RATE_BURST as usize + BAN_STRIKES as usize + 500) {
+            assert!(
+                matches!(
+                    limiter.admit_forwarded(local, MAX_CONNECTIONS_PER_IP, t),
+                    Admit::Ok
+                ),
+                "a trusted local loopback client is exempt from the per address rate limit and ban"
+            );
+        }
+        assert!(
+            matches!(
+                limiter.admit_forwarded(
+                    IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                    MAX_CONNECTIONS_PER_IP,
+                    t
+                ),
+                Admit::Ok
+            ),
+            "ipv6 loopback is exempt too"
+        );
     }
 
     #[test]
