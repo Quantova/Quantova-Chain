@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use qtv_devnet::coded::{code_proposal, ProposalAssembler};
+use qtv_devnet::coded::{code_proposal, ProposalAssembler, GLOBAL_SOURCE};
 use qtv_devnet::wire::Message;
 use qtv_devnet::{leader_for, DevNode};
 use qtv_net::Channel;
@@ -177,11 +177,17 @@ impl Driver {
         let mut entered_view: Option<u64> = None;
         let mut view_deadline = Instant::now() + view_timeout;
 
+        self.assembler.tick();
         self.replay_buffered(start_height, &selection);
 
+        let mut last_tick = Instant::now();
         loop {
             if stopped.load(Ordering::SeqCst) {
                 return Ok(());
+            }
+            if last_tick.elapsed() >= TICK {
+                self.assembler.tick();
+                last_tick = Instant::now();
             }
             self.halt_if_fatal()?;
             self.serve_rpc();
@@ -206,7 +212,9 @@ impl Driver {
             }
 
             match self.inbound.recv_timeout(TICK) {
-                Ok((_, bytes)) => self.handle_incoming(bytes, start_height, &selection),
+                Ok((source, bytes)) => {
+                    self.handle_incoming(bytes, start_height, &selection, source as u64)
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => thread::sleep(TICK),
             }
@@ -323,14 +331,14 @@ impl Driver {
         }
     }
 
-    fn dispatch(&mut self, message: Message, selection: &Selection) {
+    fn dispatch(&mut self, message: Message, selection: &Selection, source: u64) {
         match message {
             Message::Tx(transaction) => self.node.admit_gossiped(transaction),
             Message::CodedProposal(coded) => {
                 let outcome = {
                     let node = &self.node;
                     self.assembler
-                        .admit(*coded, |c| node.coded_auth_ok(selection, c))
+                        .admit(*coded, source, |c| node.coded_auth_ok(selection, c))
                 };
                 if let Some(Ok(proposal)) = outcome {
                     let proposer = leader_for(selection, proposal.view);
@@ -393,7 +401,13 @@ impl Driver {
         let _ = self.node.try_finalize(selection);
     }
 
-    fn handle_incoming(&mut self, bytes: Vec<u8>, start_height: u64, selection: &Selection) {
+    fn handle_incoming(
+        &mut self,
+        bytes: Vec<u8>,
+        start_height: u64,
+        selection: &Selection,
+        source: u64,
+    ) {
         let message = match Message::decode(&bytes) {
             Ok(message) => message,
             Err(_) => return,
@@ -401,7 +415,7 @@ impl Driver {
         match message_height(&message) {
             Some(h) if h > start_height => self.buffered.push(bytes),
             Some(h) if h < start_height => {}
-            _ => self.dispatch(message, selection),
+            _ => self.dispatch(message, selection, source),
         }
     }
 
@@ -412,7 +426,7 @@ impl Driver {
                 continue;
             };
             match message_height(&message) {
-                Some(h) if h == start_height => self.dispatch(message, selection),
+                Some(h) if h == start_height => self.dispatch(message, selection, GLOBAL_SOURCE),
                 Some(h) if h > start_height => self.buffered.push(bytes),
                 _ => {}
             }

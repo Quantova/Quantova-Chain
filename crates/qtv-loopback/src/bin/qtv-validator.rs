@@ -102,7 +102,7 @@ impl Runtime {
                 let outcome = {
                     let node = &self.node;
                     self.assembler
-                        .admit(*coded, |c| node.coded_auth_ok(selection, c))
+                        .admit(*coded, from as u64, |c| node.coded_auth_ok(selection, c))
                 };
                 if let Some(Ok(proposal)) = outcome {
                     let proposer = leader_for(selection, proposal.view);
@@ -245,7 +245,12 @@ impl Runtime {
         }
 
         let mut entered = false;
+        let mut last_tick = Instant::now();
         loop {
+            if last_tick.elapsed() >= Duration::from_millis(20) {
+                self.assembler.tick();
+                last_tick = Instant::now();
+            }
             if self.node.height() > start_height {
                 let txs = self
                     .node

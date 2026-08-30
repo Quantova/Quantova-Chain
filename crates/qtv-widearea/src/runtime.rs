@@ -238,7 +238,7 @@ impl Runtime {
         }
     }
 
-    fn dispatch(&mut self, message: Message, selection: &Selection) {
+    fn dispatch(&mut self, message: Message, selection: &Selection, source: u64) {
         match message {
             Message::Tx(transaction) => self.node.admit_gossiped(transaction),
             Message::CodedProposal(coded) => {
@@ -246,7 +246,7 @@ impl Runtime {
                 let outcome = {
                     let node = &self.node;
                     self.assembler
-                        .admit(*coded, |c| node.coded_auth_ok(selection, c))
+                        .admit(*coded, source, |c| node.coded_auth_ok(selection, c))
                 };
                 self.phase.verify += verify_start.elapsed();
                 if let Some(Ok(proposal)) = outcome {
@@ -386,11 +386,12 @@ impl Runtime {
         self.phase = PhaseTimers::default();
 
         let buffered = std::mem::take(&mut self.buffered);
-        for (_, bytes) in buffered {
+        self.assembler.tick();
+        for (src, bytes) in buffered {
             match Message::decode(&bytes) {
                 Ok(message) => match message_height(&message) {
-                    Some(h) if h == start_height => self.dispatch(message, &selection),
-                    Some(h) if h > start_height => buffer_bounded(&mut self.buffered, 0, bytes),
+                    Some(h) if h == start_height => self.dispatch(message, &selection, src as u64),
+                    Some(h) if h > start_height => buffer_bounded(&mut self.buffered, src, bytes),
                     _ => {}
                 },
                 Err(_) => {}
@@ -400,8 +401,13 @@ impl Runtime {
         let mut entered_view: Option<u64> = None;
         let mut view_deadline = start + self.view_timeout;
         let mut rotated = false;
+        let mut last_tick = Instant::now();
 
         loop {
+            if last_tick.elapsed() >= Duration::from_millis(20) {
+                self.assembler.tick();
+                last_tick = Instant::now();
+            }
             if self.node.height() > start_height {
                 let txs = self
                     .node
@@ -455,15 +461,17 @@ impl Runtime {
             let received = self.inbound.recv_timeout(Duration::from_millis(20));
             self.phase.wait += wait_start.elapsed();
             match received {
-                Ok((_, bytes)) => {
+                Ok((src, bytes)) => {
                     let message = match Message::decode(&bytes) {
                         Ok(m) => m,
                         Err(_) => continue,
                     };
                     match message_height(&message) {
-                        Some(h) if h > start_height => buffer_bounded(&mut self.buffered, 0, bytes),
+                        Some(h) if h > start_height => {
+                            buffer_bounded(&mut self.buffered, src, bytes)
+                        }
                         Some(h) if h < start_height => {}
-                        _ => self.dispatch(message, &selection),
+                        _ => self.dispatch(message, &selection, src as u64),
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
