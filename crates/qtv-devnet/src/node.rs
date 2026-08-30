@@ -29,8 +29,8 @@ use qtv_tx::{Body, Call, Wrapper};
 
 use crate::config::{DevnetConfig, NodeConfig};
 use crate::wire::{
-    decode_register_note, encode_register_note, LockedBlock, Message, Proposal, RegisterNote,
-    RevealNote, ViewChange,
+    decode_register_note, encode_register_note, CodedProposal, LockedBlock, Message, Proposal,
+    RegisterNote, RevealNote, ViewChange,
 };
 use qtv_sampler::onetime::Root;
 
@@ -851,22 +851,28 @@ impl DevNode {
     }
 
     fn proposal_auth_ok(&self, selection: &Selection, proposal: &Proposal) -> bool {
-        let leader = leader_for(selection, proposal.view);
+        self.header_auth_ok(selection, proposal.view, &proposal.header, &proposal.auth)
+    }
+
+    pub fn coded_auth_ok(&self, selection: &Selection, coded: &CodedProposal) -> bool {
+        self.header_auth_ok(selection, coded.view, &coded.header, &coded.auth)
+    }
+
+    fn header_auth_ok(
+        &self,
+        selection: &Selection,
+        view: View,
+        header: &Header,
+        auth: &Attestation,
+    ) -> bool {
+        let leader = leader_for(selection, view);
         let Some(member) = selection.commitment.member(leader) else {
             return false;
         };
-        let auth = &proposal.auth;
-        if auth.from != leader
-            || auth.height != proposal.header.height()
-            || auth.view != proposal.view
-        {
+        if auth.from != leader || auth.height != header.height() || auth.view != view {
             return false;
         }
-        let subject = proposal_subject(
-            proposal.header.height(),
-            proposal.view,
-            &proposal.header.hash(),
-        );
+        let subject = proposal_subject(header.height(), view, &header.hash());
         if auth.block != subject {
             return false;
         }

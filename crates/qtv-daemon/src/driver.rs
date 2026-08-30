@@ -327,11 +327,13 @@ impl Driver {
         match message {
             Message::Tx(transaction) => self.node.admit_gossiped(transaction),
             Message::CodedProposal(coded) => {
-                if let Some(Ok(proposal)) = self.assembler.admit(*coded) {
-                    let proposer = leader_for(selection, proposal.view);
-                    let out = self.node.on_proposal(selection, proposer, proposal);
-                    for message in out {
-                        self.emit(message);
+                if self.node.coded_auth_ok(selection, &coded) {
+                    if let Some(Ok(proposal)) = self.assembler.admit(*coded) {
+                        let proposer = leader_for(selection, proposal.view);
+                        let out = self.node.on_proposal(selection, proposer, proposal);
+                        for message in out {
+                            self.emit(message);
+                        }
                     }
                 }
             }

@@ -219,6 +219,7 @@ struct Pending {
     pieces: Vec<(Shard, ShardProof)>,
     overhead: usize,
     auth: Attestation,
+    auth_digest: [u8; 32],
 }
 
 impl ProposalAssembler {
@@ -268,6 +269,7 @@ impl ProposalAssembler {
             proof,
             auth,
         } = coded;
+        let auth_digest = crate::wire::attestation_digest(&auth);
         let is_new = !self.pending.contains_key(&key);
         if is_new && self.pending.len() >= MAX_PENDING_PROPOSALS {
             self.evict_lowest_pending();
@@ -285,9 +287,13 @@ impl ProposalAssembler {
                     pieces: Vec::new(),
                     overhead,
                     auth,
+                    auth_digest,
                 }
             });
             if entry.commitment != commitment {
+                return None;
+            }
+            if entry.auth_digest != auth_digest {
                 return None;
             }
             if entry.pieces.iter().any(|(s, _)| s.index == shard.index) {
@@ -753,6 +759,38 @@ mod tests {
             matches!(outcome, Some(Err(_))),
             "a header that did not match the coded block was not refused"
         );
+    }
+
+    #[test]
+    fn the_assembler_refuses_a_shard_whose_auth_differs_from_the_first() {
+        let proposal = sample_proposal(48, 0);
+        let shards = code_proposal(&proposal).expect("code the proposal");
+        let k = shards[0].commitment.k;
+        assert!(k > 1, "the proposal needs several shards");
+
+        let mut assembler = ProposalAssembler::new();
+        assert!(
+            assembler.admit(shards[0].clone()).is_none(),
+            "one shard does not complete a k>1 proposal"
+        );
+
+        let mut swapped = shards[1].clone();
+        swapped.auth.from ^= 1;
+        assert!(
+            assembler.admit(swapped).is_none(),
+            "a shard whose auth was changed is refused and cannot occupy the slot"
+        );
+
+        let mut outcome = None;
+        for shard in shards.iter().skip(1).take(k).cloned() {
+            if let Some(result) = assembler.admit(shard) {
+                outcome = Some(result);
+            }
+        }
+        let rebuilt = outcome
+            .expect("the genuine shards still complete")
+            .expect("reassembly succeeds");
+        same_proposal(&rebuilt, &proposal);
     }
 
     #[test]

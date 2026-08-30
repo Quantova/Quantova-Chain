@@ -8,6 +8,7 @@ use qtv_node::consensus::header_value;
 use qtv_node::fee::FeeParams;
 use qtv_node::node::GenesisAccount;
 
+use qtv_devnet::coded::{code_proposal, ProposalAssembler};
 use qtv_devnet::config::DevnetConfig;
 use qtv_devnet::node::{leader_for, DevNode};
 use qtv_devnet::wire::{Message, Proposal};
@@ -251,4 +252,65 @@ fn a_replayed_justification_flood_verifies_within_the_committee_bound() {
         later, 0,
         "a replayed justification is not verified a second time"
     );
+}
+
+#[test]
+fn a_forged_auth_shard_does_not_stall_coded_reassembly() {
+    let base = unique_base("coded_auth_grief");
+    let alice = user(0);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let config = config(&base, &[true, true, true, true], accounts);
+    let mut nodes = open_nodes(&config);
+
+    let selection = nodes[0].select().expect("committee");
+    let leader = leader_for(&selection, 0);
+    let leader_idx = idx(&config, leader);
+    let victim = (0..nodes.len())
+        .find(|&i| i != leader_idx)
+        .expect("a distinct victim");
+
+    let genuine = nodes[leader_idx].build_proposal(&selection);
+    let shards = code_proposal(&genuine).expect("code the genuine proposal");
+    assert!(
+        shards.len() > shards[0].commitment.k,
+        "the proposal codes into several shards"
+    );
+
+    let mut forged = shards[0].clone();
+    forged.auth = support::dummy_auth();
+
+    assert!(
+        !nodes[victim].coded_auth_ok(&selection, &forged),
+        "a shard carrying a garbage auth fails admit verification"
+    );
+    assert!(
+        nodes[victim].coded_auth_ok(&selection, &shards[0]),
+        "a genuine shard passes admit verification"
+    );
+
+    let mut assembler = ProposalAssembler::new();
+    let mut reassembled = None;
+    let feed = std::iter::once(forged).chain(shards.iter().cloned());
+    for shard in feed {
+        if !nodes[victim].coded_auth_ok(&selection, &shard) {
+            continue;
+        }
+        if let Some(result) = assembler.admit(shard) {
+            reassembled = Some(result);
+        }
+    }
+    let proposal = reassembled
+        .expect("the genuine shards reassemble despite the forged first shard")
+        .expect("reassembly succeeds");
+    assert_eq!(
+        proposal.auth.from, leader,
+        "the reassembled proposal carries the leader auth"
+    );
+
+    let out = nodes[victim].on_proposal(&selection, leader, proposal);
+    assert!(
+        prevote_of(&out).is_some(),
+        "the reassembled genuine proposal is prevoted"
+    );
+    assert_eq!(nodes[victim].staged_view(), Some(0));
 }

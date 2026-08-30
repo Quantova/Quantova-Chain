@@ -547,6 +547,12 @@ pub(crate) fn view_change_digest(record: &ViewChange) -> [u8; 32] {
     sha3_256(&encoder.into_bytes())
 }
 
+pub(crate) fn attestation_digest(att: &Attestation) -> [u8; 32] {
+    let mut encoder = Encoder::new();
+    encode_attestation(&mut encoder, att);
+    sha3_256(&encoder.into_bytes())
+}
+
 fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeError> {
     let height = decoder.get_u64()?;
     let target_view = decoder.get_u64()?;
