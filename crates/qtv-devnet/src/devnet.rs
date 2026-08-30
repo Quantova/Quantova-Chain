@@ -506,6 +506,12 @@ impl<S: Read + Write> Devnet<S> {
         ceiling: Height,
         active: &[usize],
     ) -> Result<(), RoundError> {
+        let Ok(selection) = self.nodes[to].select() else {
+            return Ok(());
+        };
+        if !self.nodes[to].coded_auth_ok(&selection, &coded) {
+            return Ok(());
+        }
         match self.assemblers[to].admit(coded) {
             Some(Ok(proposal)) => self.deliver_proposal(to, proposal, ceiling, active)?,
             Some(Err(_)) | None => {}
