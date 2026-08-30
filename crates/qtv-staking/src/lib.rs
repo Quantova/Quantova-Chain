@@ -321,7 +321,12 @@ impl StakeLedger {
         }
     }
 
-    pub fn withdraw_to_balance(&mut self, id: &[u8; 32], balance: u64, now_day: u64) -> Option<u64> {
+    pub fn withdraw_to_balance(
+        &mut self,
+        id: &[u8; 32],
+        balance: u64,
+        now_day: u64,
+    ) -> Option<u64> {
         let amount = match self.bonds.get(id) {
             Some(bond) if bond.can_withdraw(now_day) => bond.amount,
             _ => return None,
@@ -412,7 +417,10 @@ mod tests {
         let stake = 2_000 * QTOV;
         assert_eq!(session_reward(stake, stake), SESSION_EMISSION);
         assert_eq!(session_reward(stake, 2 * stake), SESSION_EMISSION / 2);
-        assert_eq!(session_reward(3 * stake, 4 * stake), SESSION_EMISSION * 3 / 4);
+        assert_eq!(
+            session_reward(3 * stake, 4 * stake),
+            SESSION_EMISSION * 3 / 4
+        );
         assert_eq!(session_reward(stake, 0), 0);
     }
 
@@ -519,10 +527,19 @@ mod tests {
             Some(3_000 * QTOV)
         );
         assert_eq!(l.total_staked(), 2_000 * QTOV);
-        assert_eq!(l.bond_from_balance(id(2), 1_000 * QTOV, 2_000 * QTOV, 0), None);
-        assert_eq!(l.bond_from_balance(id(2), 5_000 * QTOV, 1_999 * QTOV, 0), None);
+        assert_eq!(
+            l.bond_from_balance(id(2), 1_000 * QTOV, 2_000 * QTOV, 0),
+            None
+        );
+        assert_eq!(
+            l.bond_from_balance(id(2), 5_000 * QTOV, 1_999 * QTOV, 0),
+            None
+        );
         l.slash(&id(1), Fault::Attributable);
-        assert_eq!(l.bond_from_balance(id(1), 5_000 * QTOV, 2_000 * QTOV, 0), None);
+        assert_eq!(
+            l.bond_from_balance(id(1), 5_000 * QTOV, 2_000 * QTOV, 0),
+            None
+        );
     }
 
     #[test]

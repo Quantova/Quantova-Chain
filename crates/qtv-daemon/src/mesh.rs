@@ -76,7 +76,10 @@ fn connect_peer(
         match Channel::connect_pinned_with_timeout(stream, identity, peer, HANDSHAKE_TIMEOUT) {
             Ok(channel) => channel,
             Err(_) => {
-                log(&format!("could not handshake peer {}, dropping it", label + 1));
+                log(&format!(
+                    "could not handshake peer {}, dropping it",
+                    label + 1
+                ));
                 return None;
             }
         };
@@ -115,7 +118,11 @@ pub fn build_mesh(
             up[q] = true;
         }
     }
-    let up_peers = up.iter().enumerate().filter(|&(q, &u)| q != idx && u).count();
+    let up_peers = up
+        .iter()
+        .enumerate()
+        .filter(|&(q, &u)| q != idx && u)
+        .count();
 
     let (inbound_tx, inbound_rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_CAP);
     let (accepted_tx, accepted_rx) = mpsc::channel::<(usize, Channel<TcpStream>)>();
@@ -196,7 +203,10 @@ pub fn build_mesh(
         let (addr, peer) = match (addr, peer_ids.get(q).and_then(|p| p.clone())) {
             (Some(addr), Some(peer)) if q != idx => (addr.clone(), peer),
             (Some(_), None) if q != idx => {
-                log(&format!("no published peer id for peer {}, dropping it", q + 1));
+                log(&format!(
+                    "no published peer id for peer {}, dropping it",
+                    q + 1
+                ));
                 continue;
             }
             _ => continue,
@@ -274,12 +284,18 @@ fn spawn_readers(
             let mut last_log: Option<Instant> = None;
             while let Ok(bytes) = channel.recv() {
                 let now = Instant::now();
-                tokens = (tokens + now.saturating_duration_since(last).as_secs_f64() * PEER_MSG_PER_SEC)
+                tokens = (tokens
+                    + now.saturating_duration_since(last).as_secs_f64() * PEER_MSG_PER_SEC)
                     .min(PEER_MSG_BURST);
                 last = now;
                 if tokens < 1.0 {
-                    if last_log.map_or(true, |t| now.saturating_duration_since(t) > Duration::from_secs(10)) {
-                        log(&format!("peer {} is over its message rate, dropping its frames", from + 1));
+                    if last_log.map_or(true, |t| {
+                        now.saturating_duration_since(t) > Duration::from_secs(10)
+                    }) {
+                        log(&format!(
+                            "peer {} is over its message rate, dropping its frames",
+                            from + 1
+                        ));
                         last_log = Some(now);
                     }
                     continue;
@@ -317,7 +333,10 @@ mod tests {
             drained <= INBOUND_CAP,
             "the queue grew past its cap, it held {drained}"
         );
-        assert_eq!(drained, INBOUND_CAP, "the bounded channel fills exactly to its cap");
+        assert_eq!(
+            drained, INBOUND_CAP,
+            "the bounded channel fills exactly to its cap"
+        );
     }
 
     #[test]
@@ -349,6 +368,9 @@ mod tests {
     fn the_rate_ceiling_is_bounded_and_below_the_earlier_flood_ceiling() {
         assert!(INBOUND_CAP > 0);
         assert!(PEER_MSG_PER_SEC <= 5_000.0, "the per peer rate was lowered");
-        assert!(PEER_MSG_BURST >= PEER_MSG_PER_SEC, "the burst covers the sustained rate");
+        assert!(
+            PEER_MSG_BURST >= PEER_MSG_PER_SEC,
+            "the burst covers the sustained rate"
+        );
     }
 }

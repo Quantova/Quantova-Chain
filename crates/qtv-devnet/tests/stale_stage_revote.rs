@@ -19,7 +19,10 @@ fn open_nodes(config: &DevnetConfig) -> Vec<DevNode> {
         .iter()
         .map(|node| DevNode::open(node, config).expect("node opens"))
         .collect();
-    let notes: Vec<_> = nodes.iter().filter_map(|node| node.own_reveal_note()).collect();
+    let notes: Vec<_> = nodes
+        .iter()
+        .filter_map(|node| node.own_reveal_note())
+        .collect();
     for node in &mut nodes {
         for note in &notes {
             node.collect_reveal(note.clone());
@@ -65,7 +68,11 @@ fn a_stale_stage_is_not_reprevoted_at_a_new_view() {
     let value_a = header_value(&proposal_a.header.hash());
     let out = nodes[victim].on_proposal(&selection, leader0, proposal_a);
     let prevote_a = prevote_of(&out).expect("the victim prevotes A at view zero");
-    assert_eq!((prevote_a.view, prevote_a.block.cost), (0, u64::MAX), "a prevote is a control plane vote");
+    assert_eq!(
+        (prevote_a.view, prevote_a.block.cost),
+        (0, u64::MAX),
+        "a prevote is a control plane vote"
+    );
     assert_eq!(nodes[victim].staged_view(), Some(0));
 
     nodes[victim].jump_to(1);

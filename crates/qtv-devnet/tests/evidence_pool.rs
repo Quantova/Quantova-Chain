@@ -30,11 +30,18 @@ fn a_running_node_attributes_an_equivocation_from_conflicting_attestations() {
 
     node.on_attestation(att_a);
     let evidence = node.pending_evidence();
-    assert!(evidence.is_empty(), "one attestation is not yet an equivocation");
+    assert!(
+        evidence.is_empty(),
+        "one attestation is not yet an equivocation"
+    );
 
     node.on_attestation(att_b);
     let evidence = node.pending_evidence();
-    assert_eq!(evidence.len(), 1, "the second conflicting attestation is attributed");
+    assert_eq!(
+        evidence.len(),
+        1,
+        "the second conflicting attestation is attributed"
+    );
     assert!(
         evidence[0].attributes(chain_id, offender.attest_public_key()),
         "the attributed evidence authenticates to the offender's key"
@@ -103,9 +110,33 @@ fn a_third_block_at_one_view_slot_is_not_relayed() {
     let offender = Attester::from_secret_with_slots(2, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
     let chain_id = cfg.fee_params.chain_id;
     let beacon = genesis_beacon();
-    let a = offender.attest(chain_id, 1, 1, 0, [0u8; 32], Block::new(1, [1u8; 32], Parent::Genesis), &beacon);
-    let b = offender.attest(chain_id, 1, 1, 0, [0u8; 32], Block::new(1, [2u8; 32], Parent::Genesis), &beacon);
-    let c = offender.attest(chain_id, 1, 1, 0, [0u8; 32], Block::new(1, [3u8; 32], Parent::Genesis), &beacon);
+    let a = offender.attest(
+        chain_id,
+        1,
+        1,
+        0,
+        [0u8; 32],
+        Block::new(1, [1u8; 32], Parent::Genesis),
+        &beacon,
+    );
+    let b = offender.attest(
+        chain_id,
+        1,
+        1,
+        0,
+        [0u8; 32],
+        Block::new(1, [2u8; 32], Parent::Genesis),
+        &beacon,
+    );
+    let c = offender.attest(
+        chain_id,
+        1,
+        1,
+        0,
+        [0u8; 32],
+        Block::new(1, [3u8; 32], Parent::Genesis),
+        &beacon,
+    );
 
     assert!(node.on_attestation(a));
     assert!(node.on_attestation(b));
@@ -121,7 +152,8 @@ fn flooding_other_view_slots_does_not_suppress_an_equivocation_relay() {
     let beacon = genesis_beacon();
 
     let flood_secret = qtv_node::keys::fixture_secret(3);
-    let flooder = Attester::from_secret_with_slots(3, &flood_secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+    let flooder =
+        Attester::from_secret_with_slots(3, &flood_secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
     for v in 0..250u64 {
         let blk = Block::new(1, [(v % 251) as u8 + 4; 32], Parent::Genesis);
         node.on_attestation(flooder.attest(chain_id, 1, 1, v, [0u8; 32], blk, &beacon));
@@ -129,8 +161,24 @@ fn flooding_other_view_slots_does_not_suppress_an_equivocation_relay() {
 
     let secret = qtv_node::keys::fixture_secret(2);
     let offender = Attester::from_secret_with_slots(2, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
-    let a = offender.attest(chain_id, 1, 1, 0, [0u8; 32], Block::new(1, [1u8; 32], Parent::Genesis), &beacon);
-    let b = offender.attest(chain_id, 1, 1, 0, [0u8; 32], Block::new(1, [2u8; 32], Parent::Genesis), &beacon);
+    let a = offender.attest(
+        chain_id,
+        1,
+        1,
+        0,
+        [0u8; 32],
+        Block::new(1, [1u8; 32], Parent::Genesis),
+        &beacon,
+    );
+    let b = offender.attest(
+        chain_id,
+        1,
+        1,
+        0,
+        [0u8; 32],
+        Block::new(1, [2u8; 32], Parent::Genesis),
+        &beacon,
+    );
     assert!(node.on_attestation(a));
     assert!(node.on_attestation(b));
     assert_eq!(node.pending_evidence().len(), 1);
@@ -152,8 +200,24 @@ fn view_change_subject_filler_cannot_starve_a_genuine_equivocation_relay() {
     assert!(!node.on_attestation(offender.attest(chain_id, 1, 1, 0, [0u8; 32], filler_a, &beacon)));
     assert!(!node.on_attestation(offender.attest(chain_id, 1, 1, 0, [0u8; 32], filler_b, &beacon)));
 
-    let a = offender.attest(chain_id, 1, 1, 0, [0u8; 32], Block::new(1, [1u8; 32], Parent::Genesis), &beacon);
-    let b = offender.attest(chain_id, 1, 1, 0, [0u8; 32], Block::new(1, [2u8; 32], Parent::Genesis), &beacon);
+    let a = offender.attest(
+        chain_id,
+        1,
+        1,
+        0,
+        [0u8; 32],
+        Block::new(1, [1u8; 32], Parent::Genesis),
+        &beacon,
+    );
+    let b = offender.attest(
+        chain_id,
+        1,
+        1,
+        0,
+        [0u8; 32],
+        Block::new(1, [2u8; 32], Parent::Genesis),
+        &beacon,
+    );
     assert!(node.on_attestation(a));
     assert!(node.on_attestation(b));
     assert_eq!(node.pending_evidence().len(), 1);

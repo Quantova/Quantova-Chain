@@ -73,7 +73,10 @@ fn run(config_path: &Path) -> Result<(), String> {
     let idx = (my_id - 1) as usize;
 
     let secret = qtv_node::keys::load_or_generate(&settings.keystore_path).map_err(|e| {
-        format!("reading the keystore {}: {e}", settings.keystore_path.display())
+        format!(
+            "reading the keystore {}: {e}",
+            settings.keystore_path.display()
+        )
     })?;
 
     let own = ValidatorSpec::from_secret(
@@ -130,7 +133,9 @@ fn run(config_path: &Path) -> Result<(), String> {
             return Err(format!("a peer names this node's own id {pid}"));
         }
         if *pid < 1 || *pid as usize > n {
-            return Err(format!("peer id {pid} is not a genesis validator, expected 1..={n}"));
+            return Err(format!(
+                "peer id {pid} is not a genesis validator, expected 1..={n}"
+            ));
         }
         peer_addrs[(*pid - 1) as usize] = Some(addr.clone());
     }
@@ -181,8 +186,11 @@ fn run(config_path: &Path) -> Result<(), String> {
             version: env!("CARGO_PKG_VERSION").to_string(),
         };
         driver.attach_rpc(context, requests_rx);
-        let allow: Vec<std::net::IpAddr> =
-            settings.rpc_allow.iter().filter_map(|s| s.parse().ok()).collect();
+        let allow: Vec<std::net::IpAddr> = settings
+            .rpc_allow
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
         if allow.is_empty() {
             util::log(&format!(
                 "RPC gateway serving on {rpc_addr} with no allowlist, reachable by any host; \
@@ -371,7 +379,8 @@ struct RegisterArgs {
     slots: u64,
 }
 
-const USAGE: &str = "usage: quantovad --config <path>\n       quantovad register --keystore <path> \
+const USAGE: &str =
+    "usage: quantovad --config <path>\n       quantovad register --keystore <path> \
                      --id <id> --stake <stake> [--online|--offline] --slots <slots>";
 
 impl Command {

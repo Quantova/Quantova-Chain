@@ -8,9 +8,7 @@ use std::time::{Duration, Instant};
 use qtv_devnet::Devnet;
 
 use qtv_loopback::stats::Distribution;
-use qtv_loopback::{
-    accounts, build_batch, devnet_config, hex, recipients, transfer_fee,
-};
+use qtv_loopback::{accounts, build_batch, devnet_config, hex, recipients, transfer_fee};
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -235,7 +233,9 @@ fn run_loopback(
     for reader in readers.iter_mut() {
         loop {
             let mut line = String::new();
-            let read = reader.read_line(&mut line).expect("read a child result line");
+            let read = reader
+                .read_line(&mut line)
+                .expect("read a child result line");
             if read == 0 {
                 results.push(parse_result("RESULT stall=1"));
                 break;
@@ -267,7 +267,10 @@ fn main() {
     let senders_n = env_usize("QTV_MP_ACCOUNTS", 250).max(2);
     let run_secs = env_usize("QTV_MP_SECS", 60).max(1);
     let warmup = env_usize("QTV_MP_WARMUP", 2);
-    let height_cap = env_usize("QTV_MP_HEIGHTCAP", (qtv_loopback::HARNESS_SLOTS as usize) - 64);
+    let height_cap = env_usize(
+        "QTV_MP_HEIGHTCAP",
+        (qtv_loopback::HARNESS_SLOTS as usize) - 64,
+    );
 
     let manifest = env!("CARGO_MANIFEST_DIR");
     let cpu = shell("sysctl", &["-n", "machdep.cpu.brand_string"], "unknown CPU");
@@ -275,7 +278,11 @@ fn main() {
     let mem_bytes: u64 = shell("sysctl", &["-n", "hw.memsize"], "0")
         .parse()
         .unwrap_or(0);
-    let commit = shell("git", &["-C", manifest, "rev-parse", "--short", "HEAD"], "unknown");
+    let commit = shell(
+        "git",
+        &["-C", manifest, "rev-parse", "--short", "HEAD"],
+        "unknown",
+    );
 
     let validator_bin = std::env::var("QTV_MP_VALIDATOR_BIN").unwrap_or_else(|_| {
         std::env::current_exe()
@@ -300,11 +307,16 @@ fn main() {
     println!(" carry no inter host bandwidth or propagation, so neither is measured here.");
     println!();
     println!(" Host (measured on):");
-    println!("   {cpu}, {cores} cores, {:.0} GB memory", mem_bytes as f64 / 1e9);
+    println!(
+        "   {cpu}, {cores} cores, {:.0} GB memory",
+        mem_bytes as f64 / 1e9
+    );
     println!("   build: release (opt-level 3)");
     println!(" Source:");
     println!("   Quantova-Chain commit {commit} (qtv-loopback drives qtv-devnet DevNodes)");
-    println!("   consensus crates pinned at QRC-CONSENSUS tag v0.5.0 (qtv-bft, qtv-sampler, qtv-attest)");
+    println!(
+        "   consensus crates pinned at QRC-CONSENSUS tag v0.5.0 (qtv-bft, qtv-sampler, qtv-attest)"
+    );
     println!();
     println!(" Configuration (identical for both sides):");
     println!("   validators / committee : {validators}");
@@ -312,22 +324,40 @@ fn main() {
     println!("   target consensus secs  : {run_secs}");
     println!("   warmup heights         : {warmup} (not counted)");
     println!("   height cap             : {height_cap} measured (under the one time sortition's");
-    println!("                            {}-slot tree the harness sizes; see the note below)", qtv_loopback::HARNESS_SLOTS);
+    println!(
+        "                            {}-slot tree the harness sizes; see the note below)",
+        qtv_loopback::HARNESS_SLOTS
+    );
     println!(" Process count (loopback): {validators} validator processes + 1 driver");
     rule();
 
-    println!(" [1/2] In process serial baseline (all committee compute serial, one host, in memory) ...");
+    println!(
+        " [1/2] In process serial baseline (all committee compute serial, one host, in memory) ..."
+    );
     let serial = run_serial(validators, senders_n, run_secs as f64, warmup, height_cap);
     println!(
         "       finalised {} blocks, {} transactions over {:.1} s consensus wall clock{}",
         serial.heights,
         serial.finalized_tx,
         serial.consensus_ms / 1000.0,
-        if serial.stalled { " (stopped early)" } else { "" },
+        if serial.stalled {
+            " (stopped early)"
+        } else {
+            ""
+        },
     );
 
-    println!(" [2/2] Loopback multi process run (one process per validator, real qtv-net TCP mesh) ...");
-    let loopback = run_loopback(validators, senders_n, run_secs, warmup, height_cap, &validator_bin);
+    println!(
+        " [2/2] Loopback multi process run (one process per validator, real qtv-net TCP mesh) ..."
+    );
+    let loopback = run_loopback(
+        validators,
+        senders_n,
+        run_secs,
+        warmup,
+        height_cap,
+        &validator_bin,
+    );
     let ingress = loopback
         .first()
         .expect("at least the ingress process reported");
@@ -336,7 +366,11 @@ fn main() {
         ingress.heights,
         ingress.finalized_tx,
         ingress.consensus_ms / 1000.0,
-        if ingress.stalled { " (stopped early)" } else { "" },
+        if ingress.stalled {
+            " (stopped early)"
+        } else {
+            ""
+        },
     );
     rule();
 
@@ -446,7 +480,11 @@ fn main() {
     }
     rule();
 
-    let speedup = if loop_tps > 0.0 { loop_tps / serial_tps.max(1e-9) } else { 0.0 };
+    let speedup = if loop_tps > 0.0 {
+        loop_tps / serial_tps.max(1e-9)
+    } else {
+        0.0
+    };
     let finality_ratio = match (serial_dist, loop_dist) {
         (Some(s), Some(l)) if l.p50 > 0.0 => s.p50 / l.p50,
         _ => 0.0,
@@ -465,8 +503,12 @@ fn main() {
     println!(" WHAT CARRIES THAT MOVE. This run changed exactly one thing against the in process");
     println!(" baseline: the committee's compute went from serial in one process to parallel");
     println!(" across one process per validator over real qtv-net TCP sockets. The workload, the");
-    println!(" committee, the sortition, the attestations, the certificate, and the coded proposal");
-    println!(" dissemination are byte identical, proven by the identical finalised chains above. So");
+    println!(
+        " committee, the sortition, the attestations, the certificate, and the coded proposal"
+    );
+    println!(
+        " dissemination are byte identical, proven by the identical finalised chains above. So"
+    );
     println!(" the move is the parallelism plus the loopback socket cost, and nothing else.");
     println!(" WHAT DID NOT MOVE, AND IS NOT MEASURED. The sockets are localhost, so there is no");
     println!(" inter host bandwidth and no geographic propagation in either number; this is not a");
@@ -478,10 +520,14 @@ fn main() {
     println!(" NOTE on the run length. The one time key sortition commits each validator's tree");
     println!(" to a fixed slot count, one slot per height, and a run cannot exceed that many");
     println!(" finalised heights without the sortition refusing a slot past the commitment. The");
-    println!(" consensus default of 64 stays the default; the harness sizes its trees to {} slots",
-        qtv_loopback::HARNESS_SLOTS);
+    println!(
+        " consensus default of 64 stays the default; the harness sizes its trees to {} slots",
+        qtv_loopback::HARNESS_SLOTS
+    );
     println!(" through the with_slots path, a harness parameter only, so a sustained run is no");
-    println!(" longer bounded near 64 heights and both runs above stop on the target seconds or the");
+    println!(
+        " longer bounded near 64 heights and both runs above stop on the target seconds or the"
+    );
     println!(" height cap rather than on the slot count.");
     println!("================================================================================");
 }

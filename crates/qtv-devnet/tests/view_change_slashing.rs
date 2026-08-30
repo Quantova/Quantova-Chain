@@ -19,7 +19,10 @@ fn open_nodes(config: &DevnetConfig) -> Vec<DevNode> {
         .iter()
         .map(|node| DevNode::open(node, config).expect("node opens"))
         .collect();
-    let notes: Vec<_> = nodes.iter().filter_map(|node| node.own_reveal_note()).collect();
+    let notes: Vec<_> = nodes
+        .iter()
+        .filter_map(|node| node.own_reveal_note())
+        .collect();
     for node in &mut nodes {
         for note in &notes {
             node.collect_reveal(note.clone());
@@ -65,8 +68,10 @@ fn an_honest_view_change_is_not_a_slashable_equivocation() {
         if i == victim_idx {
             continue;
         }
-        if let Some(qtv_devnet::wire::Message::Prevote(att)) =
-            nodes[i].on_proposal(&selection, leader0, proposal.clone()).into_iter().next()
+        if let Some(qtv_devnet::wire::Message::Prevote(att)) = nodes[i]
+            .on_proposal(&selection, leader0, proposal.clone())
+            .into_iter()
+            .next()
         {
             polka.push(*att);
         }
@@ -74,7 +79,11 @@ fn an_honest_view_change_is_not_a_slashable_equivocation() {
     for prevote in &polka {
         nodes[victim_idx].on_prevote(&selection, prevote.clone());
     }
-    assert_eq!(nodes[victim_idx].staged_view(), Some(0), "locked at view zero");
+    assert_eq!(
+        nodes[victim_idx].staged_view(),
+        Some(0),
+        "locked at view zero"
+    );
 
     let record = nodes[victim_idx].make_view_change(2);
     assert!(record.polka.is_some(), "the view change carries the polka");

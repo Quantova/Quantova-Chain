@@ -25,7 +25,8 @@ pub fn verify_trustless_deposit(
 ) -> Result<TrustlessDeposit, SpvError> {
     let pinned;
     let anchor = if params.requires_pinned_checkpoint {
-        pinned = crate::chain::pinned_checkpoint(params.network).ok_or(SpvError::CheckpointNotArmed)?;
+        pinned =
+            crate::chain::pinned_checkpoint(params.network).ok_or(SpvError::CheckpointNotArmed)?;
         &pinned
     } else {
         checkpoint
@@ -118,7 +119,16 @@ mod tests {
         let txid = Transaction::parse(&raw).unwrap().txid();
         let chain = verify_chain(&[mined_block(txid)], 0, &EASY).unwrap();
 
-        let proven = verify_trustless_deposit(&chain, &EASY, &Checkpoint::accepting(&chain), 0, &[], &raw, &bridge).unwrap();
+        let proven = verify_trustless_deposit(
+            &chain,
+            &EASY,
+            &Checkpoint::accepting(&chain),
+            0,
+            &[],
+            &raw,
+            &bridge,
+        )
+        .unwrap();
         assert_eq!(proven.txid, txid);
         assert_eq!(proven.amount, 250_000);
         assert_eq!(proven.recipient, recipient);
@@ -127,7 +137,10 @@ mod tests {
 
     #[test]
     fn a_mainnet_deposit_is_refused_until_the_checkpoint_is_armed() {
-        let armed = NetworkParams { requires_pinned_checkpoint: true, ..EASY };
+        let armed = NetworkParams {
+            requires_pinned_checkpoint: true,
+            ..EASY
+        };
         let bridge = p2pkh([0x11; 20]);
         let recipient = [0x42u8; 32];
         let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return(recipient))]);
@@ -173,7 +186,16 @@ mod tests {
         let txid = Transaction::parse(&raw).unwrap().txid();
         let chain = verify_chain(&[mined_block(txid)], 0, &EASY).unwrap();
 
-        let proven = verify_trustless_deposit(&chain, &EASY, &Checkpoint::accepting(&chain), 0, &[], &raw, &bridge).unwrap();
+        let proven = verify_trustless_deposit(
+            &chain,
+            &EASY,
+            &Checkpoint::accepting(&chain),
+            0,
+            &[],
+            &raw,
+            &bridge,
+        )
+        .unwrap();
         assert_eq!(proven.amount, 250_000);
         assert_eq!(proven.recipient, recipient);
     }
@@ -188,7 +210,15 @@ mod tests {
         let chain = verify_chain(&[mined_block(txid)], 0, &EASY).unwrap();
 
         assert_eq!(
-            verify_trustless_deposit(&chain, &EASY, &Checkpoint::accepting(&chain), 0, &[], &raw, &bridge),
+            verify_trustless_deposit(
+                &chain,
+                &EASY,
+                &Checkpoint::accepting(&chain),
+                0,
+                &[],
+                &raw,
+                &bridge
+            ),
             Err(SpvError::TransactionMismatch)
         );
     }
@@ -201,7 +231,16 @@ mod tests {
         let txid = Transaction::parse(&raw).unwrap().txid();
         let chain = verify_chain(&[mined_block(txid)], 0, &EASY).unwrap();
 
-        let proven = verify_trustless_deposit(&chain, &EASY, &Checkpoint::accepting(&chain), 0, &[], &raw, &bridge).unwrap();
+        let proven = verify_trustless_deposit(
+            &chain,
+            &EASY,
+            &Checkpoint::accepting(&chain),
+            0,
+            &[],
+            &raw,
+            &bridge,
+        )
+        .unwrap();
         assert_eq!(proven.amount, 250_000);
         assert!(check_deposit_tx(&raw, &bridge, proven.txid, 250_000, recipient).is_ok());
         assert_eq!(
@@ -227,7 +266,15 @@ mod tests {
         let chain = verify_chain(&[mined_block(txid)], 0, &deep).unwrap();
 
         assert_eq!(
-            verify_trustless_deposit(&chain, &deep, &Checkpoint::accepting(&chain), 0, &[], &raw, &bridge),
+            verify_trustless_deposit(
+                &chain,
+                &deep,
+                &Checkpoint::accepting(&chain),
+                0,
+                &[],
+                &raw,
+                &bridge
+            ),
             Err(SpvError::InsufficientConfirmations { have: 1, need: 3 })
         );
     }
@@ -242,7 +289,15 @@ mod tests {
         let chain = verify_chain(&[mined_block(other_txid)], 0, &EASY).unwrap();
 
         assert_eq!(
-            verify_trustless_deposit(&chain, &EASY, &Checkpoint::accepting(&chain), 0, &[], &raw, &bridge),
+            verify_trustless_deposit(
+                &chain,
+                &EASY,
+                &Checkpoint::accepting(&chain),
+                0,
+                &[],
+                &raw,
+                &bridge
+            ),
             Err(SpvError::MerkleMismatch)
         );
     }

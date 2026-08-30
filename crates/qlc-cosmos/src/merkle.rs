@@ -58,7 +58,12 @@ pub fn proof_aunts(leaves: &[Vec<u8>], index: usize) -> Vec<[u8; 32]> {
     }
 }
 
-fn compute_root(index: usize, total: usize, leaf_hash: [u8; 32], aunts: &[[u8; 32]]) -> Option<[u8; 32]> {
+fn compute_root(
+    index: usize,
+    total: usize,
+    leaf_hash: [u8; 32],
+    aunts: &[[u8; 32]],
+) -> Option<[u8; 32]> {
     if total == 0 || index >= total {
         return None;
     }
@@ -125,7 +130,11 @@ mod tests {
         let root = merkle_root(&l);
         for i in 0..7 {
             let aunts = proof_aunts(&l, i);
-            assert!(verify_inclusion(&root, &l[i], i, 7, &aunts), "leaf {} failed", i);
+            assert!(
+                verify_inclusion(&root, &l[i], i, 7, &aunts),
+                "leaf {} failed",
+                i
+            );
         }
     }
 
@@ -161,6 +170,12 @@ mod tests {
         let leaf = [0x42u8; 32];
         let aunts = [[0u8; 32]];
         assert!(!verify_inclusion(&[0u8; 32], &leaf, 0, usize::MAX, &aunts));
-        assert!(!verify_inclusion(&[0u8; 32], &leaf, 0, (1usize << 63) + 1, &aunts));
+        assert!(!verify_inclusion(
+            &[0u8; 32],
+            &leaf,
+            0,
+            (1usize << 63) + 1,
+            &aunts
+        ));
     }
 }

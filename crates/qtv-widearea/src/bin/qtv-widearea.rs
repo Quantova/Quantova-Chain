@@ -40,7 +40,10 @@ fn main() {
     let warmup = env_usize("QTV_WA_WARMUP", 2);
     let view_ms = env_usize("QTV_WA_VIEWMS", 800).max(1);
     let stall_secs = env_usize("QTV_WA_STALLSECS", 30).max(1);
-    let height_cap = env_usize("QTV_WA_HEIGHTCAP", (qtv_loopback::HARNESS_SLOTS as usize) - 64);
+    let height_cap = env_usize(
+        "QTV_WA_HEIGHTCAP",
+        (qtv_loopback::HARNESS_SLOTS as usize) - 64,
+    );
 
     let mut up = vec![true; validators];
     for i in index_list("QTV_WA_DOWN") {
@@ -89,7 +92,9 @@ fn main() {
     println!(" exists to produce comes only from a real run across regions, driven by the deploy");
     println!(" script, and is not produced here.");
     println!();
-    println!(" Fixed transport port for a real deployment: {TRANSPORT_PORT} (one open port per host).");
+    println!(
+        " Fixed transport port for a real deployment: {TRANSPORT_PORT} (one open port per host)."
+    );
     println!(" Local run binds a distinct localhost port per process, since one host cannot share");
     println!(" one port across several processes.");
     println!();
@@ -128,9 +133,15 @@ fn main() {
         &reports,
         "LOOPBACK MULTI PROCESS, REAL SOCKETS, NEAR ZERO PROPAGATION",
     );
-    println!(" The harness stood up over real qtv-net sockets, finalised, and every up host agreed");
-    println!(" on the byte identical chain. This is the local stand up proof. A network propagation");
-    println!(" figure is produced only by the deploy script across real hosts and is committed in a");
+    println!(
+        " The harness stood up over real qtv-net sockets, finalised, and every up host agreed"
+    );
+    println!(
+        " on the byte identical chain. This is the local stand up proof. A network propagation"
+    );
+    println!(
+        " figure is produced only by the deploy script across real hosts and is committed in a"
+    );
     println!(" results file in the q-prover form, never reported without it.");
     println!("================================================================================");
 }
@@ -146,8 +157,13 @@ fn report_run(reports: &[RunReport], label: &str) {
     };
 
     if ingress.stalled || ingress.heights == 0 {
-        println!(" The run STALLED. No height finalised, so no figure is reported, only the stall.");
-        println!(" finalised transactions before the stall: {}", ingress.finalized_tx);
+        println!(
+            " The run STALLED. No height finalised, so no figure is reported, only the stall."
+        );
+        println!(
+            " finalised transactions before the stall: {}",
+            ingress.finalized_tx
+        );
         rule();
         return;
     }
@@ -166,7 +182,9 @@ fn report_run(reports: &[RunReport], label: &str) {
     );
     if !all_agree {
         println!();
-        println!("   THE CHAINS DID NOT MATCH, so no figure below should be trusted. Reporting the");
+        println!(
+            "   THE CHAINS DID NOT MATCH, so no figure below should be trusted. Reporting the"
+        );
         println!("   mismatch rather than a number.");
         rule();
         return;
@@ -196,13 +214,34 @@ fn report_run(reports: &[RunReport], label: &str) {
         println!("   finality p99 (ms)            : {:.1}", d.p99);
         println!("   finality max (ms)            : {:.1}", d.max);
     }
-    println!("   phase wait (ms)              : {:.1}", ingress.phase_wait_ms);
-    println!("   phase build (ms)             : {:.1}", ingress.phase_build_ms);
-    println!("   phase verify (ms)            : {:.1}", ingress.phase_verify_ms);
-    println!("   phase aggregate (ms)         : {:.1}", ingress.phase_aggregate_ms);
-    println!("   phase finalise (ms)          : {:.1}", ingress.phase_finalise_ms);
-    println!("   phase flood (ms)             : {:.1}", ingress.phase_flood_ms);
-    println!("   phase other (ms)             : {:.1}", ingress.phase_other_ms());
+    println!(
+        "   phase wait (ms)              : {:.1}",
+        ingress.phase_wait_ms
+    );
+    println!(
+        "   phase build (ms)             : {:.1}",
+        ingress.phase_build_ms
+    );
+    println!(
+        "   phase verify (ms)            : {:.1}",
+        ingress.phase_verify_ms
+    );
+    println!(
+        "   phase aggregate (ms)         : {:.1}",
+        ingress.phase_aggregate_ms
+    );
+    println!(
+        "   phase finalise (ms)          : {:.1}",
+        ingress.phase_finalise_ms
+    );
+    println!(
+        "   phase flood (ms)             : {:.1}",
+        ingress.phase_flood_ms
+    );
+    println!(
+        "   phase other (ms)             : {:.1}",
+        ingress.phase_other_ms()
+    );
     rule();
 }
 
@@ -240,11 +279,20 @@ fn collect_and_report(dir: &str) {
     println!("================================================================================");
     println!(" {} host result(s) gathered from {dir}.", reports.len());
     println!(" Fixed transport port for the run: {TRANSPORT_PORT}.");
-    println!(" This figure carries the real propagation of wherever the hosts ran. It is a network");
+    println!(
+        " This figure carries the real propagation of wherever the hosts ran. It is a network"
+    );
     println!(" number only if the hosts were geographically spread, and it must be committed to a");
-    println!(" results file in the q-prover form with the host regions and the measured inter host");
-    println!(" round trips before it is reported as one. Compare it to the loopback finality at the");
+    println!(
+        " results file in the q-prover form with the host regions and the measured inter host"
+    );
+    println!(
+        " round trips before it is reported as one. Compare it to the loopback finality at the"
+    );
     println!(" same committee and width; the delta is the propagation cost.");
     rule();
-    report_run(&reports, "WIDE AREA HOSTS, REAL PROPAGATION OF WHEREVER THEY RAN");
+    report_run(
+        &reports,
+        "WIDE AREA HOSTS, REAL PROPAGATION OF WHEREVER THEY RAN",
+    );
 }

@@ -6,9 +6,9 @@ use std::path::Path;
 use qtv_account::address_for_key;
 use qtv_crypto::sha3;
 use qtv_devnet::config::DEFAULT_SLOTS;
-use qtv_node::fee::FeeParams;
-use qtv_node::bridge::{operator_pop_ok, OperatorSet};
 use qtv_governance::GuardianSet;
+use qtv_node::bridge::{operator_pop_ok, OperatorSet};
+use qtv_node::fee::FeeParams;
 use qtv_node::node::{Genesis, GenesisAccount, GenesisBridgedAsset, Root, ValidatorSpec};
 
 use crate::config::{parse_kv, Field};
@@ -71,16 +71,20 @@ impl GenesisFile {
                     let id: [u8; 32] = from_hex(field.value.trim())
                         .ok()
                         .and_then(|b| b.try_into().ok())
-                        .ok_or_else(|| field.error("guardian expects a thirty two byte member id in hex"))?;
+                        .ok_or_else(|| {
+                            field.error("guardian expects a thirty two byte member id in hex")
+                        })?;
                     guardian_members.push(id);
                 }
                 "guardian_threshold" => guardian_threshold = Some(field.u32("guardian_threshold")?),
                 "bridge_operator" => {
                     let mut parts = field.value.split_whitespace();
-                    let id: u32 = parts.next().and_then(|s| s.parse().ok())
-                        .ok_or_else(|| field.error("bridge_operator expects '<id> <public_key_hex> <pop_hex>'"))?;
-                    let pk = parts.next().and_then(|s| from_hex(s).ok())
-                        .ok_or_else(|| field.error("bridge_operator expects '<id> <public_key_hex> <pop_hex>'"))?;
+                    let id: u32 = parts.next().and_then(|s| s.parse().ok()).ok_or_else(|| {
+                        field.error("bridge_operator expects '<id> <public_key_hex> <pop_hex>'")
+                    })?;
+                    let pk = parts.next().and_then(|s| from_hex(s).ok()).ok_or_else(|| {
+                        field.error("bridge_operator expects '<id> <public_key_hex> <pop_hex>'")
+                    })?;
                     let pop = parts.next().and_then(|s| from_hex(s).ok())
                         .ok_or_else(|| field.error("bridge_operator expects '<id> <public_key_hex> <pop_hex>' (missing proof-of-possession)"))?;
                     bridge_ops.push((id, pk, pop));
@@ -91,16 +95,30 @@ impl GenesisFile {
                     let asset_id: [u8; 16] = parts.next().and_then(|s| from_hex(s).ok())
                         .and_then(|b| b.try_into().ok())
                         .ok_or_else(|| field.error("bridged_asset expects '<asset_hex16> <cap> <epoch_cap> <stark 0|1>'"))?;
-                    let cap: u128 = parts.next().and_then(|s| s.parse().ok()).ok_or_else(|| field.error("bridged_asset cap"))?;
-                    let epoch_cap: u128 = parts.next().and_then(|s| s.parse().ok()).ok_or_else(|| field.error("bridged_asset epoch_cap"))?;
-                    let requires_stark = parts.next().map(|s| s == "1" || s.eq_ignore_ascii_case("true")).unwrap_or(false);
+                    let cap: u128 = parts
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .ok_or_else(|| field.error("bridged_asset cap"))?;
+                    let epoch_cap: u128 = parts
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .ok_or_else(|| field.error("bridged_asset epoch_cap"))?;
+                    let requires_stark = parts
+                        .next()
+                        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false);
                     if cap == 0 || epoch_cap == 0 {
                         return Err(field.error("bridged_asset cap and epoch_cap must be nonzero"));
                     }
                     if requires_stark {
                         return Err(field.error("bridged_asset requires_stark is not enforced yet (FRI verification unwired); refusing a false STARK assurance"));
                     }
-                    bridged.push(GenesisBridgedAsset { asset_id, cap, epoch_cap, requires_stark });
+                    bridged.push(GenesisBridgedAsset {
+                        asset_id,
+                        cap,
+                        epoch_cap,
+                        requires_stark,
+                    });
                 }
                 other => {
                     return Err(field.error(&format!("unknown genesis key '{other}'")));
@@ -131,26 +149,34 @@ impl GenesisFile {
             chain_id: chain_binding,
         };
         if fee_params.rate_micro_usd_per_qtov == 0 {
-            return Err("the genesis 'fee_rate_micro_usd_per_qtov' is zero, so the fee \
+            return Err(
+                "the genesis 'fee_rate_micro_usd_per_qtov' is zero, so the fee \
                         conversion would divide by zero on the first transaction"
-                .to_string());
+                    .to_string(),
+            );
         }
         if fee_params.native_unit == 0 {
-            return Err("the genesis 'fee_native_unit' is zero, so every fee rounds away and \
+            return Err(
+                "the genesis 'fee_native_unit' is zero, so every fee rounds away and \
                         transfers would be free"
-                .to_string());
+                    .to_string(),
+            );
         }
         if fee_params.transfer_fee() == 0 {
-            return Err("the genesis fee schedule rounds a transfer fee to zero at this rate \
+            return Err(
+                "the genesis fee schedule rounds a transfer fee to zero at this rate \
                         and native unit, so a transfer would carry no fee"
-                .to_string());
+                    .to_string(),
+            );
         }
         if fee_params.max_fee_native < fee_params.floor_native_uncapped() {
-            return Err("the genesis 'fee_max_native' is below the band floor at this rate, \
+            return Err(
+                "the genesis 'fee_max_native' is below the band floor at this rate, \
                         so the native ceiling would clamp a transfer below the advertised \
                         floor fee. Set it to at least the floor, and to the band ceiling at \
                         this rate for the band to work fully before the rate goes stale"
-                .to_string());
+                    .to_string(),
+            );
         }
         if validators.is_empty() {
             return Err("the genesis names no validators, so no committee can form".to_string());
@@ -172,7 +198,10 @@ impl GenesisFile {
                 seen.push(*m);
             }
             if threshold < 2 || (threshold as usize) > guardian_members.len() {
-                return Err("genesis guardian_threshold must be >=2 and <= the number of guardians".to_string());
+                return Err(
+                    "genesis guardian_threshold must be >=2 and <= the number of guardians"
+                        .to_string(),
+                );
             }
             GuardianSet::new(guardian_members, threshold)
         };
@@ -189,7 +218,9 @@ impl GenesisFile {
                     return Err("genesis bridge_operator public keys must be distinct".to_string());
                 }
                 if !operator_pop_ok(*id, pk, pop, chain_binding) {
-                    return Err(format!("genesis bridge_operator {id} has an invalid proof-of-possession"));
+                    return Err(format!(
+                        "genesis bridge_operator {id} has an invalid proof-of-possession"
+                    ));
                 }
                 operators.push((*id, pk.clone()));
             }
@@ -200,7 +231,9 @@ impl GenesisFile {
                 return Err("genesis bridge_threshold exceeds the committee size".to_string());
             }
             if (threshold as usize) * 3 < operators.len() * 2 {
-                return Err("genesis bridge_threshold is below the two thirds BFT safety ratio".to_string());
+                return Err(
+                    "genesis bridge_threshold is below the two thirds BFT safety ratio".to_string(),
+                );
             }
             Some(OperatorSet::new(operators, threshold))
         };
@@ -249,7 +282,12 @@ fn enforce_no_capture(
                      which reaches the BFT fault threshold and could stall or capture the chain at \
                      launch. Spread the stake so no single validator bonds a {} in {} share of the \
                      total or more",
-                    v.id, v.stake, total_stake, CAPTURE_CAP_NUM, CAPTURE_CAP_DEN, CAPTURE_CAP_NUM,
+                    v.id,
+                    v.stake,
+                    total_stake,
+                    CAPTURE_CAP_NUM,
+                    CAPTURE_CAP_DEN,
+                    CAPTURE_CAP_NUM,
                     CAPTURE_CAP_DEN
                 ));
             }
@@ -265,8 +303,13 @@ fn enforce_no_capture(
                      could bond, which reaches the BFT fault threshold and could stall or capture \
                      the chain at launch. Spread the supply so no single account holds a {} in {} \
                      share of the total or more",
-                    a.address, a.balance, total_balance, CAPTURE_CAP_NUM, CAPTURE_CAP_DEN,
-                    CAPTURE_CAP_NUM, CAPTURE_CAP_DEN
+                    a.address,
+                    a.balance,
+                    total_balance,
+                    CAPTURE_CAP_NUM,
+                    CAPTURE_CAP_DEN,
+                    CAPTURE_CAP_NUM,
+                    CAPTURE_CAP_DEN
                 ));
             }
         }
@@ -492,7 +535,12 @@ mod tests {
             validator(3, 2_000),
             validator(4, 2_000),
         ];
-        let accounts = vec![account(1, 100), account(2, 100), account(3, 100), account(4, 100)];
+        let accounts = vec![
+            account(1, 100),
+            account(2, 100),
+            account(3, 100),
+            account(4, 100),
+        ];
         assert!(
             enforce_no_capture(&validators, &accounts).is_ok(),
             "a spread where every share sits strictly under a third clears the cap"
@@ -511,7 +559,11 @@ mod tests {
 
     #[test]
     fn a_validator_at_the_fault_threshold_bond_is_rejected() {
-        let validators = vec![validator(1, 2_000), validator(2, 2_000), validator(3, 2_000)];
+        let validators = vec![
+            validator(1, 2_000),
+            validator(2, 2_000),
+            validator(3, 2_000),
+        ];
         let err = enforce_no_capture(&validators, &[])
             .expect_err("a share at exactly a third is rejected");
         assert!(err.contains("validator 1"), "{err}");
@@ -526,7 +578,8 @@ mod tests {
             validator(3, 2_000),
             validator(4, 9_000),
         ];
-        let err = enforce_no_capture(&validators, &[]).expect_err("the whale validator is rejected");
+        let err =
+            enforce_no_capture(&validators, &[]).expect_err("the whale validator is rejected");
         assert!(err.contains("validator 4"), "{err}");
     }
 
@@ -548,8 +601,8 @@ mod tests {
             validator(3, 2_000),
             validator(4, 2_000),
         ];
-        let err = enforce_no_capture(&validators, &accounts)
-            .expect_err("the whale account is rejected");
+        let err =
+            enforce_no_capture(&validators, &accounts).expect_err("the whale account is rejected");
         assert!(err.contains("account qtv1account2"), "{err}");
     }
 }

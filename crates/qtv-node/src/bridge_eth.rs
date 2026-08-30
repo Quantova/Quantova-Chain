@@ -476,7 +476,10 @@ mod tests {
         let (chain, reference) = proof.source_key();
         assert_eq!(chain, eth_source_chain(proof.config_selector));
         let finalized_root = proof.update.finalized_header.hash_tree_root();
-        assert_eq!(reference, eth_source_ref(&finalized_root, proof.deposit.receipt_index));
+        assert_eq!(
+            reference,
+            eth_source_ref(&finalized_root, proof.deposit.receipt_index)
+        );
         assert_ne!(eth_source_chain(0), eth_source_chain(1));
     }
 

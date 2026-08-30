@@ -81,7 +81,12 @@ pub fn overlap_power(old: &ValidatorSet, new: &ValidatorSet) -> u128 {
     overlap
 }
 
-pub fn overlap_meets(old: &ValidatorSet, new: &ValidatorSet, numerator: u64, denominator: u64) -> bool {
+pub fn overlap_meets(
+    old: &ValidatorSet,
+    new: &ValidatorSet,
+    numerator: u64,
+    denominator: u64,
+) -> bool {
     if numerator == 0 {
         return false;
     }
@@ -203,7 +208,10 @@ mod tests {
     fn the_validator_set_hash_stays_linear_against_a_large_untrusted_set() {
         let set = ValidatorSet::new(
             (0..60_000u32)
-                .map(|i| ValidatorInfo { pubkey: distinct_key(i), voting_power: 1 })
+                .map(|i| ValidatorInfo {
+                    pubkey: distinct_key(i),
+                    voting_power: 1,
+                })
                 .collect(),
         );
         let start = std::time::Instant::now();
@@ -219,7 +227,10 @@ mod tests {
         let old = ValidatorSet::new((0..128).map(|i| validator(i as u8, 10)).collect());
         let mut new_vals: Vec<ValidatorInfo> = (0..40).map(|i| validator(i as u8, 10)).collect();
         for i in 0..40_000u32 {
-            new_vals.push(ValidatorInfo { pubkey: distinct_key(i), voting_power: 1 });
+            new_vals.push(ValidatorInfo {
+                pubkey: distinct_key(i),
+                voting_power: 1,
+            });
         }
         let new = ValidatorSet::new(new_vals);
         let start = std::time::Instant::now();
@@ -228,6 +239,10 @@ mod tests {
             start.elapsed() < std::time::Duration::from_secs(5),
             "overlap over a large untrusted set must not be quadratic"
         );
-        assert_eq!(overlap, 40 * 10, "the forty shared validators contribute their power once each");
+        assert_eq!(
+            overlap,
+            40 * 10,
+            "the forty shared validators contribute their power once each"
+        );
     }
 }

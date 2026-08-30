@@ -66,7 +66,10 @@ fn a_transaction_a_proposal_and_an_attestation_reach_every_node_over_the_overlay
         let tau = (2 * NODES) / 3 + 1;
         assert!(
             finalized.attesters.len() >= tau
-                && finalized.attesters.iter().all(|a| (1..=NODES as u64).contains(a)),
+                && finalized
+                    .attesters
+                    .iter()
+                    .all(|a| (1..=NODES as u64).contains(a)),
             "node {i} did not aggregate a valid quorum"
         );
     }

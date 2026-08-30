@@ -17,7 +17,12 @@ fn unique_base(name: &str) -> std::path::PathBuf {
         .unwrap()
         .as_nanos();
     let mut base = std::env::temp_dir();
-    base.push(format!("qtv-gateway-{}-{}-{}", std::process::id(), name, stamp));
+    base.push(format!(
+        "qtv-gateway-{}-{}-{}",
+        std::process::id(),
+        name,
+        stamp
+    ));
     base
 }
 
@@ -52,7 +57,10 @@ fn context() -> NodeContext {
 fn build(method: &str, body: Json) -> Request {
     match build_request(method, &body) {
         Ok(request) => request,
-        Err(err) => panic!("build_request rejected {method}: {} {}", err.code, err.message),
+        Err(err) => panic!(
+            "build_request rejected {method}: {} {}",
+            err.code, err.message
+        ),
     }
 }
 
@@ -109,19 +117,40 @@ fn get_side_events_serialises_the_recorded_kinds_for_a_height() {
     };
     assert_eq!(events.len(), 3);
 
-    assert_eq!(field(&events[0], "kind").and_then(Json::as_str), Some("gov_enact"));
+    assert_eq!(
+        field(&events[0], "kind").and_then(Json::as_str),
+        Some("gov_enact")
+    );
     assert_eq!(field(&events[0], "index").and_then(Json::as_u64), Some(0));
     assert_eq!(field(&events[0], "ref").and_then(Json::as_u64), Some(3));
-    assert_eq!(field(&events[0], "action").and_then(Json::as_str), Some("mint"));
+    assert_eq!(
+        field(&events[0], "action").and_then(Json::as_str),
+        Some("mint")
+    );
 
-    assert_eq!(field(&events[1], "kind").and_then(Json::as_str), Some("bond"));
+    assert_eq!(
+        field(&events[1], "kind").and_then(Json::as_str),
+        Some("bond")
+    );
     assert_eq!(field(&events[1], "index").and_then(Json::as_u64), Some(1));
-    assert_eq!(field(&events[1], "actor").and_then(Json::as_str), Some(validator.as_str()));
-    assert_eq!(field(&events[1], "amount").and_then(Json::as_str), Some("1000"));
+    assert_eq!(
+        field(&events[1], "actor").and_then(Json::as_str),
+        Some(validator.as_str())
+    );
+    assert_eq!(
+        field(&events[1], "amount").and_then(Json::as_str),
+        Some("1000")
+    );
     assert_eq!(field(&events[1], "fee").and_then(Json::as_str), Some("5"));
 
-    assert_eq!(field(&events[2], "kind").and_then(Json::as_str), Some("freeze"));
-    assert_eq!(field(&events[2], "target").and_then(Json::as_str), Some(target.as_str()));
+    assert_eq!(
+        field(&events[2], "kind").and_then(Json::as_str),
+        Some("freeze")
+    );
+    assert_eq!(
+        field(&events[2], "target").and_then(Json::as_str),
+        Some(target.as_str())
+    );
 
     let empty = served(handle(
         &ctx,
@@ -193,26 +222,56 @@ fn get_side_events_serialises_the_bridge_economic_kinds() {
     let asset_hex: String = asset_id.iter().map(|b| format!("{b:02x}")).collect();
     let burn_hex: String = burn_ref.iter().map(|b| format!("{b:02x}")).collect();
 
-    assert_eq!(field(&events[0], "kind").and_then(Json::as_str), Some("bridge_mint"));
-    assert_eq!(field(&events[0], "amount").and_then(Json::as_str), Some("1000"));
-    assert_eq!(field(&events[0], "asset_id").and_then(Json::as_str), Some(asset_hex.as_str()));
+    assert_eq!(
+        field(&events[0], "kind").and_then(Json::as_str),
+        Some("bridge_mint")
+    );
+    assert_eq!(
+        field(&events[0], "amount").and_then(Json::as_str),
+        Some("1000")
+    );
+    assert_eq!(
+        field(&events[0], "asset_id").and_then(Json::as_str),
+        Some(asset_hex.as_str())
+    );
     assert_eq!(
         field(&events[0], "target").and_then(Json::as_str),
         Some(qtv_idfmt::render_address(&recipient).unwrap().as_str()),
     );
 
-    assert_eq!(field(&events[1], "kind").and_then(Json::as_str), Some("bridge_burn"));
-    assert_eq!(field(&events[1], "amount").and_then(Json::as_str), Some("400"));
-    assert_eq!(field(&events[1], "chain_id").and_then(Json::as_u64), Some(2));
-    assert_eq!(field(&events[1], "burn_ref").and_then(Json::as_str), Some(burn_hex.as_str()));
+    assert_eq!(
+        field(&events[1], "kind").and_then(Json::as_str),
+        Some("bridge_burn")
+    );
+    assert_eq!(
+        field(&events[1], "amount").and_then(Json::as_str),
+        Some("400")
+    );
+    assert_eq!(
+        field(&events[1], "chain_id").and_then(Json::as_u64),
+        Some(2)
+    );
+    assert_eq!(
+        field(&events[1], "burn_ref").and_then(Json::as_str),
+        Some(burn_hex.as_str())
+    );
     assert_eq!(
         field(&events[1], "actor").and_then(Json::as_str),
         Some(qtv_idfmt::render_address(&holder).unwrap().as_str()),
     );
 
-    assert_eq!(field(&events[2], "kind").and_then(Json::as_str), Some("bridge_settle"));
-    assert_eq!(field(&events[2], "burn_ref").and_then(Json::as_str), Some(burn_hex.as_str()));
-    assert_eq!(field(&events[3], "kind").and_then(Json::as_str), Some("bridge_slash"));
+    assert_eq!(
+        field(&events[2], "kind").and_then(Json::as_str),
+        Some("bridge_settle")
+    );
+    assert_eq!(
+        field(&events[2], "burn_ref").and_then(Json::as_str),
+        Some(burn_hex.as_str())
+    );
+    assert_eq!(
+        field(&events[3], "kind").and_then(Json::as_str),
+        Some("bridge_slash")
+    );
     assert_eq!(
         field(&events[3], "target").and_then(Json::as_str),
         Some(qtv_idfmt::render_address(&beneficiary).unwrap().as_str()),

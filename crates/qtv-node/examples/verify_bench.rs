@@ -60,7 +60,9 @@ fn median(mut s: Vec<f64>) -> f64 {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let count: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(100_000);
-    let cores = thread::available_parallelism().map(|p| p.get()).unwrap_or(1);
+    let cores = thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1);
     let threads: usize = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(cores);
 
     let fee = FeeParams::devnet();
@@ -110,7 +112,10 @@ fn main() {
                         })
                     })
                     .collect();
-                handles.into_iter().map(|h| h.join().expect("verify worker panicked")).sum::<usize>()
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("verify worker panicked"))
+                    .sum::<usize>()
             });
             assert_eq!(ok, signed.len(), "every signature verifies");
             count as f64 / start.elapsed().as_secs_f64()
@@ -121,7 +126,10 @@ fn main() {
     let vpar = median(par);
     println!("Signature verification throughput, {count} signatures, {threads} of {cores} cores");
     println!("  sequential, one core : {vseq:>10.0} verify/s");
-    println!("  parallel, {threads} cores  : {vpar:>10.0} verify/s   speedup {:.1}x", vpar / vseq);
+    println!(
+        "  parallel, {threads} cores  : {vpar:>10.0} verify/s   speedup {:.1}x",
+        vpar / vseq
+    );
     if vpar >= TARGET_TPS {
         println!(
             "  parallel verify {vpar:.0} is ABOVE the {TARGET_TPS:.0} target, so verification is not the ceiling, the serial state trie is what caps the block path"

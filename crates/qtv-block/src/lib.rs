@@ -246,7 +246,10 @@ fn merkle_root(leaves: &[[u8; ROOT_LEN]]) -> [u8; ROOT_LEN] {
 }
 
 fn largest_power_of_two_below(n: usize) -> usize {
-    debug_assert!(n >= 2, "the split rule is only called on two or more leaves");
+    debug_assert!(
+        n >= 2,
+        "the split rule is only called on two or more leaves"
+    );
     let mut split = 1;
     while split << 1 < n {
         split <<= 1;

@@ -65,7 +65,9 @@ fn the_running_devnet_rotates_keys_across_epochs_and_finalises_past_the_fixed_ce
 
     let target = slots * 3 + 2;
     for expected_height in 1..=target {
-        devnet.step().expect("the committee finalised the height across the rotation");
+        devnet
+            .step()
+            .expect("the committee finalised the height across the rotation");
         for i in 0..devnet.len() {
             assert_eq!(
                 devnet.node(i).height(),
@@ -83,7 +85,10 @@ fn the_running_devnet_rotates_keys_across_epochs_and_finalises_past_the_fixed_ce
     let reference = header_chain(devnet.node(0));
     assert_eq!(reference.len() as u64, target, "not every height finalised");
     for i in 0..devnet.len() {
-        assert!(devnet.node(i).epoch() >= 2, "node {i} did not rotate across two epochs");
+        assert!(
+            devnet.node(i).epoch() >= 2,
+            "node {i} did not rotate across two epochs"
+        );
         assert_eq!(
             header_chain(devnet.node(i)),
             reference,

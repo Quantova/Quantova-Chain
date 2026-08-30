@@ -17,7 +17,12 @@ fn unique_base(name: &str) -> std::path::PathBuf {
         .unwrap()
         .as_nanos();
     let mut base = std::env::temp_dir();
-    base.push(format!("qtv-gateway-{}-{}-{}", std::process::id(), name, stamp));
+    base.push(format!(
+        "qtv-gateway-{}-{}-{}",
+        std::process::id(),
+        name,
+        stamp
+    ));
     base
 }
 
@@ -61,7 +66,10 @@ fn entry(height: u64, tag: u8) -> BurnArchiveEntry {
 fn build(method: &str, body: Json) -> Request {
     match build_request(method, &body) {
         Ok(request) => request,
-        Err(err) => panic!("build_request rejected {method}: {} {}", err.code, err.message),
+        Err(err) => panic!(
+            "build_request rejected {method}: {} {}",
+            err.code, err.message
+        ),
     }
 }
 
@@ -80,7 +88,11 @@ fn finalized_head_returns_the_node_head() {
     let mut node = DevNode::open(&cfg.nodes[0], &cfg).expect("open");
 
     let expected = node.finalized_head();
-    let out = served(handle(&ctx, &mut node, build("finalized_head", Json::Object(Vec::new()))));
+    let out = served(handle(
+        &ctx,
+        &mut node,
+        build("finalized_head", Json::Object(Vec::new())),
+    ));
     assert_eq!(out.get("head").and_then(Json::as_u64), Some(expected));
 
     std::fs::remove_dir_all(&base).ok();
@@ -96,7 +108,11 @@ fn burn_block_returns_the_archived_entry_and_a_not_found_when_absent() {
     let seeded = entry(7, 0xab);
     node.seed_burn_archive(seeded.clone());
 
-    let out = served(handle(&ctx, &mut node, build("burn_block", object(vec![("height", Json::Int(7))]))));
+    let out = served(handle(
+        &ctx,
+        &mut node,
+        build("burn_block", object(vec![("height", Json::Int(7))])),
+    ));
     assert_eq!(out.get("height").and_then(Json::as_u64), Some(7));
     assert_eq!(
         out.get("header_bytes").and_then(Json::as_str),
@@ -117,7 +133,11 @@ fn burn_block_returns_the_archived_entry_and_a_not_found_when_absent() {
         .collect();
     assert_eq!(events, expected_events);
 
-    match handle(&ctx, &mut node, build("burn_block", object(vec![("height", Json::Int(8))]))) {
+    match handle(
+        &ctx,
+        &mut node,
+        build("burn_block", object(vec![("height", Json::Int(8))])),
+    ) {
         Err(err) => {
             assert_eq!(err.http, 404);
             assert_eq!(err.code, "not_found");
@@ -139,20 +159,42 @@ fn burn_heights_after_lists_archived_heights_in_order_from_the_cursor() {
     node.seed_burn_archive(entry(7, 0x22));
     node.seed_burn_archive(entry(30, 0x33));
 
-    let from_zero = served(handle(&ctx, &mut node, build("burn_heights_after", object(vec![("cursor", Json::Int(0))]))));
+    let from_zero = served(handle(
+        &ctx,
+        &mut node,
+        build("burn_heights_after", object(vec![("cursor", Json::Int(0))])),
+    ));
     assert_eq!(from_zero.get("count").and_then(Json::as_u64), Some(3));
     assert_eq!(
         from_zero.get("heights"),
-        Some(&Json::Array(vec![Json::Int(7), Json::Int(12), Json::Int(30)]))
+        Some(&Json::Array(vec![
+            Json::Int(7),
+            Json::Int(12),
+            Json::Int(30)
+        ]))
     );
 
-    let from_twelve = served(handle(&ctx, &mut node, build("burn_heights_after", object(vec![("cursor", Json::Int(12))]))));
+    let from_twelve = served(handle(
+        &ctx,
+        &mut node,
+        build(
+            "burn_heights_after",
+            object(vec![("cursor", Json::Int(12))]),
+        ),
+    ));
     assert_eq!(
         from_twelve.get("heights"),
         Some(&Json::Array(vec![Json::Int(30)]))
     );
 
-    let from_top = served(handle(&ctx, &mut node, build("burn_heights_after", object(vec![("cursor", Json::Int(30))]))));
+    let from_top = served(handle(
+        &ctx,
+        &mut node,
+        build(
+            "burn_heights_after",
+            object(vec![("cursor", Json::Int(30))]),
+        ),
+    ));
     assert_eq!(from_top.get("count").and_then(Json::as_u64), Some(0));
     assert_eq!(from_top.get("heights"), Some(&Json::Array(Vec::new())));
 
@@ -171,7 +213,11 @@ fn a_zero_cursor_burn_heights_request_is_bounded_to_one_serve_page() {
         node.seed_burn_archive(entry(height, (height & 0xff) as u8));
     }
 
-    let flood = served(handle(&ctx, &mut node, build("burn_heights_after", object(vec![("cursor", Json::Int(0))]))));
+    let flood = served(handle(
+        &ctx,
+        &mut node,
+        build("burn_heights_after", object(vec![("cursor", Json::Int(0))])),
+    ));
     let returned = match flood.get("heights") {
         Some(Json::Array(items)) => items.len(),
         other => panic!("heights must be an array, got {other:?}"),

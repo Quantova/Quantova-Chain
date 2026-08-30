@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::bls::BlsAggregateVerifier;
-use crate::engine::{verify_deposit_update, DepositProof, EthError, LightClientStore, LightClientUpdate};
+use crate::engine::{
+    verify_deposit_update, DepositProof, EthError, LightClientStore, LightClientUpdate,
+};
 use qlc_stark::corridors::ProofStatement;
 use qlc_stark::shake256_256;
 
@@ -141,8 +143,8 @@ mod tests {
     fn build_fixture(amount: u128, participation: Vec<bool>) -> Fixture {
         let mut cfg = config::ethereum();
         cfg.deposit_contract = [
-            0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x71, 0x82, 0x93, 0xa4,
-            0xb5, 0xc6, 0xd7, 0xe8, 0xf9, 0x0a, 0x1b, 0x2c, 0x3d, 0x4e,
+            0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x71, 0x82, 0x93, 0xa4, 0xb5, 0xc6, 0xd7, 0xe8,
+            0xf9, 0x0a, 0x1b, 0x2c, 0x3d, 0x4e,
         ];
         let recipient = [0x5c; 32];
         let asset_id = [0x77; 16];
@@ -215,7 +217,8 @@ mod tests {
             signature,
         };
 
-        let store = LightClientStore::from_trusted_committee(cfg, PERIOD, committee, finalized_header);
+        let store =
+            LightClientStore::from_trusted_committee(cfg, PERIOD, committee, finalized_header);
 
         let update = LightClientUpdate {
             attested_header,
@@ -264,8 +267,14 @@ mod tests {
         let f = build_fixture(7_000_000_000_000_000_000u128, full_participation());
         let witness =
             prove_ready_witness(&f.store, &f.update, &f.deposit, &HashCommitmentBls).unwrap();
-        assert_eq!(witness.facts.attested_header_root, f.update.attested_header.hash_tree_root());
-        assert_eq!(witness.facts.receipts_root, f.update.execution.receipts_root);
+        assert_eq!(
+            witness.facts.attested_header_root,
+            f.update.attested_header.hash_tree_root()
+        );
+        assert_eq!(
+            witness.facts.receipts_root,
+            f.update.execution.receipts_root
+        );
         assert_eq!(witness.facts.participants, 400);
         assert_eq!(witness.statement.corridor_id, 2);
     }
@@ -276,8 +285,15 @@ mod tests {
         let mut fewer_participation = vec![false; 512];
         fewer_participation[..350].fill(true);
         let fewer = build_fixture(7_000_000_000_000_000_000u128, fewer_participation);
-        let a = prove_ready_witness(&full.store, &full.update, &full.deposit, &HashCommitmentBls).unwrap();
-        let b = prove_ready_witness(&fewer.store, &fewer.update, &fewer.deposit, &HashCommitmentBls).unwrap();
+        let a = prove_ready_witness(&full.store, &full.update, &full.deposit, &HashCommitmentBls)
+            .unwrap();
+        let b = prove_ready_witness(
+            &fewer.store,
+            &fewer.update,
+            &fewer.deposit,
+            &HashCommitmentBls,
+        )
+        .unwrap();
         assert_ne!(a.public_input_digest, b.public_input_digest);
     }
 

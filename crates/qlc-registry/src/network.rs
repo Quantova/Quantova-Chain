@@ -64,7 +64,9 @@ impl NetworkId {
         match self {
             Bitcoin | BitcoinCash | Litecoin | Dogecoin | Zcash | Monero => ChainFamily::Bitcoin,
             Ethereum | BnbChain | Polygon | Avalanche | Arbitrum | Optimism | Base | Fantom
-            | Gnosis | Linea | Scroll | ZkSyncEra | Mantle | Celo | RobinhoodChain => ChainFamily::Evm,
+            | Gnosis | Linea | Scroll | ZkSyncEra | Mantle | Celo | RobinhoodChain => {
+                ChainFamily::Evm
+            }
             CosmosHub | Osmosis | Celestia | Injective | Sei | Kava => ChainFamily::Cosmos,
             Solana | Tron | XrpLedger | Cardano | Near | Sui | Aptos | Hedera | Algorand | Ton
             | Stellar | Cctp => ChainFamily::Other,

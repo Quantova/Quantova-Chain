@@ -21,13 +21,17 @@ fn corridor_from(name: &str) -> Result<Corridor, String> {
         "bitcoin" | "btc" => Ok(Corridor::Bitcoin),
         "ethereum" | "eth" => Ok(Corridor::Ethereum),
         "cosmos" | "atom" => Ok(Corridor::Cosmos),
-        other => Err(format!("unknown corridor {other}, expected bitcoin ethereum or cosmos")),
+        other => Err(format!(
+            "unknown corridor {other}, expected bitcoin ethereum or cosmos"
+        )),
     }
 }
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
-    let gateway = args.next().ok_or("usage qtv-bridge-relay <gateway-url> <corridor> [proof-hex]")?;
+    let gateway = args
+        .next()
+        .ok_or("usage qtv-bridge-relay <gateway-url> <corridor> [proof-hex]")?;
     let corridor = corridor_from(&args.next().ok_or("missing corridor")?)?;
 
     let proof_hex = match args.next() {

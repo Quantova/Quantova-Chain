@@ -76,7 +76,9 @@ pub fn wrap_store_layer(mut iavl: ExistenceProof, store_name: &[u8]) -> ([u8; 32
     let store = ExistenceProof {
         key: store_name.to_vec(),
         value: iavl_root.to_vec(),
-        leaf: LeafOp { prefix: vec![LEAF_MARKER] },
+        leaf: LeafOp {
+            prefix: vec![LEAF_MARKER],
+        },
         path: Vec::new(),
         store: None,
     };
@@ -147,7 +149,10 @@ pub fn extract_deposit(
         return Err(ProofError::ForeignStoreKey);
     }
     let iavl_root = proof.calculate_root();
-    let store = proof.store.as_deref().ok_or(ProofError::MissingStoreProof)?;
+    let store = proof
+        .store
+        .as_deref()
+        .ok_or(ProofError::MissingStoreProof)?;
     canonical_ops(store)?;
     if store_name.is_empty() || store.key != store_name {
         return Err(ProofError::ForeignStore);
@@ -191,10 +196,18 @@ mod tests {
         let proof = ExistenceProof {
             key: key.clone(),
             value,
-            leaf: LeafOp { prefix: vec![0x00, 0x02, 0x00] },
+            leaf: LeafOp {
+                prefix: vec![0x00, 0x02, 0x00],
+            },
             path: vec![
-                InnerOp { prefix: vec![0x01, 0xaa], suffix: vec![0xbb, 0xcc] },
-                InnerOp { prefix: vec![0x01], suffix: vec![0xde, 0xad, 0xbe, 0xef] },
+                InnerOp {
+                    prefix: vec![0x01, 0xaa],
+                    suffix: vec![0xbb, 0xcc],
+                },
+                InnerOp {
+                    prefix: vec![0x01],
+                    suffix: vec![0xde, 0xad, 0xbe, 0xef],
+                },
             ],
             store: None,
         };
@@ -211,7 +224,10 @@ mod tests {
     fn a_valid_two_layer_proof_extracts_the_deposit() {
         let (iavl, expected) = sample_proof();
         let (app_hash, proof) = wrap_store_layer(iavl, STORE_NAME);
-        assert_eq!(extract_deposit(&app_hash, STORE_NAME, STORE_PREFIX, &proof), Ok(expected));
+        assert_eq!(
+            extract_deposit(&app_hash, STORE_NAME, STORE_PREFIX, &proof),
+            Ok(expected)
+        );
     }
 
     #[test]
@@ -294,10 +310,18 @@ mod tests {
         let iavl = ExistenceProof {
             key: b"staking/deposits/quantova-recipient".to_vec(),
             value,
-            leaf: LeafOp { prefix: vec![0x00, 0x02, 0x00] },
+            leaf: LeafOp {
+                prefix: vec![0x00, 0x02, 0x00],
+            },
             path: vec![
-                InnerOp { prefix: vec![0x01, 0xaa], suffix: vec![0xbb, 0xcc] },
-                InnerOp { prefix: vec![0x01], suffix: vec![0xde, 0xad, 0xbe, 0xef] },
+                InnerOp {
+                    prefix: vec![0x01, 0xaa],
+                    suffix: vec![0xbb, 0xcc],
+                },
+                InnerOp {
+                    prefix: vec![0x01],
+                    suffix: vec![0xde, 0xad, 0xbe, 0xef],
+                },
             ],
             store: None,
         };

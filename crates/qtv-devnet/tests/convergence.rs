@@ -41,7 +41,17 @@ fn nodes_reach_a_byte_identical_chain_at_each_height() {
     for i in 0..devnet.len() {
         assert_eq!(devnet.node(i).ledger().q_root(), root);
         for finalized in devnet.node(i).chain() {
-            assert!(finalized.attesters.len() >= 3, "at least a two thirds quorum attested"); assert!(finalized.attesters.iter().all(|a| [1u64, 2, 3, 4].contains(a)), "every attester is a committee member");
+            assert!(
+                finalized.attesters.len() >= 3,
+                "at least a two thirds quorum attested"
+            );
+            assert!(
+                finalized
+                    .attesters
+                    .iter()
+                    .all(|a| [1u64, 2, 3, 4].contains(a)),
+                "every attester is a committee member"
+            );
         }
     }
 

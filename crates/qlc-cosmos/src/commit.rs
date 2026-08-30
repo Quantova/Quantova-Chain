@@ -275,7 +275,10 @@ mod tests {
             },
             signatures: Vec::new(),
         };
-        commit.signatures = signers.iter().map(|&i| precommit(&validators[i], &commit)).collect();
+        commit.signatures = signers
+            .iter()
+            .map(|&i| precommit(&validators[i], &commit))
+            .collect();
         (header, commit, set)
     }
 
@@ -299,7 +302,10 @@ mod tests {
         let (header, commit, set) = build(&vs, &[0, 1]);
         assert_eq!(
             verify_commit(CHAIN_ID, &header, &commit, &set),
-            Err(CommitError::NotEnoughVotingPower { signed: 60, total: 90 })
+            Err(CommitError::NotEnoughVotingPower {
+                signed: 60,
+                total: 90
+            })
         );
     }
 
@@ -309,7 +315,10 @@ mod tests {
         let (header, commit, set) = build(&vs, &[0, 1]);
         assert_eq!(
             verify_commit(CHAIN_ID, &header, &commit, &set),
-            Err(CommitError::NotEnoughVotingPower { signed: 50, total: 100 })
+            Err(CommitError::NotEnoughVotingPower {
+                signed: 50,
+                total: 100
+            })
         );
     }
 
@@ -331,7 +340,10 @@ mod tests {
         commit.signatures[2].signature = vec![0x00; 64];
         assert_eq!(
             verify_commit(CHAIN_ID, &header, &commit, &set),
-            Err(CommitError::NotEnoughVotingPower { signed: 50, total: 100 })
+            Err(CommitError::NotEnoughVotingPower {
+                signed: 50,
+                total: 100
+            })
         );
     }
 

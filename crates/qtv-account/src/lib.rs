@@ -195,7 +195,13 @@ mod redaction_tests {
     fn debug_never_prints_the_seed() {
         let account = derive(&[7u8; MASTER_SEED_LEN], 0);
         let shown = format!("{account:?}");
-        assert!(shown.contains("[redacted]"), "seed must be redacted: {shown}");
-        assert!(!shown.contains("seed: ["), "seed must never print as bytes: {shown}");
+        assert!(
+            shown.contains("[redacted]"),
+            "seed must be redacted: {shown}"
+        );
+        assert!(
+            !shown.contains("seed: ["),
+            "seed must never print as bytes: {shown}"
+        );
     }
 }

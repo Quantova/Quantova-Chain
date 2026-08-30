@@ -128,7 +128,9 @@ fn a_stored_burn_block_recomputes_its_event_root_and_an_inclusion_proof_verifies
     }
 
     let archive = BurnArchive::open(&path).unwrap();
-    let stored = archive.entry(1).expect("the burn block survived the reopen");
+    let stored = archive
+        .entry(1)
+        .expect("the burn block survived the reopen");
     assert_eq!(stored, &entry);
 
     let decoded_header = header_from_bytes(&stored.header_bytes).expect("the header decodes");
@@ -161,7 +163,10 @@ fn a_block_with_no_burn_leaf_is_not_treated_as_a_burn() {
         BlockEvent::native(EVENT_TRANSFER, vec![1, 2, 3]),
         BlockEvent::native(EVENT_TRANSFER, vec![4, 5, 6]),
     ];
-    assert!(!carries_burn(&events), "a transfer only block carries no burn");
+    assert!(
+        !carries_burn(&events),
+        "a transfer only block carries no burn"
+    );
 }
 
 #[test]

@@ -19,7 +19,10 @@ fn open_nodes(config: &DevnetConfig) -> Vec<DevNode> {
         .iter()
         .map(|node| DevNode::open(node, config).expect("node opens"))
         .collect();
-    let notes: Vec<_> = nodes.iter().filter_map(|node| node.own_reveal_note()).collect();
+    let notes: Vec<_> = nodes
+        .iter()
+        .filter_map(|node| node.own_reveal_note())
+        .collect();
     for node in &mut nodes {
         for note in &notes {
             node.collect_reveal(note.clone());
@@ -77,7 +80,8 @@ fn a_polka_locked_validator_refuses_to_prevote_a_conflict() {
         if i == victim {
             continue;
         }
-        if let Some(prevote) = prevote_of(nodes[i].on_proposal(&selection, l0, proposal_x.clone())) {
+        if let Some(prevote) = prevote_of(nodes[i].on_proposal(&selection, l0, proposal_x.clone()))
+        {
             polka.push(prevote);
         }
         if polka.len() as u64 >= selection.tau {
@@ -92,7 +96,10 @@ fn a_polka_locked_validator_refuses_to_prevote_a_conflict() {
             precommitted = true;
         }
     }
-    assert!(precommitted, "the victim formed the polka and precommitted X");
+    assert!(
+        precommitted,
+        "the victim formed the polka and precommitted X"
+    );
 
     let mut records = Vec::new();
     for i in 0..nodes.len() {

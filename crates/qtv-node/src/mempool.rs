@@ -149,7 +149,9 @@ fn plan_from_account_checks(
     }
     let ceiling = fee_params.ceiling_fee();
     let charged = u64::try_from(body.fee().min(u128::from(ceiling))).unwrap_or(ceiling);
-    let debit = amount.checked_add(charged).ok_or(Reject::InsufficientFunds)?;
+    let debit = amount
+        .checked_add(charged)
+        .ok_or(Reject::InsufficientFunds)?;
     if account.balance < debit {
         return Err(Reject::InsufficientFunds);
     }
@@ -472,8 +474,11 @@ impl Mempool {
             if self.duplicate_mint(&wrapper) {
                 return Ok(Admitted::Known);
             }
-            let fresh = crate::node::bridge_mint_source_key(&wrapper)
-                .is_some_and(|(source_chain, source_ref)| !ledger.bridge_reference_seen(source_chain, &source_ref));
+            let fresh = crate::node::bridge_mint_source_key(&wrapper).is_some_and(
+                |(source_chain, source_ref)| {
+                    !ledger.bridge_reference_seen(source_chain, &source_ref)
+                },
+            );
             if !fresh {
                 return Err(Reject::BadCall);
             }
@@ -561,8 +566,14 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
             let signature_ok = qtv_tx::verify(&wrapper, &account.public_key);
-            if crate::node::bridge_exit_admissible(ledger, &wrapper, &account, fee_params, signature_ok)
-                .is_none()
+            if crate::node::bridge_exit_admissible(
+                ledger,
+                &wrapper,
+                &account,
+                fee_params,
+                signature_ok,
+            )
+            .is_none()
             {
                 return Err(Reject::BadCall);
             }
@@ -620,8 +631,11 @@ impl Mempool {
                 if self.duplicate_mint(&wrapper) {
                     continue;
                 }
-                let fresh = crate::node::bridge_mint_source_key(&wrapper)
-                    .is_some_and(|(source_chain, source_ref)| !ledger.bridge_reference_seen(source_chain, &source_ref));
+                let fresh = crate::node::bridge_mint_source_key(&wrapper).is_some_and(
+                    |(source_chain, source_ref)| {
+                        !ledger.bridge_reference_seen(source_chain, &source_ref)
+                    },
+                );
                 if !fresh {
                     continue;
                 }
@@ -646,7 +660,9 @@ impl Mempool {
             let admissible = if crate::node::is_vm_op(ledger, &wrapper) {
                 if !CONTRACTS_ENABLED {
                     false
-                } else if self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce()) {
+                } else if self
+                    .has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce())
+                {
                     false
                 } else {
                     let account = ledger.account(wrapper.body().sender());
@@ -656,14 +672,20 @@ impl Mempool {
                 !self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce())
                     && {
                         let account = ledger.account(wrapper.body().sender());
-                        crate::node::key_register_admissible(&wrapper, &account, fee_params).is_some()
+                        crate::node::key_register_admissible(&wrapper, &account, fee_params)
+                            .is_some()
                     }
             } else if wrapper.body().call().target() == crate::ledger::gov_system_address() {
                 !self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce())
                     && {
                         let account = ledger.account(wrapper.body().sender());
-                        crate::node::governance_admissible(&wrapper, &account, fee_params, verified[index])
-                            .is_some()
+                        crate::node::governance_admissible(
+                            &wrapper,
+                            &account,
+                            fee_params,
+                            verified[index],
+                        )
+                        .is_some()
                     }
             } else if crate::node::is_evidence(&wrapper) {
                 crate::node::evidence_admissible(fee_params.chain_id, &wrapper, ledger)
@@ -808,7 +830,13 @@ mod tests {
         let alice = keypair(1);
         fund(&mut ledger, &alice, 1_000_000_000);
         let start = ledger.account(&alice.address()).balance;
-        let tx = signed_transfer(&alice, &alice.address(), 100, 0, u128::from(params.transfer_fee()));
+        let tx = signed_transfer(
+            &alice,
+            &alice.address(),
+            100,
+            0,
+            u128::from(params.transfer_fee()),
+        );
         assert_eq!(
             validate(&tx, &ledger, &params),
             Err(Reject::SelfTransfer),
@@ -833,7 +861,10 @@ mod tests {
         let id = tx.id();
         let mut pool = Mempool::new();
 
-        assert_eq!(pool.admit(tx.clone(), &ledger, &params), Ok(Admitted::Fresh));
+        assert_eq!(
+            pool.admit(tx.clone(), &ledger, &params),
+            Ok(Admitted::Fresh)
+        );
         assert!(pool.contains(&id), "the admitted id is in the set");
         assert_eq!(
             pool.admit(tx.clone(), &ledger, &params),
@@ -843,7 +874,10 @@ mod tests {
 
         pool.remove_included(&[id.clone()]);
         assert_eq!(pool.len(), 0, "the included tx left the pool");
-        assert!(!pool.contains(&id), "and left the id set, so the set did not drift");
+        assert!(
+            !pool.contains(&id),
+            "and left the id set, so the set did not drift"
+        );
         assert_eq!(
             pool.admit(tx, &ledger, &params),
             Ok(Admitted::Fresh),
@@ -894,7 +928,11 @@ mod tests {
             0,
             params.chain_id,
         );
-        (ledger, Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new()), offender)
+        (
+            ledger,
+            Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new()),
+            offender,
+        )
     }
 
     #[test]
@@ -903,7 +941,11 @@ mod tests {
         let (ledger, tx, _offender) = seeded_evidence(&[9u8; 32]);
         let mut pool = Mempool::new();
         assert_eq!(pool.admit(tx, &ledger, &params), Ok(Admitted::Fresh));
-        assert_eq!(pool.len(), 1, "valid evidence rides with no fee and no signature");
+        assert_eq!(
+            pool.len(),
+            1,
+            "valid evidence rides with no fee and no signature"
+        );
 
         let (bare, forged, _) = seeded_evidence(&[11u8; 32]);
         let empty = Ledger::new();
@@ -995,7 +1037,10 @@ mod tests {
         );
 
         let call = transfer_call(&victim.address(), 1_000);
-        let tx = sign(&attacker, &Body::new(alias.clone(), 0, TRANSFER_METER, fee, call));
+        let tx = sign(
+            &attacker,
+            &Body::new(alias.clone(), 0, TRANSFER_METER, fee, call),
+        );
         assert_eq!(
             pool.admit(tx, &ledger, &params),
             Err(Reject::UnknownSender),
@@ -1039,7 +1084,11 @@ mod tests {
             pool.admit(tx, &ledger, &params).is_ok(),
             "a canonical transfer still admits after the gate"
         );
-        assert_eq!(pool.len(), 1, "only the canonical transfer entered the pool");
+        assert_eq!(
+            pool.len(),
+            1,
+            "only the canonical transfer entered the pool"
+        );
     }
 
     #[test]
@@ -1050,7 +1099,11 @@ mod tests {
         let mut ledger = Ledger::new();
         fund(&mut ledger, &owner, 10_000_000);
         let alias = owner.address().to_ascii_lowercase();
-        assert_ne!(alias, owner.address(), "the alias is a distinct surface string");
+        assert_ne!(
+            alias,
+            owner.address(),
+            "the alias is a distinct surface string"
+        );
         let mut pool = Mempool::new();
 
         let aliased = sign(
@@ -1068,7 +1121,11 @@ mod tests {
             Err(Reject::UnknownSender),
             "a non canonical sender is refused before lane dispatch, not only on the transfer lane"
         );
-        assert_eq!(pool.len(), 0, "the aliased special-op did not enter the pool");
+        assert_eq!(
+            pool.len(),
+            0,
+            "the aliased special-op did not enter the pool"
+        );
 
         let canonical = sign(
             &owner,
@@ -1129,7 +1186,9 @@ mod tests {
         for i in 0..2u64 {
             let guardian = keypair(140 + i);
             fund(&mut ledger, &guardian, 10_000_000);
-            assert!(pool.admit(gov_release(&guardian, 0, fee), &ledger, &params).is_ok());
+            assert!(pool
+                .admit(gov_release(&guardian, 0, fee), &ledger, &params)
+                .is_ok());
         }
         assert_eq!(pool.len(), 4, "the pool is at its hard cap");
 
@@ -1146,10 +1205,15 @@ mod tests {
         let sentinel = keypair(170);
         fund(&mut ledger, &sentinel, 10_000_000);
         assert!(
-            pool.admit(gov_release(&sentinel, 0, fee), &ledger, &params).is_ok(),
+            pool.admit(gov_release(&sentinel, 0, fee), &ledger, &params)
+                .is_ok(),
             "a safety transaction is always includable through the reserved lane"
         );
-        assert_eq!(pool.len(), 4, "admitting a safety transaction keeps the pool bounded");
+        assert_eq!(
+            pool.len(),
+            4,
+            "admitting a safety transaction keeps the pool bounded"
+        );
         assert_eq!(
             pool.candidates().iter().filter(|w| is_priority(w)).count(),
             3,
@@ -1265,8 +1329,7 @@ mod tests {
         let params = FeeParams::devnet();
         let alice = keypair(0);
         let bob = keypair(1);
-        let account =
-            Account::funded(1_000_000, alice.scheme(), alice.public_key().to_vec());
+        let account = Account::funded(1_000_000, alice.scheme(), alice.public_key().to_vec());
         let floor = params.transfer_fee();
         let ceiling = params.ceiling_fee();
         assert!(ceiling > floor);
@@ -1279,10 +1342,12 @@ mod tests {
 
         let mid = floor + (ceiling - floor) / 2;
         let at_mid = signed_transfer(&alice, &bob.address(), 100, 0, u128::from(mid));
-        assert_eq!(plan_from_account(&at_mid, &account, &params).unwrap().fee, mid);
+        assert_eq!(
+            plan_from_account(&at_mid, &account, &params).unwrap().fee,
+            mid
+        );
 
-        let over =
-            signed_transfer(&alice, &bob.address(), 100, 0, u128::from(ceiling) * 100);
+        let over = signed_transfer(&alice, &bob.address(), 100, 0, u128::from(ceiling) * 100);
         assert_eq!(
             plan_from_account(&over, &account, &params).unwrap().fee,
             ceiling
@@ -1357,7 +1422,10 @@ mod tests {
             u128::from(params.transfer_fee()),
         );
         let mut pool = Mempool::new();
-        assert_eq!(pool.admit(tx.clone(), &ledger, &params), Ok(Admitted::Fresh));
+        assert_eq!(
+            pool.admit(tx.clone(), &ledger, &params),
+            Ok(Admitted::Fresh)
+        );
         assert_eq!(pool.admit(tx, &ledger, &params), Ok(Admitted::Known));
         assert_eq!(pool.len(), 1);
     }
@@ -1450,7 +1518,13 @@ mod tests {
         sig[0] ^= 1;
         batch.push(Wrapper::new(good.body().clone(), good.scheme(), sig));
         batch.push(signed_transfer(&keys[41], &keys[42].address(), 500, 5, fee));
-        batch.push(signed_transfer(&keys[42], &keys[43].address(), 1_000_000, 0, fee));
+        batch.push(signed_transfer(
+            &keys[42],
+            &keys[43].address(),
+            1_000_000,
+            0,
+            fee,
+        ));
         batch.push(signed_transfer(&keys[43], &keys[43].address(), 100, 0, fee));
         batch.push(signed_transfer(&keys[60], &keys[44].address(), 100, 0, fee));
 

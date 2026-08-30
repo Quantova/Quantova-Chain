@@ -113,7 +113,10 @@ fn linked_closure(graph: &BTreeMap<String, Package>, roots: &[&str]) -> BTreeSet
 fn the_node_links_no_classical_or_oracle_crate() {
     let graph = packages();
     for root in NODE_ROOTS {
-        assert!(graph.contains_key(*root), "the lockfile is missing the node crate {root}");
+        assert!(
+            graph.contains_key(*root),
+            "the lockfile is missing the node crate {root}"
+        );
     }
     let linked = linked_closure(&graph, NODE_ROOTS);
     for name in &linked {

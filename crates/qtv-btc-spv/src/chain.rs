@@ -266,7 +266,10 @@ mod tests {
     }
 
     fn early_chain() -> Vec<BlockHeader> {
-        [B0, B1, B2, B3, B4, B5, B6].iter().map(|h| header(h)).collect()
+        [B0, B1, B2, B3, B4, B5, B6]
+            .iter()
+            .map(|h| header(h))
+            .collect()
     }
 
     #[test]
@@ -281,7 +284,10 @@ mod tests {
     fn a_header_that_fails_its_proof_of_work_is_rejected() {
         let mut headers = early_chain();
         headers[3].nonce = headers[3].nonce.wrapping_add(1);
-        assert_eq!(verify_chain(&headers, 0, &BITCOIN), Err(SpvError::PowNotMet));
+        assert_eq!(
+            verify_chain(&headers, 0, &BITCOIN),
+            Err(SpvError::PowNotMet)
+        );
     }
 
     #[test]
@@ -315,7 +321,10 @@ mod tests {
 
     #[test]
     fn a_start_height_near_the_u32_ceiling_errors_instead_of_wrapping() {
-        let easy = NetworkParams { pow_limit_bits: 0x207f_ffff, ..BITCOIN };
+        let easy = NetworkParams {
+            pow_limit_bits: 0x207f_ffff,
+            ..BITCOIN
+        };
         let mined = |root: [u8; 32]| {
             let mut h = BlockHeader {
                 version: 1,
@@ -347,28 +356,40 @@ mod tests {
             hash: header(B0).block_hash(),
             min_work: U256::ZERO,
         };
-        assert!(chain.anchored_to(&good).is_ok(), "the genuine anchored chain verifies");
+        assert!(
+            chain.anchored_to(&good).is_ok(),
+            "the genuine anchored chain verifies"
+        );
 
         let wrong_hash = Checkpoint {
             height: 0,
             hash: [0x99u8; 32],
             min_work: U256::ZERO,
         };
-        assert_eq!(chain.anchored_to(&wrong_hash), Err(SpvError::CheckpointMismatch));
+        assert_eq!(
+            chain.anchored_to(&wrong_hash),
+            Err(SpvError::CheckpointMismatch)
+        );
 
         let out_of_range = Checkpoint {
             height: 999,
             hash: header(B0).block_hash(),
             min_work: U256::ZERO,
         };
-        assert_eq!(chain.anchored_to(&out_of_range), Err(SpvError::CheckpointNotInChain));
+        assert_eq!(
+            chain.anchored_to(&out_of_range),
+            Err(SpvError::CheckpointNotInChain)
+        );
 
         let too_light = Checkpoint {
             height: 0,
             hash: header(B0).block_hash(),
             min_work: U256::from_u64(u64::MAX),
         };
-        assert_eq!(chain.anchored_to(&too_light), Err(SpvError::InsufficientWork));
+        assert_eq!(
+            chain.anchored_to(&too_light),
+            Err(SpvError::InsufficientWork)
+        );
     }
 
     #[test]
@@ -406,7 +427,10 @@ mod tests {
             headers: early_chain(),
         };
         assert!(light_long.headers.len() > heavy_short.headers.len());
-        assert_eq!(heavier(&heavy_short, &light_long).tip_hash, heavy_short.tip_hash);
+        assert_eq!(
+            heavier(&heavy_short, &light_long).tip_hash,
+            heavy_short.tip_hash
+        );
     }
 
     #[test]

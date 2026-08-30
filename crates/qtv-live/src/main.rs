@@ -42,7 +42,9 @@ fn shell(program: &str, args: &[&str], fallback: &str) -> String {
 }
 
 fn accounts(count: usize) -> Vec<Account> {
-    (0..count as u64).map(|i| derive(&ACCOUNT_SEED, i)).collect()
+    (0..count as u64)
+        .map(|i| derive(&ACCOUNT_SEED, i))
+        .collect()
 }
 
 fn devnet_config(base: &PathBuf, validators: usize, senders: &[Account]) -> DevnetConfig {
@@ -146,7 +148,11 @@ fn main() {
     let mem_bytes: u64 = shell("sysctl", &["-n", "hw.memsize"], "0")
         .parse()
         .unwrap_or(0);
-    let commit = shell("git", &["-C", manifest, "rev-parse", "--short", "HEAD"], "unknown");
+    let commit = shell(
+        "git",
+        &["-C", manifest, "rev-parse", "--short", "HEAD"],
+        "unknown",
+    );
 
     println!("================================================================================");
     println!(" Quantova live in process multi node harness");
@@ -157,56 +163,88 @@ fn main() {
     println!(" bandwidth and latency are not measured; every other listed part is real.");
     println!();
     println!(" Host (measured on):");
-    println!("   {cpu}, {cores} cores, {:.0} GB memory", mem_bytes as f64 / 1e9);
+    println!(
+        "   {cpu}, {cores} cores, {:.0} GB memory",
+        mem_bytes as f64 / 1e9
+    );
     println!("   build: release (opt-level 3)");
     println!(" Source:");
     println!("   Quantova-Chain commit {commit} (qtv-live drives qtv-devnet, path deps)");
-    println!("   consensus crates pinned at QRC-CONSENSUS tag v0.5.0 (qtv-bft, qtv-sampler, qtv-attest)");
+    println!(
+        "   consensus crates pinned at QRC-CONSENSUS tag v0.5.0 (qtv-bft, qtv-sampler, qtv-attest)"
+    );
     println!();
     println!(" Real in this run:");
     println!("   - {validators} real validator instances, each with its own module lattice key");
     println!("   - real qtv-sampler committee sortition: the one time key sortition of consensus");
-    println!("     v0.5.0 with the stake floor on, each validator staking {} QTOV at the floor",
-        qtv_bft::params::VALIDATOR_STAKE_QTOV);
+    println!(
+        "     v0.5.0 with the stake floor on, each validator staking {} QTOV at the floor",
+        qtv_bft::params::VALIDATOR_STAKE_QTOV
+    );
     println!("   - real block production, real module lattice attestations, real aggregated");
     println!("     finality certificate that every node verifies (no stub)");
-    println!("   - real transactions, each a 3309 byte module lattice signature, verified on ingress");
-    println!("   - real qtv-net post quantum channel (ML-KEM + ML-DSA handshake, ChaCha20-Poly1305)");
-    println!("   - real erasure coded proposal dissemination: the proposal is coded into shards under");
-    println!("     a SHA3 commitment and rebuilt from any k, verified against the header, per node");
+    println!(
+        "   - real transactions, each a 3309 byte module lattice signature, verified on ingress"
+    );
+    println!(
+        "   - real qtv-net post quantum channel (ML-KEM + ML-DSA handshake, ChaCha20-Poly1305)"
+    );
+    println!(
+        "   - real erasure coded proposal dissemination: the proposal is coded into shards under"
+    );
+    println!(
+        "     a SHA3 commitment and rebuilt from any k, verified against the header, per node"
+    );
     println!(" The sortition that runs:");
     println!("   - the one time key sortition, drawn as a committed preimage with its Merkle path");
     println!("     against the registered root, with the minimum self stake floor on. It is the");
     println!("     grinding resistant successor to the v0.3.0 module lattice draw, now pinned at");
     println!("     consensus v0.5.0, so the predecessor draw is no longer on the path.");
-    println!("   - the harness sizes each validator one time tree to {HARNESS_SLOTS} slots through the");
-    println!("     with_slots path, a harness parameter, not the consensus default of 64. One slot is");
-    println!("     spent per height, so a sustained run finalises past 64 heights without the sortition");
+    println!(
+        "   - the harness sizes each validator one time tree to {HARNESS_SLOTS} slots through the"
+    );
+    println!(
+        "     with_slots path, a harness parameter, not the consensus default of 64. One slot is"
+    );
+    println!(
+        "     spent per height, so a sustained run finalises past 64 heights without the sortition"
+    );
     println!("     refusing a slot past the commitment.");
     println!(" In process, so NOT measured:");
     println!("   - inter node bandwidth and propagation latency (in memory duplex, not a socket)");
-    println!("   - every member's compute runs serially on this one host, not parallel across machines");
-    println!("   - the devnet schedules the round on a logical clock, so slot and view timeouts are");
+    println!(
+        "   - every member's compute runs serially on this one host, not parallel across machines"
+    );
+    println!(
+        "   - the devnet schedules the round on a logical clock, so slot and view timeouts are"
+    );
     println!("     logical; the finality figure below is measured wall clock compute, not modelled slots");
-    println!("   - coded dissemination changes how the proposal is carried, it does not turn the in");
-    println!("     memory transport into a real network. It removes the width cap so a wider block can");
+    println!(
+        "   - coded dissemination changes how the proposal is carried, it does not turn the in"
+    );
+    println!(
+        "     memory transport into a real network. It removes the width cap so a wider block can"
+    );
     println!("     be measured; it does not by itself produce a network throughput number.");
     println!();
-    println!(" Consensus parameters: slot {} ms (logical), committee budget {}, stake {} QTOV,",
+    println!(
+        " Consensus parameters: slot {} ms (logical), committee budget {}, stake {} QTOV,",
         qtv_bft::params::SLOT_MS,
         qtv_sampler::params::COMMITTEE_BUDGET,
-        qtv_bft::params::VALIDATOR_STAKE_QTOV);
-    println!("      minimum self stake floor {} QTOV, on",
-        qtv_sampler::params::MIN_SELF_STAKE);
+        qtv_bft::params::VALIDATOR_STAKE_QTOV
+    );
+    println!(
+        "      minimum self stake floor {} QTOV, on",
+        qtv_sampler::params::MIN_SELF_STAKE
+    );
     println!(" Run: {validators} validators, {senders_n} distinct signing accounts (block width),");
-    println!("      target sustained duration {run_secs:.0} s, {warmup} warmup heights (not counted)");
+    println!(
+        "      target sustained duration {run_secs:.0} s, {warmup} warmup heights (not counted)"
+    );
     rule();
 
-    let base = std::env::temp_dir().join(format!(
-        "qtv-live-{}-{}",
-        std::process::id(),
-        GENESIS_TIME
-    ));
+    let base =
+        std::env::temp_dir().join(format!("qtv-live-{}-{}", std::process::id(), GENESIS_TIME));
     let senders = accounts(senders_n);
     let recipients: Vec<String> = (0..senders_n)
         .map(|i| senders[(i + 1) % senders_n].address())
@@ -222,11 +260,17 @@ fn main() {
     let est_body_bytes = sample_tx_bytes * senders_n;
     let old_single_record_width = (MAX_RECORD_PLAINTEXT - 4096) / sample_tx_bytes;
 
-    println!(" Proposal dissemination: erasure coded shards over the overlay, not one whole record.");
-    println!("   the block is coded into k data + parity shards under a SHA3 commitment; each node");
+    println!(
+        " Proposal dissemination: erasure coded shards over the overlay, not one whole record."
+    );
+    println!(
+        "   the block is coded into k data + parity shards under a SHA3 commitment; each node"
+    );
     println!("   rebuilds it from any k shards and verifies it against the header before use.");
-    println!("   block body at this width       : {:.2} MB ({senders_n} tx x {sample_tx_bytes} bytes)",
-        est_body_bytes as f64 / 1e6);
+    println!(
+        "   block body at this width       : {:.2} MB ({senders_n} tx x {sample_tx_bytes} bytes)",
+        est_body_bytes as f64 / 1e6
+    );
     println!("   old single record width cap    : {old_single_record_width} accounts ({:.0} MB record bound)",
         MAX_RECORD_PLAINTEXT as f64 / 1e6);
     if senders_n > old_single_record_width {
@@ -267,17 +311,25 @@ fn main() {
     };
 
     println!(" Committee (from a real finalised block): {committee} attesters (all {validators} validators");
-    println!("   pass the sortition at this set size and stake). Supermajority to finalise is {}.",
-        qtv_bft::params::supermajority(committee));
+    println!(
+        "   pass the sortition at this set size and stake). Supermajority to finalise is {}.",
+        qtv_bft::params::supermajority(committee)
+    );
     println!(" Real measured wire sizes:");
-    println!("   transaction: {tx_bytes} bytes (dominated by the 3309 byte module lattice signature)");
-    println!("   finality certificate on the block: {:.2} KB ({committee} attestations)",
-        cert_bytes as f64 / 1e3);
+    println!(
+        "   transaction: {tx_bytes} bytes (dominated by the 3309 byte module lattice signature)"
+    );
+    println!(
+        "   finality certificate on the block: {:.2} KB ({committee} attestations)",
+        cert_bytes as f64 / 1e3
+    );
     println!("   finalised block: {:.2} MB", block_bytes as f64 / 1e6);
     rule();
 
     println!(" Sustained finalised run (real wall clock, only finalised transactions counted):");
-    println!("   driving back to back heights until the consensus wall clock reaches {run_secs:.0} s.");
+    println!(
+        "   driving back to back heights until the consensus wall clock reaches {run_secs:.0} s."
+    );
     println!();
 
     let mut per_block_ms: Vec<f64> = Vec::new();
@@ -315,29 +367,44 @@ fn main() {
     let tps_end_to_end = finalized_tx as f64 / (consensus_s + sign_wall.as_secs_f64());
 
     if let Some(reason) = &stalled {
-        println!(" NOTE: the run stopped early ({reason}). The numbers below cover only the heights");
+        println!(
+            " NOTE: the run stopped early ({reason}). The numbers below cover only the heights"
+        );
         println!("       that genuinely finalised, which is the honest partial result.");
         println!();
     }
     println!("   heights finalised          : {heights}");
     println!("   transactions finalised     : {finalized_tx}");
-    println!("   consensus wall clock        : {consensus_s:.1} s  (client signing {:.1} s, separate)",
-        sign_wall.as_secs_f64());
-    println!("   total run wall clock        : {:.1} s", wall_total.as_secs_f64());
+    println!(
+        "   consensus wall clock        : {consensus_s:.1} s  (client signing {:.1} s, separate)",
+        sign_wall.as_secs_f64()
+    );
+    println!(
+        "   total run wall clock        : {:.1} s",
+        wall_total.as_secs_f64()
+    );
     println!();
     println!("   SUSTAINED FINALISED THROUGHPUT (measured, in process, one host):");
     println!("     {tps_consensus:.0} finalised transactions per second");
-    println!("     caveat: consensus only, client signing excluded; all {committee} members' compute is");
+    println!(
+        "     caveat: consensus only, client signing excluded; all {committee} members' compute is"
+    );
     println!("     serial on one host and the transport is in memory, so this is a compute bound,");
     println!("     network free single host rate, not a live multi machine network throughput.");
-    println!("   end to end incl. client signing: {tps_end_to_end:.0} finalised transactions per second");
+    println!(
+        "   end to end incl. client signing: {tps_end_to_end:.0} finalised transactions per second"
+    );
     rule();
 
     println!(" FINALITY LATENCY DISTRIBUTION (measured, in process), per finalised block:");
     println!("   each sample is the real wall clock to build, attest, aggregate and verify one");
-    println!("   block across the committee. caveat: this is compute time with all {committee} members");
+    println!(
+        "   block across the committee. caveat: this is compute time with all {committee} members"
+    );
     println!("   run serially on one host over the in memory transport; it EXCLUDES real network");
-    println!("   propagation latency, so it is the in process compute floor per block, not the wall");
+    println!(
+        "   propagation latency, so it is the in process compute floor per block, not the wall"
+    );
     println!("   clock finality a globally distributed validator set would see.");
     println!();
     println!("   samples (finalised blocks) : {}", dist.count);
@@ -352,8 +419,12 @@ fn main() {
     println!("   cd Quantova-Chain && \\");
     println!("     QTV_LIVE_VALIDATORS={validators} QTV_LIVE_ACCOUNTS={senders_n} QTV_LIVE_SECS={run_secs:.0} \\");
     println!("     cargo run --release -p qtv-live");
-    println!(" The numbers move a little between runs; rerun for current figures. The number measured");
-    println!(" is the number reported: the harness drives a fixed workload and does not tune to a path.");
+    println!(
+        " The numbers move a little between runs; rerun for current figures. The number measured"
+    );
+    println!(
+        " is the number reported: the harness drives a fixed workload and does not tune to a path."
+    );
     println!("================================================================================");
 
     let _ = std::fs::remove_dir_all(&base);

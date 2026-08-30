@@ -32,7 +32,10 @@ impl<'a> Cursor<'a> {
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], SpvError> {
-        let end = self.pos.checked_add(n).ok_or(SpvError::MalformedTransaction)?;
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or(SpvError::MalformedTransaction)?;
         if end > self.bytes.len() {
             return Err(SpvError::MalformedTransaction);
         }
@@ -354,8 +357,14 @@ mod tests {
         let bridge = p2pkh([0x11; 20]);
         let recipient = [0x42u8; 32];
         let tx = build(vec![
-            TxOutput { value: 250_000, script: bridge.clone() },
-            TxOutput { value: 0, script: op_return(recipient) },
+            TxOutput {
+                value: 250_000,
+                script: bridge.clone(),
+            },
+            TxOutput {
+                value: 0,
+                script: op_return(recipient),
+            },
         ]);
         let raw = serialize_legacy(&tx);
         let txid = tx.txid();
@@ -419,6 +428,9 @@ mod tests {
         ]);
         let bytes = serialize_legacy(&tx);
         let parsed = Transaction::parse(&bytes).expect("parses");
-        assert!(parsed.deposit_to(&bridge).is_none(), "two op returns name no single recipient");
+        assert!(
+            parsed.deposit_to(&bridge).is_none(),
+            "two op returns name no single recipient"
+        );
     }
 }

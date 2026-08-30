@@ -5,9 +5,9 @@
 pub mod chain;
 pub mod deposit;
 pub mod params;
-pub mod tx;
 pub mod retarget;
 pub mod sha256;
+pub mod tx;
 pub mod work;
 
 pub use chain::{
@@ -334,7 +334,10 @@ mod tests {
             hash: c,
             sibling_on_left: true,
         }];
-        assert_eq!(fold_merkle_branch(c, &forged), Err(SpvError::MerkleMismatch));
+        assert_eq!(
+            fold_merkle_branch(c, &forged),
+            Err(SpvError::MerkleMismatch)
+        );
     }
 
     #[test]

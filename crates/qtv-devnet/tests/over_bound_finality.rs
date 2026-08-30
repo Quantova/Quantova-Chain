@@ -94,7 +94,12 @@ fn an_over_bound_block_finalizes_over_the_coded_path() {
     );
 
     for i in 0..online_count {
-        let node_block = &devnet.node(i).chain().last().expect("a finalized block").block;
+        let node_block = &devnet
+            .node(i)
+            .chain()
+            .last()
+            .expect("a finalized block")
+            .block;
         let ids: std::collections::HashSet<String> =
             node_block.body().iter().map(Wrapper::id).collect();
         assert_eq!(
@@ -129,9 +134,9 @@ fn an_over_bound_block_finalizes_over_the_coded_path() {
         to_bytes(&over_bound).len() > RECORD_BOUND,
         "the served block was not the over bound block"
     );
-    devnet
-        .apply_synced(verifier, over_bound)
-        .expect("the offline node verified the aggregated certificate over the whole over bound block");
+    devnet.apply_synced(verifier, over_bound).expect(
+        "the offline node verified the aggregated certificate over the whole over bound block",
+    );
     assert_eq!(
         header_chain(devnet.node(verifier)),
         chain,

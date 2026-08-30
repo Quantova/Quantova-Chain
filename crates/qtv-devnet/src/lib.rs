@@ -16,11 +16,11 @@ pub mod wire;
 
 pub use clock::{Clock, Event, Time};
 pub use config::{DevnetConfig, NodeConfig};
-pub use qtv_governance::GuardianSet;
 pub use devnet::Devnet;
 pub use discovery::{PeerEntry, PeerTable};
 pub use network::Network;
 pub use node::{leader_for, Checkpoint, DevNode, Fatal, FinalizedBlock, Height, SyncError, View};
 pub use overlay::Seen;
+pub use qtv_governance::GuardianSet;
 pub use transport::{connect_duplex_mesh, connect_duplex_overlay, connect_duplex_pair, Mesh};
 pub use wire::Message;

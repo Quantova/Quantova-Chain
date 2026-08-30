@@ -2,7 +2,6 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum VerificationTier {
     Federated,
@@ -32,10 +31,16 @@ pub enum TrustGrade {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TierError {
-    Downgrade { from: VerificationTier, to: VerificationTier },
+    Downgrade {
+        from: VerificationTier,
+        to: VerificationTier,
+    },
 }
 
-pub fn ratchet(current: VerificationTier, proposed: VerificationTier) -> Result<VerificationTier, TierError> {
+pub fn ratchet(
+    current: VerificationTier,
+    proposed: VerificationTier,
+) -> Result<VerificationTier, TierError> {
     if proposed.rank() >= current.rank() {
         Ok(proposed)
     } else {
@@ -143,7 +148,10 @@ mod tests {
     #[test]
     fn follow_state_rejects_a_broken_prev_link() {
         let mut s = FollowState::genesis(100, [1u8; 32]);
-        assert_eq!(s.advance(101, [9u8; 32], [2u8; 32]), Err(ForeignError::BadProof));
+        assert_eq!(
+            s.advance(101, [9u8; 32], [2u8; 32]),
+            Err(ForeignError::BadProof)
+        );
         assert_eq!(s.trusted_height, 100);
     }
 
@@ -158,8 +166,15 @@ mod tests {
     #[test]
     fn follow_state_at_the_max_height_refuses_without_overflow() {
         let mut s = FollowState::genesis(u64::MAX, [1u8; 32]);
-        assert_eq!(s.advance(0, [1u8; 32], [2u8; 32]), Err(ForeignError::Malformed));
-        assert_eq!(s.trusted_height, u64::MAX, "a rejected advance leaves the height untouched");
+        assert_eq!(
+            s.advance(0, [1u8; 32], [2u8; 32]),
+            Err(ForeignError::Malformed)
+        );
+        assert_eq!(
+            s.trusted_height,
+            u64::MAX,
+            "a rejected advance leaves the height untouched"
+        );
         assert_eq!(s.trusted_digest, [1u8; 32]);
     }
 }

@@ -14,7 +14,10 @@ fn open_nodes(config: &DevnetConfig) -> Vec<DevNode> {
         .iter()
         .map(|node| DevNode::open(node, config).expect("node opens"))
         .collect();
-    let notes: Vec<_> = nodes.iter().filter_map(|node| node.own_reveal_note()).collect();
+    let notes: Vec<_> = nodes
+        .iter()
+        .filter_map(|node| node.own_reveal_note())
+        .collect();
     for node in &mut nodes {
         for note in &notes {
             node.collect_reveal(note.clone());
@@ -53,7 +56,10 @@ fn a_flood_of_far_view_proposals_stays_bounded_in_the_future_buffer() {
         proposal.view = view;
         let from = leader_for(&selection, view);
         let out = nodes[victim].on_proposal(&selection, from, proposal);
-        assert!(out.is_empty(), "a far view proposal is buffered, not acted on");
+        assert!(
+            out.is_empty(),
+            "a far view proposal is buffered, not acted on"
+        );
     }
 
     let held = nodes[victim].future_proposals_len();

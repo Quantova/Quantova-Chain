@@ -31,7 +31,10 @@ fn a_node_forms_the_committee_from_published_reveals_and_verifies_them() {
 
     let notes: Vec<RevealNote> = nodes
         .iter()
-        .map(|node| node.own_reveal_note().expect("a selected validator publishes"))
+        .map(|node| {
+            node.own_reveal_note()
+                .expect("a selected validator publishes")
+        })
         .collect();
     assert_eq!(notes.len(), 4);
 
@@ -52,7 +55,9 @@ fn a_node_forms_the_committee_from_published_reveals_and_verifies_them() {
     };
     mislabeller.collect_reveal(notes.iter().find(|n| n.id == 1).unwrap().clone());
     mislabeller.collect_reveal(mislabelled);
-    let after = mislabeller.select().expect("committee of the ones that authenticate");
+    let after = mislabeller
+        .select()
+        .expect("committee of the ones that authenticate");
     assert!(after.members.contains(&1));
     assert!(!after.members.contains(&2));
 
@@ -81,7 +86,9 @@ fn a_multi_node_run_holding_only_own_secrets_finalises() {
     for nonce in 0..heights {
         let tx = transfer(&alice, &bob.address(), 1_000, nonce, &params);
         devnet.submit(0, tx).expect("admitted at the origin node");
-        devnet.step().expect("the committee finalised the height from published reveals");
+        devnet
+            .step()
+            .expect("the committee finalised the height from published reveals");
     }
 
     let reference = header_chain(devnet.node(0));
@@ -93,10 +100,23 @@ fn a_multi_node_run_holding_only_own_secrets_finalises() {
             "node {i} finalised a different chain"
         );
         for finalized in devnet.node(i).chain() {
-            assert!(finalized.attesters.len() >= 3, "at least a two thirds quorum attested"); assert!(finalized.attesters.iter().all(|a| [1u64, 2, 3, 4].contains(a)), "every attester is a committee member");
+            assert!(
+                finalized.attesters.len() >= 3,
+                "at least a two thirds quorum attested"
+            );
+            assert!(
+                finalized
+                    .attesters
+                    .iter()
+                    .all(|a| [1u64, 2, 3, 4].contains(a)),
+                "every attester is a committee member"
+            );
         }
     }
-    assert_eq!(devnet.node(0).ledger().balance(&bob.address()), heights * 1_000);
+    assert_eq!(
+        devnet.node(0).ledger().balance(&bob.address()),
+        heights * 1_000
+    );
 }
 
 #[test]
@@ -108,7 +128,10 @@ fn a_fresh_reveal_forwards_once_and_a_duplicate_or_forgery_does_not() {
     let nodes = open_nodes(&cfg);
     let notes: Vec<RevealNote> = nodes
         .iter()
-        .map(|node| node.own_reveal_note().expect("a selected validator publishes"))
+        .map(|node| {
+            node.own_reveal_note()
+                .expect("a selected validator publishes")
+        })
         .collect();
 
     let mut node1 = open_nodes(&cfg).into_iter().next().expect("node one");
@@ -123,7 +146,11 @@ fn a_fresh_reveal_forwards_once_and_a_duplicate_or_forgery_does_not() {
     );
 
     let three = notes.iter().find(|n| n.id == 3).unwrap();
-    let forged = RevealNote { height: three.height, id: 4, credential: three.credential.clone() };
+    let forged = RevealNote {
+        height: three.height,
+        id: 4,
+        credential: three.credential.clone(),
+    };
     assert!(
         !node1.collect_reveal(forged),
         "a reveal that does not authenticate is refused, so it is never forwarded"

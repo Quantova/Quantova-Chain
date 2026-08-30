@@ -146,7 +146,8 @@ pub fn decode_container(bytes: &[u8]) -> Option<qtv_vm::container::Container> {
     if consts_len as usize > qtv_vm::container::MAX_CONSTS {
         return None;
     }
-    let mut consts = Vec::with_capacity((consts_len as usize).min(bytes.len().saturating_sub(pos) / 8));
+    let mut consts =
+        Vec::with_capacity((consts_len as usize).min(bytes.len().saturating_sub(pos) / 8));
     for _ in 0..consts_len {
         consts.push(read_be_u64(bytes, &mut pos)?);
     }
@@ -154,7 +155,8 @@ pub fn decode_container(bytes: &[u8]) -> Option<qtv_vm::container::Container> {
     if entries_len as usize > qtv_vm::container::MAX_ENTRIES {
         return None;
     }
-    let mut entries = Vec::with_capacity((entries_len as usize).min(bytes.len().saturating_sub(pos) / 24));
+    let mut entries =
+        Vec::with_capacity((entries_len as usize).min(bytes.len().saturating_sub(pos) / 24));
     for _ in 0..entries_len {
         let sel_end = pos.checked_add(SELECTOR_BYTES)?;
         let mut selector = [0u8; SELECTOR_BYTES];
@@ -264,13 +266,25 @@ mod tests {
         assert_eq!(out.storage.get(&key), Some(&42));
 
         assert_eq!(
-            execute_contract_call(&bytes, [9, 9, 9, 9], std::collections::BTreeMap::new(), &[], 100_000)
-                .unwrap_err(),
+            execute_contract_call(
+                &bytes,
+                [9, 9, 9, 9],
+                std::collections::BTreeMap::new(),
+                &[],
+                100_000
+            )
+            .unwrap_err(),
             ExecError::BadContainer
         );
         assert_eq!(
-            execute_contract_call(b"nope", selector, std::collections::BTreeMap::new(), &[], 100_000)
-                .unwrap_err(),
+            execute_contract_call(
+                b"nope",
+                selector,
+                std::collections::BTreeMap::new(),
+                &[],
+                100_000
+            )
+            .unwrap_err(),
             ExecError::BadContainer
         );
     }
@@ -301,7 +315,10 @@ mod tests {
         );
         let bytes = container.canonical_bytes();
         let access = bytes.len() as u64 * CODE_ACCESS_BYTE_METER;
-        assert!(access > TRANSFER_METER, "the container must exceed the floor meter");
+        assert!(
+            access > TRANSFER_METER,
+            "the container must exceed the floor meter"
+        );
 
         assert_eq!(
             execute_contract_call(

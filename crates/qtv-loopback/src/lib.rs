@@ -20,7 +20,9 @@ pub const TRANSFER_AMOUNT: u64 = 1;
 pub const HARNESS_SLOTS: u64 = 4096;
 
 pub fn accounts(count: usize) -> Vec<Account> {
-    (0..count as u64).map(|i| derive(&ACCOUNT_SEED, i)).collect()
+    (0..count as u64)
+        .map(|i| derive(&ACCOUNT_SEED, i))
+        .collect()
 }
 
 pub fn recipients(senders: &[Account]) -> Vec<String> {
@@ -103,10 +105,9 @@ pub fn message_height(message: &Message) -> Option<u64> {
         Message::ViewChange(v) => Some(v.height),
         Message::Reveal(r) => Some(r.height),
         Message::Register(r) => Some(r.height),
-        Message::Peers(_)
-        | Message::Status(_)
-        | Message::GetBlocks { .. }
-        | Message::Blocks(_) => None,
+        Message::Peers(_) | Message::Status(_) | Message::GetBlocks { .. } | Message::Blocks(_) => {
+            None
+        }
     }
 }
 

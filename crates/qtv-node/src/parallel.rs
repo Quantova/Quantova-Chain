@@ -471,7 +471,10 @@ mod tests {
                 .collect();
             qtv_block::event_root(&leaves)
         };
-        assert!(!ordered.block_events().is_empty(), "the block records events");
+        assert!(
+            !ordered.block_events().is_empty(),
+            "the block records events"
+        );
 
         for threads in [1usize, 2, 4, 8, 16] {
             let mut parallel = ledger.clone();
@@ -651,7 +654,11 @@ mod tests {
             1,
             "only the canonical send applies; the aliased sender is refused"
         );
-        assert_eq!(ordered.balance(&sink_b.address()), 0, "the aliased sink is never credited");
+        assert_eq!(
+            ordered.balance(&sink_b.address()),
+            0,
+            "the aliased sink is never credited"
+        );
 
         for threads in [1usize, 2, 4, 8, 16] {
             let mut parallel = base.clone();
@@ -690,7 +697,10 @@ mod tests {
 
         let f = fee.transfer_fee();
         let ps = FeeSplit::of(f).proposer;
-        assert!(ps > 0, "the proposer fee share must be non zero for the collision to bite");
+        assert!(
+            ps > 0,
+            "the proposer fee share must be non zero for the collision to bite"
+        );
 
         let amount0 = 1_000u64;
         let amount1 = amount0 + ps - f;
@@ -748,8 +758,14 @@ mod tests {
         let b = state_key("also not an address");
         let real = state_key(&keypair(0).address());
         assert_ne!(a, b, "distinct unparseable strings must not share a leaf");
-        assert_ne!(a, real, "an unparseable string must not collide with a real account");
-        assert_ne!(b, real, "an unparseable string must not collide with a real account");
+        assert_ne!(
+            a, real,
+            "an unparseable string must not collide with a real account"
+        );
+        assert_ne!(
+            b, real,
+            "an unparseable string must not collide with a real account"
+        );
     }
 
     #[test]

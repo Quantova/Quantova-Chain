@@ -127,11 +127,15 @@ fn reduce_wide(w: [u64; 8]) -> [u64; 4] {
 
 impl Fe {
     pub const fn zero() -> Fe {
-        Fe { limbs: [0, 0, 0, 0] }
+        Fe {
+            limbs: [0, 0, 0, 0],
+        }
     }
 
     pub const fn one() -> Fe {
-        Fe { limbs: [1, 0, 0, 0] }
+        Fe {
+            limbs: [1, 0, 0, 0],
+        }
     }
 
     pub const fn from_limbs(limbs: [u64; 4]) -> Fe {

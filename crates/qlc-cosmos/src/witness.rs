@@ -62,9 +62,9 @@ mod tests {
     use crate::chain::COSMOS_HUB;
     use crate::commit::{BlockIdFlag, Commit, CommitSig, Header};
     use crate::ed25519::{public_key_from_seed, sign};
+    use crate::light::TrustedState;
     use crate::proof::{encode_deposit_value, ExistenceProof, InnerOp, LeafOp};
     use crate::proto::{vote_sign_bytes, BlockId, CanonicalVote, Timestamp, PRECOMMIT_TYPE};
-    use crate::light::TrustedState;
     use crate::statement::verify_deposit;
     use crate::validator::{ValidatorInfo, ValidatorSet};
 
@@ -87,7 +87,10 @@ mod tests {
     fn anchor(set: &ValidatorSet) -> TrustedState {
         TrustedState {
             height: 0,
-            time: Timestamp { seconds: 1_700_000_000 - 3600, nanos: 0 },
+            time: Timestamp {
+                seconds: 1_700_000_000 - 3600,
+                nanos: 0,
+            },
             header_hash: [0u8; 32],
             validators: set.clone(),
             next_validators_hash: set.hash().to_vec(),
@@ -95,7 +98,10 @@ mod tests {
     }
 
     fn wnow() -> Timestamp {
-        Timestamp { seconds: 1_700_000_000, nanos: 9 }
+        Timestamp {
+            seconds: 1_700_000_000,
+            nanos: 9,
+        }
     }
 
     fn deposit_proof() -> ExistenceProof {
@@ -105,10 +111,18 @@ mod tests {
         ExistenceProof {
             key: b"bridge/deposits/0x1a2b".to_vec(),
             value: encode_deposit_value(&recipient, &asset_id, amount),
-            leaf: LeafOp { prefix: vec![0x00, 0x02, 0x00] },
+            leaf: LeafOp {
+                prefix: vec![0x00, 0x02, 0x00],
+            },
             path: vec![
-                InnerOp { prefix: vec![0x01, 0x0a], suffix: vec![0x1b, 0x2c] },
-                InnerOp { prefix: vec![0x01], suffix: vec![0x33, 0x44, 0x55] },
+                InnerOp {
+                    prefix: vec![0x01, 0x0a],
+                    suffix: vec![0x1b, 0x2c],
+                },
+                InnerOp {
+                    prefix: vec![0x01],
+                    suffix: vec![0x33, 0x44, 0x55],
+                },
             ],
             store: None,
         }
@@ -125,8 +139,15 @@ mod tests {
             version_app: 0,
             chain_id: COSMOS_HUB.chain_id.to_string(),
             height: 18_500_000,
-            time: Timestamp { seconds: 1_700_000_000, nanos: 9 },
-            last_block_id: BlockId { hash: vec![0xaa; 32], part_total: 1, part_hash: vec![0xbb; 32] },
+            time: Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 9,
+            },
+            last_block_id: BlockId {
+                hash: vec![0xaa; 32],
+                part_total: 1,
+                part_hash: vec![0xbb; 32],
+            },
             last_commit_hash: vec![0x01; 32],
             data_hash: vec![0x02; 32],
             validators_hash: set.hash().to_vec(),
@@ -138,11 +159,18 @@ mod tests {
             proposer_address: set.validators[0].address().to_vec(),
         };
 
-        let block_id = BlockId { hash: header.hash().to_vec(), part_total: 1, part_hash: vec![0xcc; 32] };
+        let block_id = BlockId {
+            hash: header.hash().to_vec(),
+            part_total: 1,
+            part_hash: vec![0xcc; 32],
+        };
         let mut signatures = Vec::new();
         for &i in signers {
             let k = &vs[i];
-            let timestamp = Timestamp { seconds: 1_700_000_001, nanos: k.seed[0] as i32 };
+            let timestamp = Timestamp {
+                seconds: 1_700_000_001,
+                nanos: k.seed[0] as i32,
+            };
             let vote = CanonicalVote {
                 vote_type: PRECOMMIT_TYPE,
                 height: header.height,
@@ -158,14 +186,28 @@ mod tests {
                 signature: sign(&k.seed, &vote_sign_bytes(&vote)).to_vec(),
             });
         }
-        let commit = Commit { height: header.height, round: 0, block_id, signatures };
+        let commit = Commit {
+            height: header.height,
+            round: 0,
+            block_id,
+            signatures,
+        };
         (header, commit, set, proof)
     }
 
     #[test]
     fn a_successful_verification_yields_a_stable_canonical_witness() {
         let (header, commit, set, proof) = scene(&[0, 1, 2, 3]);
-        let out = verify_deposit(&COSMOS_HUB, &anchor(&set), &header, &commit, &set, &proof, wnow()).unwrap();
+        let out = verify_deposit(
+            &COSMOS_HUB,
+            &anchor(&set),
+            &header,
+            &commit,
+            &set,
+            &proof,
+            wnow(),
+        )
+        .unwrap();
         let a = prove_ready_witness(&out);
         let b = prove_ready_witness(&out);
         assert_eq!(a, b);
@@ -175,7 +217,16 @@ mod tests {
     #[test]
     fn the_digest_matches_a_fresh_hash_of_the_statement_and_facts() {
         let (header, commit, set, proof) = scene(&[0, 1, 2, 3]);
-        let out = verify_deposit(&COSMOS_HUB, &anchor(&set), &header, &commit, &set, &proof, wnow()).unwrap();
+        let out = verify_deposit(
+            &COSMOS_HUB,
+            &anchor(&set),
+            &header,
+            &commit,
+            &set,
+            &proof,
+            wnow(),
+        )
+        .unwrap();
         let witness = prove_ready_witness(&out);
         assert_eq!(witness.public_input_digest, shake256_256(&witness.encode()));
     }
@@ -183,7 +234,16 @@ mod tests {
     #[test]
     fn the_witness_carries_the_height_and_the_signed_power() {
         let (header, commit, set, proof) = scene(&[0, 1, 2, 3]);
-        let out = verify_deposit(&COSMOS_HUB, &anchor(&set), &header, &commit, &set, &proof, wnow()).unwrap();
+        let out = verify_deposit(
+            &COSMOS_HUB,
+            &anchor(&set),
+            &header,
+            &commit,
+            &set,
+            &proof,
+            wnow(),
+        )
+        .unwrap();
         let witness = prove_ready_witness(&out);
         assert_eq!(witness.facts.header_height, 18_500_000);
         assert_eq!(witness.facts.signed_power, 100);
@@ -193,9 +253,27 @@ mod tests {
     #[test]
     fn a_different_signed_power_changes_the_witness_digest() {
         let (header, commit, set, proof) = scene(&[0, 1, 2, 3]);
-        let full = verify_deposit(&COSMOS_HUB, &anchor(&set), &header, &commit, &set, &proof, wnow()).unwrap();
+        let full = verify_deposit(
+            &COSMOS_HUB,
+            &anchor(&set),
+            &header,
+            &commit,
+            &set,
+            &proof,
+            wnow(),
+        )
+        .unwrap();
         let (header2, commit2, set2, proof2) = scene(&[0, 1, 2]);
-        let partial = verify_deposit(&COSMOS_HUB, &anchor(&set2), &header2, &commit2, &set2, &proof2, wnow()).unwrap();
+        let partial = verify_deposit(
+            &COSMOS_HUB,
+            &anchor(&set2),
+            &header2,
+            &commit2,
+            &set2,
+            &proof2,
+            wnow(),
+        )
+        .unwrap();
         let a = prove_ready_witness(&full);
         let b = prove_ready_witness(&partial);
         assert_ne!(a.public_input_digest, b.public_input_digest);
@@ -204,7 +282,16 @@ mod tests {
     #[test]
     fn the_encoded_witness_is_a_fixed_width_of_hash_and_count_fields_only() {
         let (header, commit, set, proof) = scene(&[0, 1, 2, 3]);
-        let out = verify_deposit(&COSMOS_HUB, &anchor(&set), &header, &commit, &set, &proof, wnow()).unwrap();
+        let out = verify_deposit(
+            &COSMOS_HUB,
+            &anchor(&set),
+            &header,
+            &commit,
+            &set,
+            &proof,
+            wnow(),
+        )
+        .unwrap();
         let witness = prove_ready_witness(&out);
         assert_eq!(
             witness.encode().len(),

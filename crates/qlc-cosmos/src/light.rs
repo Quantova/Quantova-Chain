@@ -20,9 +20,18 @@ pub enum LightError {
     ChainMismatch,
     NotProgressing,
     UntrustedValidatorSet,
-    InsufficientOverlap { overlap: u128, trusted_total: u128 },
-    InsufficientTrustedSignatures { signed: u128, trusted_total: u128 },
-    TrustedStateExpired { elapsed_secs: i64, trusting_period_secs: u64 },
+    InsufficientOverlap {
+        overlap: u128,
+        trusted_total: u128,
+    },
+    InsufficientTrustedSignatures {
+        signed: u128,
+        trusted_total: u128,
+    },
+    TrustedStateExpired {
+        elapsed_secs: i64,
+        trusting_period_secs: u64,
+    },
     NonMonotonicHeaderTime,
     HeaderTimeInFuture,
     NotAdjacent,
@@ -34,7 +43,12 @@ fn total_nanos(ts: &Timestamp) -> i128 {
     ts.seconds as i128 * 1_000_000_000 + ts.nanos as i128
 }
 
-fn check_time(cfg: &ChainConfig, trusted: &TrustedState, new_header: &Header, now: Timestamp) -> Result<(), LightError> {
+fn check_time(
+    cfg: &ChainConfig,
+    trusted: &TrustedState,
+    new_header: &Header,
+    now: Timestamp,
+) -> Result<(), LightError> {
     let trusted_ns = total_nanos(&trusted.time);
     let new_ns = total_nanos(&new_header.time);
     let now_ns = total_nanos(&now);
@@ -56,7 +70,13 @@ fn check_time(cfg: &ChainConfig, trusted: &TrustedState, new_header: &Header, no
     Ok(())
 }
 
-fn check_header(cfg: &ChainConfig, trusted: &TrustedState, new_header: &Header, new_set: &ValidatorSet, now: Timestamp) -> Result<(), LightError> {
+fn check_header(
+    cfg: &ChainConfig,
+    trusted: &TrustedState,
+    new_header: &Header,
+    new_set: &ValidatorSet,
+    now: Timestamp,
+) -> Result<(), LightError> {
     if new_set.validators.len() > crate::validator::MAX_VALIDATORS {
         return Err(LightError::UntrustedValidatorSet);
     }
@@ -83,11 +103,15 @@ pub fn check_trusting_commit(
         .map_err(LightError::Commit)?;
     let trusted_total = trusted.validators.total_power();
     if cfg.overlap_numerator > 0
-        && signed * (cfg.overlap_denominator as u128) > trusted_total * (cfg.overlap_numerator as u128)
+        && signed * (cfg.overlap_denominator as u128)
+            > trusted_total * (cfg.overlap_numerator as u128)
     {
         Ok(())
     } else {
-        Err(LightError::InsufficientTrustedSignatures { signed, trusted_total })
+        Err(LightError::InsufficientTrustedSignatures {
+            signed,
+            trusted_total,
+        })
     }
 }
 
@@ -111,7 +135,12 @@ pub fn verify_transition(
 ) -> Result<TrustedState, LightError> {
     check_header(cfg, trusted, new_header, new_set, now)?;
 
-    if !overlap_meets(&trusted.validators, new_set, cfg.overlap_numerator, cfg.overlap_denominator) {
+    if !overlap_meets(
+        &trusted.validators,
+        new_set,
+        cfg.overlap_numerator,
+        cfg.overlap_denominator,
+    ) {
         return Err(LightError::InsufficientOverlap {
             overlap: crate::validator::overlap_power(&trusted.validators, new_set),
             trusted_total: trusted.validators.total_power(),
@@ -133,7 +162,12 @@ pub fn check_anchor(
 ) -> Result<(), LightError> {
     check_header(cfg, trusted, new_header, new_set, now)?;
 
-    if !overlap_meets(&trusted.validators, new_set, cfg.overlap_numerator, cfg.overlap_denominator) {
+    if !overlap_meets(
+        &trusted.validators,
+        new_set,
+        cfg.overlap_numerator,
+        cfg.overlap_denominator,
+    ) {
         return Err(LightError::InsufficientOverlap {
             overlap: crate::validator::overlap_power(&trusted.validators, new_set),
             trusted_total: trusted.validators.total_power(),
@@ -200,8 +234,15 @@ mod tests {
             version_app: 0,
             chain_id: COSMOS_HUB.chain_id.to_string(),
             height,
-            time: Timestamp { seconds: 1_700_000_000 + height, nanos: 7 },
-            last_block_id: BlockId { hash: vec![0xaa; 32], part_total: 1, part_hash: vec![0xbb; 32] },
+            time: Timestamp {
+                seconds: 1_700_000_000 + height,
+                nanos: 7,
+            },
+            last_block_id: BlockId {
+                hash: vec![0xaa; 32],
+                part_total: 1,
+                part_hash: vec![0xbb; 32],
+            },
             last_commit_hash: vec![0x01; 32],
             data_hash: vec![0x02; 32],
             validators_hash: set.hash().to_vec(),
@@ -215,10 +256,17 @@ mod tests {
     }
 
     fn signed_commit(header: &Header, signers: &[&Keyed]) -> Commit {
-        let block_id = BlockId { hash: header.hash().to_vec(), part_total: 1, part_hash: vec![0xcc; 32] };
+        let block_id = BlockId {
+            hash: header.hash().to_vec(),
+            part_total: 1,
+            part_hash: vec![0xcc; 32],
+        };
         let mut signatures = Vec::new();
         for k in signers {
-            let timestamp = Timestamp { seconds: 1_700_000_500, nanos: k.seed[0] as i32 };
+            let timestamp = Timestamp {
+                seconds: 1_700_000_500,
+                nanos: k.seed[0] as i32,
+            };
             let vote = CanonicalVote {
                 vote_type: PRECOMMIT_TYPE,
                 height: header.height,
@@ -234,13 +282,21 @@ mod tests {
                 signature: sign(&k.seed, &vote_sign_bytes(&vote)).to_vec(),
             });
         }
-        Commit { height: header.height, round: 0, block_id, signatures }
+        Commit {
+            height: header.height,
+            round: 0,
+            block_id,
+            signatures,
+        }
     }
 
     fn trusted_from(height: i64, set: &ValidatorSet, next: &ValidatorSet) -> TrustedState {
         TrustedState {
             height,
-            time: Timestamp { seconds: 1_700_000_000 + height, nanos: 7 },
+            time: Timestamp {
+                seconds: 1_700_000_000 + height,
+                nanos: 7,
+            },
             header_hash: [0u8; 32],
             validators: set.clone(),
             next_validators_hash: next.hash().to_vec(),
@@ -259,7 +315,8 @@ mod tests {
         let header = header_for(150, &new, &new);
         let commit = signed_commit(&header, &[&a, &b, &d]);
 
-        let result = verify_transition(&COSMOS_HUB, &trusted, &header, &commit, &new, header.time).unwrap();
+        let result =
+            verify_transition(&COSMOS_HUB, &trusted, &header, &commit, &new, header.time).unwrap();
         assert_eq!(result.height, 150);
         assert_eq!(result.validators, new);
     }
@@ -275,7 +332,10 @@ mod tests {
         let trusted = trusted_from(100, &old, &old);
         let header = header_for(150, &new, &new);
         let commit = signed_commit(&header, &[&a, &b, &d]);
-        let cfg = ChainConfig { overlap_numerator: 0, ..COSMOS_HUB };
+        let cfg = ChainConfig {
+            overlap_numerator: 0,
+            ..COSMOS_HUB
+        };
 
         assert!(
             matches!(
@@ -308,7 +368,10 @@ mod tests {
 
         assert_eq!(
             verify_transition(&COSMOS_HUB, &trusted, &header, &commit, &new, header.time),
-            Err(LightError::InsufficientOverlap { overlap: 40, trusted_total: 100 })
+            Err(LightError::InsufficientOverlap {
+                overlap: 40,
+                trusted_total: 100
+            })
         );
     }
 
@@ -371,15 +434,33 @@ mod tests {
         let commit = signed_commit(&header, &[&x, &y]);
 
         assert_eq!(
-            verify_transition(&COSMOS_HUB, &trusted, &header, &commit, &forged, header.time),
-            Err(LightError::InsufficientTrustedSignatures { signed: 0, trusted_total: 100 })
+            verify_transition(
+                &COSMOS_HUB,
+                &trusted,
+                &header,
+                &commit,
+                &forged,
+                header.time
+            ),
+            Err(LightError::InsufficientTrustedSignatures {
+                signed: 0,
+                trusted_total: 100
+            })
         );
 
         let d = keyed(4, 20);
         let new = make_set(&[&a, &b, &d]);
         let header2 = header_for(150, &new, &new);
         let commit2 = signed_commit(&header2, &[&a, &b, &d]);
-        let ok = verify_transition(&COSMOS_HUB, &trusted, &header2, &commit2, &new, header2.time).unwrap();
+        let ok = verify_transition(
+            &COSMOS_HUB,
+            &trusted,
+            &header2,
+            &commit2,
+            &new,
+            header2.time,
+        )
+        .unwrap();
         assert_eq!(ok.height, 150);
     }
 
@@ -392,7 +473,8 @@ mod tests {
         let header = header_for(150, &set, &set);
         let commit = signed_commit(&header, &[&a, &b]);
 
-        let ok = verify_adjacent(&COSMOS_HUB, &trusted, &header, &commit, &set, header.time).unwrap();
+        let ok =
+            verify_adjacent(&COSMOS_HUB, &trusted, &header, &commit, &set, header.time).unwrap();
         assert_eq!(ok.height, 150);
 
         let mut wrong = trusted.clone();
@@ -414,7 +496,10 @@ mod tests {
         let trusted = trusted_from(100, &old, &old);
         let header = header_for(150, &new, &new);
         let commit = signed_commit(&header, &[&a, &b, &d]);
-        let now = Timestamp { seconds: header.time.seconds + 5, nanos: 0 };
+        let now = Timestamp {
+            seconds: header.time.seconds + 5,
+            nanos: 0,
+        };
 
         let result = verify_transition(&COSMOS_HUB, &trusted, &header, &commit, &new, now).unwrap();
         assert_eq!(result.height, 150);
@@ -457,7 +542,10 @@ mod tests {
         let new = make_set(&[&a, &b, &d]);
         let trusted = trusted_from(100, &old, &old);
         let mut header = header_for(150, &new, &new);
-        header.time = Timestamp { seconds: trusted.time.seconds - 50, nanos: 0 };
+        header.time = Timestamp {
+            seconds: trusted.time.seconds - 50,
+            nanos: 0,
+        };
         let commit = signed_commit(&header, &[&a, &b, &d]);
         let now = trusted.time;
 
@@ -476,7 +564,10 @@ mod tests {
         let old = make_set(&[&a, &b, &c]);
         let new = make_set(&[&a, &b, &d]);
         let trusted = trusted_from(100, &old, &old);
-        let now = Timestamp { seconds: trusted.time.seconds + 50, nanos: 0 };
+        let now = Timestamp {
+            seconds: trusted.time.seconds + 50,
+            nanos: 0,
+        };
         let mut header = header_for(150, &new, &new);
         header.time = Timestamp {
             seconds: now.seconds + COSMOS_HUB.max_clock_drift_secs as i64 + 3600,

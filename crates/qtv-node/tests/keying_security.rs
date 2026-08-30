@@ -23,8 +23,16 @@ fn the_published_bond_address_reveals_neither_the_secret_nor_the_seed() {
     assert_ne!(seed, secret, "the account seed must not be the secret");
 
     let account = keys::validator_account(&secret);
-    assert_ne!(account.seed(), &secret, "the signing seed must not be the secret");
-    assert_ne!(account.seed(), &seed, "the signing seed must not be the account seed");
+    assert_ne!(
+        account.seed(),
+        &secret,
+        "the signing seed must not be the secret"
+    );
+    assert_ne!(
+        account.seed(),
+        &seed,
+        "the signing seed must not be the account seed"
+    );
     let shown = format!("{account:?}");
     assert!(
         shown.contains("[redacted]"),

@@ -299,7 +299,9 @@ mod tests {
 
     #[test]
     fn curve_constant_d_is_minus_121665_over_121666() {
-        let d = Fe::from_u64(121665).neg().mul(&Fe::from_u64(121666).invert());
+        let d = Fe::from_u64(121665)
+            .neg()
+            .mul(&Fe::from_u64(121666).invert());
         assert_eq!(d, D);
         assert_eq!(D.add(&D), D2);
     }
@@ -479,8 +481,7 @@ mod tests {
     #[test]
     fn a_small_order_public_key_is_rejected() {
         let (_pk, msg, sig) = valid_signature();
-        let small_order =
-            arr32("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f");
+        let small_order = arr32("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f");
         assert!(decompress(&small_order).unwrap().is_small_order());
         assert!(!verify(&small_order, &msg, &sig));
     }
@@ -488,8 +489,7 @@ mod tests {
     #[test]
     fn a_small_order_r_is_rejected() {
         let (pk, msg, mut sig) = valid_signature();
-        let small_order =
-            arr32("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f");
+        let small_order = arr32("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f");
         sig[0..32].copy_from_slice(&small_order);
         sig[32..64].copy_from_slice(&Scalar::from_u64(9).to_bytes_le());
         assert!(!verify(&pk, &msg, &sig));

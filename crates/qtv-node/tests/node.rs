@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use qtv_account::{derive, Account};
+use qtv_governance::GuardianSet;
 use qtv_node::execution::{transfer_call, TRANSFER_METER};
 use qtv_node::fee::FeeParams;
 use qtv_node::mempool::Reject;
 use qtv_node::node::{Finalized, Genesis, GenesisAccount, Node, ProduceError, ValidatorSpec};
-use qtv_governance::GuardianSet;
 use qtv_tx::{sign, Body, Wrapper};
 
 const USER_SEED: [u8; 32] = [11u8; 32];
@@ -361,8 +361,7 @@ fn run_batch(params: &FeeParams, threads: usize) -> Node {
         .iter()
         .map(|a| GenesisAccount::from_account(a, 10_000_000))
         .collect();
-    let mut node =
-        boot(genesis(accounts, &[true, true, true, true])).with_parallelism(threads);
+    let mut node = boot(genesis(accounts, &[true, true, true, true])).with_parallelism(threads);
 
     for i in 0..10u64 {
         let tx = transfer(
@@ -392,10 +391,7 @@ fn a_parallel_node_finalizes_the_identical_chain_as_the_sequential_node() {
     let parallel = run_batch(&params, 8);
 
     assert_eq!(fingerprint(&sequential), fingerprint(&parallel));
-    assert_eq!(
-        sequential.ledger().q_root(),
-        parallel.ledger().q_root()
-    );
+    assert_eq!(sequential.ledger().q_root(), parallel.ledger().q_root());
     for i in 0..24u64 {
         let address = user(i).address();
         assert_eq!(
@@ -468,7 +464,11 @@ fn a_restarted_node_will_not_sign_a_height_it_already_signed() {
     drop(first);
 
     let mut restarted = boot_guarded(genesis(vec![], &[true, true, true, true]), &path);
-    assert_eq!(restarted.height(), 1, "a restart brings the node back to genesis height");
+    assert_eq!(
+        restarted.height(),
+        1,
+        "a restart brings the node back to genesis height"
+    );
     assert_eq!(
         restarted.produce().err(),
         Some(ProduceError::DoubleSignRefused),
@@ -514,7 +514,13 @@ fn validators_with_slots(online: &[bool], slots: u64) -> Vec<ValidatorSpec> {
         .enumerate()
         .map(|(i, &on)| {
             let id = i as u64 + 1;
-            ValidatorSpec::from_secret(id, VALIDATOR_STAKE, on, &qtv_node::keys::fixture_secret(id), slots)
+            ValidatorSpec::from_secret(
+                id,
+                VALIDATOR_STAKE,
+                on,
+                &qtv_node::keys::fixture_secret(id),
+                slots,
+            )
         })
         .collect()
 }
@@ -605,15 +611,33 @@ fn the_chain_finalises_across_epoch_boundaries_past_the_old_one_time_ceiling() {
 
     assert_eq!(node.epoch(), 0);
     for height in 1..=target {
-        node.produce()
-            .unwrap_or_else(|e| panic!("height {height} failed to finalise past the ceiling: {e:?}"));
+        node.produce().unwrap_or_else(|e| {
+            panic!("height {height} failed to finalise past the ceiling: {e:?}")
+        });
         assert_eq!(node.height(), height + 1);
-        assert_eq!(node.epoch(), height / epoch_len, "the epoch did not track the height at {height}");
+        assert_eq!(
+            node.epoch(),
+            height / epoch_len,
+            "the epoch did not track the height at {height}"
+        );
     }
 
-    assert!(node.height() > old_ceiling + 1, "the run did not pass the old fixed ceiling");
-    assert!(node.epoch() >= 2, "the one time keys did not rotate across at least two epoch boundaries");
+    assert!(
+        node.height() > old_ceiling + 1,
+        "the run did not pass the old fixed ceiling"
+    );
+    assert!(
+        node.epoch() >= 2,
+        "the one time keys did not rotate across at least two epoch boundaries"
+    );
     let head = node.chain().last().expect("a finalised head");
-    assert!(head.reconciles(), "the certificate at the head does not bind its header past the ceiling");
-    assert_eq!(node.chain().len() as u64, target, "a block finalised at every height across the boundaries");
+    assert!(
+        head.reconciles(),
+        "the certificate at the head does not bind its header past the ceiling"
+    );
+    assert_eq!(
+        node.chain().len() as u64,
+        target,
+        "a block finalised at every height across the boundaries"
+    );
 }

@@ -371,7 +371,9 @@ mod tests {
     #[test]
     fn the_electra_boundary_comes_from_the_pinned_config_and_is_fail_closed_when_unset() {
         let eth = ethereum();
-        let boundary = eth.electra_epoch.expect("a beacon chain pins its electra epoch");
+        let boundary = eth
+            .electra_epoch
+            .expect("a beacon chain pins its electra epoch");
         let slots_per_epoch = eth.slots_per_epoch;
         assert!(!eth.is_electra_at_slot(boundary * slots_per_epoch - 1));
         assert!(eth.is_electra_at_slot(boundary * slots_per_epoch));
