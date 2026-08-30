@@ -50,12 +50,13 @@ fn a_proposal_message_round_trips() {
         "q1proposer".to_string(),
         1_700_000_000_150,
     );
-    let bytes = Message::Proposal(Proposal {
+    let bytes = Message::Proposal(Box::new(Proposal {
         view: 2,
         header: header.clone(),
         body: body.clone(),
         justification: Vec::new(),
-    })
+        auth: support::dummy_auth(),
+    }))
     .encode();
     match Message::decode(&bytes).expect("decodes") {
         Message::Proposal(decoded) => {
@@ -92,6 +93,7 @@ fn a_coded_proposal_shard_round_trips_and_still_verifies() {
         header: header.clone(),
         body,
         justification: Vec::new(),
+        auth: support::dummy_auth(),
     };
     let shards = code_proposal(&proposal).expect("code the proposal");
     let shard = shards[1].clone();

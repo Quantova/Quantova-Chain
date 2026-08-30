@@ -85,6 +85,10 @@ const MAX_FUTURE_PROPOSALS: usize = 256;
 
 const MAX_VIEW_CHANGES_PER_SENDER: usize = 64;
 
+const MAX_JUSTIFICATION_VERIFICATIONS: u64 = 4 * qtv_sampler::params::COMMITTEE_BUDGET;
+
+const MAX_JUSTIFICATION_CACHE: usize = 4096;
+
 const MAX_SERVE_BLOCKS: u64 = 256;
 
 #[derive(Debug)]
@@ -226,6 +230,7 @@ pub struct DevNode {
     prevotes: Vec<Attestation>,
     future_props: Vec<Proposal>,
     view_changes: Vec<ViewChange>,
+    justification_verified: HashSet<[u8; 32]>,
     silent: bool,
     selection_cache: RefCell<Option<Selection>>,
     chain: Vec<FinalizedBlock>,
@@ -308,6 +313,7 @@ impl DevNode {
             prevotes: Vec::new(),
             future_props: Vec::new(),
             view_changes: Vec::new(),
+            justification_verified: HashSet::new(),
             silent: false,
             selection_cache: RefCell::new(None),
             chain: Vec::new(),
@@ -821,12 +827,50 @@ impl DevNode {
             ledger,
             justification: Vec::new(),
         });
+        let auth = self.sign_proposal(view, &header);
         Proposal {
             view,
             header,
             body: included,
             justification: Vec::new(),
+            auth,
         }
+    }
+
+    fn sign_proposal(&self, view: View, header: &Header) -> Attestation {
+        let height = header.height();
+        let subject = proposal_subject(height, view, &header.hash());
+        self.consensus.own_attestation(
+            height,
+            self.slot(),
+            view,
+            self.current_committee_digest(),
+            subject,
+            &self.beacon,
+        )
+    }
+
+    fn proposal_auth_ok(&self, selection: &Selection, proposal: &Proposal) -> bool {
+        let leader = leader_for(selection, proposal.view);
+        let Some(member) = selection.commitment.member(leader) else {
+            return false;
+        };
+        let auth = &proposal.auth;
+        if auth.from != leader
+            || auth.height != proposal.header.height()
+            || auth.view != proposal.view
+        {
+            return false;
+        }
+        let subject = proposal_subject(
+            proposal.header.height(),
+            proposal.view,
+            &proposal.header.hash(),
+        );
+        if auth.block != subject {
+            return false;
+        }
+        auth.signature_verifies(self.consensus.chain_id(), &member.attest_pk)
     }
 
     pub fn accept_proposal(
@@ -834,6 +878,9 @@ impl DevNode {
         selection: &Selection,
         proposal: &Proposal,
     ) -> Result<(), RoundError> {
+        if !self.proposal_auth_ok(selection, proposal) {
+            return Err(RoundError::ProposalRejected);
+        }
         let header = &proposal.header;
         if proposal.view != self.view
             || *header.proposer() != self.validator_address(leader_for(selection, proposal.view))
@@ -1028,6 +1075,7 @@ impl DevNode {
         self.prevotes.clear();
         self.future_props.clear();
         self.view_changes.clear();
+        self.justification_verified.clear();
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();
         self.mempool.remove_included(&staged.included_ids);
@@ -1049,16 +1097,22 @@ impl DevNode {
         if leads && !self.silent && (self.view == 0 || current_stage) {
             let proposal = if current_stage {
                 let staged = self.staged.as_ref().expect("a current stage is present");
+                let view = staged.view;
+                let header = staged.header.clone();
+                let body = staged.body.clone();
+                let justification = staged.justification.clone();
+                let auth = self.sign_proposal(view, &header);
                 Proposal {
-                    view: staged.view,
-                    header: staged.header.clone(),
-                    body: staged.body.clone(),
-                    justification: staged.justification.clone(),
+                    view,
+                    header,
+                    body,
+                    justification,
+                    auth,
                 }
             } else {
                 self.build_proposal(selection)
             };
-            messages.push(Message::Proposal(proposal));
+            messages.push(Message::Proposal(Box::new(proposal)));
         }
         let stage_is_current = matches!(&self.staged, Some(staged) if staged.view == self.view);
         if stage_is_current {
@@ -1074,6 +1128,9 @@ impl DevNode {
         proposal: Proposal,
     ) -> Vec<Message> {
         if proposal.header.height() != self.height {
+            return Vec::new();
+        }
+        if !self.proposal_auth_ok(selection, &proposal) {
             return Vec::new();
         }
         if !proposal.justification.is_empty() {
@@ -1322,7 +1379,7 @@ impl DevNode {
     }
 
     pub fn collect_view_change(&mut self, selection: &Selection, record: ViewChange) {
-        if record.height != self.height || !self.verify_view_change_att(selection, &record) {
+        if record.height != self.height {
             return;
         }
         let seen = self
@@ -1338,6 +1395,9 @@ impl DevNode {
             .filter(|r| r.att.from == record.att.from)
             .count();
         if from_count >= MAX_VIEW_CHANGES_PER_SENDER {
+            return;
+        }
+        if !self.verify_view_change_att(selection, &record) {
             return;
         }
         if !self.verify_view_change_polka(selection, &record) {
@@ -1420,34 +1480,75 @@ impl DevNode {
     }
 
     fn valid_justification(
-        &self,
+        &mut self,
         selection: &Selection,
         records: &[ViewChange],
         view: View,
     ) -> Option<Vec<ViewChange>> {
+        self.valid_justification_metered(selection, records, view).0
+    }
+
+    fn valid_justification_metered(
+        &mut self,
+        selection: &Selection,
+        records: &[ViewChange],
+        view: View,
+    ) -> (Option<Vec<ViewChange>>, u64) {
         if records.len() > selection.commitment.len() {
-            return None;
+            return (None, 0);
         }
+        let cap = MAX_JUSTIFICATION_VERIFICATIONS.max(selection.commitment.len() as u64);
         let mut seen: Vec<u64> = Vec::new();
         let mut valid: Vec<ViewChange> = Vec::new();
+        let mut verifications: u64 = 0;
         for record in records {
             if record.target_view != view || record.height != self.height {
-                continue;
-            }
-            if !self.verify_view_change(selection, record) {
                 continue;
             }
             if seen.contains(&record.att.from) {
                 continue;
             }
+            let digest = crate::wire::view_change_digest(record);
+            if self.justification_verified.contains(&digest) {
+                seen.push(record.att.from);
+                valid.push(record.clone());
+                continue;
+            }
+            if verifications >= cap {
+                break;
+            }
+            verifications += 1;
+            if !self.verify_view_change(selection, record) {
+                continue;
+            }
+            self.remember_justification(digest);
             seen.push(record.att.from);
             valid.push(record.clone());
         }
-        if seen.len() as u64 >= selection.tau {
+        let out = if seen.len() as u64 >= selection.tau {
             Some(valid)
         } else {
             None
+        };
+        (out, verifications)
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn measure_justification(
+        &mut self,
+        selection: &Selection,
+        records: &[ViewChange],
+        view: View,
+    ) -> (bool, u64) {
+        let (valid, verifications) = self.valid_justification_metered(selection, records, view);
+        (valid.is_some(), verifications)
+    }
+
+    fn remember_justification(&mut self, digest: [u8; 32]) {
+        if self.justification_verified.len() >= MAX_JUSTIFICATION_CACHE {
+            self.justification_verified.clear();
         }
+        self.justification_verified.insert(digest);
     }
 
     pub fn build_justified_proposal(
@@ -1464,11 +1565,13 @@ impl DevNode {
         let proposal = match bound {
             Some((_, locked)) => {
                 self.stage_from(&locked.header, &locked.body, view).ok()?;
+                let auth = self.sign_proposal(view, &locked.header);
                 Proposal {
                     view,
                     header: locked.header,
                     body: locked.body,
                     justification: records.clone(),
+                    auth,
                 }
             }
             None => {
@@ -2040,6 +2143,7 @@ impl DevNode {
         self.prevotes.clear();
         self.future_props.clear();
         self.view_changes.clear();
+        self.justification_verified.clear();
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();
         self.mempool.remove_included(&included_ids);
@@ -2069,6 +2173,21 @@ fn registration_transaction(note: &RegisterNote, chain_id: u64) -> Wrapper {
 fn view_sync_blocking(expected: u64, members: usize, tau: u64) -> usize {
     let committee = expected.max(members as u64);
     (committee.saturating_sub(tau) + 1) as usize
+}
+
+fn proposal_subject(height: Height, view: View, header_hash: &[u8; 32]) -> ConsensusBlock {
+    let mut buf = Vec::with_capacity(19 + 8 * 2 + 32);
+    buf.extend_from_slice(b"QTV-DEVNET-PROPOSAL");
+    buf.extend_from_slice(&height.to_le_bytes());
+    buf.extend_from_slice(&view.to_le_bytes());
+    buf.extend_from_slice(header_hash);
+    let commitment = qtv_bft::hash::digest_256(&buf);
+    ConsensusBlock::with_cost(
+        height,
+        commitment,
+        Parent::Genesis,
+        qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST,
+    )
 }
 
 fn prevote_subject(height: Height, view: View, value: [u8; 32]) -> ConsensusBlock {

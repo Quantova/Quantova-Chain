@@ -61,6 +61,7 @@ pub struct Proposal {
     pub header: Header,
     pub body: Vec<Wrapper>,
     pub justification: Vec<ViewChange>,
+    pub auth: Attestation,
 }
 
 #[derive(Clone)]
@@ -71,6 +72,7 @@ pub struct CodedProposal {
     pub justification: Vec<ViewChange>,
     pub shard: Shard,
     pub proof: ShardProof,
+    pub auth: Attestation,
 }
 
 #[derive(Clone)]
@@ -108,7 +110,7 @@ pub struct RegisterNote {
 #[derive(Clone)]
 pub enum Message {
     Tx(Wrapper),
-    Proposal(Proposal),
+    Proposal(Box<Proposal>),
     CodedProposal(Box<CodedProposal>),
     Attest(Box<Attestation>),
     Prevote(Box<Attestation>),
@@ -165,6 +167,7 @@ impl Message {
                 for record in &proposal.justification {
                     encode_view_change(&mut encoder, record);
                 }
+                encode_attestation(&mut encoder, &proposal.auth);
             }
             Message::CodedProposal(coded) => {
                 encoder.put_tag(TAG_CODED_PROPOSAL);
@@ -251,12 +254,14 @@ impl Message {
                 for _ in 0..just_count {
                     justification.push(decode_view_change(&mut decoder)?);
                 }
-                Message::Proposal(Proposal {
+                let auth = decode_attestation(&mut decoder)?;
+                Message::Proposal(Box::new(Proposal {
                     view,
                     header,
                     body,
                     justification,
-                })
+                    auth,
+                }))
             }
             TAG_CODED_PROPOSAL => {
                 Message::CodedProposal(Box::new(decode_coded_proposal(&mut decoder)?))
@@ -523,6 +528,7 @@ pub(crate) fn coded_overhead(
     header: &Header,
     commitment: &Commitment,
     justification: &[ViewChange],
+    auth: &Attestation,
 ) -> usize {
     let mut encoder = Encoder::new();
     header.encode(&mut encoder);
@@ -531,7 +537,14 @@ pub(crate) fn coded_overhead(
     for record in justification {
         encode_view_change(&mut encoder, record);
     }
+    encode_attestation(&mut encoder, auth);
     encoder.into_bytes().len()
+}
+
+pub(crate) fn view_change_digest(record: &ViewChange) -> [u8; 32] {
+    let mut encoder = Encoder::new();
+    encode_view_change(&mut encoder, record);
+    sha3_256(&encoder.into_bytes())
 }
 
 fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeError> {
@@ -606,6 +619,7 @@ fn encode_coded_proposal(encoder: &mut Encoder, coded: &CodedProposal) {
     for sibling in &coded.proof.siblings {
         encoder.put_bytes(sibling);
     }
+    encode_attestation(encoder, &coded.auth);
 }
 
 fn decode_coded_proposal(decoder: &mut Decoder<'_>) -> Result<CodedProposal, DecodeError> {
@@ -633,6 +647,7 @@ fn decode_coded_proposal(decoder: &mut Decoder<'_>) -> Result<CodedProposal, Dec
         let sibling: [u8; DIGEST_LEN] = read_fixed(decoder)?;
         siblings.push(sibling);
     }
+    let auth = decode_attestation(decoder)?;
     Ok(CodedProposal {
         view,
         header,
@@ -640,6 +655,7 @@ fn decode_coded_proposal(decoder: &mut Decoder<'_>) -> Result<CodedProposal, Dec
         justification,
         shard: Shard { index, bytes },
         proof: ShardProof { siblings },
+        auth,
     })
 }
 

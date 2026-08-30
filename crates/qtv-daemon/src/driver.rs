@@ -316,7 +316,7 @@ impl Driver {
             return;
         }
         if let Some(proposal) = self.node.build_justified_proposal(selection, view) {
-            self.emit(Message::Proposal(proposal));
+            self.emit(Message::Proposal(Box::new(proposal)));
             for message in self.node.prevote_staged() {
                 self.emit(message);
             }
@@ -337,7 +337,7 @@ impl Driver {
             }
             Message::Proposal(proposal) => {
                 let proposer = leader_for(selection, proposal.view);
-                let out = self.node.on_proposal(selection, proposer, proposal);
+                let out = self.node.on_proposal(selection, proposer, *proposal);
                 for message in out {
                     self.emit(message);
                 }

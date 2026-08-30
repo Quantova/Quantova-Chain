@@ -73,12 +73,13 @@ fn an_over_bound_block_finalizes_over_the_coded_path() {
         whole_block > RECORD_BOUND,
         "the finalized block {whole_block} did not exceed the record bound {RECORD_BOUND}"
     );
-    let whole_proposal = Message::Proposal(Proposal {
+    let whole_proposal = Message::Proposal(Box::new(Proposal {
         view: 0,
         header: block.header().clone(),
         body: block.body().to_vec(),
         justification: Vec::new(),
-    })
+        auth: support::dummy_auth(),
+    }))
     .encode()
     .len();
     assert!(

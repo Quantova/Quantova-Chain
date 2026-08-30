@@ -425,7 +425,7 @@ impl<S: Read + Write> Devnet<S> {
         let messages = self.nodes[i].enter_round(&selection, online);
         for message in messages {
             match message {
-                Message::Proposal(proposal) => self.originate_proposal(i, proposal, active)?,
+                Message::Proposal(proposal) => self.originate_proposal(i, *proposal, active)?,
                 other => self.originate(i, &other, active)?,
             }
         }
@@ -556,7 +556,7 @@ impl<S: Read + Write> Devnet<S> {
                 match message {
                     Message::Tx(transaction) => self.nodes[to].admit_gossiped(transaction),
                     Message::Proposal(proposal) => {
-                        self.deliver_proposal(to, proposal, ceiling, active)?
+                        self.deliver_proposal(to, *proposal, ceiling, active)?
                     }
                     Message::CodedProposal(coded) => {
                         self.deliver_coded_proposal(to, *coded, ceiling, active)?

@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use qtv_attest::Attestation;
 use qtv_block::{transaction_root, Block as ChainBlock, Header};
 use qtv_codec::{to_bytes, Decoder, Encoder};
 use qtv_crypto::sha3::sha3_256;
@@ -166,6 +167,7 @@ pub fn code_proposal(proposal: &Proposal) -> Result<Vec<CodedProposal>, CodedErr
             justification: proposal.justification.clone(),
             shard,
             proof,
+            auth: proposal.auth.clone(),
         });
     }
     Ok(shards)
@@ -216,6 +218,7 @@ struct Pending {
     justification: Vec<ViewChange>,
     pieces: Vec<(Shard, ShardProof)>,
     overhead: usize,
+    auth: Attestation,
 }
 
 impl ProposalAssembler {
@@ -263,6 +266,7 @@ impl ProposalAssembler {
             justification,
             shard,
             proof,
+            auth,
         } = coded;
         let is_new = !self.pending.contains_key(&key);
         if is_new && self.pending.len() >= MAX_PENDING_PROPOSALS {
@@ -270,7 +274,8 @@ impl ProposalAssembler {
         }
         {
             let entry = self.pending.entry(key).or_insert_with(|| {
-                let overhead = crate::wire::coded_overhead(&header, &commitment, &justification);
+                let overhead =
+                    crate::wire::coded_overhead(&header, &commitment, &justification, &auth);
                 Pending {
                     height,
                     view,
@@ -279,6 +284,7 @@ impl ProposalAssembler {
                     justification,
                     pieces: Vec::new(),
                     overhead,
+                    auth,
                 }
             });
             if entry.commitment != commitment {
@@ -337,6 +343,7 @@ impl ProposalAssembler {
             header: pending.header,
             body: block.body().to_vec(),
             justification: pending.justification,
+            auth: pending.auth,
         }))
     }
 
@@ -587,6 +594,29 @@ mod tests {
         }
     }
 
+    fn dummy_auth() -> Attestation {
+        use qtv_attest::{Block, Parent};
+        use qtv_crypto::ml_dsa::SIGNATURE_BYTES;
+        use qtv_sampler::onetime::{MerklePath, PREIMAGE_BYTES};
+        use qtv_sampler::sortition::Credential;
+        Attestation {
+            from: 0,
+            height: 0,
+            slot: 0,
+            view: 0,
+            committee: [0u8; 32],
+            block: Block::new(0, [0u8; 32], Parent::Genesis),
+            membership: Credential {
+                position: 0,
+                preimage: [0u8; PREIMAGE_BYTES],
+                path: MerklePath {
+                    siblings: Vec::new(),
+                },
+            },
+            sig: [0u8; SIGNATURE_BYTES],
+        }
+    }
+
     fn sample_proposal(count: usize, view: u64) -> Proposal {
         let block = sample_block(count);
         Proposal {
@@ -594,6 +624,7 @@ mod tests {
             header: block.header().clone(),
             body: block.body().to_vec(),
             justification: Vec::new(),
+            auth: dummy_auth(),
         }
     }
 
@@ -888,7 +919,8 @@ mod tests {
         assert!(base.commitment.k > 1, "a lone shard must not complete");
 
         let heavy = heavy_justification();
-        let jbytes = crate::wire::coded_overhead(&base.header, &base.commitment, &heavy);
+        let jbytes =
+            crate::wire::coded_overhead(&base.header, &base.commitment, &heavy, &base.auth);
         assert!(
             jbytes > piece * 8,
             "the justification must dominate a shard piece"
@@ -906,7 +938,7 @@ mod tests {
             .pending
             .values()
             .map(|p| {
-                crate::wire::coded_overhead(&p.header, &p.commitment, &p.justification)
+                crate::wire::coded_overhead(&p.header, &p.commitment, &p.justification, &p.auth)
                     + p.pieces
                         .iter()
                         .map(|(s, pr)| super::piece_weight(s, pr))
