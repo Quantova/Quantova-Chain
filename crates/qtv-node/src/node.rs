@@ -92,6 +92,7 @@ pub struct Genesis {
     pub bridge_era: Option<[u8; 32]>,
     pub bridge_bitcoin_anchor: Option<crate::bridge_btc::BitcoinAnchor>,
     pub bridge_eth_anchors: Vec<crate::bridge_eth::EthAnchor>,
+    pub bridge_cosmos_anchor: Option<crate::bridge_cosmos::CosmosAnchor>,
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -752,6 +753,9 @@ fn bridge_mint_fact(
         let now =
             crate::bridge_cosmos::chain_now(ledger.chain_genesis_time(), ledger.execution_height());
         return crate::bridge_cosmos::verify_cosmos_mint(&anchor, &proof, dest_chain, now);
+    }
+    if !ledger.bridge_federated_enabled() {
+        return None;
     }
     let artifact = crate::bridge::MintArtifact::decode(wrapper.body().call().args())?;
     let dest_chain = ledger.bridge_dest_chain()?;
@@ -1467,6 +1471,9 @@ impl Node {
         }
         for anchor in &genesis.bridge_eth_anchors {
             ledger.seed_bridge_eth_anchor(anchor);
+        }
+        if let Some(ref anchor) = genesis.bridge_cosmos_anchor {
+            ledger.seed_bridge_cosmos_anchor(anchor);
         }
         for asset in &genesis.bridged_assets {
             ledger.register_bridged_asset(
@@ -4080,6 +4087,7 @@ mod tests {
             vec![(0, pk0.to_vec()), (1, pk1.to_vec()), (2, pk2.to_vec())],
             2,
         ));
+        ledger.seed_bridge_federated_enabled(true);
         (sk0, sk1)
     }
 
@@ -4785,6 +4793,101 @@ mod tests {
     }
 
     #[test]
+    fn a_genesis_cosmos_anchor_seeds_the_ledger_and_an_absent_one_stays_none() {
+        use qlc_cosmos::proto::Timestamp;
+        let anchor = crate::bridge_cosmos::CosmosAnchor {
+            config_selector: 0,
+            trusted_height: 42,
+            trusted_time: Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 0,
+            },
+            trusted_validators_hash: [0x5c; 32],
+            asset_id: *b"qATOM.atom\0\0\0\0\0\0",
+        };
+        let secret = crate::keys::fixture_secret(1);
+        let build = |cosmos: Option<crate::bridge_cosmos::CosmosAnchor>| Genesis {
+            fee_params: FeeParams::devnet(),
+            accounts: Vec::new(),
+            validators: vec![ValidatorSpec::from_secret(
+                1,
+                2_000,
+                true,
+                &secret,
+                crate::consensus::DEFAULT_SLOTS,
+            )],
+            genesis_time: 1_700_000_000,
+            guardians: Default::default(),
+            bridge_dest_chain: Some(BRIDGE_DEST),
+            bridge_operators: None,
+            bridged_assets: Vec::new(),
+            bridge_era: None,
+            bridge_bitcoin_anchor: None,
+            bridge_eth_anchors: Vec::new(),
+            bridge_cosmos_anchor: cosmos,
+        };
+        let secrets: std::collections::BTreeMap<u64, [u8; 32]> =
+            std::iter::once((1u64, secret)).collect();
+
+        let seeded = Node::new(build(Some(anchor.clone())), &secrets);
+        assert_eq!(
+            seeded.ledger().bridge_cosmos_anchor(0),
+            Some(anchor),
+            "the genesis cosmos anchor is seeded so a cosmos deposit can verify against it"
+        );
+
+        let bare = Node::new(build(None), &secrets);
+        assert!(
+            bare.ledger().bridge_cosmos_anchor(0).is_none(),
+            "a genesis without a cosmos anchor still boots and seeds none"
+        );
+    }
+
+    #[test]
+    fn a_federated_quorum_mints_nothing_until_the_corridor_is_enabled() {
+        assert!(
+            !crate::ledger::FEDERATED_CORRIDOR_ENABLED,
+            "the federated corridor is disabled by default at launch"
+        );
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        ledger.seed_bridge_federated_enabled(false);
+        assert!(
+            !ledger.bridge_federated_enabled(),
+            "the federated corridor is closed"
+        );
+        let relayer = keypair(470);
+        let recipient_id = address_bytes(&keypair(471).address());
+        let asset = [7u8; 16];
+        ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+
+        let fact = deposit_fact(recipient_id, asset, 500_000, [0x77; 32]);
+        let artifact = signed_artifact(&fact, &sk0, &sk1);
+        assert!(
+            execute_ordered(&mut ledger, &[mint_tx(&relayer, &artifact, &fee)], &fee, 0).is_empty(),
+            "a fully signed federated quorum mints nothing while the corridor is disabled"
+        );
+        assert_eq!(
+            ledger.bridged_supply(&asset),
+            0,
+            "the disabled federated mint moved no supply"
+        );
+        assert!(
+            !ledger.bridge_reference_seen(1, &[0x77; 32]),
+            "the refused mint leaves the reference unseen for a later replay-free retry"
+        );
+
+        ledger.seed_bridge_federated_enabled(true);
+        assert_eq!(
+            execute_ordered(&mut ledger, &[mint_tx(&relayer, &artifact, &fee)], &fee, 0).len(),
+            1,
+            "the same quorum mints once the corridor is re-enabled"
+        );
+        assert_eq!(ledger.bridged_supply(&asset), 500_000);
+    }
+
+    #[test]
     fn a_quorum_signed_for_a_sibling_chain_id_does_not_mint() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
@@ -5062,6 +5165,7 @@ mod tests {
         ));
         unset.seed_bridge_pool_vault(&BRIDGE_VAULT);
         unset.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
+        unset.seed_bridge_federated_enabled(true);
         let fact = deposit_fact(recipient_id, asset, 100_000, [0x71; 32]);
         let artifact = crate::bridge::MintArtifact {
             attestation: crate::bridge::Attestation {
@@ -5801,11 +5905,12 @@ mod tests {
 
     const EXIT_VAULT: [u8; 32] = [0x5b; 32];
     const EXIT_ASSET: [u8; 16] = [0x7c; 16];
+    const EXIT_DESTINATION: [u8; 32] = [0x9d; 32];
 
     fn exit_fact(
         outcome: crate::bridge::ExitOutcome,
         amount: u128,
-        beneficiary: [u8; 32],
+        holder: [u8; 32],
         burn_ref: [u8; 32],
     ) -> crate::bridge::ExitFact {
         crate::bridge::ExitFact {
@@ -5814,7 +5919,8 @@ mod tests {
             dest_chain: BRIDGE_DEST,
             asset_id: EXIT_ASSET,
             amount,
-            beneficiary,
+            holder,
+            destination: EXIT_DESTINATION,
             burn_ref,
             outcome,
         }
@@ -6370,7 +6476,8 @@ mod tests {
             dest_chain: 0,
             asset_id: [0u8; 16],
             amount: 0,
-            beneficiary: [0u8; 32],
+            holder: [0u8; 32],
+            destination: [0u8; 32],
             burn_ref: [0u8; 32],
             outcome: crate::bridge::ExitOutcome::Slash,
         };

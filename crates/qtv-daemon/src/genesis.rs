@@ -249,6 +249,7 @@ impl GenesisFile {
             bridge_era: None,
             bridge_bitcoin_anchor: None,
             bridge_eth_anchors: Vec::new(),
+            bridge_cosmos_anchor: None,
         };
         let hash = genesis_hash(&chain_id, &message, slots, &genesis);
         Ok(GenesisFile {
@@ -462,6 +463,7 @@ mod tests {
             bridge_era: None,
             bridge_bitcoin_anchor: None,
             bridge_eth_anchors: Vec::new(),
+            bridge_cosmos_anchor: None,
         }
     }
 
