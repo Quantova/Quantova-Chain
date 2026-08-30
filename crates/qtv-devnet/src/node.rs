@@ -827,7 +827,7 @@ impl DevNode {
             ledger,
             justification: Vec::new(),
         });
-        let auth = self.sign_proposal(view, &header);
+        let auth = self.sign_proposal(view, &header, &included);
         Proposal {
             view,
             header,
@@ -837,9 +837,13 @@ impl DevNode {
         }
     }
 
-    fn sign_proposal(&self, view: View, header: &Header) -> Attestation {
+    fn sign_proposal(&self, view: View, header: &Header, body: &[Wrapper]) -> Attestation {
         let height = header.height();
-        let subject = proposal_subject(height, view, &header.hash());
+        let (root, k, n) = match crate::coded::proposal_commitment(header, body) {
+            Some(c) => (c.root, c.k, c.n),
+            None => ([0u8; 32], 0, 0),
+        };
+        let subject = proposal_subject(height, view, &header.hash(), &root, k, n);
         self.consensus.own_attestation(
             height,
             self.slot(),
@@ -851,11 +855,27 @@ impl DevNode {
     }
 
     fn proposal_auth_ok(&self, selection: &Selection, proposal: &Proposal) -> bool {
-        self.header_auth_ok(selection, proposal.view, &proposal.header, &proposal.auth)
+        let Some(commitment) = crate::coded::proposal_commitment(&proposal.header, &proposal.body)
+        else {
+            return false;
+        };
+        self.header_auth_ok(
+            selection,
+            proposal.view,
+            &proposal.header,
+            &commitment,
+            &proposal.auth,
+        )
     }
 
     pub fn coded_auth_ok(&self, selection: &Selection, coded: &CodedProposal) -> bool {
-        self.header_auth_ok(selection, coded.view, &coded.header, &coded.auth)
+        self.header_auth_ok(
+            selection,
+            coded.view,
+            &coded.header,
+            &coded.commitment,
+            &coded.auth,
+        )
     }
 
     fn header_auth_ok(
@@ -863,6 +883,7 @@ impl DevNode {
         selection: &Selection,
         view: View,
         header: &Header,
+        commitment: &qtv_net::erasure::Commitment,
         auth: &Attestation,
     ) -> bool {
         let leader = leader_for(selection, view);
@@ -872,7 +893,14 @@ impl DevNode {
         if auth.from != leader || auth.height != header.height() || auth.view != view {
             return false;
         }
-        let subject = proposal_subject(header.height(), view, &header.hash());
+        let subject = proposal_subject(
+            header.height(),
+            view,
+            &header.hash(),
+            &commitment.root,
+            commitment.k,
+            commitment.n,
+        );
         if auth.block != subject {
             return false;
         }
@@ -1107,7 +1135,7 @@ impl DevNode {
                 let header = staged.header.clone();
                 let body = staged.body.clone();
                 let justification = staged.justification.clone();
-                let auth = self.sign_proposal(view, &header);
+                let auth = self.sign_proposal(view, &header, &body);
                 Proposal {
                     view,
                     header,
@@ -1571,7 +1599,7 @@ impl DevNode {
         let proposal = match bound {
             Some((_, locked)) => {
                 self.stage_from(&locked.header, &locked.body, view).ok()?;
-                let auth = self.sign_proposal(view, &locked.header);
+                let auth = self.sign_proposal(view, &locked.header, &locked.body);
                 Proposal {
                     view,
                     header: locked.header,
@@ -2181,12 +2209,22 @@ fn view_sync_blocking(expected: u64, members: usize, tau: u64) -> usize {
     (committee.saturating_sub(tau) + 1) as usize
 }
 
-fn proposal_subject(height: Height, view: View, header_hash: &[u8; 32]) -> ConsensusBlock {
-    let mut buf = Vec::with_capacity(19 + 8 * 2 + 32);
+fn proposal_subject(
+    height: Height,
+    view: View,
+    header_hash: &[u8; 32],
+    root: &[u8; 32],
+    k: usize,
+    n: usize,
+) -> ConsensusBlock {
+    let mut buf = Vec::with_capacity(19 + 8 * 2 + 32 + 32 + 8 * 2);
     buf.extend_from_slice(b"QTV-DEVNET-PROPOSAL");
     buf.extend_from_slice(&height.to_le_bytes());
     buf.extend_from_slice(&view.to_le_bytes());
     buf.extend_from_slice(header_hash);
+    buf.extend_from_slice(root);
+    buf.extend_from_slice(&(k as u64).to_le_bytes());
+    buf.extend_from_slice(&(n as u64).to_le_bytes());
     let commitment = qtv_bft::hash::digest_256(&buf);
     ConsensusBlock::with_cost(
         height,

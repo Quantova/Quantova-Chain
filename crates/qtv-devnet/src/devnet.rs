@@ -509,10 +509,11 @@ impl<S: Read + Write> Devnet<S> {
         let Ok(selection) = self.nodes[to].select() else {
             return Ok(());
         };
-        if !self.nodes[to].coded_auth_ok(&selection, &coded) {
-            return Ok(());
-        }
-        match self.assemblers[to].admit(coded) {
+        let outcome = {
+            let node = &self.nodes[to];
+            self.assemblers[to].admit(coded, |c| node.coded_auth_ok(&selection, c))
+        };
+        match outcome {
             Some(Ok(proposal)) => self.deliver_proposal(to, proposal, ceiling, active)?,
             Some(Err(_)) | None => {}
         }
