@@ -8,3 +8,6 @@ edition = "2021"
 qlc-stark = { path = "../qlc-stark" }
 qlc-registry = { path = "../qlc-registry" }
 qlc-core = { path = "../qlc-core" }
+
+[lints]
+workspace = true

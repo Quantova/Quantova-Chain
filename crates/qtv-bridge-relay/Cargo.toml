@@ -11,3 +11,6 @@ qcore = { path = "../../../QCore.rs", features = ["client"] }
 
 [dev-dependencies]
 qtv-devnet = { path = "../qtv-devnet" }
+
+[lints]
+workspace = true

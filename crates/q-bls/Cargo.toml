@@ -10,3 +10,6 @@ test-util = []
 [dependencies]
 blst = "=0.3.16"
 qlc-ethereum = { path = "../qlc-ethereum" }
+
+[lints]
+workspace = true

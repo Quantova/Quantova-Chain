@@ -17,3 +17,6 @@ fn-dsa = ["qtv-crypto/fn-dsa"]
 qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "4d73a36c112b91a6a25a6a876f54cdccb729c7de" }
 qtv-idfmt = { path = "../qtv-idfmt" }
 qtv-wipe = { path = "../qtv-wipe" }
+
+[lints]
+workspace = true

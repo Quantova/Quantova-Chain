@@ -10,3 +10,6 @@ repository.workspace = true
 description = "Single Bech32m formatting path for every identifier in the Quantova stack."
 
 [dependencies]
+
+[lints]
+workspace = true

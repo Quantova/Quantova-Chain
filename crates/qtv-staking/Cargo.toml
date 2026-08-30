@@ -11,3 +11,6 @@ description = "Stake accounting and reward rules for the node."
 
 [dependencies]
 qtv-codec = { path = "../qtv-codec" }
+
+[lints]
+workspace = true

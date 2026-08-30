@@ -11,3 +11,6 @@ description = "Referenda tracks, conviction voting, tallies, and the constitutio
 
 [dependencies]
 qtv-codec = { path = "../qtv-codec" }
+
+[lints]
+workspace = true
