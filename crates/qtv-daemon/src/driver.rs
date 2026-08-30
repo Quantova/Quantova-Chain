@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use qtv_devnet::coded::{code_proposal, ProposalAssembler, GLOBAL_SOURCE};
+use qtv_devnet::coded::{code_proposal, ProposalAssembler};
 use qtv_devnet::wire::Message;
 use qtv_devnet::{leader_for, DevNode};
 use qtv_net::Channel;
@@ -27,12 +27,12 @@ const MAX_BUFFERED_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Default)]
 struct FrameBuffer {
-    frames: VecDeque<Vec<u8>>,
+    frames: VecDeque<(u64, Vec<u8>)>,
     bytes: usize,
 }
 
 impl FrameBuffer {
-    fn push(&mut self, frame: Vec<u8>) {
+    fn push(&mut self, source: u64, frame: Vec<u8>) {
         if frame.len() > MAX_BUFFERED_BYTES {
             return;
         }
@@ -40,15 +40,15 @@ impl FrameBuffer {
             && (self.frames.len() + 1 > MAX_BUFFERED_FRAMES
                 || self.bytes + frame.len() > MAX_BUFFERED_BYTES)
         {
-            if let Some(dropped) = self.frames.pop_front() {
+            if let Some((_, dropped)) = self.frames.pop_front() {
                 self.bytes -= dropped.len();
             }
         }
         self.bytes += frame.len();
-        self.frames.push_back(frame);
+        self.frames.push_back((source, frame));
     }
 
-    fn take(&mut self) -> VecDeque<Vec<u8>> {
+    fn take(&mut self) -> VecDeque<(u64, Vec<u8>)> {
         self.bytes = 0;
         std::mem::take(&mut self.frames)
     }
@@ -240,13 +240,13 @@ impl Driver {
                 break;
             }
             match self.inbound.recv_timeout(TICK) {
-                Ok((_, bytes)) => match Message::decode(&bytes) {
+                Ok((source, bytes)) => match Message::decode(&bytes) {
                     Ok(Message::Register(note)) => {
                         if self.node.collect_registration((*note).clone()) {
                             self.broadcast(&Message::Register(note).encode());
                         }
                     }
-                    Ok(_) => self.buffered.push(bytes),
+                    Ok(_) => self.buffered.push(source as u64, bytes),
                     Err(_) => {}
                 },
                 Err(RecvTimeoutError::Timeout) => {}
@@ -272,13 +272,13 @@ impl Driver {
                 break;
             }
             match self.inbound.recv_timeout(TICK) {
-                Ok((_, bytes)) => match Message::decode(&bytes) {
+                Ok((source, bytes)) => match Message::decode(&bytes) {
                     Ok(Message::Reveal(note)) => {
                         if self.node.collect_reveal((*note).clone()) {
                             self.broadcast(&Message::Reveal(note).encode());
                         }
                     }
-                    Ok(_) => self.buffered.push(bytes),
+                    Ok(_) => self.buffered.push(source as u64, bytes),
                     Err(_) => {}
                 },
                 Err(RecvTimeoutError::Timeout) => {}
@@ -413,7 +413,7 @@ impl Driver {
             Err(_) => return,
         };
         match message_height(&message) {
-            Some(h) if h > start_height => self.buffered.push(bytes),
+            Some(h) if h > start_height => self.buffered.push(source, bytes),
             Some(h) if h < start_height => {}
             _ => self.dispatch(message, selection, source),
         }
@@ -421,13 +421,13 @@ impl Driver {
 
     fn replay_buffered(&mut self, start_height: u64, selection: &Selection) {
         let buffered = self.buffered.take();
-        for bytes in buffered {
+        for (source, bytes) in buffered {
             let Ok(message) = Message::decode(&bytes) else {
                 continue;
             };
             match message_height(&message) {
-                Some(h) if h == start_height => self.dispatch(message, selection, GLOBAL_SOURCE),
-                Some(h) if h > start_height => self.buffered.push(bytes),
+                Some(h) if h == start_height => self.dispatch(message, selection, source),
+                Some(h) if h > start_height => self.buffered.push(source, bytes),
                 _ => {}
             }
         }
@@ -520,7 +520,7 @@ mod tests {
     fn a_flood_of_tiny_ahead_frames_stays_within_the_count_ceiling() {
         let mut buffer = FrameBuffer::default();
         for _ in 0..(MAX_BUFFERED_FRAMES * 4) {
-            buffer.push(vec![7u8; 32]);
+            buffer.push(0, vec![7u8; 32]);
             within_ceilings(&buffer);
         }
         assert_eq!(buffer.len(), MAX_BUFFERED_FRAMES);
@@ -531,7 +531,7 @@ mod tests {
         let mut buffer = FrameBuffer::default();
         let frame = vec![3u8; 1024 * 1024];
         for _ in 0..((MAX_BUFFERED_BYTES / frame.len()) * 4) {
-            buffer.push(frame.clone());
+            buffer.push(0, frame.clone());
             within_ceilings(&buffer);
         }
         assert!(buffer.len() < MAX_BUFFERED_FRAMES);
@@ -542,12 +542,12 @@ mod tests {
     fn mixed_frame_sizes_cannot_bypass_either_ceiling() {
         let mut buffer = FrameBuffer::default();
         for round in 0..5000 {
-            buffer.push(vec![1u8; 16]);
+            buffer.push(0, vec![1u8; 16]);
             within_ceilings(&buffer);
-            buffer.push(vec![2u8; 200 * 1024]);
+            buffer.push(0, vec![2u8; 200 * 1024]);
             within_ceilings(&buffer);
             if round % 1000 == 0 {
-                buffer.push(vec![9u8; 900 * 1024]);
+                buffer.push(0, vec![9u8; 900 * 1024]);
                 within_ceilings(&buffer);
             }
         }
@@ -557,14 +557,14 @@ mod tests {
     fn the_count_ceiling_holds_exactly_at_and_over_the_boundary() {
         let mut buffer = FrameBuffer::default();
         for _ in 0..MAX_BUFFERED_FRAMES {
-            buffer.push(vec![0u8; 8]);
+            buffer.push(0, vec![0u8; 8]);
         }
         assert_eq!(
             buffer.len(),
             MAX_BUFFERED_FRAMES,
             "the buffer fills to the ceiling"
         );
-        buffer.push(vec![0u8; 8]);
+        buffer.push(0, vec![0u8; 8]);
         assert_eq!(
             buffer.len(),
             MAX_BUFFERED_FRAMES,
@@ -576,10 +576,10 @@ mod tests {
     #[test]
     fn an_oversized_single_frame_is_refused_and_leaves_the_buffer_intact() {
         let mut buffer = FrameBuffer::default();
-        buffer.push(vec![5u8; 4096]);
+        buffer.push(0, vec![5u8; 4096]);
         let before_frames = buffer.len();
         let before_bytes = buffer.byte_len();
-        buffer.push(vec![6u8; MAX_BUFFERED_BYTES + 1]);
+        buffer.push(0, vec![6u8; MAX_BUFFERED_BYTES + 1]);
         assert_eq!(
             buffer.len(),
             before_frames,
@@ -600,21 +600,50 @@ mod tests {
         for tag in 0..total as u64 {
             let mut frame = tag.to_le_bytes().to_vec();
             frame.resize(64, 0);
-            buffer.push(frame);
+            buffer.push(0, frame);
         }
         let held = buffer.take();
         assert_eq!(held.len(), MAX_BUFFERED_FRAMES);
-        let first_tag = u64::from_le_bytes(held.front().unwrap()[..8].try_into().unwrap());
-        let last_tag = u64::from_le_bytes(held.back().unwrap()[..8].try_into().unwrap());
+        let first_tag = u64::from_le_bytes(held.front().unwrap().1[..8].try_into().unwrap());
+        let last_tag = u64::from_le_bytes(held.back().unwrap().1[..8].try_into().unwrap());
         assert_eq!(first_tag, (total - MAX_BUFFERED_FRAMES) as u64);
         assert_eq!(last_tag, (total - 1) as u64);
+    }
+
+    #[test]
+    fn a_front_loaded_flood_does_not_collapse_a_buffered_proposal_onto_a_shared_source() {
+        let mut buffer = FrameBuffer::default();
+        let attacker: u64 = 1;
+        let leader: u64 = 2;
+        for i in 0..16u8 {
+            buffer.push(attacker, vec![i; 8]);
+        }
+        buffer.push(leader, vec![0x9f; 64]);
+        let held = buffer.take();
+        assert!(
+            held.iter().filter(|(s, _)| *s == attacker).count() >= 8,
+            "the attacker frames keep the attacker source"
+        );
+        let genuine = held
+            .iter()
+            .find(|(_, frame)| frame.len() == 64)
+            .expect("the genuine buffered frame survives the front loaded flood");
+        assert_eq!(
+            genuine.0, leader,
+            "the genuine frame replays under the leader source not a shared bucket"
+        );
+        assert_ne!(
+            genuine.0,
+            u64::MAX,
+            "the genuine frame is not collapsed onto the global source"
+        );
     }
 
     #[test]
     fn take_empties_the_buffer_and_resets_the_byte_count() {
         let mut buffer = FrameBuffer::default();
         for _ in 0..64 {
-            buffer.push(vec![4u8; 1000]);
+            buffer.push(0, vec![4u8; 1000]);
         }
         assert!(buffer.byte_len() > 0);
         let held = buffer.take();
