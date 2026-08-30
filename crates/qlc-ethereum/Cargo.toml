@@ -14,3 +14,6 @@ qlc-bitcoin = { path = "../qtv-btc-spv", package = "qtv-btc-spv" }
 
 [dev-dependencies]
 qlc-airlock = { path = "../qlc-airlock" }
+
+[lints]
+workspace = true

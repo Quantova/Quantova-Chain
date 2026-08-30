@@ -16,3 +16,6 @@ qtv-state = { path = "../qtv-state" }
 
 [dev-dependencies]
 qtv-tx = { path = "../qtv-tx" }
+
+[lints]
+workspace = true

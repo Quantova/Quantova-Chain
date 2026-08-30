@@ -11,3 +11,6 @@ test-util = []
 [dependencies]
 qlc-core = { path = "../qlc-core" }
 qlc-stark = { path = "../qlc-stark" }
+
+[lints]
+workspace = true

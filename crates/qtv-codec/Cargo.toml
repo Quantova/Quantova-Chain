@@ -10,3 +10,6 @@ repository.workspace = true
 description = "The canonical length delimited codec for the Quantova stack."
 
 [dependencies]
+
+[lints]
+workspace = true

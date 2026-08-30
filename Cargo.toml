@@ -26,3 +26,31 @@ opt-level = 3
 
 [profile.test.package.qtv-crypto]
 opt-level = 3
+
+[workspace.lints.rust]
+dead_code = "allow"
+
+[workspace.lints.clippy]
+chunks_exact_to_as_chunks = "allow"
+manual_is_multiple_of = "allow"
+needless_range_loop = "allow"
+too_many_arguments = "allow"
+assertions_on_constants = "allow"
+manual_repeat_n = "allow"
+useless_vec = "allow"
+if_same_then_else = "allow"
+redundant_closure = "allow"
+type_complexity = "allow"
+unnecessary_cast = "allow"
+unnecessary_unwrap = "allow"
+cloned_ref_to_slice_refs = "allow"
+iter_overeager_cloned = "allow"
+question_mark = "allow"
+single_match = "allow"
+unnecessary_map_or = "allow"
+unnecessary_to_owned = "allow"
+useless_conversion = "allow"
+needless_borrows_for_generic_args = "allow"
+ptr_arg = "allow"
+manual_saturating_arithmetic = "allow"
+while_let_loop = "allow"

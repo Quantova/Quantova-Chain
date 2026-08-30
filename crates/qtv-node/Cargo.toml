@@ -41,3 +41,6 @@ qtv-node = { path = ".", features = ["test-fixtures"] }
 qlc-ethereum = { path = "../qlc-ethereum", features = ["test-util"] }
 q-bls = { path = "../q-bls", features = ["test-util"] }
 qlc-cosmos = { path = "../qlc-cosmos", features = ["test-util"] }
+
+[lints]
+workspace = true

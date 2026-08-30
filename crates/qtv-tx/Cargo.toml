@@ -19,3 +19,6 @@ qtv-codec = { path = "../qtv-codec" }
 qtv-account = { path = "../qtv-account" }
 qtv-idfmt = { path = "../qtv-idfmt" }
 qtv-wipe = { path = "../qtv-wipe" }
+
+[lints]
+workspace = true

@@ -35,3 +35,6 @@ qtv-attest = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "cef
 [dev-dependencies]
 # Enable the test only fixtures for this crate's own integration tests.
 qtv-devnet = { path = ".", features = ["test-fixtures"] }
+
+[lints]
+workspace = true

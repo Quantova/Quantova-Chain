@@ -29,3 +29,6 @@ qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "cef5be
 qtv-devnet = { path = "../qtv-devnet", features = ["test-fixtures"] }
 qtv-node = { path = "../qtv-node" }
 qtv-store = { path = "../qtv-store" }
+
+[lints]
+workspace = true
