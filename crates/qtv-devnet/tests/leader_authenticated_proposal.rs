@@ -10,7 +10,7 @@ use qtv_node::node::GenesisAccount;
 
 use qtv_block::Block as ChainBlock;
 use qtv_devnet::coded::{
-    code_block, code_proposal, ProposalAssembler, MAX_CODED_AUTH_VERIFICATIONS,
+    code_block, code_proposal, ProposalAssembler, GLOBAL_SOURCE, PREPIN_TOKENS_PER_TICK,
 };
 use qtv_devnet::config::DevnetConfig;
 use qtv_devnet::node::{leader_for, DevNode};
@@ -295,8 +295,9 @@ fn a_forged_auth_shard_does_not_stall_coded_reassembly() {
     let mut reassembled = None;
     let feed = std::iter::once(forged).chain(shards.iter().cloned());
     for shard in feed {
-        if let Some(result) = assembler.admit(shard, |c| nodes[victim].coded_auth_ok(&selection, c))
-        {
+        if let Some(result) = assembler.admit(shard, GLOBAL_SOURCE, |c| {
+            nodes[victim].coded_auth_ok(&selection, c)
+        }) {
             reassembled = Some(result);
         }
     }
@@ -333,114 +334,196 @@ fn fabricated_shard(genuine: &Proposal, salt: u16) -> CodedProposal {
     }
 }
 
-#[test]
-fn a_fabricated_root_flood_cannot_evict_the_genuine_partial() {
-    let base = unique_base("root_churn");
-    let alice = user(0);
-    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
-    let config = config(&base, &[true, true, true, true], accounts);
-    let mut nodes = open_nodes(&config);
-
+fn coded_fixture(
+    config: &DevnetConfig,
+) -> (
+    Vec<DevNode>,
+    usize,
+    u64,
+    usize,
+    Proposal,
+    Vec<CodedProposal>,
+) {
+    let mut nodes = open_nodes(config);
     let selection = nodes[0].select().expect("committee");
     let leader = leader_for(&selection, 0);
-    let leader_idx = idx(&config, leader);
+    let leader_idx = idx(config, leader);
     let victim = (0..nodes.len())
         .find(|&i| i != leader_idx)
         .expect("a distinct victim");
-
     let genuine = nodes[leader_idx].build_proposal(&selection);
     let shards = code_proposal(&genuine).expect("code the genuine proposal");
+    (nodes, victim, leader, leader_idx, genuine, shards)
+}
+
+#[test]
+fn a_fabricated_root_burst_before_the_leader_still_finalizes() {
+    let base = unique_base("adversarial_ordering");
+    let alice = user(0);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let config = config(&base, &[true, true, true, true], accounts);
+    let (nodes, victim, leader, _leader_idx, genuine, shards) = coded_fixture(&config);
+    let selection = nodes[0].select().expect("committee");
     let k = shards[0].commitment.k;
 
-    for salt in 0..4u16 {
-        let fake = fabricated_shard(&genuine, salt);
-        assert_ne!(
-            fake.commitment.root, shards[0].commitment.root,
-            "a fabricated encoding carries a distinct root"
-        );
-        assert!(
-            !nodes[victim].coded_auth_ok(&selection, &fake),
-            "the genuine auth does not carry to a fabricated root"
-        );
-    }
+    let attacker: u64 = 999;
+    let honest: u64 = 7;
+    assert_ne!(attacker, GLOBAL_SOURCE);
 
     let mut assembler = ProposalAssembler::new();
-    let mut reassembled = None;
-    let admit = |assembler: &mut ProposalAssembler, node: &DevNode, shard: CodedProposal| {
-        assembler.admit(shard, |c| node.coded_auth_ok(&selection, c))
-    };
+    let mut verifies = 0usize;
 
-    let _ = admit(&mut assembler, &nodes[victim], shards[0].clone());
-    for salt in 0..(MAX_PENDING_FLOOD) {
-        let _ = admit(
-            &mut assembler,
-            &nodes[victim],
-            fabricated_shard(&genuine, salt),
-        );
+    let burst: u16 = 2200;
+    let mut spent = 0u32;
+    for salt in 0..burst {
+        if spent >= PREPIN_TOKENS_PER_TICK {
+            assembler.tick();
+            spent = 0;
+        }
+        let before = verifies;
+        let fake = fabricated_shard(&genuine, salt);
+        assert!(!nodes[victim].coded_auth_ok(&selection, &fake));
+        let _ = assembler.admit(fake, attacker, |c| {
+            verifies += 1;
+            nodes[victim].coded_auth_ok(&selection, c)
+        });
+        if verifies > before {
+            spent += 1;
+        }
     }
-    for shard in shards.iter().skip(1).take(k).cloned() {
-        if let Some(result) = admit(&mut assembler, &nodes[victim], shard) {
+    assert!(
+        verifies >= 2000,
+        "the attacker burst really drove past the old fixed pool"
+    );
+
+    assembler.tick();
+    let mut reassembled = None;
+    for shard in shards.iter().take(k).cloned() {
+        if let Some(result) = assembler.admit(shard, honest, |c| {
+            nodes[victim].coded_auth_ok(&selection, c)
+        }) {
             reassembled = Some(result);
         }
     }
-
     let proposal = reassembled
-        .expect("the genuine partial survives the fabricated root flood")
+        .expect("the genuine proposal still authenticates after the burst, no halt")
         .expect("reassembly succeeds");
-    assert_eq!(proposal.auth.from, leader);
+    assert_eq!(
+        proposal.auth.from, leader,
+        "only the genuine leader root reassembles into an accepted proposal"
+    );
 }
 
-const MAX_PENDING_FLOOD: u16 = 264;
-
 #[test]
-fn a_replayed_shard_flood_verifies_within_the_committee_budget() {
-    let base = unique_base("coded_verify_budget");
+fn a_fabricated_flood_does_not_consume_the_honest_peer_budget() {
+    let base = unique_base("per_peer_isolation");
     let alice = user(0);
     let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
     let config = config(&base, &[true, true, true, true], accounts);
-    let mut nodes = open_nodes(&config);
-
+    let (nodes, victim, _leader, _leader_idx, genuine, shards) = coded_fixture(&config);
     let selection = nodes[0].select().expect("committee");
-    let leader = leader_for(&selection, 0);
-    let leader_idx = idx(&config, leader);
-    let victim = (0..nodes.len())
-        .find(|&i| i != leader_idx)
-        .expect("a distinct victim");
+    let k = shards[0].commitment.k;
 
-    let genuine = nodes[leader_idx].build_proposal(&selection);
-    let shards = code_proposal(&genuine).expect("code the genuine proposal");
+    let attacker: u64 = 1;
+    let honest: u64 = 2;
+    let mut assembler = ProposalAssembler::new();
+
+    for salt in 0..(PREPIN_TOKENS_PER_TICK * 3) as u16 {
+        let _ = assembler.admit(fabricated_shard(&genuine, salt), attacker, |c| {
+            nodes[victim].coded_auth_ok(&selection, c)
+        });
+    }
+
+    let mut reassembled = None;
+    for shard in shards.iter().take(k).cloned() {
+        if let Some(result) = assembler.admit(shard, honest, |c| {
+            nodes[victim].coded_auth_ok(&selection, c)
+        }) {
+            reassembled = Some(result);
+        }
+    }
+    assert!(
+        reassembled.map(|r| r.is_ok()).unwrap_or(false),
+        "the honest peer pins the genuine root in the same tick the attacker exhausted its own bucket"
+    );
+}
+
+#[test]
+fn a_replayed_genuine_shard_is_verified_once() {
+    let base = unique_base("coded_pin_memo");
+    let alice = user(0);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let config = config(&base, &[true, true, true, true], accounts);
+    let (nodes, victim, _leader, _leader_idx, _genuine, shards) = coded_fixture(&config);
+    let selection = nodes[0].select().expect("committee");
     assert!(shards[0].commitment.k > 1, "one shard must not complete");
 
-    let mut memo_verifies = 0usize;
+    let mut verifies = 0usize;
     let mut assembler = ProposalAssembler::new();
-    for _ in 0..512 {
-        let _ = assembler.admit(shards[0].clone(), |c| {
-            memo_verifies += 1;
+    for _ in 0..256 {
+        let _ = assembler.admit(shards[0].clone(), 5, |c| {
+            verifies += 1;
             nodes[victim].coded_auth_ok(&selection, c)
         });
     }
     assert_eq!(
-        memo_verifies, 1,
-        "one auth is verified once for a view root however many times its shard is replayed"
+        verifies, 1,
+        "a genuine shard replayed many times is verified once because its root is pinned"
+    );
+}
+
+#[test]
+fn a_full_fabricated_set_is_never_accepted() {
+    let base = unique_base("coded_safety");
+    let alice = user(0);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let config = config(&base, &[true, true, true, true], accounts);
+    let (nodes, victim, _leader, _leader_idx, genuine, shards) = coded_fixture(&config);
+    let selection = nodes[0].select().expect("committee");
+
+    let mut header = genuine.header.clone();
+    let _ = header.set_extra_data(vec![0xa5, 0x5a]);
+    let block = ChainBlock::new(header, Vec::new(), genuine.body.clone());
+    let coded = code_block(&block, 2, 4).expect("code the fabricated block");
+    assert_ne!(coded.commitment().root, shards[0].commitment.root);
+
+    let mut assembler = ProposalAssembler::new();
+    let mut produced = None;
+    for i in 0..4usize {
+        let (shard, proof) = coded.piece(i).expect("a fabricated piece");
+        let fake = CodedProposal {
+            view: genuine.view,
+            header: genuine.header.clone(),
+            commitment: coded.commitment().clone(),
+            justification: Vec::new(),
+            shard,
+            proof,
+            auth: genuine.auth.clone(),
+        };
+        assert!(
+            !nodes[victim].coded_auth_ok(&selection, &fake),
+            "no fabricated root authenticates under the leader key"
+        );
+        if let Some(result) =
+            assembler.admit(fake, 3, |c| nodes[victim].coded_auth_ok(&selection, c))
+        {
+            produced = Some(result);
+        }
+    }
+    assert!(
+        produced.is_none(),
+        "a full set of fabricated shards never pins and never yields an accepted block"
     );
 
-    let mut budget_verifies = 0usize;
-    let mut flooded = ProposalAssembler::new();
-    let flood = (MAX_CODED_AUTH_VERIFICATIONS + 500) as u64;
-    for view in 0..flood {
-        let mut shard = shards[0].clone();
-        shard.view = view;
-        let _ = flooded.admit(shard, |c| {
-            budget_verifies += 1;
-            nodes[victim].coded_auth_ok(&selection, c)
-        });
+    let mut poisoned = shards[0].clone();
+    if let Some(byte) = poisoned.shard.bytes.first_mut() {
+        *byte ^= 0xff;
     }
-    assert_eq!(
-        budget_verifies, MAX_CODED_AUTH_VERIFICATIONS,
-        "a distinct key flood spends at most the committee budget of verifications"
-    );
+    let mut fresh = ProposalAssembler::new();
     assert!(
-        (budget_verifies as u64) < flood,
-        "verification does not scale with the flood"
+        fresh
+            .admit(poisoned, 3, |c| nodes[victim].coded_auth_ok(&selection, c))
+            .is_none(),
+        "a poisoned shard is rejected before it can pin or reassemble"
     );
 }

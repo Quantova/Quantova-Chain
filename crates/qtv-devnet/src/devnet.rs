@@ -511,7 +511,10 @@ impl<S: Read + Write> Devnet<S> {
         };
         let outcome = {
             let node = &self.nodes[to];
-            self.assemblers[to].admit(coded, |c| node.coded_auth_ok(&selection, c))
+            self.assemblers[to].tick();
+            self.assemblers[to].admit(coded, crate::coded::GLOBAL_SOURCE, |c| {
+                node.coded_auth_ok(&selection, c)
+            })
         };
         match outcome {
             Some(Ok(proposal)) => self.deliver_proposal(to, proposal, ceiling, active)?,
