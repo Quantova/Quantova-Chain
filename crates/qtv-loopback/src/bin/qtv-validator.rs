@@ -109,7 +109,7 @@ impl Runtime {
             }
             Message::Proposal(proposal) => {
                 let proposer = leader_for(selection, proposal.view);
-                let out = self.node.on_proposal(selection, proposer, proposal);
+                let out = self.node.on_proposal(selection, proposer, *proposal);
                 for message in out {
                     self.emit(message);
                 }

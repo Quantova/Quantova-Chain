@@ -111,3 +111,16 @@ pub fn header_chain(node: &DevNode) -> Vec<[u8; 32]> {
         .map(|block| block.header_hash())
         .collect()
 }
+
+pub fn dummy_auth() -> qtv_attest::Attestation {
+    use qtv_attest::{Attester, Beacon, Block, Parent};
+    Attester::from_secret(1, &[1u8; 32], 100).attest(
+        1,
+        1,
+        0,
+        0,
+        [0u8; 32],
+        Block::new(1, [0u8; 32], Parent::Genesis),
+        &Beacon::genesis(),
+    )
+}
