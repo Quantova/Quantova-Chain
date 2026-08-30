@@ -8,10 +8,13 @@ use qtv_node::consensus::header_value;
 use qtv_node::fee::FeeParams;
 use qtv_node::node::GenesisAccount;
 
-use qtv_devnet::coded::{code_proposal, ProposalAssembler};
+use qtv_block::Block as ChainBlock;
+use qtv_devnet::coded::{
+    code_block, code_proposal, ProposalAssembler, MAX_CODED_AUTH_VERIFICATIONS,
+};
 use qtv_devnet::config::DevnetConfig;
 use qtv_devnet::node::{leader_for, DevNode};
-use qtv_devnet::wire::{Message, Proposal};
+use qtv_devnet::wire::{CodedProposal, Message, Proposal};
 use qtv_devnet::Devnet;
 
 use support::{config, transfer, unique_base, user};
@@ -292,10 +295,8 @@ fn a_forged_auth_shard_does_not_stall_coded_reassembly() {
     let mut reassembled = None;
     let feed = std::iter::once(forged).chain(shards.iter().cloned());
     for shard in feed {
-        if !nodes[victim].coded_auth_ok(&selection, &shard) {
-            continue;
-        }
-        if let Some(result) = assembler.admit(shard) {
+        if let Some(result) = assembler.admit(shard, |c| nodes[victim].coded_auth_ok(&selection, c))
+        {
             reassembled = Some(result);
         }
     }
@@ -313,4 +314,133 @@ fn a_forged_auth_shard_does_not_stall_coded_reassembly() {
         "the reassembled genuine proposal is prevoted"
     );
     assert_eq!(nodes[victim].staged_view(), Some(0));
+}
+
+fn fabricated_shard(genuine: &Proposal, salt: u16) -> CodedProposal {
+    let mut header = genuine.header.clone();
+    let _ = header.set_extra_data(vec![(salt & 0xff) as u8, (salt >> 8) as u8]);
+    let block = ChainBlock::new(header, Vec::new(), genuine.body.clone());
+    let coded = code_block(&block, 2, 4).expect("code the fabricated bytes");
+    let (shard, proof) = coded.piece(0).expect("a fabricated shard");
+    CodedProposal {
+        view: genuine.view,
+        header: genuine.header.clone(),
+        commitment: coded.commitment().clone(),
+        justification: Vec::new(),
+        shard,
+        proof,
+        auth: genuine.auth.clone(),
+    }
+}
+
+#[test]
+fn a_fabricated_root_flood_cannot_evict_the_genuine_partial() {
+    let base = unique_base("root_churn");
+    let alice = user(0);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let config = config(&base, &[true, true, true, true], accounts);
+    let mut nodes = open_nodes(&config);
+
+    let selection = nodes[0].select().expect("committee");
+    let leader = leader_for(&selection, 0);
+    let leader_idx = idx(&config, leader);
+    let victim = (0..nodes.len())
+        .find(|&i| i != leader_idx)
+        .expect("a distinct victim");
+
+    let genuine = nodes[leader_idx].build_proposal(&selection);
+    let shards = code_proposal(&genuine).expect("code the genuine proposal");
+    let k = shards[0].commitment.k;
+
+    for salt in 0..4u16 {
+        let fake = fabricated_shard(&genuine, salt);
+        assert_ne!(
+            fake.commitment.root, shards[0].commitment.root,
+            "a fabricated encoding carries a distinct root"
+        );
+        assert!(
+            !nodes[victim].coded_auth_ok(&selection, &fake),
+            "the genuine auth does not carry to a fabricated root"
+        );
+    }
+
+    let mut assembler = ProposalAssembler::new();
+    let mut reassembled = None;
+    let admit = |assembler: &mut ProposalAssembler, node: &DevNode, shard: CodedProposal| {
+        assembler.admit(shard, |c| node.coded_auth_ok(&selection, c))
+    };
+
+    let _ = admit(&mut assembler, &nodes[victim], shards[0].clone());
+    for salt in 0..(MAX_PENDING_FLOOD) {
+        let _ = admit(
+            &mut assembler,
+            &nodes[victim],
+            fabricated_shard(&genuine, salt),
+        );
+    }
+    for shard in shards.iter().skip(1).take(k).cloned() {
+        if let Some(result) = admit(&mut assembler, &nodes[victim], shard) {
+            reassembled = Some(result);
+        }
+    }
+
+    let proposal = reassembled
+        .expect("the genuine partial survives the fabricated root flood")
+        .expect("reassembly succeeds");
+    assert_eq!(proposal.auth.from, leader);
+}
+
+const MAX_PENDING_FLOOD: u16 = 264;
+
+#[test]
+fn a_replayed_shard_flood_verifies_within_the_committee_budget() {
+    let base = unique_base("coded_verify_budget");
+    let alice = user(0);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let config = config(&base, &[true, true, true, true], accounts);
+    let mut nodes = open_nodes(&config);
+
+    let selection = nodes[0].select().expect("committee");
+    let leader = leader_for(&selection, 0);
+    let leader_idx = idx(&config, leader);
+    let victim = (0..nodes.len())
+        .find(|&i| i != leader_idx)
+        .expect("a distinct victim");
+
+    let genuine = nodes[leader_idx].build_proposal(&selection);
+    let shards = code_proposal(&genuine).expect("code the genuine proposal");
+    assert!(shards[0].commitment.k > 1, "one shard must not complete");
+
+    let mut memo_verifies = 0usize;
+    let mut assembler = ProposalAssembler::new();
+    for _ in 0..512 {
+        let _ = assembler.admit(shards[0].clone(), |c| {
+            memo_verifies += 1;
+            nodes[victim].coded_auth_ok(&selection, c)
+        });
+    }
+    assert_eq!(
+        memo_verifies, 1,
+        "one auth is verified once for a view root however many times its shard is replayed"
+    );
+
+    let mut budget_verifies = 0usize;
+    let mut flooded = ProposalAssembler::new();
+    let flood = (MAX_CODED_AUTH_VERIFICATIONS + 500) as u64;
+    for view in 0..flood {
+        let mut shard = shards[0].clone();
+        shard.view = view;
+        let _ = flooded.admit(shard, |c| {
+            budget_verifies += 1;
+            nodes[victim].coded_auth_ok(&selection, c)
+        });
+    }
+    assert_eq!(
+        budget_verifies, MAX_CODED_AUTH_VERIFICATIONS,
+        "a distinct key flood spends at most the committee budget of verifications"
+    );
+    assert!(
+        (budget_verifies as u64) < flood,
+        "verification does not scale with the flood"
+    );
 }

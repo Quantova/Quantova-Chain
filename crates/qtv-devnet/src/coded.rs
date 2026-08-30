@@ -9,7 +9,19 @@ use qtv_codec::{to_bytes, Decoder, Encoder};
 use qtv_crypto::sha3::sha3_256;
 use qtv_net::erasure::{self, Commitment, Shard, ShardProof, DIGEST_LEN};
 
+use qtv_tx::Wrapper;
+
 use crate::wire::{chain_block_from_bytes, CodedProposal, Proposal, ViewChange};
+
+pub const MAX_CODED_AUTH_VERIFICATIONS: usize = 4 * qtv_sampler::params::COMMITTEE_BUDGET as usize;
+
+pub fn proposal_commitment(header: &Header, body: &[Wrapper]) -> Option<Commitment> {
+    let block = ChainBlock::new(header.clone(), Vec::new(), body.to_vec());
+    let (k, n) = coding_params(to_bytes(&block).len());
+    code_block(&block, k, n)
+        .ok()
+        .map(|coded| coded.commitment().clone())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodedError {
@@ -201,6 +213,7 @@ pub struct ProposalAssembler {
     horizon: u64,
     bytes: usize,
     max_bytes: usize,
+    auth_budget: usize,
 }
 
 impl Default for ProposalAssembler {
@@ -230,6 +243,7 @@ impl ProposalAssembler {
             horizon: 0,
             bytes: 0,
             max_bytes: MAX_ASSEMBLER_BYTES,
+            auth_budget: MAX_CODED_AUTH_VERIFICATIONS,
         }
     }
 
@@ -246,7 +260,11 @@ impl ProposalAssembler {
         self.bytes
     }
 
-    pub fn admit(&mut self, coded: CodedProposal) -> Option<Result<Proposal, CodedError>> {
+    pub fn admit(
+        &mut self,
+        coded: CodedProposal,
+        verify_auth: impl FnOnce(&CodedProposal) -> bool,
+    ) -> Option<Result<Proposal, CodedError>> {
         let key: ProposalKey = (coded.view, coded.commitment.root);
         if self.done.contains_key(&key) {
             return None;
@@ -259,6 +277,16 @@ impl ProposalAssembler {
         }
         let height = coded.header.height();
         self.prune(height);
+
+        if !self.pending.contains_key(&key) {
+            if self.auth_budget == 0 {
+                return None;
+            }
+            self.auth_budget -= 1;
+            if !verify_auth(&coded) {
+                return None;
+            }
+        }
 
         let CodedProposal {
             view,
@@ -358,6 +386,7 @@ impl ProposalAssembler {
             return;
         }
         self.horizon = height;
+        self.auth_budget = MAX_CODED_AUTH_VERIFICATIONS;
         let floor = height.saturating_sub(2);
         self.pending.retain(|_, p| p.height >= floor);
         self.done.retain(|_, &mut h| h >= floor);
@@ -653,7 +682,7 @@ mod tests {
         for view in 0..(MAX_PENDING_PROPOSALS as u64 + 64) {
             let proposal = sample_proposal(1, view);
             let shards = code_proposal(&proposal).expect("code the proposal");
-            let _ = assembler.admit(shards[0].clone());
+            let _ = assembler.admit(shards[0].clone(), |_| true);
         }
         assert!(
             assembler.pending.len() <= MAX_PENDING_PROPOSALS,
@@ -674,7 +703,7 @@ mod tests {
         let mut assembler = ProposalAssembler::new();
         let mut rebuilt = None;
         for (fed, coded) in shards.iter().skip(n - k).cloned().enumerate() {
-            match assembler.admit(coded) {
+            match assembler.admit(coded, |_| true) {
                 Some(result) => {
                     assert_eq!(fed + 1, k, "reassembly completed before k shards");
                     rebuilt = Some(result.expect("k verified shards reconstruct"));
@@ -698,13 +727,13 @@ mod tests {
         let mut corrupt = shards[0].clone();
         corrupt.shard.bytes[0] ^= 255;
         assert!(
-            assembler.admit(corrupt).is_none(),
+            assembler.admit(corrupt, |_| true).is_none(),
             "a corrupted shard was admitted"
         );
 
         let mut rebuilt = None;
         for coded in shards.iter().take(k).cloned() {
-            if let Some(result) = assembler.admit(coded) {
+            if let Some(result) = assembler.admit(coded, |_| true) {
                 rebuilt = Some(result.expect("the clean k reconstruct"));
             }
         }
@@ -751,7 +780,7 @@ mod tests {
                 header: other.header.clone(),
                 ..coded
             };
-            if let Some(result) = assembler.admit(forged) {
+            if let Some(result) = assembler.admit(forged, |_| true) {
                 outcome = Some(result);
             }
         }
@@ -770,20 +799,20 @@ mod tests {
 
         let mut assembler = ProposalAssembler::new();
         assert!(
-            assembler.admit(shards[0].clone()).is_none(),
+            assembler.admit(shards[0].clone(), |_| true).is_none(),
             "one shard does not complete a k>1 proposal"
         );
 
         let mut swapped = shards[1].clone();
         swapped.auth.from ^= 1;
         assert!(
-            assembler.admit(swapped).is_none(),
+            assembler.admit(swapped, |_| true).is_none(),
             "a shard whose auth was changed is refused and cannot occupy the slot"
         );
 
         let mut outcome = None;
         for shard in shards.iter().skip(1).take(k).cloned() {
-            if let Some(result) = assembler.admit(shard) {
+            if let Some(result) = assembler.admit(shard, |_| true) {
                 outcome = Some(result);
             }
         }
@@ -810,7 +839,7 @@ mod tests {
         for view in 0..256u64 {
             let mut coded = shards[0].clone();
             coded.view = view;
-            let admitted = assembler.admit(coded);
+            let admitted = assembler.admit(coded, |_| true);
             assert!(
                 admitted.is_none(),
                 "a lone shard never completes a k>1 proposal"
@@ -836,20 +865,20 @@ mod tests {
 
         let mut oversized = shards[0].clone();
         oversized.commitment.n = erasure::MAX_SHARDS + 1;
-        assert!(assembler.admit(oversized).is_none());
+        assert!(assembler.admit(oversized, |_| true).is_none());
 
         let mut zero_k = shards[1].clone();
         zero_k.commitment.k = 0;
-        assert!(assembler.admit(zero_k).is_none());
+        assert!(assembler.admit(zero_k, |_| true).is_none());
 
         let mut inverted = shards[2].clone();
         inverted.commitment.k = inverted.commitment.n + 1;
-        assert!(assembler.admit(inverted).is_none());
+        assert!(assembler.admit(inverted, |_| true).is_none());
 
         let mut rebuilt = None;
         let k = shards[0].commitment.k;
         for coded in shards.iter().take(k).cloned() {
-            if let Some(result) = assembler.admit(coded) {
+            if let Some(result) = assembler.admit(coded, |_| true) {
                 rebuilt = Some(result.expect("the clean k reconstruct"));
             }
         }
@@ -885,7 +914,7 @@ mod tests {
 
         let mut assembler = ProposalAssembler::new();
         assert!(
-            assembler.admit(hostile).is_none(),
+            assembler.admit(hostile, |_| true).is_none(),
             "the assembler drops a lopsided shard"
         );
         assert_eq!(
@@ -970,7 +999,7 @@ mod tests {
             let mut coded = base.clone();
             coded.view = view;
             coded.justification = heavy.clone();
-            let _ = assembler.admit(coded);
+            let _ = assembler.admit(coded, |_| true);
         }
         let retained: usize = assembler
             .pending
