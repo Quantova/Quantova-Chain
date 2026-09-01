@@ -151,8 +151,9 @@ pub fn execute_parallel(
     candidates: &[Wrapper],
     fee_params: &FeeParams,
     threads: usize,
-    day: u64,
+    now_seconds: u64,
 ) -> Vec<Wrapper> {
+    let day = now_seconds / 86_400;
     let stake_address = crate::ledger::stake_system_address();
     let claim_address = crate::ledger::stake_claim_address();
     let exit_address = crate::ledger::stake_exit_address();
@@ -169,7 +170,6 @@ pub fn execute_parallel(
     let bridge_settle_address = crate::ledger::bridge_settle_address();
     let round_proposer = ledger.round_proposer().map(str::to_string);
     let grants_address = crate::ledger::grants_address();
-    let now_seconds = day.saturating_mul(86_400);
     ledger.bridge_expire(now_seconds);
     ledger.guardian_expire(now_seconds);
     if candidates.iter().any(|wrapper| {
@@ -197,7 +197,7 @@ pub fn execute_parallel(
             || ledger.is_frozen(sender)
             || crate::node::is_vm_op(ledger, wrapper)
     }) {
-        return crate::node::execute_ordered(ledger, candidates, fee_params, day);
+        return crate::node::execute_ordered(ledger, candidates, fee_params, now_seconds);
     }
     let layers = plan_layers(candidates);
     let mut included: Vec<usize> = Vec::new();
@@ -784,7 +784,7 @@ mod tests {
             .map(|i| transfer(&keys[i], &keys[12 + i].address(), 1_000, 0, &fee))
             .collect();
 
-        let day = 546;
+        let day = 546 * 86_400;
         let mut ordered = base.clone();
         let ordered_included = execute_ordered(&mut ordered, &block, &fee, day);
         assert!(
@@ -833,7 +833,7 @@ mod tests {
             "the straddling block is all independent plain transfers so it stays on the parallel path"
         );
 
-        let day = 8;
+        let day = 8 * 86_400;
         let mut ordered = base.clone();
         execute_ordered(&mut ordered, &block, &fee, day);
         assert!(

@@ -21,7 +21,7 @@ use qtv_node::ledger::{
     EVENT_BRIDGE_BURN, NATIVE_EVENT_SOURCE,
 };
 use qtv_node::mempool::{Admitted, Mempool, Reject};
-use qtv_node::node::{day_of_height, execute_ordered, reweigh_roster, Genesis, GenesisAccount};
+use qtv_node::node::{execute_ordered, reweigh_roster, Genesis, GenesisAccount};
 use qtv_node::watermark::SignGuard;
 use qtv_sampler::committee::PublishedReveal;
 use qtv_store::{BlockStore, BurnArchive, BurnArchiveEntry, StateStore};
@@ -792,11 +792,12 @@ impl DevNode {
         ledger.clear_block_events();
         ledger.set_round_proposer(&proposer);
         ledger.set_execution_height(height);
+        let block_time = qtv_node::node::wall_clock_seconds();
         let included = execute_ordered(
             &mut ledger,
             &candidates,
             &self.fee_params,
-            day_of_height(height),
+            block_time,
         );
         let event_leaves: Vec<Vec<u8>> = ledger
             .block_events()
@@ -811,7 +812,7 @@ impl DevNode {
             event_root(&event_leaves),
             *self.beacon.seed(),
             proposer,
-            self.genesis_time + height * qtv_bft::params::SLOT_MS,
+            block_time,
         );
         if let Some(note) = self.block_messages.get(&height) {
             let _ = header.set_extra_data(note.clone());
@@ -933,7 +934,7 @@ impl DevNode {
         if header.height() != self.height
             || *header.parent_hash() != self.parent_header_hash
             || header.beacon_seed() != self.beacon.seed()
-            || header.time() != self.genesis_time + header.height() * qtv_bft::params::SLOT_MS
+            || header.time() > qtv_node::node::wall_clock_seconds().saturating_add(120)
         {
             return Err(RoundError::ProposalRejected);
         }
@@ -945,7 +946,7 @@ impl DevNode {
             &mut ledger,
             body,
             &self.fee_params,
-            day_of_height(header.height()),
+            header.time(),
         );
         let event_leaves: Vec<Vec<u8>> = ledger
             .block_events()
@@ -2129,7 +2130,7 @@ impl DevNode {
             &mut ledger,
             block.body(),
             &self.fee_params,
-            day_of_height(header.height()),
+            header.time(),
         );
         let event_leaves: Vec<Vec<u8>> = ledger
             .block_events()
