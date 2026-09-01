@@ -289,12 +289,6 @@ impl DevNode {
         let genesis = devnet.genesis();
         let genesis_accounts = genesis.accounts.clone();
         let genesis_supply = genesis_supply_value(&genesis, &roster);
-        if genesis_supply > qtv_staking::MAX_SUPPLY {
-            return Err(RoundError::GenesisOverSupply {
-                supply: genesis_supply,
-                max: qtv_staking::MAX_SUPPLY,
-            });
-        }
 
         let secret = node.secret;
         let mut dev = DevNode {

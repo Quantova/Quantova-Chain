@@ -3317,6 +3317,7 @@ mod tests {
         let validator = keypair(120);
         fund(&mut ledger, &validator, 1_000 * 1_000_000);
         ledger.seed_stake_pool(700_000 * 1_000_000);
+        ledger.credit_supply(700_000 * 1_000_000);
         ledger.seed_validator_bond(&validator.address(), 2_000 * 1_000_000);
         ledger.set_stake_mainnet_start(0);
         ledger.set_stake_price(70 * 1_000_000);

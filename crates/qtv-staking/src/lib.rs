@@ -9,12 +9,6 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const NATIVE_UNIT: u128 = 1_000_000;
 pub const MIN_STAKE: u64 = 2_000 * NATIVE_UNIT as u64;
 pub const STAKING_POOL: u64 = 685_714 * NATIVE_UNIT as u64;
-/// An arithmetic ceiling for genesis sanity, not a monetary cap. Issuance is
-/// perpetual and bounded per session, so nothing here limits what the chain can
-/// mint over its life. This exists so a genesis cannot be written that is absurd
-/// on its face and so supply stays far inside what a u64 of quon can hold.
-pub const MAX_SUPPLY: u64 = 1_000_000_000 * NATIVE_UNIT as u64;
-
 /// Issuance is sized to the square root of the stake rather than a flat share of
 /// it. A flat share pays the same yield however much security the chain already
 /// has. Under a square root a thin validator set is paid well enough to attract
@@ -26,10 +20,11 @@ pub const MAX_SUPPLY: u64 = 1_000_000_000 * NATIVE_UNIT as u64;
 /// year.
 pub const EMISSION_K: u64 = 25_000;
 
-/// The rail that replaces a total supply cap. A total cap makes perpetual
-/// issuance impossible by construction. A bound on a single session still stops
-/// a bug minting the world, and it never deadlocks.
-pub const MAX_SESSION_EMISSION: u64 = 250_000 * NATIVE_UNIT as u64;
+/// The only rail on issuance. There is no ceiling on total supply and there is
+/// not meant to be one. This bounds what a single session may add as a share of
+/// what already exists, so the chain can mint forever while a wrong stake
+/// reading still cannot mint the world in one step.
+pub const MAX_SESSION_EMISSION_BPS: u64 = 500;
 
 /// The most a single governance mint may create, as a share of the supply that
 /// already exists. A relative bound scales with the chain instead of turning
@@ -79,10 +74,10 @@ pub fn eligible(stake: u64) -> bool {
 }
 
 /// What the whole validator set is paid for one session at this much stake.
-pub fn session_emission(total_staked: u64) -> u64 {
-    EMISSION_K
-        .saturating_mul((total_staked as u128).isqrt() as u64)
-        .min(MAX_SESSION_EMISSION)
+pub fn session_emission(total_staked: u64, total_supply: u64) -> u64 {
+    let raw = EMISSION_K.saturating_mul((total_staked as u128).isqrt() as u64);
+    let bound = ((total_supply as u128) * (MAX_SESSION_EMISSION_BPS as u128) / 10_000) as u64;
+    raw.min(bound)
 }
 
 /// The most a single governance proposal may mint against the supply that exists.
@@ -91,11 +86,12 @@ pub fn gov_mint_ceiling(total_supply: u64) -> u64 {
     share.max(GOV_MINT_FLOOR)
 }
 
-pub fn session_reward(stake: u64, total_staked: u64) -> u64 {
+pub fn session_reward(stake: u64, total_staked: u64, total_supply: u64) -> u64 {
     if total_staked == 0 {
         return 0;
     }
-    ((session_emission(total_staked) as u128) * (stake as u128) / (total_staked as u128)) as u64
+    ((session_emission(total_staked, total_supply) as u128) * (stake as u128)
+        / (total_staked as u128)) as u64
 }
 
 pub fn in_blackout(now_day: u64, mainnet_start_day: u64) -> bool {
@@ -224,6 +220,7 @@ pub struct StakeLedger {
     rewards: BTreeMap<[u8; 32], Vec<RewardTranche>>,
     pool: u64,
     treasury: u64,
+    minted: u64,
 }
 
 impl StakeLedger {
@@ -234,7 +231,12 @@ impl StakeLedger {
             rewards: BTreeMap::new(),
             pool,
             treasury: 0,
+            minted: 0,
         }
+    }
+
+    pub fn minted(&self) -> u64 {
+        self.minted
     }
 
     pub fn pool(&self) -> u64 {
@@ -288,8 +290,11 @@ impl StakeLedger {
             Some(bond) => bond.amount,
             None => return 0,
         };
-        let paid = session_reward(stake, total).min(self.pool);
-        self.pool -= paid;
+        let supply = self.pool.saturating_add(self.minted).saturating_add(total);
+        let paid = session_reward(stake, total, supply);
+        let from_pool = paid.min(self.pool);
+        self.pool -= from_pool;
+        self.minted = self.minted.saturating_add(paid - from_pool);
         if paid > 0 {
             self.rewards.entry(*id).or_default().push(RewardTranche {
                 earned_day: now_day,
@@ -459,23 +464,28 @@ mod tests {
     #[test]
     fn the_reward_is_emergent_and_pro_rata_by_stake() {
         let stake = 2_000 * QTOV;
-        assert_eq!(session_reward(stake, stake), session_emission(stake));
+        let supply = 1_000_000 * QTOV;
         assert_eq!(
-            session_reward(stake, 2 * stake),
-            session_emission(2 * stake) / 2
+            session_reward(stake, stake, supply),
+            session_emission(stake, supply)
         );
         assert_eq!(
-            session_reward(3 * stake, 4 * stake),
-            session_emission(4 * stake) * 3 / 4
+            session_reward(stake, 2 * stake, supply),
+            session_emission(2 * stake, supply) / 2
         );
-        assert_eq!(session_reward(stake, 0), 0);
+        assert_eq!(
+            session_reward(3 * stake, 4 * stake, supply),
+            session_emission(4 * stake, supply) * 3 / 4
+        );
+        assert_eq!(session_reward(stake, 0, supply), 0);
     }
 
     #[test]
     fn the_yield_is_higher_when_little_is_staked_and_falls_as_the_set_grows() {
         let stake = 2_000 * QTOV;
-        let thin = session_reward(stake, 10_000 * QTOV);
-        let deep = session_reward(stake, 1_000_000 * QTOV);
+        let supply = 10_000_000 * QTOV;
+        let thin = session_reward(stake, 10_000 * QTOV, supply);
+        let deep = session_reward(stake, 1_000_000 * QTOV, supply);
         assert!(thin > deep, "the same stake earns more when less is staked");
     }
 
@@ -529,20 +539,36 @@ mod tests {
     }
 
     #[test]
-    fn rewards_come_from_the_pool_and_never_overdraw() {
-        let mut l = StakeLedger::new(50 * QTOV);
+    fn rewards_draw_the_pool_down_then_keep_paying_from_issuance() {
+        let seeded = 50 * QTOV;
+        let mut l = StakeLedger::new(seeded);
         l.bond(id(1), 2_000 * QTOV, 0);
-        assert_eq!(l.accrue(&id(1), 400, 0), 50 * QTOV);
-        assert_eq!(l.pool(), 0);
-        assert_eq!(l.accrue(&id(1), 400, 0), 0);
+
+        let first = l.accrue(&id(1), 400, 0);
+        assert!(first > seeded, "the pot alone no longer limits the payment");
+        assert_eq!(l.pool(), 0, "the pot is spent before anything is minted");
+        assert_eq!(l.minted(), first - seeded, "only the shortfall is minted");
+
+        let second = l.accrue(&id(1), 400, 0);
+        assert!(
+            second > 0,
+            "an empty pot no longer stops the reward, that was the cliff"
+        );
+        assert_eq!(l.minted(), first - seeded + second);
     }
 
     #[test]
     fn a_sole_staker_earns_the_whole_session_emission() {
         let mut l = StakeLedger::new(100_000 * QTOV);
         l.bond(id(1), 2_000 * QTOV, 0);
-        assert_eq!(l.accrue(&id(1), 400, 0), session_emission(2_000 * QTOV));
-        assert_eq!(l.pool(), 100_000 * QTOV - session_emission(2_000 * QTOV));
+        assert_eq!(
+            l.accrue(&id(1), 400, 0),
+            session_emission(2_000 * QTOV, 100_000 * QTOV)
+        );
+        assert_eq!(
+            l.pool(),
+            100_000 * QTOV - session_emission(2_000 * QTOV, 100_000 * QTOV)
+        );
     }
 
     #[test]
@@ -551,7 +577,10 @@ mod tests {
         l.bond(id(1), 2_000 * QTOV, 0);
         assert_eq!(l.accrue(&id(1), 364, 0), 0);
         assert_eq!(l.pool(), 100_000 * QTOV);
-        assert_eq!(l.accrue(&id(1), 365, 0), session_emission(2_000 * QTOV));
+        assert_eq!(
+            l.accrue(&id(1), 365, 0),
+            session_emission(2_000 * QTOV, 100_000 * QTOV)
+        );
     }
 
     #[test]
@@ -633,7 +662,7 @@ mod tests {
         let mut l = StakeLedger::new(100_000 * QTOV);
         l.bond(id(1), 2_000 * QTOV, 0);
         let earned = l.accrue(&id(1), 400, 0);
-        assert_eq!(earned, session_emission(2_000 * QTOV));
+        assert_eq!(earned, session_emission(2_000 * QTOV, 100_000 * QTOV));
         assert_eq!(l.claimable(&id(1), 400 + 364), 0);
         assert_eq!(l.claimable(&id(1), 400 + 365), earned);
         assert_eq!(l.claim(&id(1), 400 + 365), earned);
@@ -652,29 +681,36 @@ mod tests {
     fn the_yield_falls_as_the_stake_set_grows_and_never_reaches_zero() {
         let small = 100_000 * QTOV;
         let large = 100 * small;
-        let yield_bps = |staked: u64| (session_emission(staked) as u128) * 10_000 / staked as u128;
+        let supply = 1_000_000_000 * QTOV;
+        let yield_bps =
+            |staked: u64| (session_emission(staked, supply) as u128) * 10_000 / staked as u128;
         assert!(
             yield_bps(small) > yield_bps(large),
             "a deeper validator set must cost the chain a smaller share"
         );
         assert!(
-            session_emission(large) > session_emission(small),
+            session_emission(large, supply) > session_emission(small, supply),
             "a deeper set is still paid more in absolute terms"
         );
         assert!(
-            session_emission(QTOV) > 0,
+            session_emission(QTOV, supply) > 0,
             "issuance never reaches zero, that is what perpetual means"
         );
     }
 
     #[test]
-    fn a_single_session_can_never_mint_more_than_the_bound() {
+    fn a_single_session_can_never_mint_more_than_a_share_of_what_exists() {
+        let supply = 1_000_000 * QTOV;
+        let bound = supply / 20;
         assert_eq!(
-            session_emission(u64::MAX),
-            MAX_SESSION_EMISSION,
-            "an absurd stake reading is clamped, not trusted"
+            session_emission(u64::MAX, supply),
+            bound,
+            "an absurd stake reading is clamped to a share of the supply"
         );
-        assert!(session_emission(u64::MAX) <= MAX_SESSION_EMISSION);
+        assert!(
+            session_emission(u64::MAX, supply * 1_000) > bound,
+            "the bound rises with the supply, it limits the rate and never the total"
+        );
     }
 
     #[test]

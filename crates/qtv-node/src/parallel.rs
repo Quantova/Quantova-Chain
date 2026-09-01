@@ -775,6 +775,7 @@ mod tests {
 
         let validator = qtv_idfmt::render_address(&[60u8; 32]).unwrap();
         base.seed_stake_pool(700_000 * 1_000_000);
+        base.credit_supply(700_000 * 1_000_000);
         base.seed_validator_bond(&validator, 2_000 * 1_000_000);
         base.seed_validator_set(&[[60u8; 32]]);
         base.set_stake_mainnet_start(0);

@@ -543,8 +543,8 @@ fn chain_params() -> Json {
                 ("staking_pool", Json::Int(qtv_staking::STAKING_POOL)),
                 ("emission_k", Json::Int(qtv_staking::EMISSION_K)),
                 (
-                    "max_session_emission",
-                    Json::Int(qtv_staking::MAX_SESSION_EMISSION),
+                    "max_session_emission_bps",
+                    Json::Int(qtv_staking::MAX_SESSION_EMISSION_BPS),
                 ),
                 ("gov_mint_max_bps", Json::Int(qtv_staking::GOV_MINT_MAX_BPS)),
                 ("session_days", Json::Int(qtv_staking::SESSION_DAYS)),
