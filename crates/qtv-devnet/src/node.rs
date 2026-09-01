@@ -81,6 +81,8 @@ const MAX_RELAY_BUCKETS: usize = 1 << 16;
 
 const MAX_ATTESTATIONS_PER_SENDER: usize = 64;
 
+const FINALIZED_RETAINED: usize = 512;
+
 // How often the node checks whether its state log has gone mostly stale.
 // The check is a stat, so this is about bounding the wasted work, not the cost.
 const STATE_COMPACT_CHECK_BLOCKS: u64 = 1000;
@@ -571,7 +573,7 @@ impl DevNode {
             let Some(block) = self
                 .block_store
                 .block_by_height(height)
-                .and_then(|bytes| crate::wire::chain_block_from_bytes(bytes).ok())
+                .and_then(|bytes| crate::wire::chain_block_from_bytes(&bytes).ok())
             else {
                 continue;
             };
@@ -711,7 +713,7 @@ impl DevNode {
             let decoded = self
                 .block_store
                 .block_by_height(height)
-                .and_then(|bytes| crate::wire::chain_block_from_bytes(bytes).ok());
+                .and_then(|bytes| crate::wire::chain_block_from_bytes(&bytes).ok());
             if let Some(block) = decoded {
                 for wrapper in block.body() {
                     self.tx_index.insert(wrapper.id(), height);
@@ -1118,7 +1120,7 @@ impl DevNode {
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();
         self.mempool.remove_included(&staged.included_ids);
-        self.chain.push(FinalizedBlock {
+        self.push_finalized(FinalizedBlock {
             block: chain_block,
             leader: leader_for(selection, staged.view),
             attesters,
@@ -1988,6 +1990,14 @@ impl DevNode {
         self.identity.peer_id()
     }
 
+    fn push_finalized(&mut self, finalized: FinalizedBlock) {
+        self.chain.push(finalized);
+        if self.chain.len() > FINALIZED_RETAINED {
+            let excess = self.chain.len() - FINALIZED_RETAINED;
+            self.chain.drain(..excess);
+        }
+    }
+
     pub fn chain(&self) -> &[FinalizedBlock] {
         &self.chain
     }
@@ -2062,7 +2072,7 @@ impl DevNode {
         let payload = qtv_idfmt::parse_block(id).ok()?;
         let hash: [u8; 32] = payload.try_into().ok()?;
         let bytes = self.block_store.block_by_hash(&hash)?;
-        crate::wire::chain_block_from_bytes(bytes).ok()
+        crate::wire::chain_block_from_bytes(&bytes).ok()
     }
 
     pub fn slashed(&self) -> &[u64] {
@@ -2081,7 +2091,7 @@ impl DevNode {
             let Some(bytes) = self.block_store.block_by_height(height) else {
                 break;
             };
-            match crate::wire::chain_block_from_bytes(bytes) {
+            match crate::wire::chain_block_from_bytes(&bytes) {
                 Ok(block) => blocks.push(block),
                 Err(_) => break,
             }
@@ -2192,7 +2202,7 @@ impl DevNode {
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();
         self.mempool.remove_included(&included_ids);
-        self.chain.push(FinalizedBlock {
+        self.push_finalized(FinalizedBlock {
             block,
             leader,
             attesters,

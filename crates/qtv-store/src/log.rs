@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::Mutex;
 
 use qtv_codec::{Encoder, LENGTH_WIDTH};
 
@@ -16,6 +17,7 @@ pub(crate) fn frame_len(payload_len: usize) -> u64 {
 #[derive(Debug)]
 pub struct Log {
     file: File,
+    reader: Mutex<File>,
 }
 
 impl Log {
@@ -39,7 +41,82 @@ impl Log {
         if !existed {
             sync_parent_dir(path);
         }
-        Ok((Log { file }, frames))
+        let reader = Mutex::new(OpenOptions::new().read(true).open(path)?);
+        Ok((Log { file, reader }, frames))
+    }
+
+    pub fn open_scanned<F>(path: impl AsRef<Path>, mut visit: F) -> io::Result<Self>
+    where
+        F: FnMut(&[u8], u64, u64) -> bool,
+    {
+        let path = path.as_ref();
+        let existed = path.exists();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        let total = file.metadata()?.len();
+        let mut stream = BufReader::new(file.try_clone()?);
+        let mut pos = 0u64;
+        let mut clean = 0u64;
+        let mut payload: Vec<u8> = Vec::new();
+        loop {
+            if total.saturating_sub(pos) < LENGTH_WIDTH as u64 {
+                break;
+            }
+            let mut length_bytes = [0u8; LENGTH_WIDTH];
+            if stream.read_exact(&mut length_bytes).is_err() {
+                break;
+            }
+            let length = u64::from_le_bytes(length_bytes);
+            let payload_start = pos + LENGTH_WIDTH as u64;
+            let available = total - payload_start;
+            if length > available || available - length < CHECKSUM_WIDTH as u64 {
+                break;
+            }
+            payload.clear();
+            payload.resize(length as usize, 0u8);
+            if stream.read_exact(&mut payload).is_err() {
+                break;
+            }
+            let mut checksum_bytes = [0u8; CHECKSUM_WIDTH];
+            if stream.read_exact(&mut checksum_bytes).is_err() {
+                break;
+            }
+            if u32::from_le_bytes(checksum_bytes) != checksum_parts(&[&length_bytes, &payload]) {
+                break;
+            }
+            let end = payload_start + length + CHECKSUM_WIDTH as u64;
+            if !visit(&payload, payload_start, end) {
+                break;
+            }
+            pos = end;
+            clean = end;
+        }
+        drop(stream);
+        if clean < total {
+            file.set_len(clean)?;
+            file.sync_data()?;
+        }
+        file.seek(SeekFrom::End(0))?;
+        if !existed {
+            sync_parent_dir(path);
+        }
+        let reader = Mutex::new(OpenOptions::new().read(true).open(path)?);
+        Ok(Log { file, reader })
+    }
+
+    pub fn read_payload(&self, payload_start: u64, payload_len: u64) -> io::Result<Vec<u8>> {
+        let mut reader = self
+            .reader
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "log reader poisoned"))?;
+        reader.seek(SeekFrom::Start(payload_start))?;
+        let mut payload = vec![0u8; payload_len as usize];
+        reader.read_exact(&mut payload)?;
+        Ok(payload)
     }
 
     pub fn append(&mut self, payload: &[u8]) -> io::Result<()> {
@@ -99,13 +176,19 @@ const fn crc_table() -> [u32; 256] {
 
 static CRC_TABLE: [u32; 256] = crc_table();
 
-fn checksum(bytes: &[u8]) -> u32 {
+fn checksum_parts(parts: &[&[u8]]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
-    for &byte in bytes {
-        let index = ((crc ^ byte as u32) & 0xFF) as usize;
-        crc = (crc >> 8) ^ CRC_TABLE[index];
+    for part in parts {
+        for &byte in part.iter() {
+            let index = ((crc ^ byte as u32) & 0xFF) as usize;
+            crc = (crc >> 8) ^ CRC_TABLE[index];
+        }
     }
     crc ^ 0xFFFF_FFFF
+}
+
+fn checksum(bytes: &[u8]) -> u32 {
+    checksum_parts(&[bytes])
 }
 
 fn scan(bytes: &[u8]) -> (Vec<Vec<u8>>, u64) {
