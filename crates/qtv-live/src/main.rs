@@ -114,7 +114,7 @@ fn drive_height<S: std::io::Read + std::io::Write>(
     devnet: &mut Devnet<S>,
     batch: Vec<Wrapper>,
 ) -> Result<(Duration, usize), String> {
-    let before = devnet.node(0).chain().len();
+    let before = devnet.node(0).chain().last().map(|b| b.header().height());
     let start = Instant::now();
     for tx in batch {
         let _ = devnet.submit(0, tx);
@@ -124,10 +124,9 @@ fn drive_height<S: std::io::Read + std::io::Write>(
         .map_err(|e| format!("the height did not finalise: {e:?}"))?;
     let elapsed = start.elapsed();
     let chain = devnet.node(0).chain();
-    let finalized = if chain.len() > before {
-        chain.last().expect("a finalised block").block.body().len()
-    } else {
-        0
+    let finalized = match chain.last() {
+        Some(last) if Some(last.header().height()) != before => last.block.body().len(),
+        _ => 0,
     };
     Ok((elapsed, finalized))
 }

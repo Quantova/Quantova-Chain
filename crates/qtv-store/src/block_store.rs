@@ -6,9 +6,9 @@ use std::io;
 use std::path::Path;
 
 use qtv_block::{Block, ROOT_LEN};
-use qtv_codec::{to_bytes, Decode, Decoder, Encode, Encoder, Error};
+use qtv_codec::{to_bytes, Decode, Decoder, Encode, Encoder, Error, LENGTH_WIDTH};
 
-use crate::log::{frame_len, Log};
+use crate::log::{frame_len, Log, CHECKSUM_WIDTH};
 
 type Hash = [u8; ROOT_LEN];
 
@@ -56,11 +56,10 @@ impl Decode for BlockRecord {
 #[derive(Debug)]
 pub struct BlockStore {
     log: Log,
-    blocks: Vec<Vec<u8>>,
     heights: Vec<u64>,
     hashes: Vec<Hash>,
-    ends: Vec<u64>,
-    by_height: BTreeMap<u64, usize>,
+    starts: Vec<u64>,
+    lens: Vec<u64>,
     by_hash: BTreeMap<Hash, usize>,
     head_height: Option<u64>,
     len_on_disk: u64,
@@ -68,28 +67,40 @@ pub struct BlockStore {
 
 impl BlockStore {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
-        let (log, frames) = Log::open(path)?;
-        let mut store = BlockStore {
-            log,
-            blocks: Vec::new(),
-            heights: Vec::new(),
-            hashes: Vec::new(),
-            ends: Vec::new(),
-            by_height: BTreeMap::new(),
-            by_hash: BTreeMap::new(),
-            head_height: None,
-            len_on_disk: 0,
-        };
-        let mut offset = 0u64;
-        for frame in &frames {
-            offset += frame_len(frame.len());
-            let record: BlockRecord = match qtv_codec::from_bytes(frame) {
+        let mut heights: Vec<u64> = Vec::new();
+        let mut hashes: Vec<Hash> = Vec::new();
+        let mut starts: Vec<u64> = Vec::new();
+        let mut lens: Vec<u64> = Vec::new();
+        let mut by_hash: BTreeMap<Hash, usize> = BTreeMap::new();
+        let mut head_height: Option<u64> = None;
+        let mut len_on_disk = 0u64;
+        let log = Log::open_scanned(path, |payload, payload_start, end| {
+            let record: BlockRecord = match qtv_codec::from_bytes(payload) {
                 Ok(record) => record,
-                Err(_) => break,
+                Err(_) => return false,
             };
-            store.index(record, offset);
-        }
-        Ok(store)
+            by_hash.insert(record.hash, heights.len());
+            head_height = Some(match head_height {
+                Some(current) => current.max(record.height),
+                None => record.height,
+            });
+            heights.push(record.height);
+            hashes.push(record.hash);
+            starts.push(payload_start);
+            lens.push(payload.len() as u64);
+            len_on_disk = end;
+            true
+        })?;
+        Ok(BlockStore {
+            log,
+            heights,
+            hashes,
+            starts,
+            lens,
+            by_hash,
+            head_height,
+            len_on_disk,
+        })
     }
 
     pub fn put_block(&mut self, block: &Block) -> io::Result<()> {
@@ -100,8 +111,18 @@ impl BlockStore {
         };
         let framed = to_bytes(&record);
         self.log.append(&framed)?;
+        let payload_start = self.len_on_disk + LENGTH_WIDTH as u64;
         let end = self.len_on_disk + frame_len(framed.len());
-        self.index(record, end);
+        self.by_hash.insert(record.hash, self.heights.len());
+        self.head_height = Some(match self.head_height {
+            Some(current) => current.max(record.height),
+            None => record.height,
+        });
+        self.heights.push(record.height);
+        self.hashes.push(record.hash);
+        self.starts.push(payload_start);
+        self.lens.push(framed.len() as u64);
+        self.len_on_disk = end;
         Ok(())
     }
 
@@ -111,21 +132,23 @@ impl BlockStore {
 
     pub fn truncate_to_height(&mut self, height: u64) -> io::Result<()> {
         let keep = self.heights.iter().take_while(|&&h| h <= height).count();
-        if keep == self.blocks.len() {
+        if keep == self.heights.len() {
             return Ok(());
         }
-        let new_len = if keep == 0 { 0 } else { self.ends[keep - 1] };
+        let new_len = if keep == 0 {
+            0
+        } else {
+            self.starts[keep - 1] + self.lens[keep - 1] + CHECKSUM_WIDTH as u64
+        };
         self.log.truncate(new_len)?;
-        self.blocks.truncate(keep);
         self.heights.truncate(keep);
         self.hashes.truncate(keep);
-        self.ends.truncate(keep);
+        self.starts.truncate(keep);
+        self.lens.truncate(keep);
         self.len_on_disk = new_len;
-        self.by_height.clear();
         self.by_hash.clear();
         self.head_height = None;
-        for index in 0..self.blocks.len() {
-            self.by_height.insert(self.heights[index], index);
+        for index in 0..self.heights.len() {
             self.by_hash.insert(self.hashes[index], index);
             self.head_height = Some(match self.head_height {
                 Some(current) => current.max(self.heights[index]),
@@ -135,16 +158,23 @@ impl BlockStore {
         Ok(())
     }
 
-    pub fn block_by_height(&self, height: u64) -> Option<&[u8]> {
-        self.by_height
-            .get(&height)
-            .map(|&index| self.blocks[index].as_slice())
+    pub fn block_by_height(&self, height: u64) -> Option<Vec<u8>> {
+        let index = self.heights.binary_search(&height).ok()?;
+        self.read_block(index)
     }
 
-    pub fn block_by_hash(&self, hash: &Hash) -> Option<&[u8]> {
-        self.by_hash
-            .get(hash)
-            .map(|&index| self.blocks[index].as_slice())
+    pub fn block_by_hash(&self, hash: &Hash) -> Option<Vec<u8>> {
+        let index = *self.by_hash.get(hash)?;
+        self.read_block(index)
+    }
+
+    fn read_block(&self, index: usize) -> Option<Vec<u8>> {
+        let payload = self
+            .log
+            .read_payload(*self.starts.get(index)?, *self.lens.get(index)?)
+            .ok()?;
+        let record: BlockRecord = qtv_codec::from_bytes(&payload).ok()?;
+        Some(record.block)
     }
 
     pub fn head_height(&self) -> Option<u64> {
@@ -152,27 +182,13 @@ impl BlockStore {
     }
 
     pub fn len(&self) -> usize {
-        self.blocks.len()
+        self.heights.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
+        self.heights.is_empty()
     }
 
-    fn index(&mut self, record: BlockRecord, end: u64) {
-        let index = self.blocks.len();
-        self.by_height.insert(record.height, index);
-        self.by_hash.insert(record.hash, index);
-        self.head_height = Some(match self.head_height {
-            Some(current) => current.max(record.height),
-            None => record.height,
-        });
-        self.heights.push(record.height);
-        self.hashes.push(record.hash);
-        self.ends.push(end);
-        self.len_on_disk = end;
-        self.blocks.push(record.block);
-    }
 }
 
 #[cfg(test)]
@@ -246,15 +262,15 @@ mod tests {
         }
         let store = BlockStore::open(&path).unwrap();
         assert_eq!(store.len(), 2);
-        assert_eq!(store.block_by_height(1), Some(to_bytes(&first).as_slice()));
-        assert_eq!(store.block_by_height(2), Some(to_bytes(&second).as_slice()));
+        assert_eq!(store.block_by_height(1), Some(to_bytes(&first)));
+        assert_eq!(store.block_by_height(2), Some(to_bytes(&second)));
         assert_eq!(
             store.block_by_hash(&first.header_hash()),
-            Some(to_bytes(&first).as_slice())
+            Some(to_bytes(&first))
         );
         assert_eq!(
             store.block_by_hash(&second.header_hash()),
-            Some(to_bytes(&second).as_slice())
+            Some(to_bytes(&second))
         );
         std::fs::remove_file(&path).ok();
     }
@@ -306,15 +322,15 @@ mod tests {
         let mut store = BlockStore::open(&path).unwrap();
         assert_eq!(store.len(), 2);
         assert_eq!(store.head_height(), Some(2));
-        assert_eq!(store.block_by_height(1), Some(to_bytes(&first).as_slice()));
-        assert_eq!(store.block_by_height(2), Some(to_bytes(&second).as_slice()));
+        assert_eq!(store.block_by_height(1), Some(to_bytes(&first)));
+        assert_eq!(store.block_by_height(2), Some(to_bytes(&second)));
         assert_eq!(store.block_by_height(3), None);
         let third = block(3, 33);
         store.put_block(&third).unwrap();
         store.sync().unwrap();
         let store = BlockStore::open(&path).unwrap();
         assert_eq!(store.len(), 3);
-        assert_eq!(store.block_by_height(3), Some(to_bytes(&third).as_slice()));
+        assert_eq!(store.block_by_height(3), Some(to_bytes(&third)));
         std::fs::remove_file(&path).ok();
     }
 
