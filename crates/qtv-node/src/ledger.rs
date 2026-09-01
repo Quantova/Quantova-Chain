@@ -4058,7 +4058,11 @@ mod stake_state_tests {
         let mut l = Ledger::new();
         l.seed_validator_bond(&gov_addr(21), 10_000 * 1_000_000);
         let proposer = gov_addr(20);
-        fund(&mut l, &proposer, 2_250_000 * 1_000_000);
+        fund(
+            &mut l,
+            &proposer,
+            qtv_governance::Track::ChainUpgrade.deposit(),
+        );
         let action = qtv_governance::Action::Parameter {
             key: b"price".to_vec(),
             value: 70_000_000u128.to_le_bytes().to_vec(),
@@ -4088,7 +4092,7 @@ mod stake_state_tests {
             l.gov_conclude(id, close),
             Some(qtv_governance::Status::Approved)
         );
-        assert_eq!(l.balance(&proposer), 2_250_000 * 1_000_000);
+        assert_eq!(l.balance(&proposer), qtv_governance::Track::ChainUpgrade.deposit());
 
         let spam_action = qtv_governance::Action::Parameter {
             key: b"price".to_vec(),
@@ -4107,7 +4111,7 @@ mod stake_state_tests {
             Some(qtv_governance::Status::Rejected)
         );
         assert_eq!(l.balance(&proposer), 0);
-        assert_eq!(l.stake_treasury(), 2_250_000 * 1_000_000);
+        assert_eq!(l.stake_treasury(), qtv_governance::Track::ChainUpgrade.deposit());
     }
 
     #[test]
@@ -4296,19 +4300,31 @@ mod stake_state_tests {
     #[test]
     fn every_track_deposit_matches_the_published_transparency_figure() {
         let page: [(qtv_governance::Track, u64); 5] = [
-            (qtv_governance::Track::ChainUpgrade, 2_250_000),
-            (qtv_governance::Track::Mint, 4_000_000),
-            (qtv_governance::Track::BridgeMigration, 1_500_000),
-            (qtv_governance::Track::FreezeRecovery, 292_500),
-            (qtv_governance::Track::BlacklistKill, 390_000),
+            (qtv_governance::Track::ChainUpgrade, 225_000),
+            (qtv_governance::Track::Mint, 400_000),
+            (qtv_governance::Track::BridgeMigration, 150_000),
+            (qtv_governance::Track::FreezeRecovery, 29_250),
+            (qtv_governance::Track::BlacklistKill, 39_000),
         ];
         for (track, whole_qtov) in page {
             assert_eq!(track.deposit(), whole_qtov * qtv_governance::NATIVE_UNIT);
         }
         assert_eq!(
             qtv_governance::BRIDGE_FREEZE_BOND,
-            390_000 * qtv_governance::NATIVE_UNIT
+            qtv_governance::Track::BlacklistKill.deposit()
         );
+    }
+
+    #[test]
+    fn no_track_deposit_can_exceed_what_the_chain_can_ever_mint() {
+        for track in qtv_governance::Track::all() {
+            assert!(
+                track.deposit() < qtv_staking::MAX_SUPPLY / 4,
+                "{track:?} deposit {} is not fundable against a max supply of {}",
+                track.deposit(),
+                qtv_staking::MAX_SUPPLY
+            );
+        }
     }
 
     #[test]
@@ -5766,7 +5782,7 @@ mod stake_state_tests {
         );
         assert_eq!(
             l.balance(&freezer),
-            1_610_000 * 1_000_000,
+            2_000_000 * 1_000_000 - bond,
             "the bond leaves the caller"
         );
         assert_eq!(
@@ -5859,7 +5875,7 @@ mod stake_state_tests {
         let mut l = Ledger::new();
         let freezer = gov_addr(75);
         let bond = qtv_governance::BRIDGE_FREEZE_BOND;
-        fund(&mut l, &freezer, 390_000 * 1_000_000);
+        fund(&mut l, &freezer, qtv_governance::BRIDGE_FREEZE_BOND);
         l.set_guardian_set(&qtv_governance::GuardianSet::new(
             vec![[1u8; 32], [2u8; 32], [3u8; 32]],
             2,
@@ -5895,7 +5911,7 @@ mod stake_state_tests {
         l.seed_validator_bond(&gov_addr(85), 10_000 * 1_000_000);
         let bond = qtv_governance::BRIDGE_FREEZE_BOND;
         let freezer = gov_addr(83);
-        fund(&mut l, &freezer, 390_000 * 1_000_000);
+        fund(&mut l, &freezer, qtv_governance::BRIDGE_FREEZE_BOND);
         assert!(l.bridge_freeze_with_fee(&freezer, 0, 100));
 
         let proposer = gov_addr(84);

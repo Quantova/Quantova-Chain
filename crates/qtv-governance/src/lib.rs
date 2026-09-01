@@ -30,7 +30,7 @@ pub const HOUR_SECONDS: u64 = 3_600;
 pub const MONTH_SECONDS: u64 = 30 * DAY_SECONDS;
 pub const YEAR_SECONDS: u64 = 365 * DAY_SECONDS;
 
-pub const BRIDGE_FREEZE_BOND: u64 = 390_000 * NATIVE_UNIT;
+pub const BRIDGE_FREEZE_BOND: u64 = Track::BlacklistKill.deposit();
 pub const BRIDGE_FREEZE_DURATION: u64 = 7 * DAY_SECONDS;
 pub const BRIDGE_FREEZE_COOLDOWN: u64 = DAY_SECONDS;
 
@@ -54,13 +54,13 @@ impl Track {
         ]
     }
 
-    pub fn deposit(self) -> u64 {
+    pub const fn deposit(self) -> u64 {
         let whole = match self {
-            Track::ChainUpgrade => 2_250_000,
-            Track::Mint => 4_000_000,
-            Track::BridgeMigration => 1_500_000,
-            Track::FreezeRecovery => 292_500,
-            Track::BlacklistKill => 390_000,
+            Track::ChainUpgrade => 225_000,
+            Track::Mint => 400_000,
+            Track::BridgeMigration => 150_000,
+            Track::FreezeRecovery => 29_250,
+            Track::BlacklistKill => 39_000,
         };
         whole * NATIVE_UNIT
     }
@@ -953,19 +953,19 @@ mod tests {
     #[test]
     fn the_five_tracks_carry_the_canonical_parameters() {
         assert_eq!(Track::all().len(), 5);
-        assert_eq!(Track::ChainUpgrade.deposit(), 2_250_000 * NATIVE_UNIT);
+        assert_eq!(Track::ChainUpgrade.deposit(), 225_000 * NATIVE_UNIT);
         assert_eq!(Track::ChainUpgrade.period_seconds(), 14 * DAY_SECONDS);
 
-        assert_eq!(Track::Mint.deposit(), 4_000_000 * NATIVE_UNIT);
+        assert_eq!(Track::Mint.deposit(), 400_000 * NATIVE_UNIT);
         assert_eq!(Track::Mint.period_seconds(), 3 * DAY_SECONDS);
 
-        assert_eq!(Track::BridgeMigration.deposit(), 1_500_000 * NATIVE_UNIT);
+        assert_eq!(Track::BridgeMigration.deposit(), 150_000 * NATIVE_UNIT);
         assert_eq!(Track::BridgeMigration.period_seconds(), 5 * DAY_SECONDS);
 
-        assert_eq!(Track::FreezeRecovery.deposit(), 292_500 * NATIVE_UNIT);
+        assert_eq!(Track::FreezeRecovery.deposit(), 29_250 * NATIVE_UNIT);
         assert_eq!(Track::FreezeRecovery.period_seconds(), 6 * HOUR_SECONDS);
 
-        assert_eq!(Track::BlacklistKill.deposit(), 390_000 * NATIVE_UNIT);
+        assert_eq!(Track::BlacklistKill.deposit(), 39_000 * NATIVE_UNIT);
         assert_eq!(Track::BlacklistKill.period_seconds(), 2 * DAY_SECONDS);
 
         assert_eq!(THRESHOLD_BPS, 4_000);
@@ -1499,7 +1499,7 @@ mod tests {
 
     #[test]
     fn the_bridge_freeze_bond_holds_for_longer_than_a_migration_runs() {
-        assert_eq!(BRIDGE_FREEZE_BOND, 390_000 * NATIVE_UNIT);
+        assert_eq!(BRIDGE_FREEZE_BOND, Track::BlacklistKill.deposit());
         assert_eq!(BRIDGE_FREEZE_DURATION, 7 * DAY_SECONDS);
         assert_eq!(BRIDGE_FREEZE_COOLDOWN, DAY_SECONDS);
         assert!(BRIDGE_FREEZE_DURATION > Track::BridgeMigration.period_seconds());
