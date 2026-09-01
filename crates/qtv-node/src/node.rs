@@ -2506,7 +2506,7 @@ mod tests {
         let fee = FeeParams::devnet();
         let deployer = keypair(141);
         let code =
-            qtv_vm::asm::assemble("LDI r1, 88\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
+            qtv_vm::asm::assemble("LDI r1, 120\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
                 .expect("the program assembles");
         let genesis_selector = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
         let container = qtv_vm::container::Container::new(
@@ -2577,7 +2577,7 @@ mod tests {
         let fee = FeeParams::devnet();
         let deployer = keypair(151);
         let code =
-            qtv_vm::asm::assemble("LDI r1, 88\nLDI r2, 64\nLDI r3, 40\nSEND r1, r2, r3\nHALT")
+            qtv_vm::asm::assemble("LDI r1, 120\nLDI r2, 64\nLDI r3, 40\nSEND r1, r2, r3\nHALT")
                 .expect("the program assembles");
         let genesis_selector = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
         let container = qtv_vm::container::Container::new(

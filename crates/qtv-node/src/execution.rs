@@ -33,6 +33,7 @@ HALT";
 pub const TRANSFER_METER: u64 = 1_210;
 
 pub const CODE_ACCESS_BYTE_METER: u64 = 1;
+pub const STORAGE_ACCESS_BYTE_METER: u64 = 1;
 
 pub fn transfer_call(recipient: &str, amount: u64) -> Call {
     let mut encoder = Encoder::new();
@@ -185,10 +186,13 @@ pub fn execute_contract_call(
     container_bytes: &[u8],
     selector: [u8; qtv_vm::container::SELECTOR_BYTES],
     storage: std::collections::BTreeMap<[u8; 32], u64>,
+    storage_bytes: usize,
     memory: &[u8],
     meter_limit: u64,
 ) -> Result<ContractOutcome, ExecError> {
-    let access_cost = (container_bytes.len() as u64).saturating_mul(CODE_ACCESS_BYTE_METER);
+    let access_cost = (container_bytes.len() as u64)
+        .saturating_mul(CODE_ACCESS_BYTE_METER)
+        .saturating_add((storage_bytes as u64).saturating_mul(STORAGE_ACCESS_BYTE_METER));
     let vm_limit = meter_limit
         .checked_sub(access_cost)
         .ok_or(ExecError::MeterExhausted)?;
@@ -259,6 +263,7 @@ mod tests {
             &bytes,
             selector,
             std::collections::BTreeMap::new(),
+                0,
             &key,
             100_000,
         )
@@ -270,6 +275,7 @@ mod tests {
                 &bytes,
                 [9, 9, 9, 9],
                 std::collections::BTreeMap::new(),
+                0,
                 &[],
                 100_000
             )
@@ -281,6 +287,7 @@ mod tests {
                 b"nope",
                 selector,
                 std::collections::BTreeMap::new(),
+                0,
                 &[],
                 100_000
             )
@@ -325,6 +332,7 @@ mod tests {
                 &bytes,
                 selector,
                 std::collections::BTreeMap::new(),
+                0,
                 &[],
                 access - 1,
             )
@@ -336,6 +344,7 @@ mod tests {
             &bytes,
             selector,
             std::collections::BTreeMap::new(),
+                0,
             &[],
             100_000,
         )
@@ -398,4 +407,63 @@ mod tests {
             assert_eq!(err, ExecError::MeterExhausted);
         }
     }
+
+    #[test]
+    fn a_bloated_storage_costs_meter_before_it_is_ever_decoded() {
+        use qtv_vm::container::{Container, Entry, StateAccess};
+        let key = qtv_vm::abi::scalar_key(7);
+        let code = qtv_vm::asm::assemble("LDC r0, 0
+LDI r1, 0
+SSTORE r1, r0
+HALT")
+            .expect("the program assembles");
+        let selector = [1u8, 2, 3, 4];
+        let container = Container::new(
+            code,
+            vec![42],
+            vec![Entry {
+                selector,
+                offset: 0,
+                access: StateAccess {
+                    reads: vec![],
+                    writes: vec![7],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
+            }],
+        );
+        let bytes = container.canonical_bytes();
+        let code_only = bytes.len() as u64 * CODE_ACCESS_BYTE_METER;
+        let bloat = 900_000usize;
+        let with_bloat = code_only + bloat as u64 * STORAGE_ACCESS_BYTE_METER;
+
+        let lean = execute_contract_call(
+            &bytes,
+            selector,
+            std::collections::BTreeMap::new(),
+            0,
+            &key,
+            100_000,
+        )
+        .expect("a lean contract runs");
+
+        let fat = execute_contract_call(
+            &bytes,
+            selector,
+            std::collections::BTreeMap::new(),
+            bloat,
+            &key,
+            100_000,
+        );
+        assert_eq!(
+            fat.unwrap_err(),
+            ExecError::MeterExhausted,
+            "storage bytes must be paid for, not carried free"
+        );
+        assert!(
+            with_bloat > lean.meter_used,
+            "a contract holding {bloat} bytes must cost more than the same code holding none"
+        );
+    }
+
 }
