@@ -81,6 +81,10 @@ const MAX_RELAY_BUCKETS: usize = 1 << 16;
 
 const MAX_ATTESTATIONS_PER_SENDER: usize = 64;
 
+// How often the node checks whether its state log has gone mostly stale.
+// The check is a stat, so this is about bounding the wasted work, not the cost.
+const STATE_COMPACT_CHECK_BLOCKS: u64 = 1000;
+
 const MAX_FUTURE_PROPOSALS: usize = 256;
 
 const MAX_VIEW_CHANGES_PER_SENDER: usize = 64;
@@ -1855,6 +1859,12 @@ impl DevNode {
         self.block_store.put_block(block)?;
         self.block_store.sync()?;
         self.state_store.commit(height, self.ledger.q_root())?;
+        // The state log only ever grows while the node runs, so give it a chance
+        // to shed superseded copies. The call stats the file and returns unless a
+        // rewrite is warranted, so this stays cheap at every checked height.
+        if height % STATE_COMPACT_CHECK_BLOCKS == 0 {
+            self.state_store.compact_if_bloated()?;
+        }
         Ok(())
     }
 

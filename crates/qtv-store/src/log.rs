@@ -64,7 +64,7 @@ impl Log {
     }
 }
 
-fn sync_parent_dir(path: &Path) {
+pub(crate) fn sync_parent_dir(path: &Path) {
     if let Some(parent) = path.parent() {
         let parent = if parent.as_os_str().is_empty() {
             Path::new(".")
