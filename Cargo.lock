@@ -246,6 +246,7 @@ dependencies = [
  "qtv-bft",
  "qtv-codec",
  "qtv-devnet",
+ "qtv-loopback",
  "qtv-node",
  "qtv-sampler",
  "qtv-tx",
@@ -262,6 +263,7 @@ dependencies = [
  "qtv-net",
  "qtv-node",
  "qtv-sampler",
+ "qtv-staking",
  "qtv-tx",
 ]
 

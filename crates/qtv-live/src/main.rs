@@ -48,9 +48,10 @@ fn accounts(count: usize) -> Vec<Account> {
 }
 
 fn devnet_config(base: &PathBuf, validators: usize, senders: &[Account]) -> DevnetConfig {
+    let fund = qtv_loopback::genesis_fund(validators, senders.len());
     let funded: Vec<GenesisAccount> = senders
         .iter()
-        .map(|a| GenesisAccount::from_account(a, FUND))
+        .map(|a| GenesisAccount::from_account(a, fund))
         .collect();
     let nodes: Vec<NodeConfig> = (0..validators)
         .map(|i| {

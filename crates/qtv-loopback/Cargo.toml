@@ -24,6 +24,7 @@ qtv-account = { path = "../qtv-account" }
 qtv-codec = { path = "../qtv-codec" }
 qtv-tx = { path = "../qtv-tx" }
 qtv-node = { path = "../qtv-node", features = ["test-fixtures"] }
+qtv-staking = { path = "../qtv-staking" }
 
 # The real post quantum secure channel and the real multi node substrate. The
 # validator process reuses the DevNode round primitives and drives them over real

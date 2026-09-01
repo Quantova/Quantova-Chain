@@ -24,6 +24,7 @@ qtv-node = { path = "../qtv-node", features = ["test-fixtures"] }
 # The live multi node substrate: several real DevNode instances gossiping real
 # consensus over the qtv-net post quantum channel to a real finality certificate.
 qtv-devnet = { path = "../qtv-devnet", features = ["test-fixtures"] }
+qtv-loopback = { path = "../qtv-loopback" }
 
 # The consensus parameters reported alongside the numbers: the committee budget,
 # the stake floor, and the slot. Pinned at the same tag the devnet uses so the
