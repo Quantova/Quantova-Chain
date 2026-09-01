@@ -3,12 +3,12 @@
 
 use std::collections::BTreeMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use qtv_codec::{to_bytes, Decode, Decoder, Encode, Encoder, Error};
 use qtv_state::{Hash, Key, Trie};
 
-use crate::log::{frame_len, Log};
+use crate::log::{frame_len, sync_parent_dir, Log};
 
 const TAG_ENTRY: u8 = 1;
 const TAG_COMMIT: u8 = 2;
@@ -77,9 +77,18 @@ impl Decode for StateRecord {
     }
 }
 
+/// A log below this size is left alone, because rewriting a small file buys
+/// nothing and a fresh chain would otherwise compact on every open.
+const COMPACT_FLOOR_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Compact once the log costs this many times what the live set needs. Four
+/// means the log is three quarters superseded copies before it is rewritten.
+const COMPACT_RATIO: u64 = 4;
+
 #[derive(Debug)]
 pub struct StateStore {
     log: Log,
+    path: PathBuf,
     entries: BTreeMap<Key, Vec<u8>>,
     head: Option<Hash>,
     committed_height: Option<u64>,
@@ -87,9 +96,11 @@ pub struct StateStore {
 
 impl StateStore {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
-        let (log, frames) = Log::open(path)?;
+        let path = path.as_ref().to_path_buf();
+        let (log, frames) = Log::open(&path)?;
         let mut store = StateStore {
             log,
+            path,
             entries: BTreeMap::new(),
             head: None,
             committed_height: None,
@@ -127,8 +138,87 @@ impl StateStore {
         }
         if committed_len < total_len {
             store.log.truncate(committed_len)?;
+            committed_len = committed_len.min(total_len);
+        }
+        if store.should_compact(committed_len) {
+            store.compact()?;
         }
         Ok(store)
+    }
+
+    /// The bytes a freshly written log would occupy for the current live set.
+    fn live_bytes(&self) -> u64 {
+        self.entries
+            .iter()
+            .map(|(_, value)| {
+                frame_len(to_bytes(&StateRecord::Entry {
+                    key: [0u8; qtv_state::KEY_LEN],
+                    value: value.clone(),
+                })
+                .len())
+            })
+            .sum()
+    }
+
+    fn should_compact(&self, on_disk: u64) -> bool {
+        if on_disk < COMPACT_FLOOR_BYTES {
+            return false;
+        }
+        let live = self.live_bytes().max(1);
+        on_disk / live >= COMPACT_RATIO
+    }
+
+    /// Compact only when the log has become mostly superseded copies.
+    ///
+    /// Cheap enough for the block loop to call on a schedule: it stats the file
+    /// and returns immediately unless a rewrite is actually warranted. Returns
+    /// whether a rewrite happened.
+    pub fn compact_if_bloated(&mut self) -> io::Result<bool> {
+        let on_disk = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        if !self.should_compact(on_disk) {
+            return Ok(false);
+        }
+        self.compact()?;
+        Ok(true)
+    }
+
+    /// Rewrite the log so it holds one entry per live key and a single commit.
+    ///
+    /// The in-memory map is already the compacted state, so this replays to the
+    /// identical trie. The rewrite lands in a sibling file and is renamed over
+    /// the original, so an interrupted compaction leaves the previous log whole.
+    pub fn compact(&mut self) -> io::Result<()> {
+        let (height, root) = match (self.committed_height, self.head) {
+            (Some(height), Some(root)) => (height, root),
+            // Nothing has been committed, so there is no state worth keeping.
+            _ => return Ok(()),
+        };
+        let mut temp = self.path.clone().into_os_string();
+        temp.push(".compact");
+        let temp = PathBuf::from(temp);
+        // A temp file left by an interrupted earlier attempt is not state, drop it.
+        if temp.exists() {
+            std::fs::remove_file(&temp)?;
+        }
+        {
+            let (mut fresh, _) = Log::open(&temp)?;
+            for (key, value) in &self.entries {
+                let record = StateRecord::Entry {
+                    key: *key,
+                    value: value.clone(),
+                };
+                fresh.append(&to_bytes(&record))?;
+            }
+            fresh.append(&to_bytes(&StateRecord::Commit { height, root }))?;
+            fresh.sync()?;
+        }
+        std::fs::rename(&temp, &self.path)?;
+        // The rename itself has to reach the disk, otherwise a crash here can
+        // leave a directory entry pointing at neither file.
+        sync_parent_dir(&self.path);
+        let (log, _) = Log::open(&self.path)?;
+        self.log = log;
+        Ok(())
     }
 
     pub fn put_account(&mut self, key: Key, value: Vec<u8>) -> io::Result<()> {
@@ -492,4 +582,126 @@ mod tests {
         assert_eq!(store.account(&key(2)), None);
         std::fs::remove_file(&path).ok();
     }
+
+    #[test]
+    fn compaction_keeps_every_live_value_and_the_same_root() {
+        let path = temp_path("compaction-keeps-values");
+        let mut store = StateStore::open(&path).expect("open");
+        for index in 0..16u8 {
+            store
+                .put_account(key(index), account(index as u64, 100 + index as u64))
+                .expect("put");
+        }
+        store.commit(1, [7u8; 32]).expect("commit");
+        // Rewrite every key many times so the log is mostly superseded copies.
+        for round in 1..40u64 {
+            for index in 0..16u8 {
+                store
+                    .put_account(key(index), account(round, 100 + index as u64))
+                    .expect("put");
+            }
+            store.commit(1 + round, [8u8; 32]).expect("commit");
+        }
+        let before_root = store.load_trie().root();
+        let before_len = store.len();
+        let before_bytes = std::fs::metadata(&path).expect("stat").len();
+
+        store.compact().expect("compact");
+
+        assert_eq!(store.load_trie().root(), before_root, "root changed");
+        assert_eq!(store.len(), before_len, "live count changed");
+        let after_bytes = std::fs::metadata(&path).expect("stat").len();
+        assert!(
+            after_bytes < before_bytes,
+            "compaction did not shrink the log, {before_bytes} -> {after_bytes}"
+        );
+
+        // and it survives a reopen
+        drop(store);
+        let reopened = StateStore::open(&path).expect("reopen");
+        assert_eq!(reopened.load_trie().root(), before_root, "root changed on reopen");
+        assert_eq!(reopened.len(), before_len, "count changed on reopen");
+        assert_eq!(reopened.committed_height(), Some(40), "height changed");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_key_deleted_before_compaction_stays_absent_afterwards() {
+        let path = temp_path("compaction-honours-deletes");
+        let mut store = StateStore::open(&path).expect("open");
+        store.put_account(key(1), account(1, 10)).expect("put");
+        store.put_account(key(2), account(2, 20)).expect("put");
+        store.commit(1, [1u8; 32]).expect("commit");
+        store.delete_account(key(1)).expect("delete");
+        store.commit(2, [2u8; 32]).expect("commit");
+
+        store.compact().expect("compact");
+        assert!(store.account(&key(1)).is_none(), "deleted key came back");
+        assert!(store.account(&key(2)).is_some(), "live key lost");
+
+        drop(store);
+        let reopened = StateStore::open(&path).expect("reopen");
+        assert!(reopened.account(&key(1)).is_none(), "deleted key came back on reopen");
+        assert!(reopened.account(&key(2)).is_some(), "live key lost on reopen");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_interrupted_compaction_leaves_the_original_log_untouched() {
+        let path = temp_path("compaction-interrupted");
+        let mut store = StateStore::open(&path).expect("open");
+        store.put_account(key(1), account(1, 10)).expect("put");
+        store.commit(1, [3u8; 32]).expect("commit");
+        let root = store.load_trie().root();
+        drop(store);
+        let original = std::fs::read(&path).expect("read");
+
+        // A temp file left behind by a compaction that died midway must not be
+        // mistaken for state, and must not stop a later compaction.
+        let mut temp = path.clone().into_os_string();
+        temp.push(".compact");
+        let temp = std::path::PathBuf::from(temp);
+        std::fs::write(&temp, b"a partial write from a dead process").expect("write temp");
+
+        let reopened = StateStore::open(&path).expect("reopen");
+        assert_eq!(reopened.load_trie().root(), root, "state changed");
+        assert_eq!(std::fs::read(&path).expect("read"), original, "log was altered");
+
+        let mut store = StateStore::open(&path).expect("reopen again");
+        store.compact().expect("compact over a stale temp");
+        assert_eq!(store.load_trie().root(), root, "root changed after compaction");
+        assert!(!temp.exists(), "temp file survived compaction");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn compacting_an_empty_store_is_a_no_op() {
+        let path = temp_path("compaction-empty");
+        let mut store = StateStore::open(&path).expect("open");
+        store.compact().expect("compact");
+        assert!(store.is_empty(), "empty store gained entries");
+        assert_eq!(store.committed_height(), None, "empty store gained a height");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_small_log_is_left_alone_by_the_open_time_trigger() {
+        let path = temp_path("compaction-floor");
+        let mut store = StateStore::open(&path).expect("open");
+        store.put_account(key(1), account(1, 10)).expect("put");
+        store.commit(1, [4u8; 32]).expect("commit");
+        for round in 2..50u64 {
+            store.put_account(key(1), account(round, 10)).expect("put");
+            store.commit(round, [4u8; 32]).expect("commit");
+        }
+        let before = std::fs::metadata(&path).expect("stat").len();
+        assert!(before < COMPACT_FLOOR_BYTES, "test log unexpectedly large");
+        drop(store);
+        let reopened = StateStore::open(&path).expect("reopen");
+        let after = std::fs::metadata(&path).expect("stat").len();
+        assert_eq!(before, after, "a small log should not be rewritten on open");
+        assert_eq!(reopened.committed_height(), Some(49));
+        let _ = std::fs::remove_file(&path);
+    }
+
 }
