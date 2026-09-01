@@ -13,5 +13,8 @@ qcore = { path = "../../../QCore.rs", features = ["client"] }
 [dev-dependencies]
 qtv-devnet = { path = "../qtv-devnet" }
 
-[lints]
-workspace = true
+# Excluded from the chain workspace because it reaches a sibling checkout
+# (QCore.rs) that a clean clone of this repo does not have. Keeping it a member
+# made cargo metadata fail for anyone cloning the node, so it roots its own
+# workspace and is built from its own directory.
+[workspace]
