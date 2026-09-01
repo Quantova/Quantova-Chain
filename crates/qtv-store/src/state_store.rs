@@ -149,8 +149,8 @@ impl StateStore {
     /// The bytes a freshly written log would occupy for the current live set.
     fn live_bytes(&self) -> u64 {
         self.entries
-            .iter()
-            .map(|(_, value)| {
+            .values()
+            .map(|value| {
                 frame_len(
                     to_bytes(&StateRecord::Entry {
                         key: [0u8; qtv_state::KEY_LEN],
