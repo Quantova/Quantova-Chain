@@ -19,6 +19,21 @@ pub const FUND: u64 = 1_000_000_000_000;
 pub const TRANSFER_AMOUNT: u64 = 1;
 pub const HARNESS_SLOTS: u64 = 4096;
 
+/// The most each genesis account may hold without the chain starting at or above
+/// its own ceiling. Every token allocated at genesis is a token that can never
+/// be minted afterwards, so the harness takes half the headroom and leaves the
+/// rest mintable.
+pub fn genesis_fund(validators: usize, senders: usize) -> u64 {
+    let bonds = (validators as u64)
+        .saturating_mul(qtv_bft::params::VALIDATOR_STAKE_QTOV)
+        .saturating_mul(qtv_staking::NATIVE_UNIT as u64);
+    let headroom = qtv_staking::MAX_SUPPLY
+        .saturating_sub(qtv_staking::STAKING_POOL)
+        .saturating_sub(bonds);
+    let share = (headroom / 2) / (senders.max(1) as u64);
+    share.min(FUND)
+}
+
 pub fn accounts(count: usize) -> Vec<Account> {
     (0..count as u64)
         .map(|i| derive(&ACCOUNT_SEED, i))
@@ -31,9 +46,10 @@ pub fn recipients(senders: &[Account]) -> Vec<String> {
 }
 
 pub fn devnet_config(base: &PathBuf, validators: usize, senders: &[Account]) -> DevnetConfig {
+    let fund = genesis_fund(validators, senders.len());
     let funded: Vec<GenesisAccount> = senders
         .iter()
-        .map(|a| GenesisAccount::from_account(a, FUND))
+        .map(|a| GenesisAccount::from_account(a, fund))
         .collect();
     let nodes: Vec<NodeConfig> = (0..validators)
         .map(|i| {

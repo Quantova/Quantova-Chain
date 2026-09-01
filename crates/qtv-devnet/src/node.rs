@@ -112,6 +112,10 @@ pub enum RoundError {
         state_root: Option<[u8; 32]>,
     },
     Coding(crate::coded::CodedError),
+    GenesisOverSupply {
+        supply: u64,
+        max: u64,
+    },
 }
 
 impl From<io::Error> for RoundError {
@@ -285,6 +289,12 @@ impl DevNode {
         let genesis = devnet.genesis();
         let genesis_accounts = genesis.accounts.clone();
         let genesis_supply = genesis_supply_value(&genesis, &roster);
+        if genesis_supply > qtv_staking::MAX_SUPPLY {
+            return Err(RoundError::GenesisOverSupply {
+                supply: genesis_supply,
+                max: qtv_staking::MAX_SUPPLY,
+            });
+        }
 
         let secret = node.secret;
         let mut dev = DevNode {
