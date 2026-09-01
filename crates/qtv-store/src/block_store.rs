@@ -188,7 +188,6 @@ impl BlockStore {
     pub fn is_empty(&self) -> bool {
         self.heights.is_empty()
     }
-
 }
 
 #[cfg(test)]

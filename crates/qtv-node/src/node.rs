@@ -3118,10 +3118,16 @@ mod tests {
         let into = transfer(&peer, &hostile.address(), 100 * 1_000_000, 0, &fee);
         assert!(execute_ordered(&mut ledger, &[into], &fee, 3 * 86_400).is_empty());
         let clean = transfer(&peer, &voter.address(), 100 * 1_000_000, 0, &fee);
-        assert_eq!(execute_ordered(&mut ledger, &[clean], &fee, 3 * 86_400).len(), 1);
+        assert_eq!(
+            execute_ordered(&mut ledger, &[clean], &fee, 3 * 86_400).len(),
+            1
+        );
 
         let mut parallel = ledger.clone();
-        assert!(crate::parallel::execute_parallel(&mut parallel, &[out], &fee, 8, 3 * 86_400).is_empty());
+        assert!(
+            crate::parallel::execute_parallel(&mut parallel, &[out], &fee, 8, 3 * 86_400)
+                .is_empty()
+        );
         assert_eq!(parallel.q_root(), ledger.q_root());
     }
 
@@ -3208,7 +3214,10 @@ mod tests {
             execute_ordered(&mut ledger, &[exit.clone()], &fee, 89 * 86_400).is_empty(),
             "an exit before the lock clears is not included"
         );
-        assert_eq!(execute_ordered(&mut ledger, &[exit], &fee, 90 * 86_400).len(), 1);
+        assert_eq!(
+            execute_ordered(&mut ledger, &[exit], &fee, 90 * 86_400).len(),
+            1
+        );
         assert!(ledger.stake_bond(&sid).unwrap().exit_requested_at.is_some());
 
         let nonce = ledger.account(&staker.address()).nonce;
@@ -3294,7 +3303,10 @@ mod tests {
         assert_eq!(ledger.account(&hostile.address()).nonce, hostile_nonce);
 
         let mut parallel = ledger.clone();
-        assert!(crate::parallel::execute_parallel(&mut parallel, &[gov], &fee, 8, 3 * 86_400).is_empty());
+        assert!(
+            crate::parallel::execute_parallel(&mut parallel, &[gov], &fee, 8, 3 * 86_400)
+                .is_empty()
+        );
         assert_eq!(parallel.q_root(), ledger.q_root());
     }
 

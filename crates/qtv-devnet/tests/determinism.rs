@@ -43,6 +43,10 @@ fn the_same_inputs_give_the_same_finalized_chain() {
     let params = FeeParams::devnet();
     let one = run_scripted("determinism-one", &params);
     let two = run_scripted("determinism-two", &params);
-    assert_eq!(one.0.len(), two.0.len(), "the finalized chains differ across runs");
+    assert_eq!(
+        one.0.len(),
+        two.0.len(),
+        "the finalized chains differ across runs"
+    );
     assert_eq!(one.1, two.1, "the final state roots differ across runs");
 }
