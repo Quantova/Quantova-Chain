@@ -799,12 +799,7 @@ impl DevNode {
         ledger.set_round_proposer(&proposer);
         ledger.set_execution_height(height);
         let block_time = qtv_node::node::wall_clock_seconds();
-        let included = execute_ordered(
-            &mut ledger,
-            &candidates,
-            &self.fee_params,
-            block_time,
-        );
+        let included = execute_ordered(&mut ledger, &candidates, &self.fee_params, block_time);
         let event_leaves: Vec<Vec<u8>> = ledger
             .block_events()
             .iter()
@@ -948,12 +943,7 @@ impl DevNode {
         ledger.clear_block_events();
         ledger.set_round_proposer(header.proposer());
         ledger.set_execution_height(header.height());
-        let included = execute_ordered(
-            &mut ledger,
-            body,
-            &self.fee_params,
-            header.time(),
-        );
+        let included = execute_ordered(&mut ledger, body, &self.fee_params, header.time());
         let event_leaves: Vec<Vec<u8>> = ledger
             .block_events()
             .iter()
@@ -2146,12 +2136,7 @@ impl DevNode {
         ledger.clear_block_events();
         ledger.set_round_proposer(header.proposer());
         ledger.set_execution_height(header.height());
-        let included = execute_ordered(
-            &mut ledger,
-            block.body(),
-            &self.fee_params,
-            header.time(),
-        );
+        let included = execute_ordered(&mut ledger, block.body(), &self.fee_params, header.time());
         let event_leaves: Vec<Vec<u8>> = ledger
             .block_events()
             .iter()

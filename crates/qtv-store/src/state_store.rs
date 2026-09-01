@@ -151,11 +151,13 @@ impl StateStore {
         self.entries
             .iter()
             .map(|(_, value)| {
-                frame_len(to_bytes(&StateRecord::Entry {
-                    key: [0u8; qtv_state::KEY_LEN],
-                    value: value.clone(),
-                })
-                .len())
+                frame_len(
+                    to_bytes(&StateRecord::Entry {
+                        key: [0u8; qtv_state::KEY_LEN],
+                        value: value.clone(),
+                    })
+                    .len(),
+                )
             })
             .sum()
     }
@@ -619,7 +621,11 @@ mod tests {
         // and it survives a reopen
         drop(store);
         let reopened = StateStore::open(&path).expect("reopen");
-        assert_eq!(reopened.load_trie().root(), before_root, "root changed on reopen");
+        assert_eq!(
+            reopened.load_trie().root(),
+            before_root,
+            "root changed on reopen"
+        );
         assert_eq!(reopened.len(), before_len, "count changed on reopen");
         assert_eq!(reopened.committed_height(), Some(40), "height changed");
         let _ = std::fs::remove_file(&path);
@@ -641,8 +647,14 @@ mod tests {
 
         drop(store);
         let reopened = StateStore::open(&path).expect("reopen");
-        assert!(reopened.account(&key(1)).is_none(), "deleted key came back on reopen");
-        assert!(reopened.account(&key(2)).is_some(), "live key lost on reopen");
+        assert!(
+            reopened.account(&key(1)).is_none(),
+            "deleted key came back on reopen"
+        );
+        assert!(
+            reopened.account(&key(2)).is_some(),
+            "live key lost on reopen"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -665,11 +677,19 @@ mod tests {
 
         let reopened = StateStore::open(&path).expect("reopen");
         assert_eq!(reopened.load_trie().root(), root, "state changed");
-        assert_eq!(std::fs::read(&path).expect("read"), original, "log was altered");
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            original,
+            "log was altered"
+        );
 
         let mut store = StateStore::open(&path).expect("reopen again");
         store.compact().expect("compact over a stale temp");
-        assert_eq!(store.load_trie().root(), root, "root changed after compaction");
+        assert_eq!(
+            store.load_trie().root(),
+            root,
+            "root changed after compaction"
+        );
         assert!(!temp.exists(), "temp file survived compaction");
         let _ = std::fs::remove_file(&path);
     }
@@ -680,7 +700,11 @@ mod tests {
         let mut store = StateStore::open(&path).expect("open");
         store.compact().expect("compact");
         assert!(store.is_empty(), "empty store gained entries");
-        assert_eq!(store.committed_height(), None, "empty store gained a height");
+        assert_eq!(
+            store.committed_height(),
+            None,
+            "empty store gained a height"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -703,5 +727,4 @@ mod tests {
         assert_eq!(reopened.committed_height(), Some(49));
         let _ = std::fs::remove_file(&path);
     }
-
 }

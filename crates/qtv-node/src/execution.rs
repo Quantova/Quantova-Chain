@@ -263,7 +263,7 @@ mod tests {
             &bytes,
             selector,
             std::collections::BTreeMap::new(),
-                0,
+            0,
             &key,
             100_000,
         )
@@ -344,7 +344,7 @@ mod tests {
             &bytes,
             selector,
             std::collections::BTreeMap::new(),
-                0,
+            0,
             &[],
             100_000,
         )
@@ -412,11 +412,13 @@ mod tests {
     fn a_bloated_storage_costs_meter_before_it_is_ever_decoded() {
         use qtv_vm::container::{Container, Entry, StateAccess};
         let key = qtv_vm::abi::scalar_key(7);
-        let code = qtv_vm::asm::assemble("LDC r0, 0
+        let code = qtv_vm::asm::assemble(
+            "LDC r0, 0
 LDI r1, 0
 SSTORE r1, r0
-HALT")
-            .expect("the program assembles");
+HALT",
+        )
+        .expect("the program assembles");
         let selector = [1u8, 2, 3, 4];
         let container = Container::new(
             code,
@@ -465,5 +467,4 @@ HALT")
             "a contract holding {bloat} bytes must cost more than the same code holding none"
         );
     }
-
 }

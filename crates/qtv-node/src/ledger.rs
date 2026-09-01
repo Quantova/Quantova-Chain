@@ -4112,7 +4112,10 @@ mod stake_state_tests {
             l.gov_conclude(id, close),
             Some(qtv_governance::Status::Approved)
         );
-        assert_eq!(l.balance(&proposer), qtv_governance::Track::ChainUpgrade.deposit());
+        assert_eq!(
+            l.balance(&proposer),
+            qtv_governance::Track::ChainUpgrade.deposit()
+        );
 
         let spam_action = qtv_governance::Action::Parameter {
             key: b"price".to_vec(),
@@ -4131,7 +4134,10 @@ mod stake_state_tests {
             Some(qtv_governance::Status::Rejected)
         );
         assert_eq!(l.balance(&proposer), 0);
-        assert_eq!(l.stake_treasury(), qtv_governance::Track::ChainUpgrade.deposit());
+        assert_eq!(
+            l.stake_treasury(),
+            qtv_governance::Track::ChainUpgrade.deposit()
+        );
     }
 
     #[test]

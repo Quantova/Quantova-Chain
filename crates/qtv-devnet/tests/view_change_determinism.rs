@@ -43,7 +43,8 @@ fn a_view_change_replays_to_the_same_chain() {
         "the view change did not finalize the height"
     );
     assert_eq!(
-        one.0.len(), two.0.len(),
+        one.0.len(),
+        two.0.len(),
         "the view change finalized different chains across runs"
     );
     assert_eq!(

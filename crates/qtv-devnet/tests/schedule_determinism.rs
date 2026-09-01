@@ -49,7 +49,11 @@ fn the_same_schedule_gives_the_same_finalized_chain() {
     let params = FeeParams::devnet();
     let one = run_scripted("schedule-one", &params);
     let two = run_scripted("schedule-two", &params);
-    assert_eq!(one.0.len(), two.0.len(), "the finalized chains differ across runs");
+    assert_eq!(
+        one.0.len(),
+        two.0.len(),
+        "the finalized chains differ across runs"
+    );
     assert_eq!(one.1, two.1, "the final state roots differ across runs");
     assert_eq!(one.0.len(), 3, "every scripted height finalized");
 }

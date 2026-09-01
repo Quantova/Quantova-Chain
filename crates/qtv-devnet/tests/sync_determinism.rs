@@ -47,6 +47,10 @@ fn the_same_schedule_gives_the_same_synced_chain() {
 
     assert_eq!(synced_a, peer_a);
     assert_eq!(synced_b, peer_b);
-    assert_eq!(synced_a.len(), synced_b.len(), "the synced chain was not deterministic");
+    assert_eq!(
+        synced_a.len(),
+        synced_b.len(),
+        "the synced chain was not deterministic"
+    );
     assert!(!synced_a.is_empty(), "the synced chain should not be empty");
 }
