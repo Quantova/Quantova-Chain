@@ -541,7 +541,12 @@ fn chain_params() -> Json {
                 ("native_unit", Json::Int(qtv_staking::NATIVE_UNIT as u64)),
                 ("min_stake", Json::Int(qtv_staking::MIN_STAKE)),
                 ("staking_pool", Json::Int(qtv_staking::STAKING_POOL)),
-                ("session_emission", Json::Int(qtv_staking::SESSION_EMISSION)),
+                ("emission_k", Json::Int(qtv_staking::EMISSION_K)),
+                (
+                    "max_session_emission",
+                    Json::Int(qtv_staking::MAX_SESSION_EMISSION),
+                ),
+                ("gov_mint_max_bps", Json::Int(qtv_staking::GOV_MINT_MAX_BPS)),
                 ("session_days", Json::Int(qtv_staking::SESSION_DAYS)),
                 ("high_session_tx", Json::Int(qtv_staking::HIGH_SESSION_TX)),
                 (

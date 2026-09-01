@@ -2241,11 +2241,20 @@ impl Ledger {
             Some(bond) => bond.amount,
             None => return 0,
         };
-        let paid = qtv_staking::session_reward(stake, denom).min(self.stake_pool());
+        let paid = qtv_staking::session_reward(stake, denom);
         if paid == 0 {
             return 0;
         }
-        self.set_stake_pool(self.stake_pool() - paid);
+        // The pre funded pot is spent first, for what it was allocated for, and
+        // issuance takes over once it is empty. Paying only from the pot is what
+        // made validator reward stop dead when it ran out.
+        let from_pool = paid.min(self.stake_pool());
+        if from_pool > 0 {
+            self.set_stake_pool(self.stake_pool() - from_pool);
+        }
+        if paid > from_pool {
+            self.credit_supply(paid - from_pool);
+        }
         let mut book = self.stake_rewards(id);
         book.tranches.push(qtv_staking::RewardTranche {
             earned_day: now_day,
@@ -3022,6 +3031,12 @@ impl Ledger {
                     .total_supply()
                     .checked_add(*amount)
                     .ok_or(EnactError::Overflow)?;
+                // Bounded against the supply that exists rather than a fixed
+                // ceiling, so the track scales with the chain and can never lock
+                // itself shut the way an absolute cap did.
+                if *amount > qtv_staking::gov_mint_ceiling(self.total_supply()) {
+                    return Err(EnactError::BadValue);
+                }
                 if supply > qtv_staking::MAX_SUPPLY {
                     return Err(EnactError::BadValue);
                 }
@@ -4427,7 +4442,7 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn governance_mints_uncapped_to_the_target_on_the_mint_track() {
+    fn governance_mints_up_to_the_ceiling_on_the_mint_track() {
         let mut l = Ledger::new();
         l.seed_validator_bond(&gov_addr(25), 10_000 * 1_000_000);
         let proposer = gov_addr(24);
@@ -4435,7 +4450,7 @@ mod stake_state_tests {
         let target = gov_addr(30);
         let action = qtv_governance::Action::Mint {
             to: [30u8; 32].to_vec(),
-            amount: 1_000_000 * 1_000_000,
+            amount: 100_000 * 1_000_000,
         };
         let id = l
             .gov_propose(&proposer, qtv_governance::Track::Mint, action, 0)
@@ -4451,7 +4466,7 @@ mod stake_state_tests {
             0,
         );
         l.gov_enact(id, 3 * 86_400 + 1, TEST_CHAIN).unwrap();
-        assert_eq!(l.balance(&target), 1_000_000 * 1_000_000);
+        assert_eq!(l.balance(&target), 100_000 * 1_000_000);
     }
 
     #[test]
@@ -4462,7 +4477,7 @@ mod stake_state_tests {
         fund(&mut l, &proposer, 4_000_000 * 1_000_000);
         let action = qtv_governance::Action::Mint {
             to: [30u8; 32].to_vec(),
-            amount: 1_000_000 * 1_000_000,
+            amount: 100_000 * 1_000_000,
         };
         let id = l
             .gov_propose(&proposer, qtv_governance::Track::Mint, action, 0)
@@ -5349,7 +5364,7 @@ mod stake_state_tests {
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000);
 
         l.set_stake_mainnet_start(0);
-        let emission = qtv_staking::SESSION_EMISSION;
+        let emission = qtv_staking::session_emission(2_000 * 1_000_000);
         assert_eq!(l.accrue_reward(&addr, 400), emission);
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000 - emission);
 
@@ -5381,7 +5396,7 @@ mod stake_state_tests {
         l.seed_stake_pool(700_000 * 1_000_000);
         l.seed_validator_bond(&addr, 2_000 * 1_000_000);
         l.set_stake_mainnet_start(0);
-        let emission = qtv_staking::SESSION_EMISSION;
+        let emission = qtv_staking::session_emission(2_000 * 1_000_000);
         assert_eq!(l.accrue_reward(&addr, 400), emission);
 
         assert_eq!(l.balance(&addr), 0);
@@ -5530,7 +5545,7 @@ mod stake_state_tests {
         l.seed_stake_pool(700_000 * 1_000_000);
         l.seed_validator_bond(&addr, 2_000 * 1_000_000);
         l.set_stake_mainnet_start(0);
-        let emission = qtv_staking::SESSION_EMISSION;
+        let emission = qtv_staking::session_emission(2_000 * 1_000_000);
         assert_eq!(l.accrue_reward(&addr, 400), emission);
         assert_eq!(l.claimable_reward(&addr, 400 + 365), emission);
         l.slash_stake(&addr, qtv_staking::Fault::Attributable);
@@ -5541,8 +5556,44 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn validator_reward_outlives_the_pot_and_mints_instead_of_stopping() {
+        let mut l = Ledger::new();
+        let addr = qtv_idfmt::render_address(&[41u8; 32]).unwrap();
+        let seeded = 1_000u64;
+        l.seed_stake_pool(seeded);
+        l.seed_validator_bond(&addr, 2_000 * 1_000_000);
+        l.set_stake_mainnet_start(0);
+        let owed = qtv_staking::session_emission(2_000 * 1_000_000);
+        let supply_before = l.total_supply();
+
+        let first = l.accrue_reward(&addr, 400);
+        assert_eq!(first, owed, "the validator is paid in full, pot or no pot");
+        assert_eq!(
+            l.stake_pool(),
+            0,
+            "the pot is spent before anything is minted"
+        );
+        assert_eq!(
+            l.total_supply(),
+            supply_before + owed - seeded,
+            "only the part the pot could not cover is minted"
+        );
+
+        let second = l.accrue_reward(&addr, 400 + qtv_staking::SESSION_DAYS);
+        assert_eq!(
+            second, owed,
+            "reward does not stop once the pot is empty, that was the twelve year cliff"
+        );
+        assert_eq!(
+            l.total_supply(),
+            supply_before + 2 * owed - seeded,
+            "the second session is minted in full"
+        );
+    }
+
+    #[test]
     fn a_slash_disposes_the_forfeited_reward_and_conserves_supply() {
-        let emission = qtv_staking::SESSION_EMISSION;
+        let emission = qtv_staking::session_emission(2_000 * 1_000_000);
         let pool = 700_000 * 1_000_000;
         let bond = 2_000 * 1_000_000;
 
@@ -5596,7 +5647,7 @@ mod stake_state_tests {
         l.accrue_reward(&addr, 400);
         assert_eq!(
             l.claimable_reward(&addr, 400 + 365),
-            qtv_staking::SESSION_EMISSION
+            qtv_staking::session_emission(2_000 * 1_000_000)
         );
         l.set_gov_blacklisted(&id);
         assert_eq!(l.claimable_reward(&addr, 400 + 365), 0);
@@ -5628,11 +5679,11 @@ mod stake_state_tests {
         l.settle_session(546, 5);
         assert_eq!(
             l.stake_pool(),
-            700_000 * 1_000_000 - qtv_staking::SESSION_EMISSION
+            700_000 * 1_000_000 - qtv_staking::session_emission(2_000 * 1_000_000)
         );
         assert_eq!(
             l.claimable_reward(&v, 546 + 365),
-            qtv_staking::SESSION_EMISSION
+            qtv_staking::session_emission(2_000 * 1_000_000)
         );
     }
 

@@ -9,9 +9,40 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const NATIVE_UNIT: u128 = 1_000_000;
 pub const MIN_STAKE: u64 = 2_000 * NATIVE_UNIT as u64;
 pub const STAKING_POOL: u64 = 685_714 * NATIVE_UNIT as u64;
-pub const MAX_SUPPLY: u64 = 4_571_429 * NATIVE_UNIT as u64;
+/// An arithmetic ceiling for genesis sanity, not a monetary cap. Issuance is
+/// perpetual and bounded per session, so nothing here limits what the chain can
+/// mint over its life. This exists so a genesis cannot be written that is absurd
+/// on its face and so supply stays far inside what a u64 of quon can hold.
+pub const MAX_SUPPLY: u64 = 1_000_000_000 * NATIVE_UNIT as u64;
 
-pub const SESSION_EMISSION: u64 = 28_571 * NATIVE_UNIT as u64;
+/// Issuance is sized to the square root of the stake rather than a flat share of
+/// it. A flat share pays the same yield however much security the chain already
+/// has. Under a square root a thin validator set is paid well enough to attract
+/// more, and a deep one costs the chain proportionally less, with no vote needed
+/// to adjust either way.
+///
+/// This constant is the whole monetary policy. It is set so a session pays about
+/// five percent a year when a million QTOV is staked, and two sessions make a
+/// year.
+pub const EMISSION_K: u64 = 25_000;
+
+/// The rail that replaces a total supply cap. A total cap makes perpetual
+/// issuance impossible by construction. A bound on a single session still stops
+/// a bug minting the world, and it never deadlocks.
+pub const MAX_SESSION_EMISSION: u64 = 250_000 * NATIVE_UNIT as u64;
+
+/// The most a single governance mint may create, as a share of the supply that
+/// already exists. A relative bound scales with the chain instead of turning
+/// either trivial or unreachable, and unlike an absolute ceiling it can never
+/// lock the mint track shut.
+pub const GOV_MINT_MAX_BPS: u64 = 500;
+
+/// A share of supply alone would be zero on a young chain, which is the same
+/// bootstrap deadlock an absolute cap creates from the other direction. The
+/// ceiling is whichever of the share and this floor is larger, so a mint is
+/// always possible and the share takes over once the chain is big enough for it
+/// to matter.
+pub const GOV_MINT_FLOOR: u64 = 100_000 * NATIVE_UNIT as u64;
 
 pub const REWARD_VEST_DAYS: u64 = 365;
 
@@ -47,11 +78,24 @@ pub fn eligible(stake: u64) -> bool {
     stake >= MIN_STAKE
 }
 
+/// What the whole validator set is paid for one session at this much stake.
+pub fn session_emission(total_staked: u64) -> u64 {
+    EMISSION_K
+        .saturating_mul((total_staked as u128).isqrt() as u64)
+        .min(MAX_SESSION_EMISSION)
+}
+
+/// The most a single governance proposal may mint against the supply that exists.
+pub fn gov_mint_ceiling(total_supply: u64) -> u64 {
+    let share = ((total_supply as u128) * (GOV_MINT_MAX_BPS as u128) / 10_000) as u64;
+    share.max(GOV_MINT_FLOOR)
+}
+
 pub fn session_reward(stake: u64, total_staked: u64) -> u64 {
     if total_staked == 0 {
         return 0;
     }
-    ((SESSION_EMISSION as u128) * (stake as u128) / (total_staked as u128)) as u64
+    ((session_emission(total_staked) as u128) * (stake as u128) / (total_staked as u128)) as u64
 }
 
 pub fn in_blackout(now_day: u64, mainnet_start_day: u64) -> bool {
@@ -415,11 +459,14 @@ mod tests {
     #[test]
     fn the_reward_is_emergent_and_pro_rata_by_stake() {
         let stake = 2_000 * QTOV;
-        assert_eq!(session_reward(stake, stake), SESSION_EMISSION);
-        assert_eq!(session_reward(stake, 2 * stake), SESSION_EMISSION / 2);
+        assert_eq!(session_reward(stake, stake), session_emission(stake));
+        assert_eq!(
+            session_reward(stake, 2 * stake),
+            session_emission(2 * stake) / 2
+        );
         assert_eq!(
             session_reward(3 * stake, 4 * stake),
-            SESSION_EMISSION * 3 / 4
+            session_emission(4 * stake) * 3 / 4
         );
         assert_eq!(session_reward(stake, 0), 0);
     }
@@ -494,8 +541,8 @@ mod tests {
     fn a_sole_staker_earns_the_whole_session_emission() {
         let mut l = StakeLedger::new(100_000 * QTOV);
         l.bond(id(1), 2_000 * QTOV, 0);
-        assert_eq!(l.accrue(&id(1), 400, 0), SESSION_EMISSION);
-        assert_eq!(l.pool(), 100_000 * QTOV - SESSION_EMISSION);
+        assert_eq!(l.accrue(&id(1), 400, 0), session_emission(2_000 * QTOV));
+        assert_eq!(l.pool(), 100_000 * QTOV - session_emission(2_000 * QTOV));
     }
 
     #[test]
@@ -504,7 +551,7 @@ mod tests {
         l.bond(id(1), 2_000 * QTOV, 0);
         assert_eq!(l.accrue(&id(1), 364, 0), 0);
         assert_eq!(l.pool(), 100_000 * QTOV);
-        assert_eq!(l.accrue(&id(1), 365, 0), SESSION_EMISSION);
+        assert_eq!(l.accrue(&id(1), 365, 0), session_emission(2_000 * QTOV));
     }
 
     #[test]
@@ -586,7 +633,7 @@ mod tests {
         let mut l = StakeLedger::new(100_000 * QTOV);
         l.bond(id(1), 2_000 * QTOV, 0);
         let earned = l.accrue(&id(1), 400, 0);
-        assert_eq!(earned, SESSION_EMISSION);
+        assert_eq!(earned, session_emission(2_000 * QTOV));
         assert_eq!(l.claimable(&id(1), 400 + 364), 0);
         assert_eq!(l.claimable(&id(1), 400 + 365), earned);
         assert_eq!(l.claim(&id(1), 400 + 365), earned);
@@ -599,5 +646,58 @@ mod tests {
         let bond = Bond::new(2_000 * QTOV, 42).unwrap();
         let bytes = qtv_codec::to_bytes(&bond);
         assert_eq!(qtv_codec::from_bytes::<Bond>(&bytes).unwrap(), bond);
+    }
+
+    #[test]
+    fn the_yield_falls_as_the_stake_set_grows_and_never_reaches_zero() {
+        let small = 100_000 * QTOV;
+        let large = 100 * small;
+        let yield_bps = |staked: u64| (session_emission(staked) as u128) * 10_000 / staked as u128;
+        assert!(
+            yield_bps(small) > yield_bps(large),
+            "a deeper validator set must cost the chain a smaller share"
+        );
+        assert!(
+            session_emission(large) > session_emission(small),
+            "a deeper set is still paid more in absolute terms"
+        );
+        assert!(
+            session_emission(QTOV) > 0,
+            "issuance never reaches zero, that is what perpetual means"
+        );
+    }
+
+    #[test]
+    fn a_single_session_can_never_mint_more_than_the_bound() {
+        assert_eq!(
+            session_emission(u64::MAX),
+            MAX_SESSION_EMISSION,
+            "an absurd stake reading is clamped, not trusted"
+        );
+        assert!(session_emission(u64::MAX) <= MAX_SESSION_EMISSION);
+    }
+
+    #[test]
+    fn the_governance_mint_ceiling_scales_with_the_supply_and_never_locks() {
+        assert_eq!(
+            gov_mint_ceiling(0),
+            GOV_MINT_FLOOR,
+            "an empty chain can still mint, the floor is what stops a deadlock"
+        );
+        let supply = 10_000_000 * QTOV;
+        assert_eq!(
+            gov_mint_ceiling(supply),
+            supply / 20,
+            "five percent once the share clears the floor"
+        );
+        assert_eq!(
+            gov_mint_ceiling(supply / 1000),
+            GOV_MINT_FLOOR,
+            "the floor governs while the share is still small"
+        );
+        assert!(
+            gov_mint_ceiling(supply * 1000) > gov_mint_ceiling(supply),
+            "the ceiling grows with the chain rather than becoming unreachable"
+        );
     }
 }
