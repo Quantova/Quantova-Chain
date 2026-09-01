@@ -112,7 +112,7 @@ impl Log {
         let mut reader = self
             .reader
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "log reader poisoned"))?;
+            .map_err(|_| io::Error::other("log reader poisoned"))?;
         reader.seek(SeekFrom::Start(payload_start))?;
         let mut payload = vec![0u8; payload_len as usize];
         reader.read_exact(&mut payload)?;
