@@ -8,7 +8,9 @@ use qtv_devnet::{Checkpoint, DevNode, Devnet, SyncError};
 use qtv_node::consensus::header_value;
 use qtv_node::fee::FeeParams;
 
-use support::{config, unique_base, GENESIS_TIME, VALIDATOR_STAKE};
+use qtv_node::node::GenesisAccount;
+
+use support::{config, unique_base, user, GENESIS_TIME, VALIDATOR_STAKE};
 
 fn config_with_slots(base: &std::path::Path, online: &[bool], slots: u64) -> DevnetConfig {
     let nodes = online
@@ -62,8 +64,13 @@ fn a_fork_before_the_checkpoint_is_refused() {
     let honest_value = header_value(&honest.header_hash());
 
     let base_b = unique_base("wscp-fork");
-    let mut cfg_b = config(&base_b, &online, vec![]);
-    cfg_b.genesis_time = GENESIS_TIME + 1_000_000;
+    // Diverge the fork by its genesis state. Block time is the wall clock now, so
+    // two chains that differ only in genesis_time would produce identical blocks.
+    let cfg_b = config(
+        &base_b,
+        &online,
+        vec![GenesisAccount::from_account(&user(0), 1_000_000)],
+    );
     let mut fork_net = Devnet::over_duplex(cfg_b).expect("fork devnet");
     fork_net
         .step()

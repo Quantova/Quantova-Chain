@@ -154,12 +154,12 @@ pub fn execute_ordered(
     ledger: &mut Ledger,
     candidates: &[Wrapper],
     fee_params: &FeeParams,
-    day: u64,
+    now_seconds: u64,
 ) -> Vec<Wrapper> {
     let cores = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    execute_ordered_across(ledger, candidates, fee_params, cores, day)
+    execute_ordered_across(ledger, candidates, fee_params, cores, now_seconds)
 }
 
 pub fn min_validator_cores() -> usize {
@@ -167,6 +167,16 @@ pub fn min_validator_cores() -> usize {
         .map(|n| n.get())
         .unwrap_or(1);
     (machine / 2).max(1)
+}
+
+/// Real seconds since the unix epoch. A block stamps this once, carries it in
+/// the header, and every node applying the block reads it back from there, so
+/// the proposer and the applier execute against the identical value.
+pub fn wall_clock_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 pub fn day_of_height(height: u64) -> u64 {
@@ -1160,8 +1170,9 @@ fn execute_ordered_across(
     candidates: &[Wrapper],
     fee_params: &FeeParams,
     verify_cores: usize,
-    day: u64,
+    now_seconds: u64,
 ) -> Vec<Wrapper> {
+    let day = now_seconds / 86_400;
     let verified = verify_signatures(ledger, candidates, verify_cores);
     let stake_address = crate::ledger::stake_system_address();
     let claim_address = crate::ledger::stake_claim_address();
@@ -1170,7 +1181,6 @@ fn execute_ordered_across(
     let gov_address = crate::ledger::gov_system_address();
     let bridge_freeze_address = crate::ledger::bridge_freeze_address();
     let bridge_unfreeze_address = crate::ledger::bridge_unfreeze_address();
-    let now_seconds = day.saturating_mul(86_400);
     ledger.bridge_expire(now_seconds);
     ledger.guardian_expire(now_seconds);
     let mut included = Vec::new();
@@ -1680,7 +1690,8 @@ impl Node {
             .unwrap_or_default();
 
         self.ledger.set_round_proposer(&proposer);
-        let included = self.execute_block();
+        let block_time = wall_clock_seconds();
+        let included = self.execute_block(block_time);
         let included_ids: Vec<String> = included.iter().map(Wrapper::id).collect();
 
         let q_root = self.ledger.q_root();
@@ -1692,7 +1703,7 @@ impl Node {
             .map(crate::ledger::BlockEvent::encode)
             .collect();
         let event_root = qtv_block::event_root(&event_leaves);
-        let time = self.genesis_time + height * qtv_bft::params::SLOT_MS;
+        let time = block_time;
 
         let header = Header::new(
             height,
@@ -1804,11 +1815,10 @@ impl Node {
         Ok(self.chain.last().expect("a block was just finalized"))
     }
 
-    fn execute_block(&mut self) -> Vec<Wrapper> {
+    fn execute_block(&mut self, now_seconds: u64) -> Vec<Wrapper> {
         self.ledger.clear_block_events();
         self.ledger.set_execution_height(self.height);
         let candidates = self.mempool.candidates();
-        let day = day_of_height(self.height);
         let threads = self.exec_cores();
         if threads > 1 {
             execute_parallel(
@@ -1816,10 +1826,10 @@ impl Node {
                 &candidates,
                 &self.fee_params,
                 threads,
-                day,
+                now_seconds,
             )
         } else {
-            execute_ordered(&mut self.ledger, &candidates, &self.fee_params, day)
+            execute_ordered(&mut self.ledger, &candidates, &self.fee_params, now_seconds)
         }
     }
 
@@ -3005,12 +3015,12 @@ mod tests {
         enact.put_u8(3);
         enact.put_u64(1);
         let enact_tx = gov_call_tx(&proposer, enact.into_bytes(), 1, &fee);
-        let included = execute_ordered(&mut ledger, &[enact_tx], &fee, 15);
+        let included = execute_ordered(&mut ledger, &[enact_tx], &fee, 15 * 86_400);
         assert_eq!(included.len(), 1);
         assert_eq!(ledger.stake_price(), 70_000_000);
 
         let bad = gov_call_tx(&proposer, vec![99u8], 2, &fee);
-        assert!(execute_ordered(&mut ledger, &[bad], &fee, 15).is_empty());
+        assert!(execute_ordered(&mut ledger, &[bad], &fee, 15 * 86_400).is_empty());
     }
 
     #[test]
@@ -3099,19 +3109,19 @@ mod tests {
             &mut ledger,
             &[gov_call_tx(&proposer, enact.into_bytes(), 1, &fee)],
             &fee,
-            3,
+            3 * 86_400,
         );
         assert!(ledger.is_blacklisted(&hostile.address()));
 
         let out = transfer(&hostile, &peer.address(), 100 * 1_000_000, 0, &fee);
-        assert!(execute_ordered(&mut ledger, &[out.clone()], &fee, 3).is_empty());
+        assert!(execute_ordered(&mut ledger, &[out.clone()], &fee, 3 * 86_400).is_empty());
         let into = transfer(&peer, &hostile.address(), 100 * 1_000_000, 0, &fee);
-        assert!(execute_ordered(&mut ledger, &[into], &fee, 3).is_empty());
+        assert!(execute_ordered(&mut ledger, &[into], &fee, 3 * 86_400).is_empty());
         let clean = transfer(&peer, &voter.address(), 100 * 1_000_000, 0, &fee);
-        assert_eq!(execute_ordered(&mut ledger, &[clean], &fee, 3).len(), 1);
+        assert_eq!(execute_ordered(&mut ledger, &[clean], &fee, 3 * 86_400).len(), 1);
 
         let mut parallel = ledger.clone();
-        assert!(crate::parallel::execute_parallel(&mut parallel, &[out], &fee, 8, 3).is_empty());
+        assert!(crate::parallel::execute_parallel(&mut parallel, &[out], &fee, 8, 3 * 86_400).is_empty());
         assert_eq!(parallel.q_root(), ledger.q_root());
     }
 
@@ -3151,18 +3161,18 @@ mod tests {
             &mut ledger,
             &[gov_call_tx(&proposer, enact.into_bytes(), 1, &fee)],
             &fee,
-            2,
+            2 * 86_400,
         );
         assert!(ledger.is_frozen(&hostile.address()));
 
         let out = transfer(&hostile, &peer.address(), 100 * 1_000_000, 0, &fee);
         assert!(
-            execute_ordered(&mut ledger, &[out], &fee, 2).is_empty(),
+            execute_ordered(&mut ledger, &[out], &fee, 2 * 86_400).is_empty(),
             "a frozen account cannot send"
         );
         let into = transfer(&peer, &hostile.address(), 100 * 1_000_000, 0, &fee);
         assert_eq!(
-            execute_ordered(&mut ledger, &[into], &fee, 2).len(),
+            execute_ordered(&mut ledger, &[into], &fee, 2 * 86_400).len(),
             1,
             "a frozen account still receives"
         );
@@ -3195,10 +3205,10 @@ mod tests {
             &fee,
         );
         assert!(
-            execute_ordered(&mut ledger, &[exit.clone()], &fee, 89).is_empty(),
+            execute_ordered(&mut ledger, &[exit.clone()], &fee, 89 * 86_400).is_empty(),
             "an exit before the lock clears is not included"
         );
-        assert_eq!(execute_ordered(&mut ledger, &[exit], &fee, 90).len(), 1);
+        assert_eq!(execute_ordered(&mut ledger, &[exit], &fee, 90 * 86_400).len(), 1);
         assert!(ledger.stake_bond(&sid).unwrap().exit_requested_at.is_some());
 
         let nonce = ledger.account(&staker.address()).nonce;
@@ -3210,11 +3220,11 @@ mod tests {
             &fee,
         );
         assert!(
-            execute_ordered(&mut ledger, &[withdraw.clone()], &fee, 90 + 20).is_empty(),
+            execute_ordered(&mut ledger, &[withdraw.clone()], &fee, (90 + 20) * 86_400).is_empty(),
             "a withdraw before the unbonding elapses is not included"
         );
         assert_eq!(
-            execute_ordered(&mut ledger, &[withdraw], &fee, 90 + 21).len(),
+            execute_ordered(&mut ledger, &[withdraw], &fee, (90 + 21) * 86_400).len(),
             1
         );
         assert!(ledger.stake_bond(&sid).is_none());
@@ -3252,7 +3262,7 @@ mod tests {
             &mut ledger,
             &[gov_call_tx(&proposer, enact.into_bytes(), 1, &fee)],
             &fee,
-            3,
+            3 * 86_400,
         );
         assert!(ledger.is_blacklisted(&hostile.address()));
 
@@ -3265,7 +3275,7 @@ mod tests {
             &fee,
         );
         assert!(
-            execute_ordered(&mut ledger, &[gov.clone()], &fee, 3).is_empty(),
+            execute_ordered(&mut ledger, &[gov.clone()], &fee, 3 * 86_400).is_empty(),
             "a blacklisted sender must not drive governance"
         );
 
@@ -3277,14 +3287,14 @@ mod tests {
             &fee,
         );
         assert!(
-            execute_ordered(&mut ledger, &[bond], &fee, 3).is_empty(),
+            execute_ordered(&mut ledger, &[bond], &fee, 3 * 86_400).is_empty(),
             "a blacklisted sender must not bond"
         );
 
         assert_eq!(ledger.account(&hostile.address()).nonce, hostile_nonce);
 
         let mut parallel = ledger.clone();
-        assert!(crate::parallel::execute_parallel(&mut parallel, &[gov], &fee, 8, 3).is_empty());
+        assert!(crate::parallel::execute_parallel(&mut parallel, &[gov], &fee, 8, 3 * 86_400).is_empty());
         assert_eq!(parallel.q_root(), ledger.q_root());
     }
 
@@ -3300,7 +3310,7 @@ mod tests {
         ledger.set_stake_price(70 * 1_000_000);
         ledger.accrue_reward(&validator.address(), 400);
 
-        let claim_day = 400 + 365;
+        let claim_day = (400 + 365) * 86_400;
         assert!(ledger.claimable_reward(&validator.address(), claim_day) > 0);
         let before = ledger.balance(&validator.address());
 
@@ -3961,13 +3971,13 @@ mod tests {
         assert!(ledger.bridge_is_frozen());
 
         let horizon_day = qtv_governance::BRIDGE_FREEZE_DURATION / 86_400;
-        execute_ordered(&mut ledger, &[], &fee, horizon_day - 1);
+        execute_ordered(&mut ledger, &[], &fee, (horizon_day - 1) * 86_400);
         assert!(
             ledger.bridge_is_frozen(),
             "the freeze stands before its horizon"
         );
 
-        execute_ordered(&mut ledger, &[], &fee, horizon_day);
+        execute_ordered(&mut ledger, &[], &fee, horizon_day * 86_400);
         assert!(
             !ledger.bridge_is_frozen(),
             "a block at the horizon sweeps the freeze"
@@ -5882,10 +5892,10 @@ mod tests {
         let block = vec![mint, exit, payment];
 
         let mut ordered = base.clone();
-        execute_ordered(&mut ordered, &block, &fee, horizon_day);
+        execute_ordered(&mut ordered, &block, &fee, horizon_day * 86_400);
 
         let mut parallel = base.clone();
-        crate::parallel::execute_parallel(&mut parallel, &block, &fee, 4, horizon_day);
+        crate::parallel::execute_parallel(&mut parallel, &block, &fee, 4, horizon_day * 86_400);
 
         assert_eq!(
             ordered.q_root(),
