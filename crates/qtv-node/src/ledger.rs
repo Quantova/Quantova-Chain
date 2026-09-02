@@ -2525,8 +2525,13 @@ impl Ledger {
         memory[64..72].copy_from_slice(&now_seconds.to_be_bytes());
         memory[72..80].copy_from_slice(&chain_id.to_be_bytes());
         memory[80..88].copy_from_slice(&value.to_be_bytes());
-        if let Some(issuer) = in_asset {
-            memory[88..120].copy_from_slice(&issuer);
+        // Always write this window. The caller's arguments were copied across the
+        // whole buffer above, so leaving it untouched on a call that carried no asset
+        // let the caller keep its own bytes here and forge the paying asset. Zero is
+        // the documented value for a call funded with native value.
+        match in_asset {
+            Some(issuer) => memory[88..120].copy_from_slice(&issuer),
+            None => memory[88..120].fill(0),
         }
         match crate::execution::execute_contract_call(
             &code,
@@ -3709,6 +3714,48 @@ mod stake_state_tests {
     }
 
     #[test]
+    #[test]
+    fn a_native_call_cannot_forge_the_paying_asset() {
+        // Read the first word of the paying asset window (offset 88) into storage.
+        let code =
+            qtv_vm::asm::assemble("LDI r1, 88\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
+                .expect("the program assembles");
+        let selector = [9u8, 9, 9, 9];
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![0],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
+            }],
+        );
+
+        let mut l = Ledger::new();
+        let contract = qtv_idfmt::render_address(&[80u8; 32]).unwrap();
+        let contract_id = [80u8; 32];
+        l.set_contract_code(&contract_id, &container.canonical_bytes());
+        let caller = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
+
+        // The caller supplies arguments long enough to reach the paying asset window
+        // and fills it with an issuer it never paid.
+        let mut forged = vec![0u8; CONTRACT_CONTEXT_BYTES];
+        forged[88..120].copy_from_slice(&[0xAB; 32]);
+
+        assert!(l.call_contract(&caller, &contract, selector, &forged, 0, 200_000, 0, None, 0));
+        assert_eq!(
+            l.contract_storage(&contract_id)
+                .get(&qtv_vm::abi::scalar_key(0)),
+            Some(&0u64),
+            "a call carrying no asset must read a zero paying asset, not the caller's bytes"
+        );
+    }
+
     fn a_contract_call_injects_the_trusted_caller_and_persists_storage() {
         let code =
             qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
