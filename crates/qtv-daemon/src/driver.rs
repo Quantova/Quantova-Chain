@@ -480,6 +480,12 @@ impl Driver {
             };
             if failed {
                 self.send[q] = None;
+                // Stop counting a peer whose link has died, otherwise the round waits
+                // on it every height and adopt_rejoined's up write can never matter
+                // because the flag was already true.
+                if let Some(flag) = self.up.get_mut(q) {
+                    *flag = false;
+                }
                 let _ = self.down.try_send(q);
             }
         }
