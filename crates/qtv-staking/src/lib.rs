@@ -27,10 +27,11 @@ pub const EMISSION_K: u64 = 25_000;
 pub const MAX_SESSION_EMISSION_BPS: u64 = 500;
 
 /// The most a single governance mint may create, as a share of the supply that
-/// already exists. A relative bound scales with the chain instead of turning
-/// either trivial or unreachable, and unlike an absolute ceiling it can never
-/// lock the mint track shut.
-pub const GOV_MINT_MAX_BPS: u64 = 500;
+/// already exists. There is no ceiling on total supply, so this only paces how
+/// fast one vote can expand it. At one hundred percent a single proposal may at
+/// most double the supply, which stops a captured vote minting the world in one
+/// step while leaving a real expansion a handful of votes rather than years.
+pub const GOV_MINT_MAX_BPS: u64 = 10_000;
 
 /// A share of supply alone would be zero on a young chain, which is the same
 /// bootstrap deadlock an absolute cap creates from the other direction. The
@@ -723,8 +724,8 @@ mod tests {
         let supply = 10_000_000 * QTOV;
         assert_eq!(
             gov_mint_ceiling(supply),
-            supply / 20,
-            "five percent once the share clears the floor"
+            supply,
+            "one proposal may at most double the supply once the share clears the floor"
         );
         assert_eq!(
             gov_mint_ceiling(supply / 1000),
