@@ -76,7 +76,13 @@ pub fn eligible(stake: u64) -> bool {
 
 /// What the whole validator set is paid for one session at this much stake.
 pub fn session_emission(total_staked: u64, total_supply: u64) -> u64 {
-    let raw = EMISSION_K.saturating_mul((total_staked as u128).isqrt() as u64);
+    // Nobody can stake more than exists, so a staked figure above the supply is a
+    // corrupted input rather than a real one. Clamping it here is what makes the
+    // rail below reachable at all: measured against the supply, the square root
+    // term sits far under the percentage cap at every realistic supply, so the cap
+    // alone was a backstop that could never fire.
+    let staked = total_staked.min(total_supply);
+    let raw = EMISSION_K.saturating_mul((staked as u128).isqrt() as u64);
     let bound = ((total_supply as u128) * (MAX_SESSION_EMISSION_BPS as u128) / 10_000) as u64;
     raw.min(bound)
 }
@@ -703,10 +709,17 @@ mod tests {
     fn a_single_session_can_never_mint_more_than_a_share_of_what_exists() {
         let supply = 1_000_000 * QTOV;
         let bound = supply / 20;
+        // An absurd stake reading is clamped to what staking the entire supply would
+        // pay, which is a tighter limit than the rate cap, so the cap is the outer
+        // belt and this is the inner one.
         assert_eq!(
             session_emission(u64::MAX, supply),
-            bound,
-            "an absurd stake reading is clamped to a share of the supply"
+            session_emission(supply, supply),
+            "an absurd stake reading is clamped to staking the whole supply"
+        );
+        assert!(
+            session_emission(u64::MAX, supply) <= bound,
+            "and that stays inside the rate cap"
         );
         assert!(
             session_emission(u64::MAX, supply * 1_000) > bound,
@@ -736,5 +749,34 @@ mod tests {
             gov_mint_ceiling(supply * 1000) > gov_mint_ceiling(supply),
             "the ceiling grows with the chain rather than becoming unreachable"
         );
+    }
+
+    #[test]
+    fn a_corrupted_staked_figure_cannot_outrun_the_supply() {
+        let supply = 1_600_000_000u64 * NATIVE_UNIT as u64;
+        let honest = session_emission(supply, supply);
+        // A staked figure far above the supply must not buy more issuance than
+        // staking the entire supply does.
+        let corrupted = session_emission(u64::MAX, supply);
+        assert_eq!(
+            corrupted, honest,
+            "staked above supply must clamp to supply"
+        );
+        assert!(honest > 0, "a staked chain still issues");
+    }
+
+    #[test]
+    fn a_session_never_issues_more_than_the_rate_cap() {
+        for supply in [
+            250_000u64 * NATIVE_UNIT as u64,
+            1_000_000 * NATIVE_UNIT as u64,
+            1_600_000_000 * NATIVE_UNIT as u64,
+        ] {
+            let cap = ((supply as u128) * (MAX_SESSION_EMISSION_BPS as u128) / 10_000) as u64;
+            assert!(
+                session_emission(u64::MAX, supply) <= cap,
+                "issuance must stay under the rate cap at supply {supply}"
+            );
+        }
     }
 }
