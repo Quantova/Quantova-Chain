@@ -30,6 +30,21 @@ pub const HOUR_SECONDS: u64 = 3_600;
 pub const MONTH_SECONDS: u64 = 30 * DAY_SECONDS;
 pub const YEAR_SECONDS: u64 = 365 * DAY_SECONDS;
 
+/// A deposit may never be free and may never be a lockout. The compiled figures
+/// are only the starting point, governance retunes them by vote inside this band,
+/// which is why a bad number no longer needs a coordinated restart to correct.
+pub const MIN_GOV_DEPOSIT: u64 = 1_000 * NATIVE_UNIT;
+
+/// The widest a deposit may be set, as a share of the supply that exists. A
+/// deposit larger than this could not be funded by a realistic holder, which is
+/// precisely how a track gets locked shut.
+pub const MAX_GOV_DEPOSIT_BPS: u64 = 1_000;
+
+pub fn gov_deposit_bounds(total_supply: u64) -> (u64, u64) {
+    let ceiling = ((total_supply as u128) * (MAX_GOV_DEPOSIT_BPS as u128) / 10_000) as u64;
+    (MIN_GOV_DEPOSIT, ceiling.max(MIN_GOV_DEPOSIT * 2))
+}
+
 pub const BRIDGE_FREEZE_BOND: u64 = Track::BlacklistKill.deposit();
 pub const BRIDGE_FREEZE_DURATION: u64 = 7 * DAY_SECONDS;
 pub const BRIDGE_FREEZE_COOLDOWN: u64 = DAY_SECONDS;
@@ -819,12 +834,18 @@ pub struct Referendum {
 }
 
 impl Referendum {
-    pub fn open(id: u64, track: Track, proposer: Vec<u8>, submitted_at: u64) -> Referendum {
+    pub fn open(
+        id: u64,
+        track: Track,
+        proposer: Vec<u8>,
+        submitted_at: u64,
+        deposit: u64,
+    ) -> Referendum {
         Referendum {
             id,
             track,
             proposer,
-            deposit: track.deposit(),
+            deposit,
             submitted_at,
             tally: Tally::default(),
             status: Status::Deciding,
@@ -1030,15 +1051,33 @@ mod tests {
 
     #[test]
     fn a_deposit_returns_when_the_bar_is_met_and_is_forfeit_on_a_miss_or_a_kill() {
-        let mut passed = Referendum::open(1, Track::ChainUpgrade, vec![1; 32], 0);
+        let mut passed = Referendum::open(
+            1,
+            Track::ChainUpgrade,
+            vec![1; 32],
+            0,
+            Track::ChainUpgrade.deposit(),
+        );
         passed.tally.record(true, 40_000);
         assert!(passed.deposit_refunded(100_000));
 
-        let mut miss = Referendum::open(2, Track::ChainUpgrade, vec![2; 32], 0);
+        let mut miss = Referendum::open(
+            2,
+            Track::ChainUpgrade,
+            vec![2; 32],
+            0,
+            Track::ChainUpgrade.deposit(),
+        );
         miss.tally.record(true, 39_999);
         assert!(!miss.deposit_refunded(100_000));
 
-        let mut killed = Referendum::open(3, Track::ChainUpgrade, vec![3; 32], 0);
+        let mut killed = Referendum::open(
+            3,
+            Track::ChainUpgrade,
+            vec![3; 32],
+            0,
+            Track::ChainUpgrade.deposit(),
+        );
         killed.tally.record(true, 40_000);
         killed.killed = true;
         assert!(!killed.deposit_refunded(100_000));
@@ -1046,7 +1085,7 @@ mod tests {
 
     #[test]
     fn a_referendum_decides_only_when_its_window_closes() {
-        let mut r = Referendum::open(1, Track::Mint, vec![1; 32], 1_000);
+        let mut r = Referendum::open(1, Track::Mint, vec![1; 32], 1_000, Track::Mint.deposit());
         r.tally.record(true, 40_000);
         assert_eq!(
             r.resolve(1_000 + 3 * DAY_SECONDS - 1, 100_000),
@@ -1061,14 +1100,14 @@ mod tests {
             Status::Approved
         );
 
-        let mut thin = Referendum::open(2, Track::Mint, vec![2; 32], 0);
+        let mut thin = Referendum::open(2, Track::Mint, vec![2; 32], 0, Track::Mint.deposit());
         thin.tally.record(true, 39_999);
         assert_eq!(thin.resolve(3 * DAY_SECONDS, 100_000), Status::Rejected);
     }
 
     #[test]
     fn a_killed_referendum_is_rejected_the_moment_it_resolves() {
-        let mut r = Referendum::open(1, Track::Mint, vec![1; 32], 0);
+        let mut r = Referendum::open(1, Track::Mint, vec![1; 32], 0, Track::Mint.deposit());
         r.tally.record(true, 90_000);
         r.killed = true;
         assert_eq!(r.resolve(0, 100_000), Status::Rejected);
@@ -1446,7 +1485,13 @@ mod tests {
 
     #[test]
     fn a_referendum_round_trips_through_the_codec() {
-        let mut r = Referendum::open(42, Track::FreezeRecovery, vec![9; 32], 123);
+        let mut r = Referendum::open(
+            42,
+            Track::FreezeRecovery,
+            vec![9; 32],
+            123,
+            Track::FreezeRecovery.deposit(),
+        );
         r.tally.record(true, 1_000);
         r.tally.record(false, 400);
         r.status = Status::Approved;

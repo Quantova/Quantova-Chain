@@ -103,6 +103,7 @@ pub fn rent_exempt_minimum_for(footprint: usize) -> u64 {
 const STAKE_PRICE_TAG: &[u8] = b"qtv/stake/price";
 const STAKE_MAINNET_TAG: &[u8] = b"qtv/stake/mainnet";
 const STAKE_METER_TAG: &[u8] = b"qtv/stake/meter";
+const GOV_DEPOSIT_TAG: &[u8] = b"qtv/gov/deposit";
 const STAKE_VALIDATORS_TAG: &[u8] = b"qtv/stake/validators";
 const STAKE_TOTAL_TAG: &[u8] = b"qtv/stake/total";
 
@@ -553,6 +554,13 @@ fn gov_action_key(id: u64) -> Key {
     let mut input = Vec::with_capacity(GOV_ACTION_TAG.len() + 8);
     input.extend_from_slice(GOV_ACTION_TAG);
     input.extend_from_slice(&id.to_le_bytes());
+    sha3::sha3_256(&input)
+}
+
+fn gov_deposit_key(code: u8) -> Key {
+    let mut input = Vec::with_capacity(GOV_DEPOSIT_TAG.len() + 1);
+    input.extend_from_slice(GOV_DEPOSIT_TAG);
+    input.push(code);
     sha3::sha3_256(&input)
 }
 
@@ -2775,6 +2783,18 @@ impl Ledger {
             .map(|bytes| from_bytes(bytes).expect("state holds a canonical electorate snapshot"))
     }
 
+    pub fn gov_track_deposit(&self, track: qtv_governance::Track) -> u64 {
+        self.trie
+            .get(&gov_deposit_key(track.code()))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical deposit"))
+            .unwrap_or_else(|| track.deposit())
+    }
+
+    fn set_gov_track_deposit(&mut self, track: qtv_governance::Track, amount: u64) {
+        self.write_leaf(gov_deposit_key(track.code()), to_bytes(&amount));
+    }
+
     fn set_gov_electorate(&mut self, id: u64, amount: u64) {
         self.write_leaf(gov_electorate_key(id), to_bytes(&amount));
     }
@@ -2837,7 +2857,7 @@ impl Ledger {
             return None;
         }
         let proposer_id = address_id(proposer)?;
-        let deposit = track.deposit();
+        let deposit = self.gov_track_deposit(track);
         let mut account = self.account(proposer);
         if account.balance < deposit {
             return None;
@@ -2845,7 +2865,7 @@ impl Ledger {
         account.balance -= deposit;
         self.set_account(proposer, &account);
         let id = self.gov_next_id();
-        let referendum = Referendum::open(id, track, proposer_id.to_vec(), now);
+        let referendum = Referendum::open(id, track, proposer_id.to_vec(), now, deposit);
         self.set_gov_referendum(id, &referendum);
         self.set_gov_action(id, &action);
         self.set_gov_electorate(id, self.total_staked());
@@ -3420,6 +3440,22 @@ impl Ledger {
             }
             b"bridge_payout_cap" => {
                 self.set_bridge_payout_cap(u128_from_le(value).ok_or(EnactError::BadValue)?);
+                Ok(())
+            }
+            b"gov_deposit" => {
+                if value.len() != 9 {
+                    return Err(EnactError::BadValue);
+                }
+                let track =
+                    qtv_governance::Track::from_code(value[0]).ok_or(EnactError::BadValue)?;
+                let mut amount = [0u8; 8];
+                amount.copy_from_slice(&value[1..9]);
+                let amount = u64::from_le_bytes(amount);
+                let (floor, ceiling) = qtv_governance::gov_deposit_bounds(self.total_supply());
+                if amount < floor || amount > ceiling {
+                    return Err(EnactError::BadValue);
+                }
+                self.set_gov_track_deposit(track, amount);
                 Ok(())
             }
             _ => Err(EnactError::UnknownParameter),
@@ -4344,6 +4380,71 @@ mod stake_state_tests {
         assert_eq!(
             qtv_governance::BRIDGE_FREEZE_BOND,
             qtv_governance::Track::BlacklistKill.deposit()
+        );
+    }
+
+    #[test]
+    fn a_vote_can_retune_a_deposit_without_a_coordinated_restart() {
+        let mut l = Ledger::new();
+        l.credit_supply(10_000_000 * 1_000_000);
+        let track = qtv_governance::Track::ChainUpgrade;
+        assert_eq!(
+            l.gov_track_deposit(track),
+            track.deposit(),
+            "the compiled figure is only the starting point"
+        );
+
+        let raised = 500_000 * 1_000_000u64;
+        let mut value = vec![track.code()];
+        value.extend_from_slice(&raised.to_le_bytes());
+        l.execute_action(
+            &Action::Parameter {
+                key: b"gov_deposit".to_vec(),
+                value,
+            },
+            0,
+            TEST_CHAIN,
+        )
+        .expect("a deposit inside the band is accepted");
+
+        assert_eq!(
+            l.gov_track_deposit(track),
+            raised,
+            "the next proposal pays the retuned figure"
+        );
+        assert_eq!(
+            l.gov_track_deposit(qtv_governance::Track::Mint),
+            qtv_governance::Track::Mint.deposit(),
+            "retuning one track leaves the others alone"
+        );
+    }
+
+    #[test]
+    fn a_deposit_outside_the_band_is_refused_so_a_vote_cannot_lock_a_track_shut() {
+        let mut l = Ledger::new();
+        l.credit_supply(10_000_000 * 1_000_000);
+        let track = qtv_governance::Track::Mint;
+        let (floor, ceiling) = qtv_governance::gov_deposit_bounds(l.total_supply());
+        for bad in [floor - 1, ceiling + 1] {
+            let mut value = vec![track.code()];
+            value.extend_from_slice(&bad.to_le_bytes());
+            assert_eq!(
+                l.execute_action(
+                    &Action::Parameter {
+                        key: b"gov_deposit".to_vec(),
+                        value,
+                    },
+                    0,
+                    TEST_CHAIN,
+                ),
+                Err(EnactError::BadValue),
+                "a deposit of {bad} is outside the band and must be refused"
+            );
+        }
+        assert_eq!(
+            l.gov_track_deposit(track),
+            track.deposit(),
+            "a refused change leaves the deposit where it was"
         );
     }
 
