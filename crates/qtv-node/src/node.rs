@@ -1066,7 +1066,12 @@ pub(crate) fn vm_admissible(
     account.balance >= charged
 }
 
-const DEPLOY_PARAMS_TAG: &[u8; 8] = b"QDEPLOY1";
+/// Deploy frame version. QDEPLOY1 carried containers built for the 88 byte call
+/// context, where arguments began at 88. The context is now 120 bytes and arguments
+/// begin at 120, so an old container would read its first argument out of the paying
+/// asset field. Bumping the tag means such a frame no longer matches, falls through,
+/// and fails to parse as a container rather than running against the wrong offsets.
+const DEPLOY_PARAMS_TAG: &[u8; 8] = b"QDEPLOY2";
 
 fn split_deploy_args(args: &[u8]) -> (&[u8], &[u8]) {
     if args.len() >= 12 && &args[0..8] == DEPLOY_PARAMS_TAG {
