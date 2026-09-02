@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -71,6 +71,8 @@ pub struct Driver {
     send: Vec<Option<Channel<TcpStream>>>,
     inbound: Receiver<(usize, Vec<u8>)>,
     up: Vec<bool>,
+    rejoined: Receiver<(usize, Channel<TcpStream>)>,
+    down: SyncSender<usize>,
     assembler: ProposalAssembler,
     buffered: FrameBuffer,
     budget: u64,
@@ -87,6 +89,8 @@ impl Driver {
             send: mesh.send,
             inbound: mesh.inbound,
             up: mesh.up,
+            rejoined: mesh.rejoined,
+            down: mesh.down,
             assembler: ProposalAssembler::new(),
             buffered: FrameBuffer::default(),
             budget: u64::MAX,
@@ -188,6 +192,7 @@ impl Driver {
             if last_tick.elapsed() >= TICK {
                 self.assembler.tick();
                 last_tick = Instant::now();
+                self.adopt_rejoined();
             }
             self.halt_if_fatal()?;
             self.serve_rpc();
@@ -217,6 +222,20 @@ impl Driver {
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => thread::sleep(TICK),
+            }
+        }
+    }
+
+    /// Take up any link the redialler has re-established. A peer that went away and
+    /// came back is put straight back into the round rather than staying dropped for
+    /// the life of the process.
+    fn adopt_rejoined(&mut self) {
+        while let Ok((q, channel)) = self.rejoined.try_recv() {
+            if q < self.send.len() {
+                self.send[q] = Some(channel);
+                if let Some(flag) = self.up.get_mut(q) {
+                    *flag = true;
+                }
             }
         }
     }
@@ -461,6 +480,7 @@ impl Driver {
             };
             if failed {
                 self.send[q] = None;
+                let _ = self.down.try_send(q);
             }
         }
     }
