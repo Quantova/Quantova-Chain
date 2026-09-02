@@ -1,4 +1,16 @@
 use qtv_crypto::{ml_dsa, sha3};
+use std::io::Read;
+
+/// Operator secrets come from the operating system's entropy, never from anything
+/// derivable. Seeding these from the chain name meant every secret key could be
+/// recomputed by anyone who knew the name, which is public, so the whole operator
+/// quorum was forgeable by any observer.
+fn urandom(n: usize) -> Vec<u8> {
+    let mut f = std::fs::File::open("/dev/urandom").expect("open /dev/urandom");
+    let mut b = vec![0u8; n];
+    f.read_exact(&mut b).expect("read /dev/urandom");
+    b
+}
 
 fn chain_binding(name: &str) -> u64 {
     u64::from_be_bytes(
@@ -15,8 +27,7 @@ fn main() {
     let mut secrets = String::new();
     for id in 0u32..3 {
         let mut seed = [0u8; 32];
-        let base = sha3::sha3_256(format!("{name}/bridge/operator/{id}").as_bytes());
-        seed.copy_from_slice(&base);
+        seed.copy_from_slice(&urandom(32));
         let (pk, sk) = ml_dsa::keygen(&seed);
         let pop = ml_dsa::sign(
             &sk,
