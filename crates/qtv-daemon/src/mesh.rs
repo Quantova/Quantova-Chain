@@ -26,6 +26,11 @@ const KNOWN_HANDSHAKE_RESERVE: usize = 64;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 const BOOTSTRAP_DEADLINE: Duration = Duration::from_secs(60);
+/// How often a lost link is retried, and how many times before it is left to the
+/// next failure to re-arm. A node is never permanently written off.
+const RECONNECT_EVERY: Duration = Duration::from_secs(5);
+const REDIAL_ATTEMPTS: usize = 720;
+const REJOIN_QUEUE: usize = 64;
 
 struct InflightGuard(Arc<AtomicUsize>);
 
@@ -100,6 +105,12 @@ pub struct Mesh {
     pub send: Vec<Option<Channel<TcpStream>>>,
     pub inbound: Receiver<(usize, Vec<u8>)>,
     pub up: Vec<bool>,
+    /// Links re-established after bootstrap. A validator that restarts dials its
+    /// peers again, and without this the peers never answer, so the returning node
+    /// runs on alone against a set that has moved past it.
+    pub rejoined: Receiver<(usize, Channel<TcpStream>)>,
+    /// The driver reports a peer whose link has failed so it is dialled again.
+    pub down: SyncSender<usize>,
 }
 
 pub fn build_mesh(
@@ -132,6 +143,7 @@ pub fn build_mesh(
     let peer_ids_acc: Vec<Option<PeerId>> = peer_ids.to_vec();
     let known_ips = known_peer_ips(peer_addrs);
     let (worker_tx, worker_rx) = mpsc::channel::<(usize, Channel<TcpStream>)>();
+    let late_listener = listener.try_clone().expect("the listener clones");
     let acceptor = thread::spawn(move || {
         let _ = listener.set_nonblocking(true);
         let mut seen = vec![false; n];
@@ -227,13 +239,119 @@ pub fn build_mesh(
 
     acceptor.join().expect("the acceptor thread joins");
 
-    spawn_readers(&accepted_rx, up_peers, inbound_tx, genesis_hash);
+    spawn_readers(&accepted_rx, up_peers, inbound_tx.clone(), genesis_hash);
+
+    // The listener stays open for the life of the node. Bootstrap only decides when
+    // the round may start, it is not the end of the node's willingness to be reached.
+    let (rejoined_tx, rejoined_rx) = mpsc::sync_channel::<(usize, Channel<TcpStream>)>(REJOIN_QUEUE);
+    let (down_tx, down_rx) = mpsc::sync_channel::<usize>(REJOIN_QUEUE);
+    spawn_late_acceptor(
+        late_listener,
+        idx,
+        n,
+        identity.clone(),
+        peer_ids.to_vec(),
+        genesis_hash,
+        inbound_tx,
+    );
+    spawn_redialer(
+        peer_addrs.to_vec(),
+        peer_ids.to_vec(),
+        identity.clone(),
+        genesis_hash,
+        down_rx,
+        rejoined_tx,
+    );
 
     Mesh {
         send,
         inbound: inbound_rx,
         up,
+        rejoined: rejoined_rx,
+        down: down_tx,
     }
+}
+
+/// Accept peers for as long as the node runs, so a returning validator is answered.
+fn spawn_late_acceptor(
+    listener: TcpListener,
+    idx: usize,
+    n: usize,
+    identity: Identity,
+    peer_ids: Vec<Option<PeerId>>,
+    genesis_hash: [u8; 32],
+    inbound_tx: SyncSender<(usize, Vec<u8>)>,
+) {
+    thread::spawn(move || {
+        let _ = listener.set_nonblocking(false);
+        let inflight = Arc::new(AtomicUsize::new(0));
+        loop {
+            let Ok((stream, _addr)) = listener.accept() else {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            };
+            if inflight.load(Ordering::Relaxed) >= MAX_HANDSHAKE_INFLIGHT {
+                continue;
+            }
+            inflight.fetch_add(1, Ordering::Relaxed);
+            let identity_w = identity.clone();
+            let peer_ids_w = peer_ids.clone();
+            let out = inbound_tx.clone();
+            let inflight_w = Arc::clone(&inflight);
+            thread::spawn(move || {
+                let _guard = InflightGuard(inflight_w);
+                let _ = stream.set_nonblocking(false);
+                let Ok(channel) =
+                    Channel::accept_with_timeout(stream, &identity_w, HANDSHAKE_TIMEOUT)
+                else {
+                    return;
+                };
+                let peer = channel.peer_id().clone();
+                let Some(from) = (0..n).find(|&q| {
+                    q != idx && peer_ids_w.get(q).and_then(|p| p.as_ref()) == Some(&peer)
+                }) else {
+                    return;
+                };
+                log(&format!("peer {} reconnected, reading from it again", from + 1));
+                read_peer(from, channel, out, genesis_hash);
+            });
+        }
+    });
+}
+
+/// Dial a peer the driver has reported as down until it answers again.
+fn spawn_redialer(
+    peer_addrs: Vec<Option<String>>,
+    peer_ids: Vec<Option<PeerId>>,
+    identity: Identity,
+    genesis_hash: [u8; 32],
+    down_rx: Receiver<usize>,
+    rejoined_tx: SyncSender<(usize, Channel<TcpStream>)>,
+) {
+    thread::spawn(move || {
+        let hello = hello_frame(&genesis_hash);
+        while let Ok(q) = down_rx.recv() {
+            let (Some(addr), Some(peer)) = (
+                peer_addrs.get(q).and_then(|a| a.clone()),
+                peer_ids.get(q).and_then(|p| p.clone()),
+            ) else {
+                continue;
+            };
+            let identity = identity.clone();
+            let hello = hello.clone();
+            let tx = rejoined_tx.clone();
+            thread::spawn(move || {
+                for _ in 0..REDIAL_ATTEMPTS {
+                    thread::sleep(RECONNECT_EVERY);
+                    if let Some(channel) = connect_peer(&addr, &identity, &peer, &hello, q) {
+                        log(&format!("re-established the link to peer {}", q + 1));
+                        let _ = tx.send((q, channel));
+                        return;
+                    }
+                }
+            });
+        }
+    });
 }
 
 fn hello_frame(genesis_hash: &[u8; 32]) -> Vec<u8> {
@@ -255,18 +373,12 @@ fn forward_frame(out: &SyncSender<(usize, Vec<u8>)>, from: usize, bytes: Vec<u8>
     }
 }
 
-fn spawn_readers(
-    accepted_rx: &Receiver<(usize, Channel<TcpStream>)>,
-    up_peers: usize,
-    inbound_tx: SyncSender<(usize, Vec<u8>)>,
+fn read_peer(
+    from: usize,
+    mut channel: Channel<TcpStream>,
+    out: SyncSender<(usize, Vec<u8>)>,
     genesis_hash: [u8; 32],
 ) {
-    for _ in 0..up_peers {
-        let Ok((from, mut channel)) = accepted_rx.recv() else {
-            break;
-        };
-        let out = inbound_tx.clone();
-        thread::spawn(move || {
             match channel.recv() {
                 Ok(frame) if hello_ok(&frame, &genesis_hash) => {}
                 Ok(frame) => {
@@ -305,9 +417,21 @@ fn spawn_readers(
                     break;
                 }
             }
-        });
+        }
+
+fn spawn_readers(
+    accepted_rx: &Receiver<(usize, Channel<TcpStream>)>,
+    up_peers: usize,
+    inbound_tx: SyncSender<(usize, Vec<u8>)>,
+    genesis_hash: [u8; 32],
+) {
+    for _ in 0..up_peers {
+        let Ok((from, channel)) = accepted_rx.recv() else {
+            break;
+        };
+        let out = inbound_tx.clone();
+        thread::spawn(move || read_peer(from, channel, out, genesis_hash));
     }
-    drop(inbound_tx);
 }
 
 #[cfg(test)]
