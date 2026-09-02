@@ -1,11 +1,11 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,9 +28,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const BOOTSTRAP_DEADLINE: Duration = Duration::from_secs(60);
 /// How often a lost link is retried, and how many times before it is left to the
 /// next failure to re-arm. A node is never permanently written off.
-const RECONNECT_EVERY: Duration = Duration::from_secs(5);
-const REDIAL_ATTEMPTS: usize = 720;
+const RECONNECT_MIN: Duration = Duration::from_millis(250);
+const RECONNECT_MAX: Duration = Duration::from_secs(10);
 const REJOIN_QUEUE: usize = 64;
+/// Concurrent handshakes allowed from one source address, so a single host cannot
+/// hold every slot and lock a returning validator out.
+const LATE_PER_IP: usize = 2;
+const LATE_PER_IP_KNOWN: usize = 4;
 
 struct InflightGuard(Arc<AtomicUsize>);
 
@@ -252,6 +256,8 @@ pub fn build_mesh(
         n,
         identity.clone(),
         peer_ids.to_vec(),
+        peer_addrs.to_vec(),
+        up.clone(),
         genesis_hash,
         inbound_tx,
     );
@@ -274,56 +280,146 @@ pub fn build_mesh(
 }
 
 /// Accept peers for as long as the node runs, so a returning validator is answered.
+///
+/// Bootstrap decides when the round may start, it is not the end of the node's
+/// willingness to be reached. Everything the bootstrap acceptor does to stay safe is
+/// done here too, because this listener is exposed for the life of the process rather
+/// than for one minute.
 fn spawn_late_acceptor(
     listener: TcpListener,
     idx: usize,
     n: usize,
     identity: Identity,
     peer_ids: Vec<Option<PeerId>>,
+    peer_addrs: Vec<Option<String>>,
+    up: Vec<bool>,
     genesis_hash: [u8; 32],
     inbound_tx: SyncSender<(usize, Vec<u8>)>,
 ) {
     thread::spawn(move || {
         let _ = listener.set_nonblocking(false);
+        let known = known_peer_ips(&peer_addrs);
         let inflight = Arc::new(AtomicUsize::new(0));
+        // Concurrent handshakes already running per source address. Without this one
+        // host can hold every handshake slot and no validator can ever reconnect.
+        let per_ip: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+        // Generation per peer. A newer link supersedes an older one, so a peer that
+        // opens many connections cannot multiply its share of the inbound queue.
+        let live: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(vec![0; n]));
         loop {
-            let Ok((stream, _addr)) = listener.accept() else {
+            let Ok((stream, addr)) = listener.accept() else {
                 thread::sleep(Duration::from_millis(50));
                 continue;
             };
-            if inflight.load(Ordering::Relaxed) >= MAX_HANDSHAKE_INFLIGHT {
+            let ip = addr.ip();
+            let is_known = known.contains(&ip);
+            let cap = if is_known {
+                MAX_HANDSHAKE_INFLIGHT + KNOWN_HANDSHAKE_RESERVE
+            } else {
+                MAX_HANDSHAKE_INFLIGHT
+            };
+            if inflight.load(Ordering::Relaxed) >= cap {
                 continue;
+            }
+            {
+                let mut map = per_ip.lock().expect("the per ip map is not poisoned");
+                let slot = map.entry(ip).or_insert(0);
+                let ip_cap = if is_known {
+                    LATE_PER_IP_KNOWN
+                } else {
+                    LATE_PER_IP
+                };
+                if *slot >= ip_cap {
+                    continue;
+                }
+                *slot += 1;
             }
             inflight.fetch_add(1, Ordering::Relaxed);
             let identity_w = identity.clone();
             let peer_ids_w = peer_ids.clone();
+            let up_w = up.clone();
             let out = inbound_tx.clone();
             let inflight_w = Arc::clone(&inflight);
+            let per_ip_w = Arc::clone(&per_ip);
+            let live_w = Arc::clone(&live);
             thread::spawn(move || {
-                let _guard = InflightGuard(inflight_w);
-                let _ = stream.set_nonblocking(false);
-                let Ok(channel) =
+                let _ip_guard = IpGuard(per_ip_w, ip);
+                let handshake = {
+                    // The inflight slot covers the handshake only. Holding it for the
+                    // life of the link would make the cap a permanent ceiling on how
+                    // many peers may ever return.
+                    let _guard = InflightGuard(inflight_w);
+                    let _ = stream.set_nonblocking(false);
                     Channel::accept_with_timeout(stream, &identity_w, HANDSHAKE_TIMEOUT)
-                else {
+                };
+                let Ok(channel) = handshake else {
                     return;
                 };
                 let peer = channel.peer_id().clone();
+                // Same predicate the bootstrap acceptor applies, so a peer this node
+                // was never configured to talk to cannot be adopted late.
                 let Some(from) = (0..n).find(|&q| {
-                    q != idx && peer_ids_w.get(q).and_then(|p| p.as_ref()) == Some(&peer)
+                    q != idx
+                        && up_w.get(q).copied().unwrap_or(false)
+                        && peer_ids_w.get(q).and_then(|p| p.as_ref()) == Some(&peer)
                 }) else {
                     return;
+                };
+                let generation = {
+                    let mut g = live_w.lock().expect("the generation table is not poisoned");
+                    g[from] = g[from].saturating_add(1);
+                    g[from]
                 };
                 log(&format!(
                     "peer {} reconnected, reading from it again",
                     from + 1
                 ));
-                read_peer(from, channel, out, genesis_hash);
+                read_peer_until_superseded(from, channel, out, genesis_hash, live_w, generation);
             });
         }
     });
 }
 
+/// Release a per address handshake slot however the thread leaves.
+struct IpGuard(Arc<Mutex<HashMap<IpAddr, usize>>>, IpAddr);
+
+impl Drop for IpGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.0.lock() {
+            if let Some(slot) = map.get_mut(&self.1) {
+                *slot = slot.saturating_sub(1);
+                if *slot == 0 {
+                    map.remove(&self.1);
+                }
+            }
+        }
+    }
+}
+
+/// Read a peer until a newer link from the same peer supersedes this one, so a peer
+/// that opens many connections does not get many shares of the inbound queue.
+fn read_peer_until_superseded(
+    from: usize,
+    channel: Channel<TcpStream>,
+    out: SyncSender<(usize, Vec<u8>)>,
+    genesis_hash: [u8; 32],
+    live: Arc<Mutex<Vec<u64>>>,
+    generation: u64,
+) {
+    let current = Arc::clone(&live);
+    let stop = move || {
+        current
+            .lock()
+            .map(|g| g[from] != generation)
+            .unwrap_or(true)
+    };
+    read_peer_with_stop(from, channel, out, genesis_hash, &stop);
+}
+
 /// Dial a peer the driver has reported as down until it answers again.
+///
+/// A validator is never permanently written off. The delay grows to a ceiling and then
+/// stays there, so a machine that is away for hours still rejoins when it returns.
 fn spawn_redialer(
     peer_addrs: Vec<Option<String>>,
     peer_ids: Vec<Option<PeerId>>,
@@ -334,6 +430,7 @@ fn spawn_redialer(
 ) {
     thread::spawn(move || {
         let hello = hello_frame(&genesis_hash);
+        let dialling: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
         while let Ok(q) = down_rx.recv() {
             let (Some(addr), Some(peer)) = (
                 peer_addrs.get(q).and_then(|a| a.clone()),
@@ -341,17 +438,29 @@ fn spawn_redialer(
             ) else {
                 continue;
             };
+            // One dialler per peer. Repeated down reports must not stack threads.
+            if !dialling.lock().map(|mut d| d.insert(q)).unwrap_or(false) {
+                continue;
+            }
             let identity = identity.clone();
             let hello = hello.clone();
             let tx = rejoined_tx.clone();
+            let dialling_w = Arc::clone(&dialling);
             thread::spawn(move || {
-                for _ in 0..REDIAL_ATTEMPTS {
-                    thread::sleep(RECONNECT_EVERY);
+                let mut wait = RECONNECT_MIN;
+                loop {
+                    // Try immediately, a link lost to one write timeout is usually back
+                    // straight away and should not cost a full backoff.
                     if let Some(channel) = connect_peer(&addr, &identity, &peer, &hello, q) {
                         log(&format!("re-established the link to peer {}", q + 1));
                         let _ = tx.send((q, channel));
-                        return;
+                        break;
                     }
+                    thread::sleep(wait);
+                    wait = (wait * 2).min(RECONNECT_MAX);
+                }
+                if let Ok(mut d) = dialling_w.lock() {
+                    d.remove(&q);
                 }
             });
         }
@@ -377,11 +486,12 @@ fn forward_frame(out: &SyncSender<(usize, Vec<u8>)>, from: usize, bytes: Vec<u8>
     }
 }
 
-fn read_peer(
+fn read_peer_with_stop(
     from: usize,
     mut channel: Channel<TcpStream>,
     out: SyncSender<(usize, Vec<u8>)>,
     genesis_hash: [u8; 32],
+    stop: &dyn Fn() -> bool,
 ) {
     match channel.recv() {
         Ok(frame) if hello_ok(&frame, &genesis_hash) => {}
@@ -399,6 +509,9 @@ fn read_peer(
     let mut last = Instant::now();
     let mut last_log: Option<Instant> = None;
     while let Ok(bytes) = channel.recv() {
+        if stop() {
+            return;
+        }
         let now = Instant::now();
         tokens = (tokens + now.saturating_duration_since(last).as_secs_f64() * PEER_MSG_PER_SEC)
             .min(PEER_MSG_BURST);
@@ -420,6 +533,15 @@ fn read_peer(
             break;
         }
     }
+}
+
+fn read_peer(
+    from: usize,
+    channel: Channel<TcpStream>,
+    out: SyncSender<(usize, Vec<u8>)>,
+    genesis_hash: [u8; 32],
+) {
+    read_peer_with_stop(from, channel, out, genesis_hash, &|| false);
 }
 
 fn spawn_readers(
