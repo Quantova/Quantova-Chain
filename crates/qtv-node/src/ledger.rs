@@ -2519,7 +2519,15 @@ impl Ledger {
         }
         let storage = self.contract_storage(&contract_id);
         let mut memory = vec![0u8; user_memory.len().max(CONTRACT_CONTEXT_BYTES)];
-        memory[..user_memory.len()].copy_from_slice(user_memory);
+        // Copy the caller's payload ONLY above the context window. Copying it across
+        // the whole buffer and stamping the trusted fields on top left any byte the
+        // stamping happened to miss under the caller's control, which is how the
+        // paying asset field became forgeable. Starting from a zeroed window closes
+        // that for every field the context carries now or later.
+        if user_memory.len() > CONTRACT_CONTEXT_BYTES {
+            memory[CONTRACT_CONTEXT_BYTES..user_memory.len()]
+                .copy_from_slice(&user_memory[CONTRACT_CONTEXT_BYTES..]);
+        }
         memory[0..32].copy_from_slice(&caller_id);
         memory[32..64].copy_from_slice(&contract_id);
         memory[64..72].copy_from_slice(&now_seconds.to_be_bytes());
@@ -2529,10 +2537,7 @@ impl Ledger {
         // whole buffer above, so leaving it untouched on a call that carried no asset
         // let the caller keep its own bytes here and forge the paying asset. Zero is
         // the documented value for a call funded with native value.
-        match in_asset {
-            Some(issuer) => memory[88..120].copy_from_slice(&issuer),
-            None => memory[88..120].fill(0),
-        }
+        memory[88..120].copy_from_slice(&in_asset.unwrap_or([0u8; 32]));
         match crate::execution::execute_contract_call(
             &code,
             selector,
