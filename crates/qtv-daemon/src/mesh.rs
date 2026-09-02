@@ -243,7 +243,8 @@ pub fn build_mesh(
 
     // The listener stays open for the life of the node. Bootstrap only decides when
     // the round may start, it is not the end of the node's willingness to be reached.
-    let (rejoined_tx, rejoined_rx) = mpsc::sync_channel::<(usize, Channel<TcpStream>)>(REJOIN_QUEUE);
+    let (rejoined_tx, rejoined_rx) =
+        mpsc::sync_channel::<(usize, Channel<TcpStream>)>(REJOIN_QUEUE);
     let (down_tx, down_rx) = mpsc::sync_channel::<usize>(REJOIN_QUEUE);
     spawn_late_acceptor(
         late_listener,
@@ -312,7 +313,10 @@ fn spawn_late_acceptor(
                 }) else {
                     return;
                 };
-                log(&format!("peer {} reconnected, reading from it again", from + 1));
+                log(&format!(
+                    "peer {} reconnected, reading from it again",
+                    from + 1
+                ));
                 read_peer(from, channel, out, genesis_hash);
             });
         }
@@ -379,45 +383,44 @@ fn read_peer(
     out: SyncSender<(usize, Vec<u8>)>,
     genesis_hash: [u8; 32],
 ) {
-            match channel.recv() {
-                Ok(frame) if hello_ok(&frame, &genesis_hash) => {}
-                Ok(frame) => {
-                    log(&format!(
-                        "refusing peer {}: its genesis hash {} is not ours, wrong chain",
-                        from + 1,
-                        hex(frame.get(8..).unwrap_or(&[]))
-                    ));
-                    return;
-                }
-                Err(_) => return,
-            }
-            let mut tokens = PEER_MSG_BURST;
-            let mut last = Instant::now();
-            let mut last_log: Option<Instant> = None;
-            while let Ok(bytes) = channel.recv() {
-                let now = Instant::now();
-                tokens = (tokens
-                    + now.saturating_duration_since(last).as_secs_f64() * PEER_MSG_PER_SEC)
-                    .min(PEER_MSG_BURST);
-                last = now;
-                if tokens < 1.0 {
-                    if last_log.map_or(true, |t| {
-                        now.saturating_duration_since(t) > Duration::from_secs(10)
-                    }) {
-                        log(&format!(
-                            "peer {} is over its message rate, dropping its frames",
-                            from + 1
-                        ));
-                        last_log = Some(now);
-                    }
-                    continue;
-                }
-                tokens -= 1.0;
-                if !forward_frame(&out, from, bytes) {
-                    break;
-                }
-            }
+    match channel.recv() {
+        Ok(frame) if hello_ok(&frame, &genesis_hash) => {}
+        Ok(frame) => {
+            log(&format!(
+                "refusing peer {}: its genesis hash {} is not ours, wrong chain",
+                from + 1,
+                hex(frame.get(8..).unwrap_or(&[]))
+            ));
+            return;
         }
+        Err(_) => return,
+    }
+    let mut tokens = PEER_MSG_BURST;
+    let mut last = Instant::now();
+    let mut last_log: Option<Instant> = None;
+    while let Ok(bytes) = channel.recv() {
+        let now = Instant::now();
+        tokens = (tokens + now.saturating_duration_since(last).as_secs_f64() * PEER_MSG_PER_SEC)
+            .min(PEER_MSG_BURST);
+        last = now;
+        if tokens < 1.0 {
+            if last_log.map_or(true, |t| {
+                now.saturating_duration_since(t) > Duration::from_secs(10)
+            }) {
+                log(&format!(
+                    "peer {} is over its message rate, dropping its frames",
+                    from + 1
+                ));
+                last_log = Some(now);
+            }
+            continue;
+        }
+        tokens -= 1.0;
+        if !forward_frame(&out, from, bytes) {
+            break;
+        }
+    }
+}
 
 fn spawn_readers(
     accepted_rx: &Receiver<(usize, Channel<TcpStream>)>,
