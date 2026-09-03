@@ -8189,6 +8189,19 @@ impl Ledger {
         self.last_vm_meter_used
     }
 
+    /// Arm the reading with what this transaction declared, before any execution.
+    ///
+    /// A transaction can finish without ever reaching call_contract, through a failed
+    /// deploy, a short payload, or a genesis selector, and execution can fault after
+    /// consuming real meter. In every one of those the block budget would otherwise be
+    /// charged whatever the PREVIOUS transaction happened to leave behind, so a caller
+    /// making calls that fault would be charged nearly nothing and the budget would
+    /// stop bounding anything. Starting from the declared limit means the charge is
+    /// only ever revised DOWN, by a call that actually completed and reported its cost.
+    pub fn arm_vm_meter(&mut self, declared: u64) {
+        self.last_vm_meter_used = declared;
+    }
+
     pub(crate) fn apply_atomic<F>(&mut self, f: F) -> bool
     where
         F: FnOnce(&mut Ledger) -> bool,

@@ -1104,6 +1104,8 @@ fn dispatch_vm(
     if !vm_admissible(wrapper, &account, fee_params, signature_ok) {
         return false;
     }
+    // Charge the declared limit unless a completed call reports less.
+    ledger.arm_vm_meter(wrapper.body().meter_limit());
     let charged = u64::try_from(
         wrapper
             .body()
