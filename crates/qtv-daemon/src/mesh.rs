@@ -270,6 +270,17 @@ pub fn build_mesh(
         rejoined_tx,
     );
 
+    // A peer that never answered at bootstrap has no live link, and a down report is
+    // only ever produced when a link that WAS alive fails to write. Without this the
+    // redialer never hears about it and a validator that happened to be restarting
+    // during bootstrap is written off for the life of the process, which is exactly
+    // what the unbounded redial was added to prevent.
+    for (q, addr) in peer_addrs.iter().enumerate() {
+        if q != idx && addr.is_some() && send[q].is_none() {
+            let _ = down_tx.try_send(q);
+        }
+    }
+
     Mesh {
         send,
         inbound: inbound_rx,
@@ -343,11 +354,15 @@ fn spawn_late_acceptor(
             let per_ip_w = Arc::clone(&per_ip);
             let live_w = Arc::clone(&live);
             thread::spawn(move || {
-                let _ip_guard = IpGuard(per_ip_w, ip);
                 let handshake = {
-                    // The inflight slot covers the handshake only. Holding it for the
-                    // life of the link would make the cap a permanent ceiling on how
-                    // many peers may ever return.
+                    // Both slots cover the handshake only. Holding either for the life
+                    // of the link would make the cap a permanent ceiling on how many
+                    // peers may ever return: two unclean disconnects from one address
+                    // leave two threads parked in read, and the third attempt from that
+                    // address is refused for as long as the process runs. What the caps
+                    // are for is bounding concurrent handshake cost. Once a link is up
+                    // the authenticated one live link per peer rule governs it.
+                    let _ip_guard = IpGuard(per_ip_w, ip);
                     let _guard = InflightGuard(inflight_w);
                     let _ = stream.set_nonblocking(false);
                     Channel::accept_with_timeout(stream, &identity_w, HANDSHAKE_TIMEOUT)

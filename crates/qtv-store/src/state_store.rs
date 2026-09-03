@@ -220,24 +220,28 @@ impl StateStore {
         if temp.exists() {
             std::fs::remove_file(&temp)?;
         }
-        {
-            let (mut fresh, _) = Log::open(&temp)?;
-            for (key, value) in &self.entries {
-                let record = StateRecord::Entry {
-                    key: *key,
-                    value: value.clone(),
-                };
-                fresh.append(&to_bytes(&record))?;
-            }
-            fresh.append(&to_bytes(&StateRecord::Commit { height, root }))?;
-            fresh.sync()?;
+        // The fresh handle is kept open ACROSS the rename and installed directly.
+        // Reopening the path afterwards used to sit between the rename and the
+        // install: the rename had already unlinked the old file, so a reopen that
+        // failed left `self.log` writing into an inode with no name, and every
+        // append after it was lost on the next restart while the node went on
+        // finalizing blocks. A descriptor follows the inode through a rename, so
+        // there is nothing left to fail here.
+        let (mut fresh, _) = Log::open(&temp)?;
+        for (key, value) in &self.entries {
+            let record = StateRecord::Entry {
+                key: *key,
+                value: value.clone(),
+            };
+            fresh.append(&to_bytes(&record))?;
         }
+        fresh.append(&to_bytes(&StateRecord::Commit { height, root }))?;
+        fresh.sync()?;
         std::fs::rename(&temp, &self.path)?;
         // The rename itself has to reach the disk, otherwise a crash here can
         // leave a directory entry pointing at neither file.
         sync_parent_dir(&self.path);
-        let (log, _) = Log::open(&self.path)?;
-        self.log = log;
+        self.log = fresh;
         Ok(())
     }
 
@@ -744,5 +748,50 @@ mod tests {
         assert_eq!(before, after, "a small log should not be rewritten on open");
         assert_eq!(reopened.committed_height(), Some(49));
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod compaction_survives_the_rename {
+    use super::*;
+
+    #[test]
+    fn writes_after_a_compaction_land_in_the_file_that_is_reopened() {
+        let dir = std::env::temp_dir().join(format!("qtv-compact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.log");
+
+        let mut s = StateStore::open(&path).unwrap();
+        for i in 0..64u64 {
+            let mut k = [0u8; 32];
+            k[24..].copy_from_slice(&i.to_be_bytes());
+            // Rewrite each key repeatedly so the log goes mostly stale.
+            for v in 0..8u64 {
+                s.put_account(k, v.to_be_bytes().to_vec()).unwrap();
+            }
+        }
+        s.commit(1, [7u8; 32]).unwrap();
+        // Called directly rather than through the size threshold: what is under test
+        // is the handle across the rename, not when compaction decides to run.
+        s.compact().unwrap();
+
+        // The write below goes through the handle the compaction installed. If that
+        // handle still pointed at the unlinked pre rename inode it would be accepted
+        // here and gone after the reopen.
+        let mut late = [0u8; 32];
+        late[31] = 0xEE;
+        s.put_account(late, vec![1, 2, 3]).unwrap();
+        s.commit(2, [8u8; 32]).unwrap();
+        drop(s);
+
+        let reopened = StateStore::open(&path).unwrap();
+        assert_eq!(
+            reopened.account(&late).map(|v| v.to_vec()),
+            Some(vec![1, 2, 3]),
+            "a write made after compaction must survive a restart"
+        );
+        assert_eq!(reopened.committed_height(), Some(2));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
