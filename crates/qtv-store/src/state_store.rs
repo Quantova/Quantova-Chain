@@ -772,8 +772,17 @@ mod compaction_survives_the_rename {
             }
         }
         s.commit(1, [7u8; 32]).unwrap();
-        // Called directly rather than through the size threshold: what is under test
-        // is the handle across the rename, not when compaction decides to run.
+        // What this covers: compaction round trips, and a write made through the
+        // handle compaction installed still survives a restart.
+        //
+        // What it does NOT cover, stated plainly because the first version of this
+        // test was cited as evidence for a fix it could not detect: the failure the
+        // fix removes is a reopen of `self.path` FAILING after the rename has already
+        // unlinked the old file. Forcing that needs a descriptor limit this crate
+        // cannot lower without `unsafe`, which the workspace forbids. The guarantee is
+        // structural instead, and it is worth stating: `compact` holds the fresh
+        // handle across the rename and installs it directly, so there is no fallible
+        // call between the two for a failure to land in.
         s.compact().unwrap();
 
         // The write below goes through the handle the compaction installed. If that
