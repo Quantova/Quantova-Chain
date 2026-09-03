@@ -3831,7 +3831,6 @@ mod stake_state_tests {
     }
 
     #[test]
-    #[test]
     fn a_contract_far_past_the_old_size_ceiling_is_still_callable() {
         // The old layout kept a contract's whole storage in one leaf and charged a
         // call for its size, so a contract holding more than about 260,416 entries
