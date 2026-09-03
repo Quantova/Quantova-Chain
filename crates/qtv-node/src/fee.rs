@@ -1,6 +1,14 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+/// The frozen fee band, in millionths of a dollar.
+///
+/// FLOOR is half a tenth of a cent and CEILING is one tenth of a cent: every fee the
+/// chain charges is clamped into this band by `native_fee`, whatever a caller asks
+/// for and whatever the price feed says. These two numbers are economics, not
+/// tuning. They are pinned by the founder, they are consensus visible through the
+/// fee every block charges, and `the_fee_band_is_frozen` below exists to make a
+/// change to either one impossible to land by accident.
 pub const MICRO_USD_FLOOR: u128 = 500;
 
 pub const MICRO_USD_CEILING: u128 = 1000;
@@ -55,6 +63,39 @@ impl FeeParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fee_band_is_frozen() {
+        // Pinned economics. 500 micro USD is 0.05 of a cent and 1000 is 0.10 of a
+        // cent, so the band is 0.05c to 0.10c per transaction. Changing either number
+        // repices every transaction on the chain and every quote the explorer, the
+        // SDKs and the wallet publish, so it does not get to happen as a side effect
+        // of some other edit. If this test is failing, the band was changed: put it
+        // back, or change it deliberately with the founder's word on the new figures.
+        assert_eq!(
+            MICRO_USD_FLOOR, 500,
+            "the fee floor is frozen at 0.05 of a cent"
+        );
+        assert_eq!(
+            MICRO_USD_CEILING, 1000,
+            "the fee ceiling is frozen at 0.10 of a cent"
+        );
+        assert!(
+            MICRO_USD_FLOOR < MICRO_USD_CEILING,
+            "the band must be a band"
+        );
+
+        // And the band has to actually bind, not merely be declared.
+        let p = FeeParams::devnet();
+        for asked in [0, 1, MICRO_USD_FLOOR - 1, MICRO_USD_CEILING + 1, u128::MAX] {
+            let charged = p.native_fee(asked);
+            assert!(
+                charged >= p.native_fee(MICRO_USD_FLOOR)
+                    && charged <= p.native_fee(MICRO_USD_CEILING),
+                "asking for {asked} micro USD charged {charged}, outside the frozen band"
+            );
+        }
+    }
 
     #[test]
     fn a_transfer_fee_is_nonzero_and_within_the_band() {
