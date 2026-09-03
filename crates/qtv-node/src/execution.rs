@@ -34,6 +34,11 @@ pub const TRANSFER_METER: u64 = 1_210;
 
 pub const CODE_ACCESS_BYTE_METER: u64 = 1;
 pub const STORAGE_ACCESS_BYTE_METER: u64 = 1;
+/// What one slot costs to touch. A slot is a trie read plus, if written, a trie write,
+/// so it is charged well above a plain instruction. This replaces charging a call for
+/// the size of the whole contract, which is what created the size ceiling, while still
+/// pricing the real work so a call cannot walk a large keyspace for nothing.
+pub const SLOT_ACCESS_METER: u64 = 200;
 
 pub fn transfer_call(recipient: &str, amount: u64) -> Call {
     let mut encoder = Encoder::new();
@@ -180,6 +185,54 @@ pub fn decode_container(bytes: &[u8]) -> Option<qtv_vm::container::Container> {
         });
     }
     Some(Container::new(code, consts, entries))
+}
+
+/// Run an entry, reading storage slots on demand.
+///
+/// The whole of a contract's storage used to be handed in, and charged for, on every
+/// call. That made a call cost what the contract HELD rather than what it TOUCHED, and
+/// once a contract held more than the per transaction meter could pay for it could
+/// never be called again. The loader is asked only for the slots the entry actually
+/// reads, and only the slots it writes come back.
+pub fn execute_contract_call_lazy(
+    container_bytes: &[u8],
+    selector: [u8; qtv_vm::container::SELECTOR_BYTES],
+    loader: &dyn Fn(&[u8; 32]) -> u64,
+    memory: &[u8],
+    meter_limit: u64,
+) -> Result<ContractOutcome, ExecError> {
+    let access_cost = (container_bytes.len() as u64).saturating_mul(CODE_ACCESS_BYTE_METER);
+    let vm_limit = meter_limit
+        .checked_sub(access_cost)
+        .ok_or(ExecError::MeterExhausted)?;
+    let container = decode_container(container_bytes).ok_or(ExecError::BadContainer)?;
+    container
+        .entry_offset(&selector)
+        .ok_or(ExecError::BadContainer)?;
+    let interpreter = Interpreter::for_entry(&container, selector, vm_limit)
+        .map_err(|_| ExecError::BadContainer)?;
+    let outcome = interpreter
+        .with_storage_loader(loader)
+        .with_memory(memory)
+        .run()
+        .map_err(|fault| match fault {
+            Fault::Overflow => ExecError::InsufficientFunds,
+            Fault::OutOfMeter => ExecError::MeterExhausted,
+            other => ExecError::Vm(other),
+        })?;
+    let touched = outcome.storage.len() as u64;
+    Ok(ContractOutcome {
+        storage: outcome
+            .dirty
+            .iter()
+            .filter_map(|slot| outcome.storage.get(slot).map(|v| (*slot, *v)))
+            .collect(),
+        effects: outcome.effects,
+        meter_used: outcome
+            .meter_used
+            .saturating_add(access_cost)
+            .saturating_add(touched.saturating_mul(SLOT_ACCESS_METER)),
+    })
 }
 
 pub fn execute_contract_call(

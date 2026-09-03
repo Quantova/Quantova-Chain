@@ -648,6 +648,75 @@ pub fn bridge_settle_address() -> String {
 
 const VM_CODE_TAG: &[u8] = b"qtv/vm/code/";
 const VM_STORE_TAG: &[u8] = b"qtv/vm/store/";
+/// One trie leaf per storage slot.
+///
+/// A contract's whole storage used to live in a single leaf, so reading one balance
+/// decoded every slot the contract owned and writing one re-encoded and rewrote all of
+/// them. That made a call cost O(contract size) and, because the meter charged that
+/// size, a contract passing about 260,000 entries could never be called again and its
+/// assets were frozen. Per slot leaves make a call cost what it actually touches.
+const VM_SLOT_TAG: &[u8] = b"qtv/vm/slot/";
+/// Bytes of the key given over to a per contract prefix, so one contract's slots sit
+/// in a contiguous range and can be walked without an index.
+const SLOT_PREFIX_BYTES: usize = 8;
+
+fn contract_slot_prefix(id: &[u8; 32]) -> [u8; SLOT_PREFIX_BYTES] {
+    let mut input = Vec::with_capacity(VM_SLOT_TAG.len() + id.len());
+    input.extend_from_slice(VM_SLOT_TAG);
+    input.extend_from_slice(id);
+    let digest = sha3::sha3_256(&input);
+    let mut prefix = [0u8; SLOT_PREFIX_BYTES];
+    prefix.copy_from_slice(&digest[..SLOT_PREFIX_BYTES]);
+    prefix
+}
+
+/// The prefix makes the range walkable, the tail binds the contract AND the slot so
+/// two contracts can never collide on a slot even if their prefixes collide.
+fn contract_slot_key(id: &[u8; 32], slot: &StorageKey) -> Key {
+    let mut input = Vec::with_capacity(VM_SLOT_TAG.len() + id.len() + slot.len());
+    input.extend_from_slice(VM_SLOT_TAG);
+    input.extend_from_slice(id);
+    input.extend_from_slice(slot);
+    let tail = sha3::sha3_256(&input);
+    let mut key = [0u8; KEY_LEN];
+    key[..SLOT_PREFIX_BYTES].copy_from_slice(&contract_slot_prefix(id));
+    key[SLOT_PREFIX_BYTES..].copy_from_slice(&tail[SLOT_PREFIX_BYTES..]);
+    key
+}
+
+fn contract_slot_range(id: &[u8; 32]) -> (Key, Key) {
+    let prefix = contract_slot_prefix(id);
+    let mut low = [0u8; KEY_LEN];
+    low[..SLOT_PREFIX_BYTES].copy_from_slice(&prefix);
+    let mut high = [0xffu8; KEY_LEN];
+    high[..SLOT_PREFIX_BYTES].copy_from_slice(&prefix);
+    (low, high)
+}
+
+/// A slot leaf carries the contract id and the slot alongside the value. The id is
+/// what lets a range walk filter out a foreign contract whose prefix collides, and the
+/// slot is what lets the walk report which slot it found. The value is eight fixed big
+/// endian bytes, never a codec framing, so one value has exactly one encoding under
+/// the state root.
+fn encode_slot_leaf(id: &[u8; 32], slot: &StorageKey, value: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(72);
+    out.extend_from_slice(id);
+    out.extend_from_slice(slot);
+    out.extend_from_slice(&value.to_be_bytes());
+    out
+}
+
+fn decode_slot_leaf(bytes: &[u8]) -> Option<([u8; 32], StorageKey, u64)> {
+    if bytes.len() != 72 {
+        return None;
+    }
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&bytes[..32]);
+    let mut slot = [0u8; 32];
+    slot.copy_from_slice(&bytes[32..64]);
+    let value = u64::from_be_bytes(bytes[64..72].try_into().ok()?);
+    Some((id, slot, value))
+}
 
 pub fn vm_deploy_address() -> String {
     qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/vm/deploy"))
@@ -2456,11 +2525,40 @@ impl Ledger {
         Some(contract)
     }
 
-    pub fn contract_storage(&self, id: &[u8; 32]) -> std::collections::BTreeMap<StorageKey, u64> {
-        match self.trie.get(&contract_store_key(id)) {
-            Some(bytes) if !bytes.is_empty() => decode_storage(bytes),
-            _ => std::collections::BTreeMap::new(),
+    /// One slot, one trie read.
+    pub fn contract_slot(&self, id: &[u8; 32], slot: &StorageKey) -> u64 {
+        match self.trie.get(&contract_slot_key(id, slot)) {
+            Some(bytes) => decode_slot_leaf(bytes)
+                .filter(|(owner, found, _)| owner == id && found == slot)
+                .map(|(_, _, value)| value)
+                .unwrap_or(0),
+            None => 0,
         }
+    }
+
+    /// One slot, one trie write. A zero clears the leaf so an absent slot and a slot
+    /// holding zero are the same state, which keeps the root canonical.
+    pub fn set_contract_slot(&mut self, id: &[u8; 32], slot: &StorageKey, value: u64) {
+        let key = contract_slot_key(id, slot);
+        if value == 0 {
+            self.erase_leaf(&key);
+        } else {
+            self.write_leaf(key, encode_slot_leaf(id, slot, value));
+        }
+    }
+
+    /// Every slot a contract owns, by walking its prefix range. The id in each leaf is
+    /// checked so a foreign contract whose prefix collides is filtered out rather than
+    /// reported as this contract's state.
+    pub fn contract_storage(&self, id: &[u8; 32]) -> std::collections::BTreeMap<StorageKey, u64> {
+        let (low, high) = contract_slot_range(id);
+        self.trie
+            .leaves()
+            .range(low..=high)
+            .filter_map(|(_key, bytes)| decode_slot_leaf(bytes))
+            .filter(|(owner, _, _)| owner == id)
+            .map(|(_, slot, value)| (slot, value))
+            .collect()
     }
 
     pub fn set_contract_storage(
@@ -2468,7 +2566,9 @@ impl Ledger {
         id: &[u8; 32],
         storage: &std::collections::BTreeMap<StorageKey, u64>,
     ) {
-        self.write_leaf(contract_store_key(id), encode_storage(storage));
+        for (slot, value) in storage {
+            self.set_contract_slot(id, slot, *value);
+        }
     }
 
     pub fn call_contract(
@@ -2507,17 +2607,9 @@ impl Ledger {
                 }
             }
         }
-        let storage_bytes = self
-            .trie
-            .get(&contract_store_key(&contract_id))
-            .map(|bytes| bytes.len())
-            .unwrap_or(0);
-        if (storage_bytes as u64).saturating_mul(crate::execution::STORAGE_ACCESS_BYTE_METER)
-            > meter
-        {
-            return false;
-        }
-        let storage = self.contract_storage(&contract_id);
+        // No size gate any more. A call is charged for the slots it touches, not for
+        // everything the contract holds, so a contract can grow without ever becoming
+        // uncallable.
         let mut memory = vec![0u8; user_memory.len().max(CONTRACT_CONTEXT_BYTES)];
         // Copy the caller's payload ONLY above the context window. Copying it across
         // the whole buffer and stamping the trusted fields on top left any byte the
@@ -2538,14 +2630,23 @@ impl Ledger {
         // let the caller keep its own bytes here and forge the paying asset. Zero is
         // the documented value for a call funded with native value.
         memory[88..120].copy_from_slice(&in_asset.unwrap_or([0u8; 32]));
-        match crate::execution::execute_contract_call(
-            &code,
-            selector,
-            storage,
-            storage_bytes,
-            &memory,
-            meter,
-        ) {
+        // The loader borrows the trie immutably for the length of the run, which ends
+        // before anything below mutates the ledger.
+        let executed = {
+            let trie = &self.trie;
+            let owner = contract_id;
+            let loader = move |slot: &StorageKey| -> u64 {
+                match trie.get(&contract_slot_key(&owner, slot)) {
+                    Some(bytes) => decode_slot_leaf(bytes)
+                        .filter(|(who, found, _)| *who == owner && found == slot)
+                        .map(|(_, _, value)| value)
+                        .unwrap_or(0),
+                    None => 0,
+                }
+            };
+            crate::execution::execute_contract_call_lazy(&code, selector, &loader, &memory, meter)
+        };
+        match executed {
             Ok(outcome) => {
                 self.last_vm_meter_used = outcome.meter_used;
                 let mut native_credits: Vec<(String, u64)> = Vec::new();
@@ -2681,7 +2782,11 @@ impl Ledger {
                         });
                     }
                 }
-                self.set_contract_storage(&contract_id, &outcome.storage);
+                // Only the slots this call wrote. Rewriting every slot the contract
+                // owns to change one of them is what made a call cost O(contract).
+                for (slot, value) in &outcome.storage {
+                    self.set_contract_slot(&contract_id, slot, *value);
+                }
                 true
             }
             Err(_) => false,
@@ -3727,6 +3832,55 @@ mod stake_state_tests {
 
     #[test]
     #[test]
+    fn a_contract_far_past_the_old_size_ceiling_is_still_callable() {
+        // The old layout kept a contract's whole storage in one leaf and charged a
+        // call for its size, so a contract holding more than about 260,416 entries
+        // could never be called again and its assets were frozen. Per slot leaves mean
+        // a call is charged for what it touches, so size stops mattering.
+        let code =
+            qtv_vm::asm::assemble("LDI r1, 88\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
+                .expect("the program assembles");
+        let selector = [4u8, 4, 4, 4];
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![0],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
+            }],
+        );
+        let mut l = Ledger::new();
+        let contract_id = [90u8; 32];
+        let contract = qtv_idfmt::render_address(&contract_id).unwrap();
+        l.set_contract_code(&contract_id, &container.canonical_bytes());
+
+        // Well past the old ceiling.
+        let entries = 300_000u64;
+        for i in 0..entries {
+            let mut slot = [0u8; 32];
+            slot[..8].copy_from_slice(&i.to_be_bytes());
+            l.set_contract_slot(&contract_id, &slot, i + 1);
+        }
+        assert_eq!(
+            l.contract_storage(&contract_id).len() as u64,
+            entries,
+            "every seeded slot is present"
+        );
+
+        let caller = qtv_idfmt::render_address(&[11u8; 32]).unwrap();
+        assert!(
+            l.call_contract(&caller, &contract, selector, &[], 0, 400_000, 0, None, 0),
+            "a contract holding {entries} entries must still be callable"
+        );
+    }
+
+    #[test]
     fn a_native_call_cannot_forge_the_paying_asset() {
         // Read the first word of the paying asset window (offset 88) into storage.
         let code =
@@ -3741,7 +3895,7 @@ mod stake_state_tests {
                 offset: 0,
                 access: qtv_vm::container::StateAccess {
                     reads: vec![],
-                    writes: vec![0],
+                    writes: vec![0, 1],
                     keyed_reads: vec![],
                     keyed_writes: vec![],
                 },
@@ -3759,12 +3913,31 @@ mod stake_state_tests {
         let mut forged = vec![0u8; CONTRACT_CONTEXT_BYTES];
         forged[88..120].copy_from_slice(&[0xAB; 32]);
 
-        assert!(l.call_contract(&caller, &contract, selector, &forged, 0, 200_000, 0, None, 0));
+        assert!(l.call_contract(&caller, &contract, selector, &forged, 0, 400_000, 0, None, 0));
+        let slot = qtv_vm::abi::scalar_key(0);
         assert_eq!(
-            l.contract_storage(&contract_id)
-                .get(&qtv_vm::abi::scalar_key(0)),
-            Some(&0u64),
+            l.contract_slot(&contract_id, &slot),
+            0,
             "a call carrying no asset must read a zero paying asset, not the caller's bytes"
+        );
+        // The same call carrying a real asset must read that issuer, which proves the
+        // slot is genuinely written and the zero above is not simply an absent write.
+        let issuer = [0xBBu8; 32];
+        assert!(l.call_contract(
+            &caller,
+            &contract,
+            selector,
+            &forged,
+            0,
+            400_000,
+            0,
+            Some(issuer),
+            0
+        ));
+        assert_eq!(
+            l.contract_slot(&contract_id, &slot),
+            u64::from_be_bytes([0xBB; 8]),
+            "a call carrying an asset must read that issuer"
         );
     }
 
