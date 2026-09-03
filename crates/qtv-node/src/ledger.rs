@@ -3881,10 +3881,24 @@ mod stake_state_tests {
 
     #[test]
     fn a_native_call_cannot_forge_the_paying_asset() {
-        // Read the first word of the paying asset window (offset 88) into storage.
-        let code =
-            qtv_vm::asm::assemble("LDI r1, 88\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
-                .expect("the program assembles");
+        // Read all four words of the paying asset window (88..120) plus the first word
+        // of the argument area (120), so a forged byte anywhere in the window is caught
+        // and the caller's own arguments are shown to survive above it.
+        //
+        // SSTORE takes the ADDRESS of its 32 byte key, not the key, so each read needs
+        // its own key written into memory first. Sharing one all zero key would make
+        // every store land on the same slot and only the last read would be checked.
+        let mut prog = String::new();
+        for (slot, off) in [(0u64, 88u64), (1, 96), (2, 104), (3, 112), (4, 120)] {
+            let key = 1024 + slot * 32;
+            prog.push_str(&format!(
+                "LDI r3, {slot}\nLDI r2, {}\nMSTORE r2, r3\n\
+                 LDI r1, {off}\nMLOAD r0, r1\nLDI r2, {key}\nSSTORE r2, r0\n",
+                key + 24
+            ));
+        }
+        prog.push_str("HALT");
+        let code = qtv_vm::asm::assemble(&prog).expect("the program assembles");
         let selector = [9u8, 9, 9, 9];
         let container = qtv_vm::container::Container::new(
             code,
@@ -3894,7 +3908,7 @@ mod stake_state_tests {
                 offset: 0,
                 access: qtv_vm::container::StateAccess {
                     reads: vec![],
-                    writes: vec![0, 1],
+                    writes: vec![0, 1, 2, 3, 4],
                     keyed_reads: vec![],
                     keyed_writes: vec![],
                 },
@@ -3909,15 +3923,33 @@ mod stake_state_tests {
 
         // The caller supplies arguments long enough to reach the paying asset window
         // and fills it with an issuer it never paid.
-        let mut forged = vec![0u8; CONTRACT_CONTEXT_BYTES];
+        // Longer than the context on purpose. A payload of exactly CONTRACT_CONTEXT_BYTES
+        // never reaches the copy fbc4528 added, so the old shape of this test could not
+        // have failed even with the fix reverted.
+        const ARG: u64 = 0x1234_5678_9abc_def0;
+        let mut forged = vec![0u8; CONTRACT_CONTEXT_BYTES + 8];
         forged[88..120].copy_from_slice(&[0xAB; 32]);
+        forged[CONTRACT_CONTEXT_BYTES..CONTRACT_CONTEXT_BYTES + 8]
+            .copy_from_slice(&ARG.to_be_bytes());
 
         assert!(l.call_contract(&caller, &contract, selector, &forged, 0, 400_000, 0, None, 0));
-        let slot = qtv_vm::abi::scalar_key(0);
+        macro_rules! word {
+            ($i:expr) => {
+                l.contract_slot(&contract_id, &qtv_vm::abi::scalar_key($i))
+            };
+        }
+        for i in 0..4 {
+            assert_eq!(
+                word!(i),
+                0,
+                "word {i} of the paying asset window must be zero for a native call, \
+                 not the caller's forged bytes"
+            );
+        }
         assert_eq!(
-            l.contract_slot(&contract_id, &slot),
-            0,
-            "a call carrying no asset must read a zero paying asset, not the caller's bytes"
+            word!(4),
+            ARG,
+            "the caller's own arguments above the context must survive untouched"
         );
         // The same call carrying a real asset must read that issuer, which proves the
         // slot is genuinely written and the zero above is not simply an absent write.
@@ -3933,13 +3965,17 @@ mod stake_state_tests {
             Some(issuer),
             0
         ));
-        assert_eq!(
-            l.contract_slot(&contract_id, &slot),
-            u64::from_be_bytes([0xBB; 8]),
-            "a call carrying an asset must read that issuer"
-        );
+        for i in 0..4 {
+            assert_eq!(
+                word!(i),
+                u64::from_be_bytes([0xBB; 8]),
+                "word {i} of the paying asset window must be the real issuer"
+            );
+        }
+        assert_eq!(word!(4), ARG, "the arguments are still the caller's own");
     }
 
+    #[test]
     fn a_contract_call_injects_the_trusted_caller_and_persists_storage() {
         let code =
             qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
