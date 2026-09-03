@@ -97,51 +97,64 @@ pub struct StateStore {
 impl StateStore {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let (log, frames) = Log::open(&path)?;
-        let mut store = StateStore {
-            log,
-            path,
-            entries: BTreeMap::new(),
-            head: None,
-            committed_height: None,
-        };
-        let total_len: u64 = frames.iter().map(|frame| frame_len(frame.len())).sum();
+        // Stream the log rather than materialising every frame first. Holding the
+        // whole log in a Vec and then building the live set from it meant a log too
+        // big for memory could never be opened, so it could never be compacted back
+        // down either, which is the state that traps a node with a large history.
+        let mut entries: BTreeMap<Key, Vec<u8>> = BTreeMap::new();
+        let mut head: Option<Hash> = None;
+        let mut committed_height: Option<u64> = None;
         let mut pending: Vec<(Key, Option<Vec<u8>>)> = Vec::new();
         let mut committed_len: u64 = 0;
-        let mut offset: u64 = 0;
-        for frame in &frames {
-            offset += frame_len(frame.len());
-            match qtv_codec::from_bytes(frame) {
+        let mut total_len: u64 = 0;
+        let log = Log::open_scanned(&path, |frame, _start, end_offset| {
+            total_len = end_offset;
+            match qtv_codec::from_bytes::<StateRecord>(frame) {
                 Ok(StateRecord::Entry { key, value }) => {
                     pending.push((key, Some(value)));
+                    true
                 }
                 Ok(StateRecord::Delete { key }) => {
                     pending.push((key, None));
+                    true
                 }
                 Ok(StateRecord::Commit { height, root }) => {
                     for (key, value) in pending.drain(..) {
                         match value {
                             Some(value) => {
-                                store.entries.insert(key, value);
+                                entries.insert(key, value);
                             }
                             None => {
-                                store.entries.remove(&key);
+                                entries.remove(&key);
                             }
                         }
                     }
-                    store.head = Some(root);
-                    store.committed_height = Some(height);
-                    committed_len = offset;
+                    head = Some(root);
+                    committed_height = Some(height);
+                    committed_len = end_offset;
+                    true
                 }
-                Err(_) => break,
+                Err(_) => false,
             }
-        }
+        })?;
+        let mut store = StateStore {
+            log,
+            path,
+            entries,
+            head,
+            committed_height,
+        };
         if committed_len < total_len {
             store.log.truncate(committed_len)?;
-            committed_len = committed_len.min(total_len);
         }
         if store.should_compact(committed_len) {
-            store.compact()?;
+            // Compaction is an optimisation, never a correctness requirement. A store
+            // that cannot be rewritten, for want of disk or a read only mount, still
+            // holds every committed byte, so refusing to boot over it would turn a
+            // housekeeping failure into a halted validator that cannot restart.
+            if let Err(e) = store.compact() {
+                eprintln!("state log compaction skipped at open: {e}");
+            }
         }
         Ok(store)
     }
@@ -180,7 +193,12 @@ impl StateStore {
         if !self.should_compact(on_disk) {
             return Ok(false);
         }
-        self.compact()?;
+        // Never propagate a compaction failure into the block loop. The chain is
+        // correct without compaction, it simply uses more disk until the next attempt.
+        if let Err(e) = self.compact() {
+            eprintln!("state log compaction skipped: {e}");
+            return Ok(false);
+        }
         Ok(true)
     }
 
