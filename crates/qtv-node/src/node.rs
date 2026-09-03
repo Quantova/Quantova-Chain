@@ -2575,10 +2575,8 @@ mod tests {
         );
         assert_eq!(execute_ordered(&mut bare_ledger, &[bare], &fee, 0).len(), 1);
         assert_eq!(
-            bare_ledger
-                .contract_storage(&address_bytes(&contract))
-                .get(&qtv_vm::abi::scalar_key(0)),
-            Some(&0),
+            bare_ledger.contract_slot(&address_bytes(&contract), &qtv_vm::abi::scalar_key(0)),
+            0,
             "a bare deploy carries no parameter, so the genesis read and stored a zero"
         );
     }
