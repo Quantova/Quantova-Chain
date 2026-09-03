@@ -26,6 +26,19 @@ const KNOWN_HANDSHAKE_RESERVE: usize = 64;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 const BOOTSTRAP_DEADLINE: Duration = Duration::from_secs(60);
+
+/// How long bootstrap waits for peers. Reads `QTV_BOOTSTRAP_DEADLINE_MS` so a test
+/// can exercise the real path in milliseconds instead of a minute. Unset in
+/// production, where the constant above is what applies.
+fn bootstrap_deadline() -> Duration {
+    match std::env::var("QTV_BOOTSTRAP_DEADLINE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        Some(ms) => Duration::from_millis(ms),
+        None => BOOTSTRAP_DEADLINE,
+    }
+}
 /// How often a lost link is retried, and how many times before it is left to the
 /// next failure to re-arm. A node is never permanently written off.
 const RECONNECT_MIN: Duration = Duration::from_millis(250);
@@ -63,7 +76,7 @@ fn connect_peer(
     hello: &[u8],
     label: usize,
 ) -> Option<Channel<TcpStream>> {
-    let deadline = Instant::now() + BOOTSTRAP_DEADLINE;
+    let deadline = Instant::now() + bootstrap_deadline();
     let stream = loop {
         if Instant::now() >= deadline {
             log(&format!(
@@ -115,6 +128,10 @@ pub struct Mesh {
     pub rejoined: Receiver<(usize, Channel<TcpStream>)>,
     /// The driver reports a peer whose link has failed so it is dialled again.
     pub down: SyncSender<usize>,
+    /// Peers that ended bootstrap with no link and were handed to the redialer.
+    /// Recorded so the handover can be asserted, not just the rule that computes it:
+    /// without this the whole wiring could be deleted and every test stayed green.
+    pub redialing: Vec<usize>,
 }
 
 pub fn build_mesh(
@@ -153,7 +170,7 @@ pub fn build_mesh(
         let mut seen = vec![false; n];
         let mut registered = 0usize;
         let inflight = Arc::new(AtomicUsize::new(0));
-        let deadline = Instant::now() + BOOTSTRAP_DEADLINE;
+        let deadline = Instant::now() + bootstrap_deadline();
         while registered < up_peers && Instant::now() < deadline {
             while let Ok((from, channel)) = worker_rx.try_recv() {
                 if from < n && !seen[from] {
@@ -275,10 +292,9 @@ pub fn build_mesh(
     // redialer never hears about it and a validator that happened to be restarting
     // during bootstrap is written off for the life of the process, which is exactly
     // what the unbounded redial was added to prevent.
-    for (q, addr) in peer_addrs.iter().enumerate() {
-        if q != idx && addr.is_some() && send[q].is_none() {
-            let _ = down_tx.try_send(q);
-        }
+    let redialing = bootstrap_misses(peer_addrs, &send, idx);
+    for &q in &redialing {
+        let _ = down_tx.try_send(q);
     }
 
     Mesh {
@@ -287,7 +303,29 @@ pub fn build_mesh(
         up,
         rejoined: rejoined_rx,
         down: down_tx,
+        redialing,
     }
+}
+
+/// Peers that are configured, are not this node, and ended bootstrap with no link.
+///
+/// A down report is otherwise only ever produced when a link that WAS alive fails to
+/// write, so a validator that happened to be restarting while this node booted is
+/// never redialled and is written off for the life of the process. Kept separate from
+/// `build_mesh` so the rule can be tested without a network.
+fn bootstrap_misses<T>(
+    peer_addrs: &[Option<String>],
+    send: &[Option<T>],
+    idx: usize,
+) -> Vec<usize> {
+    peer_addrs
+        .iter()
+        .enumerate()
+        .filter(|&(q, addr)| {
+            q != idx && addr.is_some() && send.get(q).map(Option::is_none).unwrap_or(true)
+        })
+        .map(|(q, _)| q)
+        .collect()
 }
 
 /// Accept peers for as long as the node runs, so a returning validator is answered.
@@ -635,6 +673,164 @@ mod tests {
         assert!(
             PEER_MSG_BURST >= PEER_MSG_PER_SEC,
             "the burst covers the sustained rate"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_report {
+    use super::bootstrap_misses;
+
+    fn addrs(v: &[Option<&str>]) -> Vec<Option<String>> {
+        v.iter().map(|a| a.map(str::to_string)).collect()
+    }
+
+    #[test]
+    fn a_configured_peer_with_no_link_is_reported_down() {
+        // Peer 2 answered, peer 1 and 3 did not. Without the report the redialer
+        // never hears about 1 or 3 and they are written off for the process lifetime.
+        let peers = addrs(&[Some("a:1"), Some("b:2"), Some("c:3"), Some("d:4")]);
+        let send: Vec<Option<()>> = vec![None, None, Some(()), None];
+        assert_eq!(bootstrap_misses(&peers, &send, 0), vec![1, 3]);
+    }
+
+    #[test]
+    fn this_node_is_never_reported_against_itself() {
+        let peers = addrs(&[Some("a:1"), Some("b:2")]);
+        let send: Vec<Option<()>> = vec![None, None];
+        assert_eq!(bootstrap_misses(&peers, &send, 0), vec![1]);
+    }
+
+    #[test]
+    fn a_peer_with_no_configured_address_is_not_reported() {
+        // Nothing to redial, so reporting it would spin the redialer forever.
+        let peers = addrs(&[Some("a:1"), None, Some("c:3")]);
+        let send: Vec<Option<()>> = vec![None, None, None];
+        assert_eq!(bootstrap_misses(&peers, &send, 0), vec![2]);
+    }
+
+    #[test]
+    fn a_peer_that_answered_is_not_reported() {
+        let peers = addrs(&[Some("a:1"), Some("b:2")]);
+        let send: Vec<Option<()>> = vec![None, Some(())];
+        assert!(bootstrap_misses(&peers, &send, 0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod per_ip_slots {
+    use super::{IpGuard, LATE_PER_IP};
+    use std::collections::HashMap;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::{Arc, Mutex};
+
+    fn admit(map: &Arc<Mutex<HashMap<IpAddr, usize>>>, ip: IpAddr, cap: usize) -> Option<IpGuard> {
+        let mut m = map.lock().unwrap();
+        let slot = m.entry(ip).or_insert(0);
+        if *slot >= cap {
+            return None;
+        }
+        *slot += 1;
+        drop(m);
+        Some(IpGuard(Arc::clone(map), ip))
+    }
+
+    #[test]
+    fn a_finished_handshake_gives_its_slot_back() {
+        // The guard used to live for the whole LINK, so two unclean disconnects from
+        // one address parked two readers and locked that address out of the inbound
+        // path for the life of the process. Scoped to the handshake, a completed one
+        // always returns its slot and a validator can always come back.
+        let map: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+
+        for round in 0..50 {
+            let mut held = Vec::new();
+            for _ in 0..LATE_PER_IP {
+                held.push(
+                    admit(&map, ip, LATE_PER_IP)
+                        .unwrap_or_else(|| panic!("round {round} was refused a slot")),
+                );
+            }
+            assert!(
+                admit(&map, ip, LATE_PER_IP).is_none(),
+                "the cap must still bound concurrent handshakes"
+            );
+            drop(held);
+            assert!(
+                map.lock().unwrap().get(&ip).is_none(),
+                "every slot must be released once the handshakes finish"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cap_still_bounds_concurrent_handshakes_from_one_address() {
+        let map: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4));
+        let _a = admit(&map, ip, LATE_PER_IP).expect("first");
+        let _b = admit(&map, ip, LATE_PER_IP).expect("second");
+        assert!(admit(&map, ip, LATE_PER_IP).is_none(), "a third is refused");
+    }
+
+    #[test]
+    fn one_address_cannot_starve_another() {
+        let map: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+        let noisy = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        let quiet = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8));
+        let _a = admit(&map, noisy, LATE_PER_IP).expect("first");
+        let _b = admit(&map, noisy, LATE_PER_IP).expect("second");
+        assert!(admit(&map, noisy, LATE_PER_IP).is_none());
+        assert!(
+            admit(&map, quiet, LATE_PER_IP).is_some(),
+            "a different address keeps its own budget"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_wiring {
+    use super::build_mesh;
+    use qtv_net::Identity;
+    use std::net::TcpListener;
+
+    #[test]
+    fn a_peer_that_never_answered_is_handed_to_the_redialer() {
+        // The unit test on `bootstrap_misses` covers the rule. This covers the
+        // WIRING: with the handover deleted the rule stays correct, stays tested and
+        // stays green, which is exactly how the fix shipped unguarded the first time.
+        // Safety: single threaded within this test, restored immediately.
+        std::env::set_var("QTV_BOOTSTRAP_DEADLINE_MS", "300");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a local listener");
+        // A closed port on loopback: the dial fails fast and the peer ends bootstrap
+        // with no link, which is the restarting validator this fix exists for.
+        let dead = TcpListener::bind("127.0.0.1:0").expect("a port to close");
+        let dead_addr = dead.local_addr().expect("addr").to_string();
+        drop(dead);
+
+        let peers = vec![None, Some(dead_addr), None];
+        let ids = vec![None, None, None];
+        let identity = Identity::from_seed(&[42u8; 32]);
+        let mesh = build_mesh(listener, &peers, &ids, 0, 3, &identity, [0u8; 32]);
+
+        std::env::remove_var("QTV_BOOTSTRAP_DEADLINE_MS");
+        assert_eq!(
+            mesh.redialing,
+            vec![1],
+            "a configured peer that never answered must be handed to the redialer"
+        );
+    }
+
+    #[test]
+    fn a_node_with_no_configured_peers_reports_nothing() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a local listener");
+        let peers = vec![None, None];
+        let ids = vec![None, None];
+        let identity = Identity::from_seed(&[43u8; 32]);
+        let mesh = build_mesh(listener, &peers, &ids, 0, 2, &identity, [0u8; 32]);
+        assert!(
+            mesh.redialing.is_empty(),
+            "there is nothing to redial, so the redialer must not be woken"
         );
     }
 }

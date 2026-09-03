@@ -2489,11 +2489,28 @@ impl Ledger {
             Some(id) => id,
             None => return Some(std::collections::BTreeMap::new()),
         };
-        match self.trie.get(&contract_store_key(&id)) {
-            Some(bytes) if bytes.len() > MAX_RPC_STORAGE_BYTES => None,
-            Some(bytes) if !bytes.is_empty() => Some(decode_storage(bytes)),
-            _ => Some(std::collections::BTreeMap::new()),
+        // Read the per slot leaves, not the single blob the store used to hold.
+        // Writes moved to per slot leaves and this reader was left behind, so every
+        // `get_storage` over RPC answered with an empty map for every contract: the
+        // explorer showed no state, and an SDK reading a contract nonce through the
+        // gateway read zero and signed against it.
+        let (low, high) = contract_slot_range(&id);
+        let mut out = std::collections::BTreeMap::new();
+        let mut bytes = 0usize;
+        for (_key, leaf) in self.trie.leaves().range(low..=high) {
+            let Some((owner, slot, value)) = decode_slot_leaf(leaf) else {
+                continue;
+            };
+            if owner != id {
+                continue;
+            }
+            bytes += leaf.len();
+            if bytes > MAX_RPC_STORAGE_BYTES {
+                return None;
+            }
+            out.insert(slot, value);
         }
+        Some(out)
     }
 
     pub fn contract_code(&self, id: &[u8; 32]) -> Option<Vec<u8>> {
@@ -3880,6 +3897,30 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn the_rpc_storage_reader_sees_what_a_call_actually_wrote() {
+        // The gateway answers `get_storage` through contract_storage_at_capped. When
+        // writes moved to per slot leaves this reader was left on the old single blob,
+        // so it returned an empty map for every contract while the state was there.
+        let mut l = Ledger::new();
+        let id = [0x5Au8; 32];
+        let address = qtv_idfmt::render_address(&id).unwrap();
+        let slot = qtv_vm::abi::scalar_key(9);
+        l.set_contract_slot(&id, &slot, 4242);
+
+        let direct = l.contract_storage(&id);
+        assert_eq!(direct.get(&slot), Some(&4242), "the slot is written");
+
+        let over_rpc = l
+            .contract_storage_at_capped(&address)
+            .expect("under the cap");
+        assert_eq!(
+            over_rpc.get(&slot),
+            Some(&4242),
+            "the RPC reader must see the same slot the call wrote, not an empty map"
+        );
+        assert_eq!(over_rpc, direct, "both readers must agree");
+    }
+
     fn a_native_call_cannot_forge_the_paying_asset() {
         // Read all four words of the paying asset window (88..120) plus the first word
         // of the argument area (120), so a forged byte anywhere in the window is caught
