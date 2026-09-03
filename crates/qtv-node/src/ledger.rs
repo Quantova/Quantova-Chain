@@ -3431,6 +3431,12 @@ impl Ledger {
             }
             b"mainnet_start" => {
                 let day = u64_from_le(value).ok_or(EnactError::BadValue)?;
+                // Set once. Re-enacting this used to re-arm the session meter, which
+                // opens another full session emission each time it is passed, so a
+                // repeatable parameter change became a repeatable mint.
+                if self.stake_mainnet_start() != u64::MAX {
+                    return Err(EnactError::BadValue);
+                }
                 self.set_stake_mainnet_start(day);
                 self.set_session_meter(&SessionMeter::new(day));
                 Ok(())
