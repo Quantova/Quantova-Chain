@@ -94,6 +94,92 @@ pub struct StateStore {
     committed_height: Option<u64>,
 }
 
+/// How recently the holder must have committed for the store to be treated as live.
+///
+/// Only ever used to decide whether it is safe to REWRITE the log on open. It never
+/// refuses to open, because a store that will not open is a validator that cannot
+/// restart, which is a far worse failure than a skipped compaction.
+const HOLDER_FRESH: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn holder_path(path: &Path) -> PathBuf {
+    let mut p = path.to_path_buf().into_os_string();
+    p.push(".holder");
+    PathBuf::from(p)
+}
+
+/// Whether another process is actively committing to this log right now.
+///
+/// The running store touches its holder file on every commit. Nothing here refuses
+/// to open: it only tells `open` to leave the bytes alone, because truncating and
+/// renaming underneath a live node hands it a descriptor with no name and silently
+/// throws away every block it goes on to write.
+fn another_process_is_live(path: &Path) -> bool {
+    let holder = holder_path(path);
+    let Ok(meta) = std::fs::metadata(&holder) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    // A holder stamped in the future is a clock change, not a live writer.
+    let fresh = std::time::SystemTime::now()
+        .duration_since(modified)
+        .map(|age| age < HOLDER_FRESH)
+        .unwrap_or(false);
+    if !fresh {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(&holder) else {
+        return false;
+    };
+    let Ok(pid) = text.trim().parse::<u32>() else {
+        return false;
+    };
+    // Our own holder from earlier in this process is not contention.
+    if pid == std::process::id() {
+        return false;
+    }
+    // Freshness alone would call a node that crashed seconds ago a live writer and
+    // refuse to clean its torn tail on restart. Only a pid that still exists is a
+    // reason to leave the bytes alone.
+    process_is_alive(pid)
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    // `ps` rather than `kill -0`, which reports a live process owned by another user
+    // as dead: it fails with EPERM, and an exit status cannot tell that apart from
+    // "no such process". Reading a live holder as dead is the dangerous direction,
+    // because it is what lets a second opener rewrite the log underneath it.
+    std::process::Command::new("ps")
+        .arg("-p")
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    // Without a portable liveness check, keep the previous behaviour rather than
+    // silently declining to clean a torn tail.
+    false
+}
+
+fn touch_holder(path: &Path) {
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(holder_path(path))
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(std::process::id().to_string().as_bytes())
+        });
+}
+
 impl StateStore {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
@@ -144,10 +230,15 @@ impl StateStore {
             head,
             committed_height,
         };
-        if committed_len < total_len {
+        // Another process committing right now owns these bytes. Truncating or
+        // renaming underneath it leaves its descriptor pointing at an unlinked inode
+        // and every block it goes on to write is lost on the next restart, with no
+        // error anywhere. Opening still succeeds: this only declines to REWRITE.
+        let contended = another_process_is_live(&store.path);
+        if committed_len < total_len && !contended {
             store.log.truncate(committed_len)?;
         }
-        if store.should_compact(committed_len) {
+        if !contended && store.should_compact(committed_len) {
             // Compaction is an optimisation, never a correctness requirement. A store
             // that cannot be rewritten, for want of disk or a read only mount, still
             // holds every committed byte, so refusing to boot over it would turn a
@@ -268,6 +359,8 @@ impl StateStore {
         self.log.sync()?;
         self.head = Some(root);
         self.committed_height = Some(height);
+        // Say we are alive, so nothing else rewrites this log underneath us.
+        touch_holder(&self.path);
         Ok(())
     }
 
@@ -802,5 +895,105 @@ mod compaction_survives_the_rename {
         );
         assert_eq!(reopened.committed_height(), Some(2));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod live_holder {
+    use super::*;
+
+    fn dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("qtv-holder-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_second_open_does_not_rewrite_a_log_a_live_process_is_committing_to() {
+        // Nothing locks this path, so any tool, backup script or mistakenly started
+        // second node used to rewrite a running validator's log. The cheap and most
+        // dangerous half is the truncate: a live node always has entries appended
+        // past its last commit, and a second open threw exactly those away, leaving
+        // the running node writing into a file nobody would read back.
+        let d = dir("live");
+        let path = d.join("state.log");
+
+        let mut live = StateStore::open(&path).unwrap();
+        live.put_account([1u8; 32], vec![1]).unwrap();
+        live.commit(1, [7u8; 32]).unwrap();
+        let committed = std::fs::metadata(&path).unwrap().len();
+
+        // Work in flight: appended, not yet committed. The normal state of a running
+        // node between blocks.
+        live.put_account([2u8; 32], vec![2, 2]).unwrap();
+        live.put_account([3u8; 32], vec![3, 3, 3]).unwrap();
+        let with_inflight = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            with_inflight > committed,
+            "there is uncommitted work on disk"
+        );
+
+        // Stand in for the other process. Pid 1 always exists on unix, so this is a
+        // holder naming a genuinely live process that is not this one.
+        std::fs::write(holder_path(&path), b"1").unwrap();
+        assert!(
+            another_process_is_live(&path),
+            "a fresh holder naming a live pid is contention"
+        );
+
+        let second = StateStore::open(&path).unwrap();
+        drop(second);
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            with_inflight,
+            "a second open must not truncate work a live process has in flight"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn our_own_holder_is_not_treated_as_contention() {
+        // Otherwise a restart within the freshness window would decline to clean its
+        // own torn tail, and every reopen inside one process would too.
+        let d = dir("self");
+        let path = d.join("state.log");
+        let mut s = StateStore::open(&path).unwrap();
+        s.put_account([1u8; 32], vec![1]).unwrap();
+        s.commit(1, [1u8; 32]).unwrap();
+        assert!(
+            !another_process_is_live(&path),
+            "our own pid is not another process"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_stale_holder_never_stops_a_restart() {
+        // A crashed node leaves its holder behind. Refusing to compact forever would
+        // be a slow leak, and refusing to OPEN would be a validator that cannot come
+        // back, which is the worse failure by far.
+        let d = dir("stale");
+        let path = d.join("state.log");
+        let mut s = StateStore::open(&path).unwrap();
+        s.put_account([1u8; 32], vec![1]).unwrap();
+        s.commit(1, [1u8; 32]).unwrap();
+        drop(s);
+
+        // Backdate the holder well past the freshness window.
+        let holder = holder_path(&path);
+        assert!(holder.exists(), "committing stamps a holder");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let f = std::fs::File::options().write(true).open(&holder).unwrap();
+        f.set_modified(old).unwrap();
+
+        assert!(
+            !another_process_is_live(&path),
+            "a stale holder is not live"
+        );
+        let reopened = StateStore::open(&path).unwrap();
+        assert_eq!(reopened.committed_height(), Some(1), "it still opens");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
