@@ -40,6 +40,61 @@ pub const STORAGE_ACCESS_BYTE_METER: u64 = 1;
 /// pricing the real work so a call cannot walk a large keyspace for nothing.
 pub const SLOT_ACCESS_METER: u64 = 200;
 
+#[cfg(test)]
+mod slot_charge {
+    use super::*;
+
+    fn run(src: &str, reads: Vec<u64>) -> ContractOutcome {
+        let key = qtv_vm::abi::scalar_key(0);
+        let code = qtv_vm::asm::assemble(src).expect("assembles");
+        let selector = [3u8, 3, 3, 3];
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads,
+                    writes: vec![],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
+            }],
+        );
+        let mut memory = vec![0u8; 4096];
+        memory[..32].copy_from_slice(&key);
+        execute_contract_call_lazy(
+            &container.canonical_bytes(),
+            selector,
+            &|_k| 41,
+            &memory,
+            4_000_000,
+        )
+        .expect("the call halts")
+    }
+
+    #[test]
+    fn a_read_costs_the_same_slot_charge_as_a_write() {
+        // Separating fetched slots from written ones stopped a read looking like a
+        // write, and in doing so took reads out of this charge entirely. A read is a
+        // trie lookup on every validator, so leaving it free let one transaction walk
+        // an unbounded keyspace inside its own meter budget.
+        let with_read = run("LDI r0, 0\nSLOAD r1, r0\nHALT", vec![0]);
+        let without = run("LDI r0, 0\nHALT", vec![]);
+        assert!(
+            with_read.meter_used >= without.meter_used + SLOT_ACCESS_METER,
+            "a fetched slot must cost at least one slot access: with {} without {}",
+            with_read.meter_used,
+            without.meter_used
+        );
+        assert!(
+            with_read.storage.is_empty(),
+            "a read must still write nothing back"
+        );
+    }
+}
+
 pub fn transfer_call(recipient: &str, amount: u64) -> Call {
     let mut encoder = Encoder::new();
     encoder.put_u64(amount);
@@ -220,7 +275,11 @@ pub fn execute_contract_call_lazy(
             Fault::OutOfMeter => ExecError::MeterExhausted,
             other => ExecError::Vm(other),
         })?;
-    let touched = outcome.storage.len() as u64;
+    // Reads cost the node a trie lookup exactly like writes do. Charging only the
+    // written set made walking an unbounded keyspace free, so one transaction could
+    // force arbitrarily many lookups inside its own meter budget. The two sets are
+    // disjoint by construction: the loader only runs on a miss in `storage`.
+    let touched = outcome.storage.len() as u64 + outcome.fetched as u64;
     Ok(ContractOutcome {
         storage: outcome
             .dirty
