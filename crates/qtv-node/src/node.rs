@@ -1210,7 +1210,11 @@ fn execute_ordered_across(
             if ledger
                 .apply_atomic(|l| dispatch_vm(l, wrapper, verified[index], fee_params, now_seconds))
             {
-                vm_meter = vm_meter.saturating_add(meter);
+                // Charge what the call actually cost, not what it declared. Reserving
+                // the declared limit let a handful of transactions that execute
+                // nothing hold the whole block budget and censor every real contract
+                // call in the block, for a flat fee each.
+                vm_meter = vm_meter.saturating_add(ledger.last_vm_meter_used().min(meter));
                 included.push(wrapper.clone());
             }
             continue;
