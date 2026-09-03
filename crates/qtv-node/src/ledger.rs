@@ -2547,6 +2547,7 @@ impl Ledger {
             meter,
         ) {
             Ok(outcome) => {
+                self.last_vm_meter_used = outcome.meter_used;
                 let mut native_credits: Vec<(String, u64)> = Vec::new();
                 let mut native_sent: u64 = 0;
                 let mut asset_credits: Vec<([u8; 16], [u8; 32], u128)> = Vec::new();
@@ -8121,6 +8122,10 @@ pub struct Ledger {
     round_proposer: Option<String>,
     execution_height: u64,
     journal: Option<Vec<(Key, Option<Vec<u8>>)>>,
+    /// Meter actually consumed by the most recent contract call. The block budget
+    /// charges this rather than the limit a transaction declared, so declaring a
+    /// large limit and doing nothing cannot reserve the block against everyone else.
+    last_vm_meter_used: u64,
 }
 
 impl Ledger {
@@ -8132,6 +8137,7 @@ impl Ledger {
             round_proposer: None,
             execution_height: 0,
             journal: None,
+            last_vm_meter_used: 0,
         }
     }
 
@@ -8144,6 +8150,7 @@ impl Ledger {
             round_proposer: None,
             execution_height: 0,
             journal: None,
+            last_vm_meter_used: 0,
         }
     }
 
@@ -8169,6 +8176,11 @@ impl Ledger {
         }
         let trie = &mut self.trie;
         trie.remove(key)
+    }
+
+    /// What the last contract call actually cost, for charging the block budget.
+    pub fn last_vm_meter_used(&self) -> u64 {
+        self.last_vm_meter_used
     }
 
     pub(crate) fn apply_atomic<F>(&mut self, f: F) -> bool
