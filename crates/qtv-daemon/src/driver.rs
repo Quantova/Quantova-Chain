@@ -232,10 +232,11 @@ impl Driver {
     fn adopt_rejoined(&mut self) {
         while let Ok((q, channel)) = self.rejoined.try_recv() {
             if q < self.send.len() {
+                // Only the transport is restored here. `up` is NOT link health, it is
+                // the membership of the reveal barrier that decides which set every
+                // node calls select() on, so moving it from one node's view of a
+                // socket would let two nodes form different committees.
                 self.send[q] = Some(channel);
-                if let Some(flag) = self.up.get_mut(q) {
-                    *flag = true;
-                }
             }
         }
     }
@@ -479,13 +480,11 @@ impl Driver {
                 None => false,
             };
             if failed {
+                // Drop the transport and ask for it to be redialled. `up` is left
+                // alone on purpose: it is the reveal barrier's membership, shared
+                // across nodes, and shrinking it from one node's failed write is a
+                // consensus divergence, not a bookkeeping tidy up.
                 self.send[q] = None;
-                // Stop counting a peer whose link has died, otherwise the round waits
-                // on it every height and adopt_rejoined's up write can never matter
-                // because the flag was already true.
-                if let Some(flag) = self.up.get_mut(q) {
-                    *flag = false;
-                }
                 let _ = self.down.try_send(q);
             }
         }
