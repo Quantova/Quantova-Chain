@@ -299,7 +299,7 @@ pub fn handle(
         Request::Submit(bytes) => Ok(submit(node, bytes)),
         Request::Block(selector) => block(node, selector),
         Request::Validators => Ok(validators(node)),
-        Request::ChainParams => Ok(chain_params()),
+        Request::ChainParams => Ok(chain_params(node)),
         Request::StakingState => Ok(staking_state(node)),
         Request::Pending => Ok(pending(node)),
         Request::Supply => Ok(supply(node)),
@@ -519,13 +519,17 @@ fn staking_state(node: &DevNode) -> Json {
     ])
 }
 
-fn chain_params() -> Json {
+fn chain_params(node: &DevNode) -> Json {
+    let ledger = node.ledger();
     let tracks: Vec<Json> = qtv_governance::Track::all()
         .iter()
         .map(|track| {
             object(vec![
                 ("code", Json::Int(u64::from(track.code()))),
-                ("deposit", Json::Int(track.deposit())),
+                // The deposit governance is actually charging, not the figure this
+                // binary was compiled with. Publishing the compiled constant after a
+                // retune sent proposers the wrong amount and cost them the fee.
+                ("deposit", Json::Int(ledger.gov_track_deposit(*track))),
                 (
                     "threshold_bps",
                     Json::Int(qtv_governance::THRESHOLD_BPS as u64),
