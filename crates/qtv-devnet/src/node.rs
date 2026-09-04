@@ -239,6 +239,7 @@ pub struct DevNode {
     genesis_time: u64,
     block_store: BlockStore,
     event_store: EventStore,
+    side_event_store: EventStore,
     state_store: StateStore,
     burn_archive: BurnArchive,
     outbox: Vec<Wrapper>,
@@ -290,6 +291,7 @@ impl DevNode {
         std::fs::create_dir_all(&node.store_dir)?;
         let block_store = BlockStore::open(node.store_dir.join("blocks.log"))?;
         let event_store = EventStore::open(node.store_dir.join("events.log"))?;
+        let side_event_store = EventStore::open(node.store_dir.join("side_events.log"))?;
         let state_store = StateStore::open(node.store_dir.join("state.log"))?;
         let burn_archive = BurnArchive::open(node.store_dir.join("burns.log"))?;
         let sign_guard = SignGuard::open(node.store_dir.join("sign.watermark"))?;
@@ -324,6 +326,7 @@ impl DevNode {
             genesis_time: devnet.genesis_time,
             block_store,
             event_store,
+            side_event_store,
             state_store,
             burn_archive,
             outbox: Vec::new(),
@@ -1099,6 +1102,8 @@ impl DevNode {
         let side_events = self.ledger.side_events().to_vec();
         if !side_events.is_empty() {
             self.side_events_by_height.insert(self.height, side_events);
+            self.side_events_by_height
+                .retain(|&h, _| h >= self.height.saturating_sub(EVENTS_CACHED_HEIGHTS));
         }
         let attesters = certificate.attesters();
         let cert_slot = crate::wire::certificate_to_bytes(&certificate);
@@ -1882,10 +1887,17 @@ impl DevNode {
             .get(&height)
             .map(|events| events.iter().map(BlockEvent::encode).collect())
             .unwrap_or_default();
+        let side_leaves: Vec<Vec<u8>> = self
+            .side_events_by_height
+            .get(&height)
+            .map(|events| events.iter().map(SideEvent::encode).collect())
+            .unwrap_or_default();
         self.event_store.put_events(height, &leaves)?;
+        self.side_event_store.put_events(height, &side_leaves)?;
         self.block_store.put_block(block)?;
         self.block_store.sync()?;
         self.event_store.sync()?;
+        self.side_event_store.sync()?;
         self.state_store.commit(height, self.ledger.q_root())?;
         // The state log only ever grows while the node runs, so give it a chance
         // to shed superseded copies. The call stats the file and returns unless a
@@ -2095,9 +2107,17 @@ impl DevNode {
     }
 
     pub fn side_events_at(&self, height: Height) -> Vec<SideEvent> {
-        self.side_events_by_height
-            .get(&height)
-            .cloned()
+        if let Some(events) = self.side_events_by_height.get(&height) {
+            return events.clone();
+        }
+        self.side_event_store
+            .events_at(height)
+            .map(|leaves| {
+                leaves
+                    .iter()
+                    .filter_map(|leaf| SideEvent::decode(leaf))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -2206,6 +2226,8 @@ impl DevNode {
         let side_events = self.ledger.side_events().to_vec();
         if !side_events.is_empty() {
             self.side_events_by_height.insert(self.height, side_events);
+            self.side_events_by_height
+                .retain(|&h, _| h >= self.height.saturating_sub(EVENTS_CACHED_HEIGHTS));
         }
         self.persist(&block).map_err(|_| SyncError::Io)?;
         self.archive_burn_block(&block);
