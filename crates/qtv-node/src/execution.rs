@@ -304,13 +304,8 @@ pub fn decode_container(bytes: &[u8]) -> Option<qtv_vm::container::Container> {
     Some(Container::new(code, consts, entries))
 }
 
-/// Run an entry, reading storage slots on demand.
-///
-/// The whole of a contract's storage used to be handed in, and charged for, on every
-/// call. That made a call cost what the contract HELD rather than what it TOUCHED, and
-/// once a contract held more than the per transaction meter could pay for it could
-/// never be called again. The loader is asked only for the slots the entry actually
-/// reads, and only the slots it writes come back.
+/// Run an entry, reading storage slots on demand, so a call costs what it touches
+/// rather than what the contract holds.
 pub fn execute_contract_call_lazy(
     container_bytes: &[u8],
     selector: [u8; qtv_vm::container::SELECTOR_BYTES],
