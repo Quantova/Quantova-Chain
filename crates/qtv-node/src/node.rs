@@ -169,10 +169,37 @@ pub fn min_validator_cores() -> usize {
     (machine / 2).max(1)
 }
 
+/// A block clock a test can hold still. Zero means the real clock.
+///
+/// Compiled out of a default build, so a released node has no way to reach it.
+#[cfg(any(test, feature = "test-fixtures"))]
+static PINNED_BLOCK_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Hold the block clock at `seconds`, or release it with zero.
+///
+/// A determinism test runs the same script twice and compares the finalized chains,
+/// but the header carries the wall clock, so two runs either side of a second boundary
+/// stamp different times and produce different block ids. That made the test fail about
+/// once in twenty five runs and read as consensus non determinism when the chain was
+/// behaving exactly as it should. Determinism means the same inputs give the same
+/// chain, and the timestamp IS one of the inputs, so a test has to hold it still rather
+/// than compare across two different ones.
+#[cfg(any(test, feature = "test-fixtures"))]
+pub fn pin_block_time(seconds: u64) {
+    PINNED_BLOCK_TIME.store(seconds, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Real seconds since the unix epoch. A block stamps this once, carries it in
 /// the header, and every node applying the block reads it back from there, so
 /// the proposer and the applier execute against the identical value.
 pub fn wall_clock_seconds() -> u64 {
+    #[cfg(any(test, feature = "test-fixtures"))]
+    {
+        let pinned = PINNED_BLOCK_TIME.load(std::sync::atomic::Ordering::SeqCst);
+        if pinned != 0 {
+            return pinned;
+        }
+    }
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
