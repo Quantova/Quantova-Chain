@@ -24,7 +24,7 @@ use qtv_node::mempool::{Admitted, Mempool, Reject};
 use qtv_node::node::{execute_ordered, reweigh_roster, Genesis, GenesisAccount};
 use qtv_node::watermark::SignGuard;
 use qtv_sampler::committee::PublishedReveal;
-use qtv_store::{BlockStore, BurnArchive, BurnArchiveEntry, StateStore};
+use qtv_store::{BlockStore, BurnArchive, BurnArchiveEntry, EventStore, StateStore};
 use qtv_tx::{Body, Call, Wrapper};
 
 use crate::config::{DevnetConfig, NodeConfig};
@@ -214,6 +214,14 @@ struct Lock {
     polka: Certificate,
 }
 
+/// How many recent heights of events stay in memory.
+///
+/// The event store is the durable record, so this map is a read cache and nothing more.
+/// It used to be the ONLY copy, unpruned, growing by one entry per block for the life of
+/// the process, which is what made a long running node bloat and what made a restart
+/// lose every event the chain had ever emitted.
+const EVENTS_CACHED_HEIGHTS: Height = 1024;
+
 pub struct DevNode {
     id: u64,
     identity: Identity,
@@ -230,6 +238,7 @@ pub struct DevNode {
     parent_val: Parent,
     genesis_time: u64,
     block_store: BlockStore,
+    event_store: EventStore,
     state_store: StateStore,
     burn_archive: BurnArchive,
     outbox: Vec<Wrapper>,
@@ -280,6 +289,7 @@ impl DevNode {
     pub fn open(node: &NodeConfig, devnet: &DevnetConfig) -> Result<DevNode, RoundError> {
         std::fs::create_dir_all(&node.store_dir)?;
         let block_store = BlockStore::open(node.store_dir.join("blocks.log"))?;
+        let event_store = EventStore::open(node.store_dir.join("events.log"))?;
         let state_store = StateStore::open(node.store_dir.join("state.log"))?;
         let burn_archive = BurnArchive::open(node.store_dir.join("burns.log"))?;
         let sign_guard = SignGuard::open(node.store_dir.join("sign.watermark"))?;
@@ -313,6 +323,7 @@ impl DevNode {
             parent_val: Parent::Genesis,
             genesis_time: devnet.genesis_time,
             block_store,
+            event_store,
             state_store,
             burn_archive,
             outbox: Vec::new(),
@@ -996,6 +1007,15 @@ impl DevNode {
         }
     }
 
+    /// Drop cached events below `floor`. The store is the record now, so this map is
+    /// only a window over recent heights and a read past it goes to disk.
+    fn forget_cached_events_before(&mut self, floor: Height) {
+        if floor == 0 {
+            return;
+        }
+        self.events_by_height.retain(|&height, _| height >= floor);
+    }
+
     fn observe_finality(&mut self, height: Height, value: [u8; 32]) {
         if let FinalityStatus::Violation {
             height,
@@ -1074,6 +1094,7 @@ impl DevNode {
         let block_events = self.ledger.block_events().to_vec();
         if !block_events.is_empty() {
             self.events_by_height.insert(self.height, block_events);
+            self.forget_cached_events_before(self.height.saturating_sub(EVENTS_CACHED_HEIGHTS));
         }
         let side_events = self.ledger.side_events().to_vec();
         if !side_events.is_empty() {
@@ -1852,8 +1873,19 @@ impl DevNode {
                 None => self.state_store.delete_account(key)?,
             }
         }
+        // Events go to disk with the block. Held only in memory they died with the
+        // process, so a restart lost every event the chain had emitted and the explorer
+        // was the sole surviving record of them by accident. Collected before the store
+        // is touched so the read of the map ends before the write to the store begins.
+        let leaves: Vec<Vec<u8>> = self
+            .events_by_height
+            .get(&height)
+            .map(|events| events.iter().map(BlockEvent::encode).collect())
+            .unwrap_or_default();
+        self.event_store.put_events(height, &leaves)?;
         self.block_store.put_block(block)?;
         self.block_store.sync()?;
+        self.event_store.sync()?;
         self.state_store.commit(height, self.ledger.q_root())?;
         // The state log only ever grows while the node runs, so give it a chance
         // to shed superseded copies. The call stats the file and returns unless a
@@ -2045,9 +2077,20 @@ impl DevNode {
     }
 
     pub fn events_at(&self, height: Height) -> Vec<BlockEvent> {
-        self.events_by_height
-            .get(&height)
-            .cloned()
+        if let Some(events) = self.events_by_height.get(&height) {
+            return events.clone();
+        }
+        // Past the cached window, so read it back from disk. A leaf that will not decode
+        // is dropped rather than faking an event, which keeps a torn tail from being
+        // served as chain history.
+        self.event_store
+            .events_at(height)
+            .map(|leaves| {
+                leaves
+                    .iter()
+                    .filter_map(|leaf| BlockEvent::decode(leaf))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -2158,6 +2201,7 @@ impl DevNode {
         let block_events = self.ledger.block_events().to_vec();
         if !block_events.is_empty() {
             self.events_by_height.insert(self.height, block_events);
+            self.forget_cached_events_before(self.height.saturating_sub(EVENTS_CACHED_HEIGHTS));
         }
         let side_events = self.ledger.side_events().to_vec();
         if !side_events.is_empty() {
