@@ -39,8 +39,8 @@ qtv-loopback = { path = "../qtv-loopback" }
 
 # The consensus parameters reported alongside the run, pinned at the same tag the
 # devnet uses so the whole graph keeps one crypto version.
-qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "70e8c3a77ef3c427f8b8d60150776870d725020f" }
-qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "70e8c3a77ef3c427f8b8d60150776870d725020f" }
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "c1348ca801e7f97ed47572ae19c09bb7ea42a60d" }
+qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "c1348ca801e7f97ed47572ae19c09bb7ea42a60d" }
 
 [lints]
 workspace = true
