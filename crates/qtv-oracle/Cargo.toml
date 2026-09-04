@@ -19,7 +19,7 @@ qtv-account = { path = "../qtv-account" }
 qtv-tx = { path = "../qtv-tx" }
 qtv-node = { path = "../qtv-node" }
 qtv-governance = { path = "../qtv-governance" }
-qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "4d73a36c112b91a6a25a6a876f54cdccb729c7de" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "292594d18080179e304576164f44703d410d919f" }
 
 [lints]
 workspace = true
