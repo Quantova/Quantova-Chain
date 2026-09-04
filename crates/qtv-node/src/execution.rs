@@ -42,25 +42,12 @@ pub const SLOT_ACCESS_METER: u64 = 200;
 
 /// What one byte of PERMANENT contract code costs to deploy.
 ///
-/// A deployed container is written into the trie once and read by every validator for
-/// the life of the chain, so it is the most expensive byte the chain sells. Reading a
-/// container costs CODE_ACCESS_BYTE_METER per byte per call; writing one has to cost
-/// far more, or a single flat fee transaction buys unbounded permanent state.
-///
-/// 100 is chosen against the real ceiling, not picked round: MAX_TX_METER is a quarter
-/// of the block budget, so this sets the largest deployable contract at 125,000 bytes
-/// and leaves the biggest contract in examples/ at roughly half the transaction limit.
-/// Pricing it higher starts refusing contracts people actually write.
-///
-/// This bounds the RATE at which permanent state can be bought. It does not price
-/// permanence itself: the transaction fee is flat and frozen, so a block of deploys
-/// still costs only its transaction fees. Charging for storage over time is a fee
-/// model change and is not this constant's job.
+/// Set against MAX_TX_METER, which caps a deployable contract at 125,000 bytes. This
+/// bounds the rate permanent state can be bought, not the price of permanence.
 pub const DEPLOY_BYTE_METER: u64 = 100;
 
-/// The meter a deploy of this many bytes must be able to pay before anything is
-/// written. Saturating on purpose: an absurd size yields an unpayable price rather
-/// than wrapping to a cheap one.
+/// What a deploy of this size must pay before anything is written. Saturating, so an
+/// absurd size prices out rather than wrapping cheap.
 pub fn deploy_meter_cost(container_bytes: usize) -> u64 {
     (container_bytes as u64).saturating_mul(DEPLOY_BYTE_METER)
 }

@@ -33,9 +33,7 @@ impl EventRecord {
         let mut decoder = Decoder::new(bytes);
         let height = decoder.get_u64()?;
         let count = decoder.get_u64()?;
-        // Not pre allocated from `count`. A torn tail can carry any number there, and
-        // reserving on it would turn a truncated write into an allocation the size of
-        // the claim. The reads below run out first.
+        // Not pre allocated from `count`: a torn tail can claim any size.
         let mut events = Vec::new();
         for _ in 0..count {
             events.push(decoder.get_bytes()?.to_vec());
@@ -45,17 +43,8 @@ impl EventRecord {
     }
 }
 
-/// A durable, append only record of the events each block emitted.
-///
-/// Events used to live only in `events_by_height` in the node, which meant two failures
-/// at once: the map grew by one entry per block for the life of the process, and a
-/// restart lost every event the chain had ever emitted. Nothing else held them. Block
-/// bodies and state are persisted, but events are not recoverable from either, because
-/// regenerating them means replaying against historical state the node compacts away.
-///
-/// Only the height index is kept in memory, the same shape `BlockStore` uses. Payloads
-/// stay on disk and are read on demand, so holding the full history costs a few bytes a
-/// block rather than every event the chain ever produced.
+/// A durable, append only record of the events each block emitted. Only the height
+/// index is held in memory; payloads stay on disk and are read on demand.
 #[derive(Debug)]
 pub struct EventStore {
     log: Log,
@@ -111,9 +100,7 @@ impl EventStore {
     }
 
     pub fn events_at(&self, height: u64) -> Option<Vec<Vec<u8>>> {
-        // Written in height order, so the index is sorted and a scan is never needed.
-        // A height is written at most once, and `rposition` would still be correct if a
-        // reorg ever appended one twice, since the later record is the live one.
+        // Later record wins, so a reorg that appended a height twice still reads right.
         let index = self.heights.iter().rposition(|&h| h == height)?;
         let payload = self
             .log
@@ -133,9 +120,7 @@ impl EventStore {
         if keep == self.heights.len() {
             return Ok(());
         }
-        // `starts` is the PAYLOAD offset and `lens` the payload length, so the frame's
-        // trailing checksum has to be counted or the cut lands inside the last record
-        // that was meant to survive and takes it with it.
+        // `starts` is the payload offset, so the frame checksum has to be counted.
         let len = if keep == 0 {
             0
         } else {
@@ -172,7 +157,6 @@ mod tests {
 
     #[test]
     fn events_come_back_after_the_store_is_reopened() {
-        // The whole point. A restart used to lose every event the chain had emitted.
         let dir = std::env::temp_dir().join(format!("qtv-events-{}", std::process::id()));
         let _ = std::fs::remove_file(&dir);
         {

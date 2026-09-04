@@ -214,12 +214,8 @@ struct Lock {
     polka: Certificate,
 }
 
-/// How many recent heights of events stay in memory.
-///
-/// The event store is the durable record, so this map is a read cache and nothing more.
-/// It used to be the ONLY copy, unpruned, growing by one entry per block for the life of
-/// the process, which is what made a long running node bloat and what made a restart
-/// lose every event the chain had ever emitted.
+/// Recent heights of events kept in memory. The store is the durable record; this is a
+/// read cache.
 const EVENTS_CACHED_HEIGHTS: Height = 1024;
 
 pub struct DevNode {
@@ -1010,8 +1006,7 @@ impl DevNode {
         }
     }
 
-    /// Drop cached events below `floor`. The store is the record now, so this map is
-    /// only a window over recent heights and a read past it goes to disk.
+    /// Drop cached events below `floor`. A read past the window goes to disk.
     fn forget_cached_events_before(&mut self, floor: Height) {
         if floor == 0 {
             return;
@@ -1878,10 +1873,7 @@ impl DevNode {
                 None => self.state_store.delete_account(key)?,
             }
         }
-        // Events go to disk with the block. Held only in memory they died with the
-        // process, so a restart lost every event the chain had emitted and the explorer
-        // was the sole surviving record of them by accident. Collected before the store
-        // is touched so the read of the map ends before the write to the store begins.
+        // Collected before the store is touched, so the map read ends before the write.
         let leaves: Vec<Vec<u8>> = self
             .events_by_height
             .get(&height)
@@ -2092,9 +2084,7 @@ impl DevNode {
         if let Some(events) = self.events_by_height.get(&height) {
             return events.clone();
         }
-        // Past the cached window, so read it back from disk. A leaf that will not decode
-        // is dropped rather than faking an event, which keeps a torn tail from being
-        // served as chain history.
+        // Past the cache, so read from disk. An undecodable leaf is dropped, not faked.
         self.event_store
             .events_at(height)
             .map(|leaves| {

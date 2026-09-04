@@ -537,8 +537,7 @@ fn gov_freeze_key(id: &[u8; 32]) -> Key {
     sha3::sha3_256(&input)
 }
 
-/// Keyed by the asset id rather than the issuer, so a contract moving an asset can ask
-/// whether its issuer is stopped without holding the address the asset came from.
+/// Keyed by asset id, so a mover can ask without holding the issuer address.
 fn gov_stopped_asset_key(asset_id: &[u8; 16]) -> Key {
     let mut input = Vec::with_capacity(GOV_STOPPED_ASSET_TAG.len() + asset_id.len());
     input.extend_from_slice(GOV_STOPPED_ASSET_TAG);
@@ -1152,23 +1151,8 @@ impl Ledger {
         matches!(self.trie.get(&gov_freeze_key(id)), Some(bytes) if !bytes.is_empty())
     }
 
-    /// Whether the account that issued this asset has been stopped by governance.
-    ///
-    /// A freeze or a blacklist names an ADDRESS, and the asset an address issues is
-    /// identified by a one way hash of it, so there is no way back from an asset to its
-    /// issuer. The hash only runs forward, so it is taken once when the account is
-    /// stopped and the answer kept under its own key. Gating the CALL alone was not
-    /// enough. A contract moves asset balances for an arbitrary issuer in two places,
-    /// so a pass through contract carrying a frozen issuer's asset moved it in one
-    /// transaction, and any pool holding a frozen asset paid it out to a passer by who
-    /// never named the issuer at all. The transaction gate cannot see either, because
-    /// the transaction never mentions the frozen address.
-    ///
-    /// This runs inside the loop over a call's asset credits, so it has to be one
-    /// lookup. Scanning a list of stopped accounts instead cost a hash per stopped
-    /// account per credit, and the meter never charged for it, so the price of moving
-    /// an asset grew with the length of the blacklist rather than with the work the
-    /// transaction actually asked for.
+    /// Whether governance has stopped the account that issued this asset. The asset id
+    /// is a one way hash of the issuer, so it is taken at stop time and kept by key.
     fn asset_issuer_is_stopped(&self, asset_id: &[u8; 16]) -> bool {
         matches!(self.trie.get(&gov_stopped_asset_key(asset_id)), Some(bytes) if !bytes.is_empty())
     }
@@ -8636,12 +8620,7 @@ impl BlockEvent {
         encoder.into_bytes()
     }
 
-    /// The inverse of `encode`, so a persisted event can be read back.
-    ///
-    /// Events used to exist only in memory, which meant a node restart lost every
-    /// event the chain had ever emitted and the explorer was the sole surviving record
-    /// of them by accident. Nothing could read one back because nothing could decode
-    /// one.
+    /// The inverse of `encode`.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let mut decoder = Decoder::new(bytes);
         let contract = String::from_utf8(decoder.get_bytes().ok()?.to_vec()).ok()?;
@@ -8847,10 +8826,7 @@ impl SideEvent {
     }
 }
 
-/// The three fields below are `&'static str` produced by total functions over closed
-/// sets, so decoding one means handing back the SAME static string rather than a new
-/// allocation. An unrecognised value fails the decode instead of being invented, which
-/// keeps a torn record from being served as governance history.
+/// These fields are `&'static str` over closed sets. An unknown value fails the decode.
 fn intern_action(text: &str) -> Option<&'static str> {
     const ALL: [&str; 16] = [
         "activate",
@@ -8901,10 +8877,6 @@ fn get_word16(decoder: &mut Decoder<'_>) -> Option<[u8; 16]> {
 
 impl SideEvent {
     /// A side event as bytes, tagged by variant.
-    ///
-    /// Side events carry governance, staking and bridge history. They lived only in a
-    /// map in the node, so a restart lost them exactly as it lost block events, and
-    /// nothing could write them down because no encoding existed.
     pub fn encode(&self) -> Vec<u8> {
         let mut e = Encoder::new();
         match self {

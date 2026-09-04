@@ -221,22 +221,8 @@ pub enum FinalityStatus {
     },
 }
 
-/// How many epochs of finalized heights the violation check keeps.
-///
-/// This map is a local safety alarm. It catches THIS node finalizing two different
-/// values at one height. It is not the slashing record, which lives in the evidence
-/// pool and is keyed by offender rather than by height. Conflicting certificates for a
-/// single height arrive within a round of each other, so sixty four epochs is already
-/// far wider than the case it exists to catch, and at a 150ms block it covers about ten
-/// minutes for a couple of hundred kilobytes.
-///
-/// The limit this accepts, stated here rather than only in a report: a conflicting
-/// finalization for a height older than this window is NOT detected. That is bounded
-/// harm, because a certificate that old cannot be applied to a chain that has already
-/// finalized past it, and the offender remains slashable through the evidence pool.
-/// Before this the map was never pruned at all and grew by one entry per finalized
-/// height for the life of the process, which at a 150ms block is over half a million
-/// entries a day on a node that already needs swap to restart.
+/// Epochs of finalized heights kept for the conflict check. A conflict older than this
+/// window is not detected here; the slashing record is the evidence pool.
 const FINALITY_RETAINED_EPOCHS: u64 = 64;
 const FINALITY_RETAINED_HEIGHTS: u64 = FINALITY_RETAINED_EPOCHS * DEFAULT_SLOTS;
 
@@ -267,9 +253,7 @@ impl FinalityLedger {
                 conflicting: value,
             },
             None => {
-                // Older than the window, so it was already dropped and cannot be
-                // judged either way. Recording it would let the map grow backwards
-                // without bound, which is the leak this window exists to close.
+                // Below the window, so it cannot be judged and must not be recorded.
                 if height.saturating_add(FINALITY_RETAINED_HEIGHTS) < self.highest {
                     return FinalityStatus::Confirms;
                 }
@@ -802,10 +786,6 @@ mod tests {
 
     #[test]
     fn the_finality_record_stays_bounded_as_the_chain_advances() {
-        // It used to keep one entry per finalized height for the life of the process,
-        // with no pruning anywhere, so a validator accumulated over half a million
-        // entries a day at a 150ms block. The window has to hold the memory flat while
-        // still catching a conflict inside it.
         let mut ledger = FinalityLedger::new();
         let span = FINALITY_RETAINED_HEIGHTS * 4;
         for h in 1..=span {
@@ -817,7 +797,6 @@ mod tests {
             ledger.finalized.len()
         );
 
-        // A conflict inside the window is still a violation.
         let recent = span - 1;
         assert_eq!(
             ledger.observe(recent, [0xEEu8; 32]),
@@ -828,8 +807,6 @@ mod tests {
             }
         );
 
-        // One far behind the window is dropped rather than recorded, so replaying
-        // ancient heights cannot grow the map backwards.
         let before = ledger.finalized.len();
         assert_eq!(ledger.observe(1, [0xAAu8; 32]), FinalityStatus::Confirms);
         assert_eq!(
