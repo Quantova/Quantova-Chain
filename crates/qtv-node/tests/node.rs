@@ -347,6 +347,10 @@ fn run_scripted(params: &FeeParams) -> Result<Node, ProduceError> {
 
 #[test]
 fn the_same_inputs_give_the_same_finalized_chain() {
+    // The header carries the wall clock, so two runs either side of a second boundary
+    // stamp different times and produce different block ids through no fault of the
+    // chain. The timestamp is one of the inputs, so hold it still and compare the rest.
+    qtv_node::node::pin_block_time(1_760_000_000);
     let params = FeeParams::devnet();
     let one = run_scripted(&params).expect("first run");
     let two = run_scripted(&params).expect("second run");
