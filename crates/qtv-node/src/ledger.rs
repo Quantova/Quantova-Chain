@@ -4054,6 +4054,209 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn every_side_event_survives_a_round_trip_through_its_encoding() {
+        // Governance, staking and bridge history. These had no encoding at all, so they
+        // could not be written down and a restart lost them. Every variant has to
+        // return exactly, or a persisted event comes back as a different fact.
+        let all = vec![
+            SideEvent::GovPropose {
+                referendum: 7,
+                proposer: "Q1PROPOSER".to_string(),
+                track: 3,
+                action: "asset_register",
+                deposit: 1_000,
+            },
+            SideEvent::GovVote {
+                referendum: 7,
+                voter: "Q1VOTER".to_string(),
+                aye: true,
+                conviction: 2,
+                stake: 5_000,
+            },
+            SideEvent::GovTally {
+                referendum: 7,
+                status: "approved",
+                aye_stake: u128::MAX,
+                nay_stake: 0,
+            },
+            SideEvent::GovEnact {
+                referendum: 7,
+                action: "unfreeze",
+                proposal_hash: [9u8; 32],
+            },
+            SideEvent::Mint {
+                to: "Q1TO".to_string(),
+                amount: 42,
+            },
+            SideEvent::Spend {
+                source: "Q1SRC".to_string(),
+                to: "Q1DST".to_string(),
+                amount: 43,
+            },
+            SideEvent::Parameter {
+                key: vec![1, 2, 3],
+                value: Vec::new(),
+            },
+            SideEvent::Blacklist {
+                target: "Q1BAD".to_string(),
+            },
+            SideEvent::Freeze {
+                target: "Q1FROZEN".to_string(),
+            },
+            SideEvent::Unfreeze {
+                target: "Q1THAWED".to_string(),
+            },
+            SideEvent::RecoverySeizure {
+                victim: "Q1VICTIM".to_string(),
+                from: "Q1FROM".to_string(),
+                amount: 44,
+                scope: [3u8; 32],
+            },
+            SideEvent::RecoveryCredit {
+                victim: "Q1VICTIM".to_string(),
+                amount: 45,
+                scope: [4u8; 32],
+            },
+            SideEvent::GuardianFreeze {
+                target: "Q1HELD".to_string(),
+                bound: 99,
+            },
+            SideEvent::GuardianRotate {
+                size: 7,
+                threshold: 4,
+            },
+            SideEvent::CommitteeRotate {
+                operators: 9,
+                threshold: 5,
+            },
+            SideEvent::OperatorRevoke { operator_id: 11 },
+            SideEvent::AssetRegister {
+                asset_id: [6u8; 16],
+                cap: u128::MAX,
+                epoch_cap: 1,
+                requires_stark: true,
+            },
+            SideEvent::EpochAdvance { epoch: 12 },
+            SideEvent::Activate {
+                feature: b"qtv/feature".to_vec(),
+                version: 2,
+            },
+            SideEvent::BridgeMigration {
+                vault: "Q1VAULT".to_string(),
+            },
+            SideEvent::BridgeUnfreeze,
+            SideEvent::Bond {
+                validator: "Q1VAL".to_string(),
+                amount: 100,
+                fee: 5,
+            },
+            SideEvent::Unbond {
+                validator: "Q1VAL".to_string(),
+                amount: 100,
+            },
+            SideEvent::Slash {
+                validator: "Q1VAL".to_string(),
+                amount: 50,
+                disposition: SLASH_DISPOSITION_TREASURY,
+            },
+            SideEvent::Reward {
+                validator: "Q1VAL".to_string(),
+                amount: 3,
+            },
+            SideEvent::RewardClaim {
+                validator: "Q1VAL".to_string(),
+                amount: 3,
+            },
+            SideEvent::ContractTransfer {
+                contract: "Q1CONTRACT".to_string(),
+                to: "Q1HOLDER".to_string(),
+                amount: 8,
+            },
+            SideEvent::BridgeMint {
+                asset_id: [1u8; 16],
+                recipient: [2u8; 32],
+                amount: 77,
+            },
+            SideEvent::BridgeBurn {
+                asset_id: [1u8; 16],
+                holder: [2u8; 32],
+                amount: 78,
+                destination: [3u8; 32],
+                chain_id: 5,
+                burn_ref: [4u8; 32],
+            },
+            SideEvent::BridgeSettle {
+                asset_id: [1u8; 16],
+                beneficiary: [2u8; 32],
+                amount: 79,
+                burn_ref: [4u8; 32],
+            },
+            SideEvent::BridgeSlash {
+                asset_id: [1u8; 16],
+                beneficiary: [2u8; 32],
+                amount: 80,
+                burn_ref: [4u8; 32],
+            },
+        ];
+
+        for event in &all {
+            let decoded = SideEvent::decode(&event.encode())
+                .unwrap_or_else(|| panic!("{} must decode", event.kind()));
+            assert_eq!(decoded, *event, "{} did not return exactly", event.kind());
+        }
+
+        // A variant added later must not slip past the codec unnoticed. This match has
+        // no wildcard, so adding one stops the build here rather than silently losing
+        // that event on the next restart.
+        for event in &all {
+            match event {
+                SideEvent::GovPropose { .. }
+                | SideEvent::GovVote { .. }
+                | SideEvent::GovTally { .. }
+                | SideEvent::GovEnact { .. }
+                | SideEvent::Mint { .. }
+                | SideEvent::Spend { .. }
+                | SideEvent::Parameter { .. }
+                | SideEvent::Blacklist { .. }
+                | SideEvent::Freeze { .. }
+                | SideEvent::Unfreeze { .. }
+                | SideEvent::RecoverySeizure { .. }
+                | SideEvent::RecoveryCredit { .. }
+                | SideEvent::GuardianFreeze { .. }
+                | SideEvent::GuardianRotate { .. }
+                | SideEvent::CommitteeRotate { .. }
+                | SideEvent::OperatorRevoke { .. }
+                | SideEvent::AssetRegister { .. }
+                | SideEvent::EpochAdvance { .. }
+                | SideEvent::Activate { .. }
+                | SideEvent::BridgeMigration { .. }
+                | SideEvent::BridgeUnfreeze
+                | SideEvent::Bond { .. }
+                | SideEvent::Unbond { .. }
+                | SideEvent::Slash { .. }
+                | SideEvent::Reward { .. }
+                | SideEvent::RewardClaim { .. }
+                | SideEvent::ContractTransfer { .. }
+                | SideEvent::BridgeMint { .. }
+                | SideEvent::BridgeBurn { .. }
+                | SideEvent::BridgeSettle { .. }
+                | SideEvent::BridgeSlash { .. } => {}
+            }
+        }
+
+        assert!(
+            SideEvent::decode(&[99u8]).is_none(),
+            "an unknown tag must not decode"
+        );
+        let mut trailing = all[0].encode();
+        trailing.push(0);
+        assert!(
+            SideEvent::decode(&trailing).is_none(),
+            "a record with trailing bytes must not decode"
+        );
+    }
+
+    #[test]
     fn a_block_event_survives_a_round_trip_through_its_encoding() {
         // Nothing could read a persisted event back, because only the encode half
         // existed. Every field has to return exactly, including an empty payload and a
@@ -8641,6 +8844,470 @@ impl SideEvent {
             SideEvent::BridgeSettle { .. } => "bridge_settle",
             SideEvent::BridgeSlash { .. } => "bridge_slash",
         }
+    }
+}
+
+/// The three fields below are `&'static str` produced by total functions over closed
+/// sets, so decoding one means handing back the SAME static string rather than a new
+/// allocation. An unrecognised value fails the decode instead of being invented, which
+/// keeps a torn record from being served as governance history.
+fn intern_action(text: &str) -> Option<&'static str> {
+    const ALL: [&str; 16] = [
+        "activate",
+        "mint",
+        "bridge_migration",
+        "bridge_unfreeze",
+        "guardian_rotate",
+        "committee_rotate",
+        "asset_register",
+        "bridge_anchor_set",
+        "epoch_advance",
+        "operator_revoke",
+        "freeze_recovery",
+        "blacklist",
+        "freeze",
+        "parameter",
+        "spend",
+        "unfreeze",
+    ];
+    ALL.iter().copied().find(|&known| known == text)
+}
+
+fn intern_status(text: &str) -> Option<&'static str> {
+    const ALL: [&str; 3] = ["deciding", "approved", "rejected"];
+    ALL.iter().copied().find(|&known| known == text)
+}
+
+fn intern_disposition(text: &str) -> Option<&'static str> {
+    const ALL: [&str; 2] = [SLASH_DISPOSITION_BURN, SLASH_DISPOSITION_TREASURY];
+    ALL.iter().copied().find(|&known| known == text)
+}
+
+fn put_text(encoder: &mut Encoder, text: &str) {
+    encoder.put_bytes(text.as_bytes());
+}
+
+fn get_text(decoder: &mut Decoder<'_>) -> Option<String> {
+    String::from_utf8(decoder.get_bytes().ok()?.to_vec()).ok()
+}
+
+fn get_word32(decoder: &mut Decoder<'_>) -> Option<[u8; 32]> {
+    <[u8; 32]>::try_from(decoder.get_bytes().ok()?).ok()
+}
+
+fn get_word16(decoder: &mut Decoder<'_>) -> Option<[u8; 16]> {
+    <[u8; 16]>::try_from(decoder.get_bytes().ok()?).ok()
+}
+
+impl SideEvent {
+    /// A side event as bytes, tagged by variant.
+    ///
+    /// Side events carry governance, staking and bridge history. They lived only in a
+    /// map in the node, so a restart lost them exactly as it lost block events, and
+    /// nothing could write them down because no encoding existed.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut e = Encoder::new();
+        match self {
+            SideEvent::GovPropose {
+                referendum,
+                proposer,
+                track,
+                action,
+                deposit,
+            } => {
+                e.put_tag(1);
+                e.put_u64(*referendum);
+                put_text(&mut e, proposer);
+                e.put_u8(*track);
+                put_text(&mut e, action);
+                e.put_u64(*deposit);
+            }
+            SideEvent::GovVote {
+                referendum,
+                voter,
+                aye,
+                conviction,
+                stake,
+            } => {
+                e.put_tag(2);
+                e.put_u64(*referendum);
+                put_text(&mut e, voter);
+                e.put_u8(u8::from(*aye));
+                e.put_u8(*conviction);
+                e.put_u64(*stake);
+            }
+            SideEvent::GovTally {
+                referendum,
+                status,
+                aye_stake,
+                nay_stake,
+            } => {
+                e.put_tag(3);
+                e.put_u64(*referendum);
+                put_text(&mut e, status);
+                e.put_u128(*aye_stake);
+                e.put_u128(*nay_stake);
+            }
+            SideEvent::GovEnact {
+                referendum,
+                action,
+                proposal_hash,
+            } => {
+                e.put_tag(4);
+                e.put_u64(*referendum);
+                put_text(&mut e, action);
+                e.put_bytes(proposal_hash);
+            }
+            SideEvent::Mint { to, amount } => {
+                e.put_tag(5);
+                put_text(&mut e, to);
+                e.put_u64(*amount);
+            }
+            SideEvent::Spend { source, to, amount } => {
+                e.put_tag(6);
+                put_text(&mut e, source);
+                put_text(&mut e, to);
+                e.put_u64(*amount);
+            }
+            SideEvent::Parameter { key, value } => {
+                e.put_tag(7);
+                e.put_bytes(key);
+                e.put_bytes(value);
+            }
+            SideEvent::Blacklist { target } => {
+                e.put_tag(8);
+                put_text(&mut e, target);
+            }
+            SideEvent::Freeze { target } => {
+                e.put_tag(9);
+                put_text(&mut e, target);
+            }
+            SideEvent::Unfreeze { target } => {
+                e.put_tag(10);
+                put_text(&mut e, target);
+            }
+            SideEvent::RecoverySeizure {
+                victim,
+                from,
+                amount,
+                scope,
+            } => {
+                e.put_tag(11);
+                put_text(&mut e, victim);
+                put_text(&mut e, from);
+                e.put_u64(*amount);
+                e.put_bytes(scope);
+            }
+            SideEvent::RecoveryCredit {
+                victim,
+                amount,
+                scope,
+            } => {
+                e.put_tag(12);
+                put_text(&mut e, victim);
+                e.put_u64(*amount);
+                e.put_bytes(scope);
+            }
+            SideEvent::GuardianFreeze { target, bound } => {
+                e.put_tag(13);
+                put_text(&mut e, target);
+                e.put_u64(*bound);
+            }
+            SideEvent::GuardianRotate { size, threshold } => {
+                e.put_tag(14);
+                e.put_u32(*size);
+                e.put_u32(*threshold);
+            }
+            SideEvent::CommitteeRotate {
+                operators,
+                threshold,
+            } => {
+                e.put_tag(15);
+                e.put_u32(*operators);
+                e.put_u32(*threshold);
+            }
+            SideEvent::OperatorRevoke { operator_id } => {
+                e.put_tag(16);
+                e.put_u32(*operator_id);
+            }
+            SideEvent::AssetRegister {
+                asset_id,
+                cap,
+                epoch_cap,
+                requires_stark,
+            } => {
+                e.put_tag(17);
+                e.put_bytes(asset_id);
+                e.put_u128(*cap);
+                e.put_u128(*epoch_cap);
+                e.put_u8(u8::from(*requires_stark));
+            }
+            SideEvent::EpochAdvance { epoch } => {
+                e.put_tag(18);
+                e.put_u64(*epoch);
+            }
+            SideEvent::Activate { feature, version } => {
+                e.put_tag(19);
+                e.put_bytes(feature);
+                e.put_u64(*version);
+            }
+            SideEvent::BridgeMigration { vault } => {
+                e.put_tag(20);
+                put_text(&mut e, vault);
+            }
+            SideEvent::BridgeUnfreeze => {
+                e.put_tag(21);
+            }
+            SideEvent::Bond {
+                validator,
+                amount,
+                fee,
+            } => {
+                e.put_tag(22);
+                put_text(&mut e, validator);
+                e.put_u64(*amount);
+                e.put_u64(*fee);
+            }
+            SideEvent::Unbond { validator, amount } => {
+                e.put_tag(23);
+                put_text(&mut e, validator);
+                e.put_u64(*amount);
+            }
+            SideEvent::Slash {
+                validator,
+                amount,
+                disposition,
+            } => {
+                e.put_tag(24);
+                put_text(&mut e, validator);
+                e.put_u64(*amount);
+                put_text(&mut e, disposition);
+            }
+            SideEvent::Reward { validator, amount } => {
+                e.put_tag(25);
+                put_text(&mut e, validator);
+                e.put_u64(*amount);
+            }
+            SideEvent::RewardClaim { validator, amount } => {
+                e.put_tag(26);
+                put_text(&mut e, validator);
+                e.put_u64(*amount);
+            }
+            SideEvent::ContractTransfer {
+                contract,
+                to,
+                amount,
+            } => {
+                e.put_tag(27);
+                put_text(&mut e, contract);
+                put_text(&mut e, to);
+                e.put_u64(*amount);
+            }
+            SideEvent::BridgeMint {
+                asset_id,
+                recipient,
+                amount,
+            } => {
+                e.put_tag(28);
+                e.put_bytes(asset_id);
+                e.put_bytes(recipient);
+                e.put_u128(*amount);
+            }
+            SideEvent::BridgeBurn {
+                asset_id,
+                holder,
+                amount,
+                destination,
+                chain_id,
+                burn_ref,
+            } => {
+                e.put_tag(29);
+                e.put_bytes(asset_id);
+                e.put_bytes(holder);
+                e.put_u128(*amount);
+                e.put_bytes(destination);
+                e.put_u64(*chain_id);
+                e.put_bytes(burn_ref);
+            }
+            SideEvent::BridgeSettle {
+                asset_id,
+                beneficiary,
+                amount,
+                burn_ref,
+            } => {
+                e.put_tag(30);
+                e.put_bytes(asset_id);
+                e.put_bytes(beneficiary);
+                e.put_u128(*amount);
+                e.put_bytes(burn_ref);
+            }
+            SideEvent::BridgeSlash {
+                asset_id,
+                beneficiary,
+                amount,
+                burn_ref,
+            } => {
+                e.put_tag(31);
+                e.put_bytes(asset_id);
+                e.put_bytes(beneficiary);
+                e.put_u128(*amount);
+                e.put_bytes(burn_ref);
+            }
+        }
+        e.into_bytes()
+    }
+
+    /// The inverse of `encode`. Anything that does not decode exactly returns None
+    /// rather than a partly filled event.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let mut d = Decoder::new(bytes);
+        let event = match d.get_tag().ok()? {
+            1 => SideEvent::GovPropose {
+                referendum: d.get_u64().ok()?,
+                proposer: get_text(&mut d)?,
+                track: d.get_u8().ok()?,
+                action: intern_action(&get_text(&mut d)?)?,
+                deposit: d.get_u64().ok()?,
+            },
+            2 => SideEvent::GovVote {
+                referendum: d.get_u64().ok()?,
+                voter: get_text(&mut d)?,
+                aye: d.get_u8().ok()? != 0,
+                conviction: d.get_u8().ok()?,
+                stake: d.get_u64().ok()?,
+            },
+            3 => SideEvent::GovTally {
+                referendum: d.get_u64().ok()?,
+                status: intern_status(&get_text(&mut d)?)?,
+                aye_stake: d.get_u128().ok()?,
+                nay_stake: d.get_u128().ok()?,
+            },
+            4 => SideEvent::GovEnact {
+                referendum: d.get_u64().ok()?,
+                action: intern_action(&get_text(&mut d)?)?,
+                proposal_hash: get_word32(&mut d)?,
+            },
+            5 => SideEvent::Mint {
+                to: get_text(&mut d)?,
+                amount: d.get_u64().ok()?,
+            },
+            6 => SideEvent::Spend {
+                source: get_text(&mut d)?,
+                to: get_text(&mut d)?,
+                amount: d.get_u64().ok()?,
+            },
+            7 => SideEvent::Parameter {
+                key: d.get_bytes().ok()?.to_vec(),
+                value: d.get_bytes().ok()?.to_vec(),
+            },
+            8 => SideEvent::Blacklist {
+                target: get_text(&mut d)?,
+            },
+            9 => SideEvent::Freeze {
+                target: get_text(&mut d)?,
+            },
+            10 => SideEvent::Unfreeze {
+                target: get_text(&mut d)?,
+            },
+            11 => SideEvent::RecoverySeizure {
+                victim: get_text(&mut d)?,
+                from: get_text(&mut d)?,
+                amount: d.get_u64().ok()?,
+                scope: get_word32(&mut d)?,
+            },
+            12 => SideEvent::RecoveryCredit {
+                victim: get_text(&mut d)?,
+                amount: d.get_u64().ok()?,
+                scope: get_word32(&mut d)?,
+            },
+            13 => SideEvent::GuardianFreeze {
+                target: get_text(&mut d)?,
+                bound: d.get_u64().ok()?,
+            },
+            14 => SideEvent::GuardianRotate {
+                size: d.get_u32().ok()?,
+                threshold: d.get_u32().ok()?,
+            },
+            15 => SideEvent::CommitteeRotate {
+                operators: d.get_u32().ok()?,
+                threshold: d.get_u32().ok()?,
+            },
+            16 => SideEvent::OperatorRevoke {
+                operator_id: d.get_u32().ok()?,
+            },
+            17 => SideEvent::AssetRegister {
+                asset_id: get_word16(&mut d)?,
+                cap: d.get_u128().ok()?,
+                epoch_cap: d.get_u128().ok()?,
+                requires_stark: d.get_u8().ok()? != 0,
+            },
+            18 => SideEvent::EpochAdvance {
+                epoch: d.get_u64().ok()?,
+            },
+            19 => SideEvent::Activate {
+                feature: d.get_bytes().ok()?.to_vec(),
+                version: d.get_u64().ok()?,
+            },
+            20 => SideEvent::BridgeMigration {
+                vault: get_text(&mut d)?,
+            },
+            21 => SideEvent::BridgeUnfreeze,
+            22 => SideEvent::Bond {
+                validator: get_text(&mut d)?,
+                amount: d.get_u64().ok()?,
+                fee: d.get_u64().ok()?,
+            },
+            23 => SideEvent::Unbond {
+                validator: get_text(&mut d)?,
+                amount: d.get_u64().ok()?,
+            },
+            24 => SideEvent::Slash {
+                validator: get_text(&mut d)?,
+                amount: d.get_u64().ok()?,
+                disposition: intern_disposition(&get_text(&mut d)?)?,
+            },
+            25 => SideEvent::Reward {
+                validator: get_text(&mut d)?,
+                amount: d.get_u64().ok()?,
+            },
+            26 => SideEvent::RewardClaim {
+                validator: get_text(&mut d)?,
+                amount: d.get_u64().ok()?,
+            },
+            27 => SideEvent::ContractTransfer {
+                contract: get_text(&mut d)?,
+                to: get_text(&mut d)?,
+                amount: d.get_u64().ok()?,
+            },
+            28 => SideEvent::BridgeMint {
+                asset_id: get_word16(&mut d)?,
+                recipient: get_word32(&mut d)?,
+                amount: d.get_u128().ok()?,
+            },
+            29 => SideEvent::BridgeBurn {
+                asset_id: get_word16(&mut d)?,
+                holder: get_word32(&mut d)?,
+                amount: d.get_u128().ok()?,
+                destination: get_word32(&mut d)?,
+                chain_id: d.get_u64().ok()?,
+                burn_ref: get_word32(&mut d)?,
+            },
+            30 => SideEvent::BridgeSettle {
+                asset_id: get_word16(&mut d)?,
+                beneficiary: get_word32(&mut d)?,
+                amount: d.get_u128().ok()?,
+                burn_ref: get_word32(&mut d)?,
+            },
+            31 => SideEvent::BridgeSlash {
+                asset_id: get_word16(&mut d)?,
+                beneficiary: get_word32(&mut d)?,
+                amount: d.get_u128().ok()?,
+                burn_ref: get_word32(&mut d)?,
+            },
+            _ => return None,
+        };
+        d.finish().ok()?;
+        Some(event)
     }
 }
 
