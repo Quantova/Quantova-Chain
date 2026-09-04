@@ -221,15 +221,36 @@ pub enum FinalityStatus {
     },
 }
 
+/// How many epochs of finalized heights the violation check keeps.
+///
+/// This map is a local safety alarm. It catches THIS node finalizing two different
+/// values at one height. It is not the slashing record, which lives in the evidence
+/// pool and is keyed by offender rather than by height. Conflicting certificates for a
+/// single height arrive within a round of each other, so sixty four epochs is already
+/// far wider than the case it exists to catch, and at a 150ms block it covers about ten
+/// minutes for a couple of hundred kilobytes.
+///
+/// The limit this accepts, stated here rather than only in a report: a conflicting
+/// finalization for a height older than this window is NOT detected. That is bounded
+/// harm, because a certificate that old cannot be applied to a chain that has already
+/// finalized past it, and the offender remains slashable through the evidence pool.
+/// Before this the map was never pruned at all and grew by one entry per finalized
+/// height for the life of the process, which at a 150ms block is over half a million
+/// entries a day on a node that already needs swap to restart.
+const FINALITY_RETAINED_EPOCHS: u64 = 64;
+const FINALITY_RETAINED_HEIGHTS: u64 = FINALITY_RETAINED_EPOCHS * DEFAULT_SLOTS;
+
 #[derive(Debug, Default)]
 pub struct FinalityLedger {
     finalized: std::collections::BTreeMap<u64, [u8; 32]>,
+    highest: u64,
 }
 
 impl FinalityLedger {
     pub fn new() -> Self {
         FinalityLedger {
             finalized: std::collections::BTreeMap::new(),
+            highest: 0,
         }
     }
 
@@ -246,7 +267,18 @@ impl FinalityLedger {
                 conflicting: value,
             },
             None => {
+                // Older than the window, so it was already dropped and cannot be
+                // judged either way. Recording it would let the map grow backwards
+                // without bound, which is the leak this window exists to close.
+                if height.saturating_add(FINALITY_RETAINED_HEIGHTS) < self.highest {
+                    return FinalityStatus::Confirms;
+                }
                 self.finalized.insert(height, value);
+                self.highest = self.highest.max(height);
+                let floor = self.highest.saturating_sub(FINALITY_RETAINED_HEIGHTS);
+                if self.finalized.keys().next().is_some_and(|&low| low < floor) {
+                    self.finalized = self.finalized.split_off(&floor);
+                }
                 FinalityStatus::Extends
             }
         }
@@ -766,6 +798,45 @@ mod tests {
     fn the_header_value_is_a_deterministic_fold() {
         assert_eq!(header_value(&[3u8; 32]), header_value(&[3u8; 32]));
         assert_ne!(header_value(&[3u8; 32]), header_value(&[4u8; 32]));
+    }
+
+    #[test]
+    fn the_finality_record_stays_bounded_as_the_chain_advances() {
+        // It used to keep one entry per finalized height for the life of the process,
+        // with no pruning anywhere, so a validator accumulated over half a million
+        // entries a day at a 150ms block. The window has to hold the memory flat while
+        // still catching a conflict inside it.
+        let mut ledger = FinalityLedger::new();
+        let span = FINALITY_RETAINED_HEIGHTS * 4;
+        for h in 1..=span {
+            ledger.observe(h, [(h % 251) as u8; 32]);
+        }
+        assert!(
+            ledger.finalized.len() as u64 <= FINALITY_RETAINED_HEIGHTS + 1,
+            "the record must stay inside its window, held {} over {span} heights",
+            ledger.finalized.len()
+        );
+
+        // A conflict inside the window is still a violation.
+        let recent = span - 1;
+        assert_eq!(
+            ledger.observe(recent, [0xEEu8; 32]),
+            FinalityStatus::Violation {
+                height: recent,
+                finalized: [(recent % 251) as u8; 32],
+                conflicting: [0xEEu8; 32],
+            }
+        );
+
+        // One far behind the window is dropped rather than recorded, so replaying
+        // ancient heights cannot grow the map backwards.
+        let before = ledger.finalized.len();
+        assert_eq!(ledger.observe(1, [0xAAu8; 32]), FinalityStatus::Confirms);
+        assert_eq!(
+            ledger.finalized.len(),
+            before,
+            "an observation older than the window must not be recorded"
+        );
     }
 
     #[test]
