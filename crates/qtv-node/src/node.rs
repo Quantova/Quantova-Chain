@@ -1212,21 +1212,15 @@ fn execute_ordered_across(
         if wrapper.body().chain_id() != fee_params.chain_id {
             continue;
         }
-        // Both ENDS of the call, not just the sender. A contract is never a sender, so
-        // testing only the sender made freezing or blacklisting a contract address a
-        // complete no operation: a compromised token, pool or registry stayed callable
-        // and kept paying out while the freeze was nominally in force. Since a non
-        // native asset only moves when its own contract moves it, these were the two
-        // controls governance had for stopping exactly that, and neither reached it.
+        // Both ENDS of the call, not only the sender. A freeze stops an account
+        // SPENDING and a plain transfer into one still lands, which is why the target
+        // is gated for a contract call and not for a value move. A contract is never a
+        // sender, so testing the sender alone made freezing or blacklisting a contract
+        // address a complete no operation: a compromised token, pool or registry stayed
+        // callable and kept paying out while the freeze was nominally in force. Since a
+        // non native asset only moves when its own contract moves it, these were the
+        // two controls governance had for stopping exactly that, and neither reached it.
         let target = wrapper.body().call().target();
-        // A freeze stops an account SPENDING, and a plain transfer into one still
-        // lands, which is why the target is not gated for value moves. Running a
-        // CONTRACT is different: a contract is never a sender, so testing only the
-        // sender made freezing or blacklisting a contract address a complete no
-        // operation. A compromised token, pool or registry stayed callable and kept
-        // paying out while the freeze was nominally in force, and since a non native
-        // asset only ever moves when its own contract moves it, these were the two
-        // controls governance had for stopping exactly that.
         let calling_a_contract = is_vm_op(ledger, wrapper);
         if ledger.is_blacklisted(wrapper.body().sender())
             || (calling_a_contract && ledger.is_blacklisted(target))
@@ -1239,7 +1233,7 @@ fn execute_ordered_across(
         {
             continue;
         }
-        if is_vm_op(ledger, wrapper) {
+        if calling_a_contract {
             let meter = wrapper.body().meter_limit();
             if vm_meter.saturating_add(meter) > VM_BLOCK_METER_BUDGET {
                 continue;
