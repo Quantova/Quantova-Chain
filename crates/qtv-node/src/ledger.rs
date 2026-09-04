@@ -489,7 +489,7 @@ const GOV_BALLOT_TAG: &[u8] = b"qtv/gov/ballot/";
 const GOV_LOCK_TAG: &[u8] = b"qtv/gov/lock/";
 const GOV_BLACKLIST_TAG: &[u8] = b"qtv/gov/blacklist/";
 const GOV_FREEZE_TAG: &[u8] = b"qtv/gov/freeze/";
-const GOV_STOPPED_TAG: &[u8] = b"qtv/gov/stopped";
+const GOV_STOPPED_ASSET_TAG: &[u8] = b"qtv/gov/stopped/asset/";
 const GOV_FEATURE_TAG: &[u8] = b"qtv/gov/feature/";
 const GOV_GUARDIAN_TAG: &[u8] = b"qtv/gov/guardians";
 const GOV_GUARDIAN_EPOCH_TAG: &[u8] = b"qtv/gov/guardian/epoch";
@@ -534,6 +534,15 @@ fn gov_freeze_key(id: &[u8; 32]) -> Key {
     let mut input = Vec::with_capacity(GOV_FREEZE_TAG.len() + id.len());
     input.extend_from_slice(GOV_FREEZE_TAG);
     input.extend_from_slice(id);
+    sha3::sha3_256(&input)
+}
+
+/// Keyed by the asset id rather than the issuer, so a contract moving an asset can ask
+/// whether its issuer is stopped without holding the address the asset came from.
+fn gov_stopped_asset_key(asset_id: &[u8; 16]) -> Key {
+    let mut input = Vec::with_capacity(GOV_STOPPED_ASSET_TAG.len() + asset_id.len());
+    input.extend_from_slice(GOV_STOPPED_ASSET_TAG);
+    input.extend_from_slice(asset_id);
     sha3::sha3_256(&input)
 }
 
@@ -1147,57 +1156,29 @@ impl Ledger {
     ///
     /// A freeze or a blacklist names an ADDRESS, and the asset an address issues is
     /// identified by a one way hash of it, so there is no way back from an asset to its
-    /// issuer. Both are known here though: the stopped set is searched by hashing each
-    /// stopped address forward. Without this, gating the CALL was not enough. A
-    /// contract moves asset balances for an arbitrary issuer in two places, so a
-    /// pass through contract carrying a frozen issuer's asset moved it in one
+    /// issuer. The hash only runs forward, so it is taken once when the account is
+    /// stopped and the answer kept under its own key. Gating the CALL alone was not
+    /// enough. A contract moves asset balances for an arbitrary issuer in two places,
+    /// so a pass through contract carrying a frozen issuer's asset moved it in one
     /// transaction, and any pool holding a frozen asset paid it out to a passer by who
     /// never named the issuer at all. The transaction gate cannot see either, because
     /// the transaction never mentions the frozen address.
+    ///
+    /// This runs inside the loop over a call's asset credits, so it has to be one
+    /// lookup. Scanning a list of stopped accounts instead cost a hash per stopped
+    /// account per credit, and the meter never charged for it, so the price of moving
+    /// an asset grew with the length of the blacklist rather than with the work the
+    /// transaction actually asked for.
     fn asset_issuer_is_stopped(&self, asset_id: &[u8; 16]) -> bool {
-        for id in self.stopped_accounts() {
-            if asset_id_of(&id) == *asset_id {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Every address governance has frozen or blacklisted.
-    fn stopped_accounts(&self) -> Vec<[u8; 32]> {
-        // Stored as concatenated ids, since a Vec of fixed arrays is not encodable.
-        match self.trie.get(&stake_singleton_key(GOV_STOPPED_TAG)) {
-            Some(bytes) => bytes
-                .chunks_exact(32)
-                .filter_map(|c| <[u8; 32]>::try_from(c).ok())
-                .collect(),
-            None => Vec::new(),
-        }
-    }
-
-    fn write_stopped(&mut self, all: &[[u8; 32]]) {
-        let mut flat = Vec::with_capacity(all.len() * 32);
-        for id in all {
-            flat.extend_from_slice(id);
-        }
-        self.write_leaf(stake_singleton_key(GOV_STOPPED_TAG), flat);
+        matches!(self.trie.get(&gov_stopped_asset_key(asset_id)), Some(bytes) if !bytes.is_empty())
     }
 
     fn record_stopped(&mut self, id: &[u8; 32]) {
-        let mut all = self.stopped_accounts();
-        if !all.contains(id) {
-            all.push(*id);
-            self.write_stopped(&all);
-        }
+        self.write_leaf(gov_stopped_asset_key(&asset_id_of(id)), vec![1]);
     }
 
     fn forget_stopped(&mut self, id: &[u8; 32]) {
-        let mut all = self.stopped_accounts();
-        let before = all.len();
-        all.retain(|x| x != id);
-        if all.len() != before {
-            self.write_stopped(&all);
-        }
+        self.write_leaf(gov_stopped_asset_key(&asset_id_of(id)), Vec::new());
     }
 
     fn set_frozen(&mut self, id: &[u8; 32]) {
@@ -4069,6 +4050,57 @@ mod stake_state_tests {
         assert!(
             l.asset_issuer_is_stopped(&asset),
             "a blacklist must survive a freeze being lifted"
+        );
+    }
+
+    #[test]
+    fn a_long_blacklist_does_not_change_what_moving_an_asset_costs() {
+        // The first version of this gate held the stopped accounts as one list and
+        // searched it by hashing every entry forward, because the asset id is a one way
+        // hash of its issuer. That ran inside the loop over a call's asset credits, so a
+        // single transaction paid a hash per stopped account per credit, and the meter
+        // charged for none of it. The price of moving an asset grew with the length of
+        // the blacklist rather than with anything the transaction asked for, which is
+        // the wrong way round for a chain expected to carry a sanctions sized list.
+        //
+        // Each stopped account now writes one leaf under its own asset id, so the check
+        // is a single keyed read. This pins the correctness half of that: a long list
+        // still answers exactly, with no collisions between neighbours and no drift for
+        // an issuer that was never stopped at all.
+        let mut l = Ledger::new();
+        let stopped: Vec<[u8; 32]> = (0u16..512)
+            .map(|i| {
+                let mut id = [0u8; 32];
+                id[..2].copy_from_slice(&i.to_be_bytes());
+                id
+            })
+            .collect();
+        for id in &stopped {
+            l.set_frozen(id);
+        }
+
+        for id in &stopped {
+            assert!(
+                l.asset_issuer_is_stopped(&asset_id_of(id)),
+                "every stopped issuer must still be found in a long list"
+            );
+        }
+
+        let never_stopped = [0xA7u8; 32];
+        assert!(
+            !l.asset_issuer_is_stopped(&asset_id_of(&never_stopped)),
+            "an issuer that was never stopped must not be caught by a neighbour's entry"
+        );
+
+        // Releasing one leaves the rest alone, which a shared blob would not guarantee.
+        l.clear_frozen(&stopped[100]);
+        assert!(
+            !l.asset_issuer_is_stopped(&asset_id_of(&stopped[100])),
+            "clearing one freeze must release exactly that asset"
+        );
+        assert!(
+            l.asset_issuer_is_stopped(&asset_id_of(&stopped[101])),
+            "clearing one freeze must not release its neighbour"
         );
     }
 
