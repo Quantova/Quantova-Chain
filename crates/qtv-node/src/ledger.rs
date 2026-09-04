@@ -1207,6 +1207,20 @@ impl Ledger {
         {
             return false;
         }
+        // A target already frozen by something other than the guardians is out of
+        // bounds. A governance freeze deliberately carries no expiry entry so it never
+        // lapses; a guardian freeze over the top of it ADDS one, and the next expiry
+        // sweep then clears the voted freeze. That turned a threshold of guardians
+        // into a one transaction override of a referendum: freeze what governance
+        // froze, wait out your own window, and the vote is undone. Extending a freeze
+        // the guardians themselves placed is still allowed.
+        let held = self.guardian_freeze_entries();
+        if targets
+            .iter()
+            .any(|target| self.is_frozen_id(target) && !held.iter().any(|(id, _)| id == target))
+        {
+            return false;
+        }
         let until = now.saturating_add(GUARDIAN_FREEZE_WINDOW_SECONDS);
         let mut entries = self.guardian_freeze_entries();
         for target in targets {
@@ -3893,6 +3907,41 @@ mod stake_state_tests {
         assert!(
             l.call_contract(&caller, &contract, selector, &[], 0, 400_000, 0, None, 0),
             "a contract holding {entries} entries must still be callable"
+        );
+    }
+
+    #[test]
+    fn guardians_cannot_lift_a_governance_freeze_by_refreezing_it() {
+        // A governance freeze deliberately carries no expiry entry so it never lapses.
+        // A guardian freeze over the top of it used to ADD one, and the next expiry
+        // sweep then cleared the voted freeze: a threshold of guardians could undo a
+        // referendum in one transaction by freezing what governance froze and waiting
+        // out their own window.
+        let mut l = Ledger::new();
+        let target = [91u8; 32];
+        l.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![[1u8; 32], [2u8; 32], [3u8; 32]],
+            2,
+        ));
+
+        // Governance freezes it, permanently.
+        l.set_frozen(&target);
+        l.guardian_freeze_forget(&[target]);
+        assert!(l.is_frozen_id(&target), "governance froze it");
+
+        // The caucus tries to take it over.
+        let epoch = l.guardian_freeze_epoch();
+        let took = l.guardian_freeze(epoch, &[target], &[[1u8; 32], [2u8; 32]], 1_000);
+        assert!(
+            !took,
+            "guardians must not freeze over a freeze they did not place"
+        );
+
+        // And it survives their window either way.
+        l.guardian_expire(1_000 + 30 * 86_400);
+        assert!(
+            l.is_frozen_id(&target),
+            "the voted freeze must outlive any guardian window"
         );
     }
 
