@@ -489,6 +489,7 @@ const GOV_BALLOT_TAG: &[u8] = b"qtv/gov/ballot/";
 const GOV_LOCK_TAG: &[u8] = b"qtv/gov/lock/";
 const GOV_BLACKLIST_TAG: &[u8] = b"qtv/gov/blacklist/";
 const GOV_FREEZE_TAG: &[u8] = b"qtv/gov/freeze/";
+const GOV_STOPPED_TAG: &[u8] = b"qtv/gov/stopped";
 const GOV_FEATURE_TAG: &[u8] = b"qtv/gov/feature/";
 const GOV_GUARDIAN_TAG: &[u8] = b"qtv/gov/guardians";
 const GOV_GUARDIAN_EPOCH_TAG: &[u8] = b"qtv/gov/guardian/epoch";
@@ -1128,6 +1129,7 @@ impl Ledger {
 
     fn set_gov_blacklisted(&mut self, id: &[u8; 32]) {
         self.write_leaf(gov_blacklist_key(id), vec![1]);
+        self.record_stopped(id);
     }
 
     pub fn is_blacklisted(&self, address: &str) -> bool {
@@ -1141,12 +1143,73 @@ impl Ledger {
         matches!(self.trie.get(&gov_freeze_key(id)), Some(bytes) if !bytes.is_empty())
     }
 
+    /// Whether the account that issued this asset has been stopped by governance.
+    ///
+    /// A freeze or a blacklist names an ADDRESS, and the asset an address issues is
+    /// identified by a one way hash of it, so there is no way back from an asset to its
+    /// issuer. Both are known here though: the stopped set is searched by hashing each
+    /// stopped address forward. Without this, gating the CALL was not enough. A
+    /// contract moves asset balances for an arbitrary issuer in two places, so a
+    /// pass through contract carrying a frozen issuer's asset moved it in one
+    /// transaction, and any pool holding a frozen asset paid it out to a passer by who
+    /// never named the issuer at all. The transaction gate cannot see either, because
+    /// the transaction never mentions the frozen address.
+    fn asset_issuer_is_stopped(&self, asset_id: &[u8; 16]) -> bool {
+        for id in self.stopped_accounts() {
+            if asset_id_of(&id) == *asset_id {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Every address governance has frozen or blacklisted.
+    fn stopped_accounts(&self) -> Vec<[u8; 32]> {
+        // Stored as concatenated ids, since a Vec of fixed arrays is not encodable.
+        match self.trie.get(&stake_singleton_key(GOV_STOPPED_TAG)) {
+            Some(bytes) => bytes
+                .chunks_exact(32)
+                .filter_map(|c| <[u8; 32]>::try_from(c).ok())
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    fn write_stopped(&mut self, all: &[[u8; 32]]) {
+        let mut flat = Vec::with_capacity(all.len() * 32);
+        for id in all {
+            flat.extend_from_slice(id);
+        }
+        self.write_leaf(stake_singleton_key(GOV_STOPPED_TAG), flat);
+    }
+
+    fn record_stopped(&mut self, id: &[u8; 32]) {
+        let mut all = self.stopped_accounts();
+        if !all.contains(id) {
+            all.push(*id);
+            self.write_stopped(&all);
+        }
+    }
+
+    fn forget_stopped(&mut self, id: &[u8; 32]) {
+        let mut all = self.stopped_accounts();
+        let before = all.len();
+        all.retain(|x| x != id);
+        if all.len() != before {
+            self.write_stopped(&all);
+        }
+    }
+
     fn set_frozen(&mut self, id: &[u8; 32]) {
         self.write_leaf(gov_freeze_key(id), vec![1]);
+        self.record_stopped(id);
     }
 
     fn clear_frozen(&mut self, id: &[u8; 32]) {
         self.write_leaf(gov_freeze_key(id), Vec::new());
+        if !self.is_gov_blacklisted(id) {
+            self.forget_stopped(id);
+        }
     }
 
     pub fn is_frozen(&self, address: &str) -> bool {
@@ -2679,7 +2742,17 @@ impl Ledger {
         };
         match executed {
             Ok(outcome) => {
-                self.last_vm_meter_used = outcome.meter_used;
+                // ADD to whatever was already armed, never overwrite it. A deploy arms
+                // the price of the permanent state it is about to write and then runs
+                // the container's genesis entry through here; a plain assignment threw
+                // that price away and left the block charged only what the constructor
+                // itself cost, a hundredth of the real figure. The per transaction gate
+                // still held, so a single deploy was bounded, but the block wide bound
+                // did not exist and one block could buy tens of megabytes of permanent
+                // code for a handful of flat fees. Only containers WITH a constructor
+                // got the discount, which is every contract anyone actually writes.
+                self.last_vm_meter_used =
+                    self.last_vm_meter_used.saturating_add(outcome.meter_used);
                 let mut native_credits: Vec<(String, u64)> = Vec::new();
                 let mut native_sent: u64 = 0;
                 let mut asset_credits: Vec<([u8; 16], [u8; 32], u128)> = Vec::new();
@@ -2764,6 +2837,14 @@ impl Ledger {
                             {
                                 return false;
                             }
+                            // The issuer of the carried asset, not the contract
+                            // being called. A pass through contract could otherwise
+                            // move a frozen issuer's asset in one transaction, and
+                            // the transaction gate cannot see it because the
+                            // transaction never names the frozen address.
+                            if self.asset_issuer_is_stopped(&asset) {
+                                return false;
+                            }
                             if !self.debit_asset(&asset, &caller_id, u128::from(value)) {
                                 return false;
                             }
@@ -2788,6 +2869,11 @@ impl Ledger {
                         .checked_add(*amount)
                         .is_none()
                     {
+                        return false;
+                    }
+                    // Same question on the way out: a pool holding a frozen asset
+                    // used to pay it to any passer by who never named the issuer.
+                    if self.asset_issuer_is_stopped(asset) {
                         return false;
                     }
                     if !self.debit_asset(asset, &contract_id, *amount) {
@@ -3942,6 +4028,88 @@ mod stake_state_tests {
         assert!(
             l.is_frozen_id(&target),
             "the voted freeze must outlive any guardian window"
+        );
+    }
+
+    #[test]
+    fn a_frozen_issuers_asset_cannot_be_moved_by_any_contract() {
+        // Gating the CALL was not enough. A contract moves asset balances for an
+        // arbitrary issuer, so a pass through contract carrying a frozen issuer's
+        // asset moved it in one transaction, and a pool holding a frozen asset paid it
+        // out to a passer by who never named the issuer at all. Neither is visible to
+        // the transaction gate, because the transaction never mentions the frozen
+        // address. The question has to be asked where the asset actually moves.
+        let mut l = Ledger::new();
+        let issuer = [0x5Eu8; 32];
+        let asset = asset_id_of(&issuer);
+
+        assert!(
+            !l.asset_issuer_is_stopped(&asset),
+            "nothing is stopped to begin with"
+        );
+
+        // Governance freezes the ISSUER, not the contract doing the moving.
+        l.set_frozen(&issuer);
+        assert!(
+            l.asset_issuer_is_stopped(&asset),
+            "freezing the issuer must stop its asset wherever it sits"
+        );
+
+        // Lifting the freeze releases it again.
+        l.clear_frozen(&issuer);
+        assert!(
+            !l.asset_issuer_is_stopped(&asset),
+            "clearing the freeze must release the asset"
+        );
+
+        // A blacklist stops it too, and outlives a freeze being lifted.
+        l.set_gov_blacklisted(&issuer);
+        l.set_frozen(&issuer);
+        l.clear_frozen(&issuer);
+        assert!(
+            l.asset_issuer_is_stopped(&asset),
+            "a blacklist must survive a freeze being lifted"
+        );
+    }
+
+    #[test]
+    fn a_genesis_run_does_not_wipe_a_price_armed_before_it() {
+        // The deploy branch arms the price of the permanent state it is about to write
+        // and then runs the container's genesis entry through call_contract. A plain
+        // assignment there threw the armed price away, and the block was charged only
+        // what the constructor itself cost. The earlier test for this passed because it
+        // asserted arithmetic on the constants and never ran a call at all, which is
+        // exactly how the hole survived the first pass.
+        let mut l = Ledger::new();
+        let id = [0x6Cu8; 32];
+        let contract = qtv_idfmt::render_address(&id).unwrap();
+        let selector = [7u8, 7, 7, 7];
+        let code = qtv_vm::asm::assemble("HALT").expect("assembles");
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
+            }],
+        );
+        l.set_contract_code(&id, &container.canonical_bytes());
+        let caller = qtv_idfmt::render_address(&[13u8; 32]).unwrap();
+
+        const ARMED: u64 = 5_000_000;
+        l.arm_vm_meter(ARMED);
+        let ran = l.call_contract(&caller, &contract, selector, &[], 0, 8_000_000, 0, None, 0);
+        assert!(ran, "the call runs");
+        assert!(
+            l.last_vm_meter_used() >= ARMED,
+            "a price armed before the call must survive it: armed {ARMED}, charged {}",
+            l.last_vm_meter_used()
         );
     }
 
