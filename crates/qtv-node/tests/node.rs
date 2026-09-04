@@ -391,6 +391,9 @@ fn run_batch(params: &FeeParams, threads: usize) -> Node {
 
 #[test]
 fn a_parallel_node_finalizes_the_identical_chain_as_the_sequential_node() {
+    // Same reason as the determinism test above. Two runs either side of a second
+    // boundary stamp different header times, which is not what this test is about.
+    qtv_node::node::pin_block_time(1_760_000_000);
     let params = FeeParams::devnet();
     let sequential = run_batch(&params, 1);
     let parallel = run_batch(&params, 8);
