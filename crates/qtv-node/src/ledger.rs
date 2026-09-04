@@ -657,13 +657,8 @@ pub fn bridge_settle_address() -> String {
 
 const VM_CODE_TAG: &[u8] = b"qtv/vm/code/";
 const VM_STORE_TAG: &[u8] = b"qtv/vm/store/";
-/// One trie leaf per storage slot.
-///
-/// A contract's whole storage used to live in a single leaf, so reading one balance
-/// decoded every slot the contract owned and writing one re-encoded and rewrote all of
-/// them. That made a call cost O(contract size) and, because the meter charged that
-/// size, a contract passing about 260,000 entries could never be called again and its
-/// assets were frozen. Per slot leaves make a call cost what it actually touches.
+/// One trie leaf per storage slot, so a call costs what it touches rather than the
+/// whole contract.
 const VM_SLOT_TAG: &[u8] = b"qtv/vm/slot/";
 /// Bytes of the key given over to a per contract prefix, so one contract's slots sit
 /// in a contiguous range and can be walked without an index.
