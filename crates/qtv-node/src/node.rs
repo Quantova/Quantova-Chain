@@ -169,21 +169,13 @@ pub fn min_validator_cores() -> usize {
     (machine / 2).max(1)
 }
 
-/// A block clock a test can hold still. Zero means the real clock.
-///
-/// Compiled out of a default build, so a released node has no way to reach it.
+/// A block clock a test can hold still. Zero means the real clock. Compiled out of a
+/// default build.
 #[cfg(any(test, feature = "test-fixtures"))]
 static PINNED_BLOCK_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Hold the block clock at `seconds`, or release it with zero.
-///
-/// A determinism test runs the same script twice and compares the finalized chains,
-/// but the header carries the wall clock, so two runs either side of a second boundary
-/// stamp different times and produce different block ids. That made the test fail about
-/// once in twenty five runs and read as consensus non determinism when the chain was
-/// behaving exactly as it should. Determinism means the same inputs give the same
-/// chain, and the timestamp IS one of the inputs, so a test has to hold it still rather
-/// than compare across two different ones.
+/// Hold the block clock at `seconds`, or release it with zero. The timestamp is one of
+/// the inputs, so a test comparing two runs has to hold it still.
 #[cfg(any(test, feature = "test-fixtures"))]
 pub fn pin_block_time(seconds: u64) {
     PINNED_BLOCK_TIME.store(seconds, std::sync::atomic::Ordering::SeqCst);
@@ -1157,18 +1149,11 @@ fn dispatch_vm(
     ledger.collect_fee(charged);
     if target == crate::ledger::vm_deploy_address() {
         let (container, params) = split_deploy_args(&args);
-        // Price the permanent state BEFORE writing it. The container used to be
-        // decoded, verified and written into the trie with nothing on that path
-        // consulting the meter: the only size gate ran afterwards, inside the genesis
-        // call, and failing there did not remove the leaf unless the container
-        // declared a genesis entry. One flat fee transaction could therefore buy
-        // 130,984 bytes of permanent state for 500 Quon, and a block of them
-        // gigabytes for a few QTOV.
+        // Price the permanent state before writing it.
         let deploy_cost = crate::execution::deploy_meter_cost(container.len());
         if deploy_cost > meter {
-            // Not enough meter declared to pay for the state this would write. The fee
-            // is already taken and the nonce already spent, so the sender pays for the
-            // attempt; the block is charged what was declared and nothing is written.
+            // Too little meter declared. The fee and nonce are already spent, so the
+            // sender pays for the attempt and nothing is written.
             ledger.arm_vm_meter(meter);
             return true;
         }
@@ -1239,14 +1224,9 @@ fn execute_ordered_across(
         if wrapper.body().chain_id() != fee_params.chain_id {
             continue;
         }
-        // Both ENDS of the call, not only the sender. A freeze stops an account
-        // SPENDING and a plain transfer into one still lands, which is why the target
-        // is gated for a contract call and not for a value move. A contract is never a
-        // sender, so testing the sender alone made freezing or blacklisting a contract
-        // address a complete no operation: a compromised token, pool or registry stayed
-        // callable and kept paying out while the freeze was nominally in force. Since a
-        // non native asset only moves when its own contract moves it, these were the
-        // two controls governance had for stopping exactly that, and neither reached it.
+        // Both ends of the call. A freeze stops spending, so a plain transfer into a
+        // frozen account still lands, but a contract is never a sender and gating only
+        // the sender left a frozen contract callable.
         let target = wrapper.body().call().target();
         let calling_a_contract = is_vm_op(ledger, wrapper);
         if ledger.is_blacklisted(wrapper.body().sender())
