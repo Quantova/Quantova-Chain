@@ -40,6 +40,81 @@ pub const STORAGE_ACCESS_BYTE_METER: u64 = 1;
 /// pricing the real work so a call cannot walk a large keyspace for nothing.
 pub const SLOT_ACCESS_METER: u64 = 200;
 
+/// What one byte of PERMANENT contract code costs to deploy.
+///
+/// A deployed container is written into the trie once and read by every validator for
+/// the life of the chain, so it is the most expensive byte the chain sells. Reading a
+/// container costs CODE_ACCESS_BYTE_METER per byte per call; writing one has to cost
+/// far more, or a single flat fee transaction buys unbounded permanent state.
+///
+/// 100 is chosen against the real ceiling, not picked round: MAX_TX_METER is a quarter
+/// of the block budget, so this sets the largest deployable contract at 125,000 bytes
+/// and leaves the biggest contract in examples/ at roughly half the transaction limit.
+/// Pricing it higher starts refusing contracts people actually write.
+///
+/// This bounds the RATE at which permanent state can be bought. It does not price
+/// permanence itself: the transaction fee is flat and frozen, so a block of deploys
+/// still costs only its transaction fees. Charging for storage over time is a fee
+/// model change and is not this constant's job.
+pub const DEPLOY_BYTE_METER: u64 = 100;
+
+/// The meter a deploy of this many bytes must be able to pay before anything is
+/// written. Saturating on purpose: an absurd size yields an unpayable price rather
+/// than wrapping to a cheap one.
+pub fn deploy_meter_cost(container_bytes: usize) -> u64 {
+    (container_bytes as u64).saturating_mul(DEPLOY_BYTE_METER)
+}
+
+#[cfg(test)]
+mod deploy_price {
+    use super::*;
+
+    #[test]
+    fn permanent_state_costs_more_than_the_flat_fee_can_buy() {
+        // A container used to be written into the trie before anything charged for it,
+        // so one flat fee transaction bought 130,984 bytes of permanent state, and a
+        // full block of them bought gigabytes. The price has to be payable from the
+        // declared meter, not discovered afterwards.
+        // The block VM budget, mirrored from node.rs so this test is self contained.
+        const BLOCK_BUDGET: u64 = 50_000_000;
+        let big = 130_984usize;
+        let cost = deploy_meter_cost(big);
+        assert!(
+            cost > 1_210,
+            "a {big} byte container must cost more than a plain transfer meter, cost {cost}"
+        );
+        assert!(
+            cost > BLOCK_BUDGET / 100,
+            "one such deploy must take a real share of the block budget, cost {cost}"
+        );
+    }
+
+    #[test]
+    fn the_block_budget_bounds_how_much_state_a_block_can_buy() {
+        // What matters is the total: a block must not be able to write gigabytes.
+        const BLOCK_BUDGET: u64 = 50_000_000;
+        let max_bytes = BLOCK_BUDGET / DEPLOY_BYTE_METER;
+        assert!(
+            max_bytes <= 1_000_000,
+            "a block must not admit {max_bytes} bytes of permanent contract code"
+        );
+        // And the largest contract anyone actually writes must still fit in one
+        // transaction, with room to spare. The biggest in examples/ is under 60 KiB.
+        const MAX_TX: u64 = BLOCK_BUDGET / 4;
+        assert!(
+            deploy_meter_cost(60 * 1024) < MAX_TX / 2,
+            "a 60 KiB contract must deploy comfortably, cost {}",
+            deploy_meter_cost(60 * 1024)
+        );
+    }
+
+    #[test]
+    fn the_price_saturates_rather_than_wrapping() {
+        // An absurd size must yield an unpayable price, never a cheap one.
+        assert_eq!(deploy_meter_cost(usize::MAX), u64::MAX);
+    }
+}
+
 #[cfg(test)]
 mod slot_charge {
     use super::*;

@@ -1130,6 +1130,22 @@ fn dispatch_vm(
     ledger.collect_fee(charged);
     if target == crate::ledger::vm_deploy_address() {
         let (container, params) = split_deploy_args(&args);
+        // Price the permanent state BEFORE writing it. The container used to be
+        // decoded, verified and written into the trie with nothing on that path
+        // consulting the meter: the only size gate ran afterwards, inside the genesis
+        // call, and failing there did not remove the leaf unless the container
+        // declared a genesis entry. One flat fee transaction could therefore buy
+        // 130,984 bytes of permanent state for 500 Quon, and a block of them
+        // gigabytes for a few QTOV.
+        let deploy_cost = crate::execution::deploy_meter_cost(container.len());
+        if deploy_cost > meter {
+            // Not enough meter declared to pay for the state this would write. The fee
+            // is already taken and the nonce already spent, so the sender pays for the
+            // attempt; the block is charged what was declared and nothing is written.
+            ledger.arm_vm_meter(meter);
+            return true;
+        }
+        ledger.arm_vm_meter(deploy_cost);
         if let Some(contract) = ledger.deploy_contract(&sender, nonce, container) {
             let genesis = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
             let mut genesis_memory =
