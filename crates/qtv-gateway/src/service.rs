@@ -233,25 +233,39 @@ fn storage_at(node: &DevNode, address: &str, keys: &[[u8; 32]]) -> Result<Json, 
             "the address is not a q1 address",
         ));
     }
-    let all = node
-        .ledger()
-        .contract_storage_at_capped(address)
-        .ok_or_else(|| {
-            ClientError::bad(
-                "storage_too_large",
-                "the contract storage is too large to serve over rpc",
-            )
-        })?;
+    // Read the slots that were ASKED FOR, one trie lookup each. This used to walk the
+    // contract's whole storage and refuse with storage_too_large past about seven
+    // thousand slots, so a targeted read of one known slot failed on a contract that
+    // had simply grown, and any stranger who could create a slot in it, by taking a
+    // token balance or a name, could push it over that line permanently. The ledger
+    // has always been able to answer one exact key in one read; nothing called it.
+    let id = match qtv_idfmt::parse_address(address) {
+        Ok(bytes) => match <[u8; 32]>::try_from(bytes.as_slice()) {
+            Ok(id) => id,
+            Err(_) => {
+                return Err(ClientError::bad(
+                    "bad_address",
+                    "the address is not a q1 address",
+                ))
+            }
+        },
+        Err(_) => {
+            return Err(ClientError::bad(
+                "bad_address",
+                "the address is not a q1 address",
+            ))
+        }
+    };
+    let ledger = node.ledger();
     let slots: Vec<Json> = keys
         .iter()
-        .filter_map(|key| {
-            all.get(key).map(|value| {
-                let slot_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
-                object(vec![
-                    ("slot", Json::str(slot_hex)),
-                    ("value", Json::str(value.to_string())),
-                ])
-            })
+        .map(|key| {
+            let value = ledger.contract_slot(&id, key);
+            let slot_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+            object(vec![
+                ("slot", Json::str(slot_hex)),
+                ("value", Json::str(value.to_string())),
+            ])
         })
         .collect();
     Ok(object(vec![

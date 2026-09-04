@@ -3946,6 +3946,35 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn one_slot_can_be_read_out_of_a_contract_too_large_to_enumerate() {
+        // The targeted read used to walk the contract's WHOLE storage first and refuse
+        // past about seven thousand slots, so reading one known slot failed on a
+        // contract that had simply grown. Worse, any stranger who could create a slot
+        // in it, by taking a token balance or a name, could push it over that line and
+        // the condition was permanent from the owner's side.
+        let mut l = Ledger::new();
+        let id = [0x7Au8; 32];
+        let wanted = qtv_vm::abi::scalar_key(42);
+        l.set_contract_slot(&id, &wanted, 4242);
+
+        // Well past the enumeration cap of roughly 7,281 slots.
+        for i in 1_000u64..12_000 {
+            l.set_contract_slot(&id, &qtv_vm::abi::scalar_key(i), i);
+        }
+
+        let address = qtv_idfmt::render_address(&id).unwrap();
+        assert!(
+            l.contract_storage_at_capped(&address).is_none(),
+            "the contract is now too large to enumerate, which is the whole point"
+        );
+        assert_eq!(
+            l.contract_slot(&id, &wanted),
+            4242,
+            "a targeted read of one slot must still work"
+        );
+    }
+
+    #[test]
     fn the_rpc_storage_reader_sees_what_a_call_actually_wrote() {
         // The gateway answers `get_storage` through contract_storage_at_capped. When
         // writes moved to per slot leaves this reader was left on the old single blob,
