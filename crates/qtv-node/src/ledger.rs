@@ -4054,6 +4054,34 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn a_block_event_survives_a_round_trip_through_its_encoding() {
+        // Nothing could read a persisted event back, because only the encode half
+        // existed. Every field has to return exactly, including an empty payload and a
+        // contract name that is not a plain address.
+        for event in [
+            BlockEvent {
+                contract: "Q1EXAMPLE".to_string(),
+                selector: [0xDE, 0xAD, 0xBE, 0xEF],
+                data: vec![1, 2, 3, 4, 5],
+            },
+            BlockEvent {
+                contract: String::new(),
+                selector: [0, 0, 0, 0],
+                data: Vec::new(),
+            },
+            BlockEvent::native([0x51, 0x58, 0x46, 0x52], vec![0xFF; 300]),
+        ] {
+            let decoded = BlockEvent::decode(&event.encode()).expect("decodes");
+            assert_eq!(decoded, event, "an event must return exactly as it went in");
+        }
+
+        assert!(
+            BlockEvent::decode(&[0xFF, 0xFF, 0xFF]).is_none(),
+            "a truncated record must not decode into a half filled event"
+        );
+    }
+
+    #[test]
     fn a_long_blacklist_does_not_change_what_moving_an_asset_costs() {
         // The first version of this gate held the stopped accounts as one list and
         // searched it by hashing every entry forward, because the asset id is a one way
@@ -8403,6 +8431,24 @@ impl BlockEvent {
         encoder.put_bytes(&self.selector);
         encoder.put_bytes(&self.data);
         encoder.into_bytes()
+    }
+
+    /// The inverse of `encode`, so a persisted event can be read back.
+    ///
+    /// Events used to exist only in memory, which meant a node restart lost every
+    /// event the chain had ever emitted and the explorer was the sole surviving record
+    /// of them by accident. Nothing could read one back because nothing could decode
+    /// one.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let mut decoder = Decoder::new(bytes);
+        let contract = String::from_utf8(decoder.get_bytes().ok()?.to_vec()).ok()?;
+        let selector = <[u8; 4]>::try_from(decoder.get_bytes().ok()?).ok()?;
+        let data = decoder.get_bytes().ok()?.to_vec();
+        Some(BlockEvent {
+            contract,
+            selector,
+            data,
+        })
     }
 
     pub fn native(kind: [u8; 4], data: Vec<u8>) -> Self {
