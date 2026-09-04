@@ -1212,11 +1212,30 @@ fn execute_ordered_across(
         if wrapper.body().chain_id() != fee_params.chain_id {
             continue;
         }
-        if ledger.is_blacklisted(wrapper.body().sender()) {
+        // Both ENDS of the call, not just the sender. A contract is never a sender, so
+        // testing only the sender made freezing or blacklisting a contract address a
+        // complete no operation: a compromised token, pool or registry stayed callable
+        // and kept paying out while the freeze was nominally in force. Since a non
+        // native asset only moves when its own contract moves it, these were the two
+        // controls governance had for stopping exactly that, and neither reached it.
+        let target = wrapper.body().call().target();
+        // A freeze stops an account SPENDING, and a plain transfer into one still
+        // lands, which is why the target is not gated for value moves. Running a
+        // CONTRACT is different: a contract is never a sender, so testing only the
+        // sender made freezing or blacklisting a contract address a complete no
+        // operation. A compromised token, pool or registry stayed callable and kept
+        // paying out while the freeze was nominally in force, and since a non native
+        // asset only ever moves when its own contract moves it, these were the two
+        // controls governance had for stopping exactly that.
+        let calling_a_contract = is_vm_op(ledger, wrapper);
+        if ledger.is_blacklisted(wrapper.body().sender())
+            || (calling_a_contract && ledger.is_blacklisted(target))
+        {
             continue;
         }
-        if ledger.is_frozen(wrapper.body().sender())
-            && wrapper.body().call().target() != gov_address
+        if (ledger.is_frozen(wrapper.body().sender())
+            || (calling_a_contract && ledger.is_frozen(target)))
+            && target != gov_address
         {
             continue;
         }
@@ -3154,6 +3173,84 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(parallel.q_root(), ledger.q_root());
+    }
+
+    #[test]
+    fn a_governance_freeze_stops_a_contract_being_called() {
+        // A contract is never a sender, so gating only the sender made freezing a
+        // contract address do nothing at all: a compromised token or pool stayed
+        // callable and kept paying out while the freeze was nominally in force. Since
+        // a non native asset only ever moves when its own contract moves it, this was
+        // the one control governance had for stopping exactly that.
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let proposer = keypair(150);
+        let voter = keypair(151);
+        let user = keypair(152);
+        fund(&mut ledger, &proposer, 400_000 * 1_000_000);
+        fund(&mut ledger, &voter, 10_000 * 1_000_000);
+        fund(&mut ledger, &user, 10_000 * 1_000_000);
+        ledger.seed_validator_bond(&voter.address(), 10_000 * 1_000_000);
+
+        // A contract that simply halts, so a call to it is included when allowed.
+        let contract_id = [120u8; 32];
+        let contract = qtv_idfmt::render_address(&contract_id).unwrap();
+        let selector = [4u8, 4, 4, 4];
+        let code = qtv_vm::asm::assemble("HALT").expect("assembles");
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
+            }],
+        );
+        ledger.set_contract_code(&contract_id, &container.canonical_bytes());
+
+        let call_it =
+            |nonce: u64| payable_tx(&user, &contract, selector.to_vec(), nonce, 400_000, &fee, 0);
+        assert_eq!(
+            execute_ordered(&mut ledger, &[call_it(0)], &fee, 0).len(),
+            1,
+            "the contract is callable before governance freezes it"
+        );
+
+        let target = qtv_idfmt::parse_address(&contract).unwrap();
+        let action = Action::Freeze {
+            targets: vec![target],
+        };
+        let mut propose_args = vec![1u8];
+        propose_args.extend_from_slice(&qtv_codec::to_bytes(&action));
+        execute_ordered(
+            &mut ledger,
+            &[
+                gov_call_tx(&proposer, propose_args, 0, &fee),
+                gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee),
+            ],
+            &fee,
+            0,
+        );
+        let mut enact = qtv_codec::Encoder::new();
+        enact.put_u8(3);
+        enact.put_u64(1);
+        execute_ordered(
+            &mut ledger,
+            &[gov_call_tx(&proposer, enact.into_bytes(), 1, &fee)],
+            &fee,
+            2 * 86_400,
+        );
+        assert!(ledger.is_frozen(&contract), "governance froze the contract");
+
+        assert!(
+            execute_ordered(&mut ledger, &[call_it(1)], &fee, 2 * 86_400).is_empty(),
+            "a frozen contract must not be callable"
+        );
     }
 
     #[test]
