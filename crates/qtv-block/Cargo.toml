@@ -10,7 +10,7 @@ repository.workspace = true
 description = "The block header, body, transaction root, and block id for the Quantova stack."
 
 [dependencies]
-qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "4d73a36c112b91a6a25a6a876f54cdccb729c7de" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "292594d18080179e304576164f44703d410d919f" }
 qtv-codec = { path = "../qtv-codec" }
 qtv-tx = { path = "../qtv-tx" }
 qtv-idfmt = { path = "../qtv-idfmt" }
