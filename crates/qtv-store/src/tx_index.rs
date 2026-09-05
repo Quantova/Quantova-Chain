@@ -126,31 +126,32 @@ impl TxIndex {
         Ok(None)
     }
 
-    /// Fold the tail into the sorted run. The only point memory is proportional to the
-    /// index, and it is bounded by how often this runs rather than by the chain.
+    /// Fold the tail into the sorted run by streaming, so memory is proportional to the
+    /// TAIL and never to the index.
+    ///
+    /// This runs inside the block persist path. Reading the whole index into a vector to
+    /// sort it would allocate forty bytes per transaction the chain has ever seen and
+    /// stall consensus for as long as that takes. The sorted run is already ordered and
+    /// the tail is small, so sorting only the tail and walking the two in step gives the
+    /// same result at a bounded cost.
     pub fn merge(&mut self) -> io::Result<()> {
         if self.tail_len == 0 {
             return Ok(());
         }
-        let mut all: Vec<([u8; 32], u64)> = Vec::with_capacity(self.sorted_len + self.tail_len);
         let mut buf = [0u8; RECORD];
 
-        self.sorted.seek(SeekFrom::Start(0))?;
-        for _ in 0..self.sorted_len {
-            self.sorted.read_exact(&mut buf)?;
-            all.push(split_record(&buf));
-        }
+        // Only the tail is held. Later wins, so a stable sort keeps arrival order within
+        // one id and the last of a run is the live height.
+        let mut tail: Vec<([u8; 32], u64)> = Vec::with_capacity(self.tail_len);
         let mut tail_read = File::open(&self.tail_path)?;
         for _ in 0..self.tail_len {
             if tail_read.read_exact(&mut buf).is_err() {
                 break;
             }
-            all.push(split_record(&buf));
+            tail.push(split_record(&buf));
         }
-
-        // Later wins, so sort by id and keep the last of each run.
-        all.sort_by_key(|r| r.0);
-        all.dedup_by(|a, b| {
+        tail.sort_by_key(|r| r.0);
+        tail.dedup_by(|a, b| {
             if a.0 == b.0 {
                 b.1 = a.1;
                 true
@@ -160,12 +161,70 @@ impl TxIndex {
         });
 
         let tmp = self.sorted_path.with_extension("rebuilding");
+        let mut written = 0usize;
         {
-            let mut out = File::create(&tmp)?;
-            for (id, height) in &all {
-                out.write_all(&record_bytes(id, *height))?;
+            let mut out = std::io::BufWriter::new(File::create(&tmp)?);
+            let mut reader = std::io::BufReader::new(File::open(&self.sorted_path)?);
+            let mut ti = 0usize;
+            let mut have_left = reader.read_exact(&mut buf).is_ok();
+            let mut left = if have_left {
+                Some(split_record(&buf))
+            } else {
+                None
+            };
+
+            loop {
+                match (left, tail.get(ti).copied()) {
+                    (None, None) => break,
+                    // The tail is newer, so on an equal id the tail entry wins and the
+                    // sorted one is skipped.
+                    (Some(l), Some(r)) if l.0 == r.0 => {
+                        out.write_all(&record_bytes(&r.0, r.1))?;
+                        written += 1;
+                        ti += 1;
+                        have_left = reader.read_exact(&mut buf).is_ok();
+                        left = if have_left {
+                            Some(split_record(&buf))
+                        } else {
+                            None
+                        };
+                    }
+                    (Some(l), Some(r)) if l.0 < r.0 => {
+                        out.write_all(&record_bytes(&l.0, l.1))?;
+                        written += 1;
+                        have_left = reader.read_exact(&mut buf).is_ok();
+                        left = if have_left {
+                            Some(split_record(&buf))
+                        } else {
+                            None
+                        };
+                    }
+                    (Some(_), Some(r)) => {
+                        out.write_all(&record_bytes(&r.0, r.1))?;
+                        written += 1;
+                        ti += 1;
+                    }
+                    (Some(l), None) => {
+                        out.write_all(&record_bytes(&l.0, l.1))?;
+                        written += 1;
+                        have_left = reader.read_exact(&mut buf).is_ok();
+                        left = if have_left {
+                            Some(split_record(&buf))
+                        } else {
+                            None
+                        };
+                    }
+                    (None, Some(r)) => {
+                        out.write_all(&record_bytes(&r.0, r.1))?;
+                        written += 1;
+                        ti += 1;
+                    }
+                }
             }
-            out.sync_all()?;
+            out.flush()?;
+            out.into_inner()
+                .map_err(|e| io::Error::other(e.to_string()))?
+                .sync_all()?;
         }
         std::fs::rename(&tmp, &self.sorted_path)?;
 
@@ -173,7 +232,7 @@ impl TxIndex {
             .read(true)
             .write(true)
             .open(&self.sorted_path)?;
-        self.sorted_len = all.len();
+        self.sorted_len = written;
 
         self.tail = OpenOptions::new()
             .write(true)
@@ -250,6 +309,35 @@ mod tests {
         for n in 0..200u8 {
             assert_eq!(ix.get(&id(n)).expect("read"), Some(7000 + n as u64));
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_merge_across_many_entries_keeps_every_answer_in_order() {
+        // The merge streams rather than loading the index, so this also stands as the
+        // check that the two ordered walks stay in step over a run longer than the tail.
+        let d = dir("stream");
+        let mut ix = TxIndex::open(&d).expect("opens");
+        for n in 0..255u8 {
+            ix.insert(&id(n), 100 + n as u64).expect("insert");
+        }
+        ix.merge().expect("first merge");
+        // A second round interleaves new ids among the sorted run and rewrites some.
+        for n in 0..255u8 {
+            if n % 3 == 0 {
+                ix.insert(&id(n), 9000 + n as u64).expect("rewrite");
+            }
+        }
+        ix.merge().expect("second merge");
+        for n in 0..255u8 {
+            let want = if n % 3 == 0 { 9000 } else { 100 } + n as u64;
+            assert_eq!(
+                ix.get(&id(n)).expect("read"),
+                Some(want),
+                "id {n} must read back the later height"
+            );
+        }
+        assert_eq!(ix.len(), 255, "rewrites fold rather than duplicate");
         let _ = std::fs::remove_dir_all(&d);
     }
 
