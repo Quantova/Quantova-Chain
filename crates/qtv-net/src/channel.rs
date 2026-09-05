@@ -60,14 +60,22 @@ impl<S: Read + Write> Channel<S> {
     }
 }
 
+/// How long a live link may be silent before its reader wakes to re-check whether it
+/// is still wanted. Not a liveness requirement, just a bound on how long a dead or
+/// superseded link can hold a thread.
+pub const POST_HANDSHAKE_READ: std::time::Duration = std::time::Duration::from_secs(20);
+
 impl Channel<std::net::TcpStream> {
     pub(crate) fn set_deadline(&self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
         self.stream.set_read_timeout(timeout)?;
         self.stream.set_write_timeout(timeout)
     }
 
+    /// A live link still gets a read deadline. With none, a reader blocks in recv for
+    /// ever on a peer that simply stops sending, so a superseded or silent link holds a
+    /// thread and a socket until the process dies.
     pub(crate) fn set_post_handshake(&self) -> std::io::Result<()> {
-        self.stream.set_read_timeout(None)?;
+        self.stream.set_read_timeout(Some(POST_HANDSHAKE_READ))?;
         self.stream
             .set_write_timeout(Some(std::time::Duration::from_millis(250)))
     }
