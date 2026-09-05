@@ -43,6 +43,20 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl Error {
+    /// Whether this is a read deadline expiring rather than a broken link, so a caller
+    /// can wake, re-check its own state, and keep the connection.
+    pub fn is_timeout(&self) -> bool {
+        match self {
+            Error::Io(err) => matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            _ => false,
+        }
+    }
+}
+
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
         Error::Io(err)

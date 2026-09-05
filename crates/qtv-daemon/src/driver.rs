@@ -70,6 +70,7 @@ pub struct Driver {
     n: usize,
     send: Vec<Option<Channel<TcpStream>>>,
     inbound: Receiver<(usize, Vec<u8>)>,
+    queued_bytes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     up: Vec<bool>,
     rejoined: Receiver<(usize, Channel<TcpStream>)>,
     down: SyncSender<usize>,
@@ -81,6 +82,17 @@ pub struct Driver {
 }
 
 impl Driver {
+    /// Hand queued bytes back to the mesh budget as soon as a frame leaves the queue.
+    fn release_queued(&self, len: usize) {
+        self.queued_bytes
+            .fetch_sub(len, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn decode_queued(&self, bytes: &[u8]) -> Result<Message, qtv_devnet::wire::DecodeError> {
+        self.release_queued(bytes.len());
+        Message::decode(bytes)
+    }
+
     pub fn new(node: DevNode, idx: usize, mesh: Mesh) -> Driver {
         Driver {
             node,
@@ -88,6 +100,7 @@ impl Driver {
             n: mesh.up.len(),
             send: mesh.send,
             inbound: mesh.inbound,
+            queued_bytes: mesh.queued_bytes,
             up: mesh.up,
             rejoined: mesh.rejoined,
             down: mesh.down,
@@ -218,6 +231,7 @@ impl Driver {
 
             match self.inbound.recv_timeout(TICK) {
                 Ok((source, bytes)) => {
+                    self.release_queued(bytes.len());
                     self.handle_incoming(bytes, start_height, &selection, source as u64)
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -260,7 +274,7 @@ impl Driver {
                 break;
             }
             match self.inbound.recv_timeout(TICK) {
-                Ok((source, bytes)) => match Message::decode(&bytes) {
+                Ok((source, bytes)) => match self.decode_queued(&bytes) {
                     Ok(Message::Register(note)) => {
                         if self.node.collect_registration((*note).clone()) {
                             self.broadcast(&Message::Register(note).encode());
@@ -292,7 +306,7 @@ impl Driver {
                 break;
             }
             match self.inbound.recv_timeout(TICK) {
-                Ok((source, bytes)) => match Message::decode(&bytes) {
+                Ok((source, bytes)) => match self.decode_queued(&bytes) {
                     Ok(Message::Reveal(note)) => {
                         if self.node.collect_reveal((*note).clone()) {
                             self.broadcast(&Message::Reveal(note).encode());

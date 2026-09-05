@@ -114,6 +114,13 @@ fn connect_peer(
 
 const INBOUND_CAP: usize = 4096;
 
+/// A ceiling on the BYTES parked in the inbound queue, not just the frame count.
+///
+/// The record layer admits a frame up to a megabyte, so a count-only bound of 4096 lets
+/// peers pin gigabytes here. The driver already budgets its own buffer in bytes; this is
+/// the same bound one stage earlier, where the frames actually arrive.
+const INBOUND_BYTES_CAP: usize = 64 * 1024 * 1024;
+
 const PEER_MSG_PER_SEC: f64 = 5_000.0;
 
 const PEER_MSG_BURST: f64 = 10_000.0;
@@ -121,6 +128,8 @@ const PEER_MSG_BURST: f64 = 10_000.0;
 pub struct Mesh {
     pub send: Vec<Option<Channel<TcpStream>>>,
     pub inbound: Receiver<(usize, Vec<u8>)>,
+    /// Bytes currently parked in `inbound`. The consumer subtracts what it takes.
+    pub queued_bytes: Arc<AtomicUsize>,
     pub up: Vec<bool>,
     /// Links re-established after bootstrap. A validator that restarts dials its
     /// peers again, and without this the peers never answer, so the returning node
@@ -157,6 +166,7 @@ pub fn build_mesh(
         .count();
 
     let (inbound_tx, inbound_rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_CAP);
+    let queued_bytes = Arc::new(AtomicUsize::new(0));
     let (accepted_tx, accepted_rx) = mpsc::channel::<(usize, Channel<TcpStream>)>();
 
     let identity_acc = identity.clone();
@@ -260,7 +270,13 @@ pub fn build_mesh(
 
     acceptor.join().expect("the acceptor thread joins");
 
-    spawn_readers(&accepted_rx, up_peers, inbound_tx.clone(), genesis_hash);
+    spawn_readers(
+        &accepted_rx,
+        up_peers,
+        inbound_tx.clone(),
+        Arc::clone(&queued_bytes),
+        genesis_hash,
+    );
 
     // The listener stays open for the life of the node. Bootstrap only decides when
     // the round may start, it is not the end of the node's willingness to be reached.
@@ -277,6 +293,7 @@ pub fn build_mesh(
         up.clone(),
         genesis_hash,
         inbound_tx,
+        Arc::clone(&queued_bytes),
     );
     spawn_redialer(
         peer_addrs.to_vec(),
@@ -298,6 +315,7 @@ pub fn build_mesh(
     }
 
     Mesh {
+        queued_bytes,
         send,
         inbound: inbound_rx,
         up,
@@ -344,6 +362,7 @@ fn spawn_late_acceptor(
     up: Vec<bool>,
     genesis_hash: [u8; 32],
     inbound_tx: SyncSender<(usize, Vec<u8>)>,
+    queued: Arc<AtomicUsize>,
 ) {
     thread::spawn(move || {
         let _ = listener.set_nonblocking(false);
@@ -391,6 +410,7 @@ fn spawn_late_acceptor(
             let inflight_w = Arc::clone(&inflight);
             let per_ip_w = Arc::clone(&per_ip);
             let live_w = Arc::clone(&live);
+            let queued_w = Arc::clone(&queued);
             thread::spawn(move || {
                 let handshake = {
                     // Both slots cover the handshake only. Holding either for the life
@@ -427,7 +447,15 @@ fn spawn_late_acceptor(
                     "peer {} reconnected, reading from it again",
                     from + 1
                 ));
-                read_peer_until_superseded(from, channel, out, genesis_hash, live_w, generation);
+                read_peer_until_superseded(
+                    from,
+                    channel,
+                    out,
+                    queued_w,
+                    genesis_hash,
+                    live_w,
+                    generation,
+                );
             });
         }
     });
@@ -455,6 +483,7 @@ fn read_peer_until_superseded(
     from: usize,
     channel: Channel<TcpStream>,
     out: SyncSender<(usize, Vec<u8>)>,
+    queued: Arc<AtomicUsize>,
     genesis_hash: [u8; 32],
     live: Arc<Mutex<Vec<u64>>>,
     generation: u64,
@@ -466,7 +495,7 @@ fn read_peer_until_superseded(
             .map(|g| g[from] != generation)
             .unwrap_or(true)
     };
-    read_peer_with_stop(from, channel, out, genesis_hash, &stop);
+    read_peer_with_stop(from, channel, out, queued, genesis_hash, &stop);
 }
 
 /// Dial a peer the driver has reported as down until it answers again.
@@ -531,11 +560,29 @@ fn hello_ok(frame: &[u8], genesis_hash: &[u8; 32]) -> bool {
     frame.len() == HELLO_LEN && &frame[..8] == HELLO_TAG && &frame[8..] == genesis_hash
 }
 
-fn forward_frame(out: &SyncSender<(usize, Vec<u8>)>, from: usize, bytes: Vec<u8>) -> bool {
+fn forward_frame(
+    out: &SyncSender<(usize, Vec<u8>)>,
+    queued: &AtomicUsize,
+    from: usize,
+    bytes: Vec<u8>,
+) -> bool {
+    // Dropped the same way a full queue drops, so a byte flood costs the sender its
+    // frames rather than costing this node its memory.
+    let len = bytes.len();
+    if queued.load(Ordering::Relaxed).saturating_add(len) > INBOUND_BYTES_CAP {
+        return true;
+    }
+    queued.fetch_add(len, Ordering::Relaxed);
     match out.try_send((from, bytes)) {
         Ok(()) => true,
-        Err(TrySendError::Full(_)) => true,
-        Err(TrySendError::Disconnected(_)) => false,
+        Err(TrySendError::Full(_)) => {
+            queued.fetch_sub(len, Ordering::Relaxed);
+            true
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            queued.fetch_sub(len, Ordering::Relaxed);
+            false
+        }
     }
 }
 
@@ -543,25 +590,51 @@ fn read_peer_with_stop(
     from: usize,
     mut channel: Channel<TcpStream>,
     out: SyncSender<(usize, Vec<u8>)>,
+    queued: Arc<AtomicUsize>,
     genesis_hash: [u8; 32],
     stop: &dyn Fn() -> bool,
 ) {
-    match channel.recv() {
-        Ok(frame) if hello_ok(&frame, &genesis_hash) => {}
-        Ok(frame) => {
-            log(&format!(
-                "refusing peer {}: its genesis hash {} is not ours, wrong chain",
-                from + 1,
-                hex(frame.get(8..).unwrap_or(&[]))
-            ));
-            return;
+    // The hello has a deadline of its own. A peer that completes the handshake and then
+    // sends nothing must not hold this thread and its socket for the life of the node.
+    loop {
+        match channel.recv() {
+            Ok(frame) if hello_ok(&frame, &genesis_hash) => break,
+            Ok(frame) => {
+                // Only the genesis hash field is meaningful, and the rest is peer
+                // chosen, so log a bounded prefix rather than expanding a whole frame.
+                log(&format!(
+                    "refusing peer {}: its genesis hash {} is not ours, wrong chain",
+                    from + 1,
+                    hex(frame.get(8..HELLO_LEN).unwrap_or(&[]))
+                ));
+                return;
+            }
+            Err(err) if err.is_timeout() => {
+                if stop() {
+                    return;
+                }
+                continue;
+            }
+            Err(_) => return,
         }
-        Err(_) => return,
     }
     let mut tokens = PEER_MSG_BURST;
     let mut last = Instant::now();
     let mut last_log: Option<Instant> = None;
-    while let Ok(bytes) = channel.recv() {
+    loop {
+        let bytes = match channel.recv() {
+            Ok(bytes) => bytes,
+            // A deadline expiring is not a broken link. Wake, ask whether this reader is
+            // still wanted, and carry on. This is what lets a superseded or silent link
+            // release its thread and its socket instead of parking for ever.
+            Err(err) if err.is_timeout() => {
+                if stop() {
+                    return;
+                }
+                continue;
+            }
+            Err(_) => break,
+        };
         if stop() {
             return;
         }
@@ -582,7 +655,7 @@ fn read_peer_with_stop(
             continue;
         }
         tokens -= 1.0;
-        if !forward_frame(&out, from, bytes) {
+        if !forward_frame(&out, &queued, from, bytes) {
             break;
         }
     }
@@ -592,15 +665,17 @@ fn read_peer(
     from: usize,
     channel: Channel<TcpStream>,
     out: SyncSender<(usize, Vec<u8>)>,
+    queued: Arc<AtomicUsize>,
     genesis_hash: [u8; 32],
 ) {
-    read_peer_with_stop(from, channel, out, genesis_hash, &|| false);
+    read_peer_with_stop(from, channel, out, queued, genesis_hash, &|| false);
 }
 
 fn spawn_readers(
     accepted_rx: &Receiver<(usize, Channel<TcpStream>)>,
     up_peers: usize,
     inbound_tx: SyncSender<(usize, Vec<u8>)>,
+    queued: Arc<AtomicUsize>,
     genesis_hash: [u8; 32],
 ) {
     for _ in 0..up_peers {
@@ -608,13 +683,45 @@ fn spawn_readers(
             break;
         };
         let out = inbound_tx.clone();
-        thread::spawn(move || read_peer(from, channel, out, genesis_hash));
+        let queued = Arc::clone(&queued);
+        thread::spawn(move || read_peer(from, channel, out, queued, genesis_hash));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{forward_frame, INBOUND_CAP, PEER_MSG_BURST, PEER_MSG_PER_SEC};
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn the_inbound_queue_is_bounded_by_bytes_not_only_by_frame_count() {
+        // A count only bound let peers park INBOUND_CAP megabyte frames, gigabytes of
+        // resident memory, because the record layer admits a frame that large.
+        let (tx, _rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_CAP);
+        let queued = AtomicUsize::new(0);
+        let big = super::INBOUND_BYTES_CAP / 4;
+
+        for _ in 0..4 {
+            assert!(
+                forward_frame(&tx, &queued, 0, vec![7u8; big]),
+                "a frame inside the budget is accepted"
+            );
+        }
+        let at_cap = queued.load(super::Ordering::Relaxed);
+        assert!(
+            at_cap <= super::INBOUND_BYTES_CAP,
+            "the queue must never hold more than its byte budget, held {at_cap}"
+        );
+        assert!(
+            forward_frame(&tx, &queued, 0, vec![7u8; big]),
+            "past the budget the reader keeps running"
+        );
+        assert_eq!(
+            queued.load(super::Ordering::Relaxed),
+            at_cap,
+            "but the frame past the budget is dropped rather than parked"
+        );
+    }
     use std::sync::mpsc;
 
     #[test]
@@ -623,7 +730,7 @@ mod tests {
         let flood = INBOUND_CAP * 4;
         for _ in 0..flood {
             assert!(
-                forward_frame(&tx, 1, vec![0u8; 64]),
+                forward_frame(&tx, &AtomicUsize::new(0), 1, vec![0u8; 64]),
                 "a full inbound channel must drop the frame, not stop the reader"
             );
         }
@@ -645,13 +752,13 @@ mod tests {
     fn a_drained_channel_keeps_accepting_after_a_full_burst() {
         let (tx, rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_CAP);
         for _ in 0..INBOUND_CAP {
-            assert!(forward_frame(&tx, 0, vec![1u8; 8]));
+            assert!(forward_frame(&tx, &AtomicUsize::new(0), 0, vec![1u8; 8]));
         }
         for _ in 0..INBOUND_CAP {
             assert!(rx.try_recv().is_ok());
         }
         assert!(
-            forward_frame(&tx, 0, vec![2u8; 8]),
+            forward_frame(&tx, &AtomicUsize::new(0), 0, vec![2u8; 8]),
             "a drained channel accepts fresh frames again"
         );
     }
@@ -661,7 +768,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_CAP);
         drop(rx);
         assert!(
-            !forward_frame(&tx, 0, vec![9u8; 8]),
+            !forward_frame(&tx, &AtomicUsize::new(0), 0, vec![9u8; 8]),
             "a disconnected receiver must stop the reader loop"
         );
     }
