@@ -149,7 +149,7 @@ impl TxIndex {
         }
 
         // Later wins, so sort by id and keep the last of each run.
-        all.sort_by(|a, b| a.0.cmp(&b.0));
+        all.sort_by_key(|r| r.0);
         all.dedup_by(|a, b| {
             if a.0 == b.0 {
                 b.1 = a.1;
