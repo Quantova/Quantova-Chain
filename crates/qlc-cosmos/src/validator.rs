@@ -206,19 +206,32 @@ mod tests {
 
     #[test]
     fn the_validator_set_hash_stays_linear_against_a_large_untrusted_set() {
-        let set = ValidatorSet::new(
-            (0..60_000u32)
-                .map(|i| ValidatorInfo {
-                    pubkey: distinct_key(i),
-                    voting_power: 1,
-                })
-                .collect(),
-        );
-        let start = std::time::Instant::now();
-        let _ = set.hash();
+        // Compares two sizes rather than a wall clock bound. A fixed deadline fails on a
+        // loaded machine even when the algorithm is linear, which reddens CI for a reason
+        // that has nothing to do with the property under test. Doubling the input roughly
+        // doubles a linear hash and roughly quadruples a quadratic one, and load moves
+        // both measurements together.
+        fn timed(n: u32) -> std::time::Duration {
+            let set = ValidatorSet::new(
+                (0..n)
+                    .map(|i| ValidatorInfo {
+                        pubkey: distinct_key(i),
+                        voting_power: 1,
+                    })
+                    .collect(),
+            );
+            let start = std::time::Instant::now();
+            let _ = set.hash();
+            start.elapsed()
+        }
+
+        let small = timed(30_000).max(std::time::Duration::from_micros(1));
+        let large = timed(60_000);
+        let ratio = large.as_secs_f64() / small.as_secs_f64();
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
-            "hashing a large untrusted validator set must not be quadratic"
+            ratio < 3.0,
+            "hashing a large untrusted validator set must not be quadratic, \
+             doubling the set multiplied the time by {ratio:.2}"
         );
     }
 
@@ -233,12 +246,32 @@ mod tests {
             });
         }
         let new = ValidatorSet::new(new_vals);
-        let start = std::time::Instant::now();
-        let overlap = overlap_power(&old, &new);
+        // Scaling ratio rather than a wall clock deadline, for the same reason as the
+        // hash test above: a fixed bound fails on a loaded machine even when linear.
+        fn timed(extra: u32) -> (std::time::Duration, u128) {
+            let old = ValidatorSet::new((0..128).map(|i| validator(i as u8, 10)).collect());
+            let mut vals: Vec<ValidatorInfo> = (0..40).map(|i| validator(i as u8, 10)).collect();
+            for i in 0..extra {
+                vals.push(ValidatorInfo {
+                    pubkey: distinct_key(i),
+                    voting_power: 1,
+                });
+            }
+            let new = ValidatorSet::new(vals);
+            let start = std::time::Instant::now();
+            let power = overlap_power(&old, &new);
+            (start.elapsed(), power)
+        }
+        let (small, _) = timed(20_000);
+        let (large, _) = timed(40_000);
+        let small = small.max(std::time::Duration::from_micros(1));
+        let ratio = large.as_secs_f64() / small.as_secs_f64();
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
-            "overlap over a large untrusted set must not be quadratic"
+            ratio < 3.0,
+            "overlap over a large untrusted set must not be quadratic, \
+             doubling the set multiplied the time by {ratio:.2}"
         );
+        let overlap = overlap_power(&old, &new);
         assert_eq!(
             overlap,
             40 * 10,
