@@ -652,3 +652,39 @@ fn the_chain_finalises_across_epoch_boundaries_past_the_old_one_time_ceiling() {
         "a block finalised at every height across the boundaries"
     );
 }
+
+#[test]
+fn a_contract_call_worth_more_than_the_sender_holds_is_never_admitted() {
+    // Admission used to test only the fee while dispatch tested fee plus value, so a
+    // transaction declaring more value than the sender holds was admitted, refused at
+    // execution, never included, and therefore never removed. It sat in every node's
+    // mempool for ever, and enough of them wedge the pool against honest traffic.
+    let params = FeeParams::devnet();
+    let alice = user(0);
+    let mut node = boot(genesis(
+        vec![GenesisAccount::from_account(&alice, 10_000)],
+        &[true, true, true, true],
+    ));
+
+    let call = qtv_tx::Call::new(qtv_node::ledger::vm_deploy_address(), Vec::new());
+    let body = Body::with_context(
+        alice.address(),
+        0,
+        TRANSFER_METER,
+        u128::from(params.ceiling_fee()),
+        call,
+        u64::MAX,
+        params.chain_id,
+    );
+    let tx = sign(&alice, &body);
+
+    assert!(
+        node.submit(tx).is_err(),
+        "a call declaring more value than the sender holds must be refused at admission"
+    );
+    assert_eq!(
+        node.mempool_len(),
+        0,
+        "and it must not be parked in the pool where nothing can ever clear it"
+    );
+}
