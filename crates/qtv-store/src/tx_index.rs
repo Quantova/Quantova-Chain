@@ -40,6 +40,11 @@ pub struct TxIndex {
     tail: File,
     sorted_len: usize,
     tail_len: usize,
+    /// The tail, mirrored in memory. It is bounded by TAIL_MERGE_AT, so this is at most
+    /// a few hundred kilobytes, and it keeps a lookup off the syscall path entirely.
+    /// `get_transaction` is a public RPC method, so a per record seek would let any
+    /// caller force thousands of syscalls per request on the node's own thread.
+    tail_mem: Vec<([u8; 32], u64)>,
 }
 
 impl TxIndex {
@@ -63,6 +68,17 @@ impl TxIndex {
         // reading half an id as a whole one.
         let sorted_len = sorted.metadata()?.len() as usize / RECORD;
         let tail_len = tail.metadata()?.len() as usize / RECORD;
+        let mut tail_mem = Vec::with_capacity(tail_len);
+        {
+            let mut r = std::io::BufReader::new(File::open(&tail_path)?);
+            let mut b = [0u8; RECORD];
+            for _ in 0..tail_len {
+                if r.read_exact(&mut b).is_err() {
+                    break;
+                }
+                tail_mem.push(split_record(&b));
+            }
+        }
         Ok(TxIndex {
             sorted_path,
             tail_path,
@@ -70,12 +86,14 @@ impl TxIndex {
             tail,
             sorted_len,
             tail_len,
+            tail_mem,
         })
     }
 
     pub fn insert(&mut self, id: &[u8; 32], height: u64) -> io::Result<()> {
         self.tail.write_all(&record_bytes(id, height))?;
         self.tail_len += 1;
+        self.tail_mem.push((*id, height));
         if self.tail_len >= TAIL_MERGE_AT {
             self.merge()?;
         }
@@ -91,20 +109,13 @@ impl TxIndex {
     }
 
     fn scan_tail(&self, id: &[u8; 32]) -> io::Result<Option<u64>> {
-        let mut found = None;
-        let mut file = &self.tail;
-        let mut buf = [0u8; RECORD];
-        for i in 0..self.tail_len {
-            file.seek(SeekFrom::Start((i * RECORD) as u64))?;
-            if file.read_exact(&mut buf).is_err() {
-                break;
-            }
-            let (got, height) = split_record(&buf);
-            if got == *id {
-                found = Some(height);
-            }
-        }
-        Ok(found)
+        // Last match wins, so a rewrite in the same tail reads back as the later height.
+        Ok(self
+            .tail_mem
+            .iter()
+            .rev()
+            .find(|(got, _)| got == id)
+            .map(|(_, height)| *height))
     }
 
     fn search_sorted(&self, id: &[u8; 32]) -> io::Result<Option<u64>> {
@@ -244,6 +255,7 @@ impl TxIndex {
             .append(true)
             .open(&self.tail_path)?;
         self.tail_len = 0;
+        self.tail_mem.clear();
         Ok(())
     }
 
