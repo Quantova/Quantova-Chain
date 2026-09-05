@@ -1082,7 +1082,16 @@ pub(crate) fn vm_admissible(
     }
     let charged = u64::try_from(body.fee().min(u128::from(fee_params.ceiling_fee())))
         .unwrap_or_else(|_| fee_params.ceiling_fee());
-    account.balance >= charged
+    // The same test dispatch applies, so a transaction that can never execute is never
+    // admitted. Admitting one weaker than dispatch parks it in the pool for ever: it is
+    // refused at execution, so it is never included, so nothing ever removes it, and the
+    // sender's balance and nonce never move to make it inadmissible later.
+    let native_debit = if body.in_asset().is_none() {
+        body.value()
+    } else {
+        0
+    };
+    account.balance >= charged.saturating_add(native_debit)
 }
 
 /// Deploy frame version. QDEPLOY1 carried containers built for the 88 byte call

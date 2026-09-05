@@ -257,6 +257,10 @@ pub struct DevNode {
     chain: Vec<FinalizedBlock>,
     slashed: Vec<u64>,
     tx_index: TxIndex,
+    /// What this node has already prevoted at each view of the current height. A second,
+    /// different prevote in one view is what lets two conflicting polkas form from honest
+    /// signatures, so it is refused at the point of signing.
+    prevoted: std::collections::BTreeMap<View, [u8; 32]>,
     events_by_height: HashMap<Height, Vec<BlockEvent>>,
     side_events_by_height: HashMap<Height, Vec<SideEvent>>,
     block_messages: HashMap<u64, Vec<u8>>,
@@ -345,6 +349,7 @@ impl DevNode {
             chain: Vec::new(),
             slashed: Vec::new(),
             tx_index,
+            prevoted: std::collections::BTreeMap::new(),
             events_by_height: HashMap::new(),
             side_events_by_height: HashMap::new(),
             block_messages: HashMap::new(),
@@ -1116,6 +1121,7 @@ impl DevNode {
         self.height += 1;
         self.view = 0;
         self.lock = None;
+        self.prevoted.clear();
         self.round_atts.clear();
         self.attest_relayed.clear();
         self.prevotes.clear();
@@ -1286,12 +1292,19 @@ impl DevNode {
             return Vec::new();
         };
         let value = header_value(&staged.header.hash());
+        let view = staged.view;
+        if let Some(already) = self.prevoted.get(&view) {
+            if *already != value {
+                return Vec::new();
+            }
+        }
         let committee = self.current_committee_digest();
-        let subject = prevote_subject(self.height, staged.view, value);
+        let subject = prevote_subject(self.height, view, value);
+        self.prevoted.insert(view, value);
         let prevote = self.consensus.own_attestation(
             self.height,
             self.slot(),
-            staged.view,
+            view,
             committee,
             subject,
             &self.beacon,
@@ -2231,6 +2244,7 @@ impl DevNode {
         self.view = 0;
         self.staged = None;
         self.lock = None;
+        self.prevoted.clear();
         self.round_atts.clear();
         self.attest_relayed.clear();
         self.prevotes.clear();
