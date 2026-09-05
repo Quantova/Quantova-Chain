@@ -24,7 +24,7 @@ use qtv_node::mempool::{Admitted, Mempool, Reject};
 use qtv_node::node::{execute_ordered, reweigh_roster, Genesis, GenesisAccount};
 use qtv_node::watermark::SignGuard;
 use qtv_sampler::committee::PublishedReveal;
-use qtv_store::{BlockStore, BurnArchive, BurnArchiveEntry, EventStore, StateStore};
+use qtv_store::{BlockStore, BurnArchive, BurnArchiveEntry, EventStore, StateStore, TxIndex};
 use qtv_tx::{Body, Call, Wrapper};
 
 use crate::config::{DevnetConfig, NodeConfig};
@@ -218,6 +218,11 @@ struct Lock {
 /// read cache.
 const EVENTS_CACHED_HEIGHTS: Height = 1024;
 
+/// The index is keyed by a fixed width digest of the rendered id.
+fn tx_key(tx_id: &str) -> [u8; 32] {
+    qtv_crypto::sha3::sha3_256(tx_id.as_bytes())
+}
+
 pub struct DevNode {
     id: u64,
     identity: Identity,
@@ -251,7 +256,7 @@ pub struct DevNode {
     selection_cache: RefCell<Option<Selection>>,
     chain: Vec<FinalizedBlock>,
     slashed: Vec<u64>,
-    tx_index: HashMap<String, Height>,
+    tx_index: TxIndex,
     events_by_height: HashMap<Height, Vec<BlockEvent>>,
     side_events_by_height: HashMap<Height, Vec<SideEvent>>,
     block_messages: HashMap<u64, Vec<u8>>,
@@ -287,6 +292,7 @@ impl DevNode {
         std::fs::create_dir_all(&node.store_dir)?;
         let block_store = BlockStore::open(node.store_dir.join("blocks.log"))?;
         let event_store = EventStore::open(node.store_dir.join("events.log"))?;
+        let tx_index = TxIndex::open(node.store_dir.join("txindex"))?;
         let side_event_store = EventStore::open(node.store_dir.join("side_events.log"))?;
         let state_store = StateStore::open(node.store_dir.join("state.log"))?;
         let burn_archive = BurnArchive::open(node.store_dir.join("burns.log"))?;
@@ -338,7 +344,7 @@ impl DevNode {
             selection_cache: RefCell::new(None),
             chain: Vec::new(),
             slashed: Vec::new(),
-            tx_index: HashMap::new(),
+            tx_index,
             events_by_height: HashMap::new(),
             side_events_by_height: HashMap::new(),
             block_messages: HashMap::new(),
@@ -717,23 +723,7 @@ impl DevNode {
         self.height = head + 1;
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();
-        self.rebuild_tx_index(head);
         Ok(())
-    }
-
-    fn rebuild_tx_index(&mut self, head: Height) {
-        self.tx_index.clear();
-        for height in qtv_bft::params::MIN_HEIGHT..=head {
-            let decoded = self
-                .block_store
-                .block_by_height(height)
-                .and_then(|bytes| crate::wire::chain_block_from_bytes(&bytes).ok());
-            if let Some(block) = decoded {
-                for wrapper in block.body() {
-                    self.tx_index.insert(wrapper.id(), height);
-                }
-            }
-        }
     }
 
     pub fn submit(&mut self, transaction: Wrapper) -> Result<Admitted, Reject> {
@@ -1865,7 +1855,7 @@ impl DevNode {
     fn persist(&mut self, block: &ChainBlock) -> Result<(), RoundError> {
         let height = block.header().height();
         for wrapper in block.body() {
-            self.tx_index.insert(wrapper.id(), height);
+            self.tx_index.insert(&tx_key(&wrapper.id()), height)?;
         }
         for (key, value) in self.ledger.take_dirty_entries() {
             match value {
@@ -1890,6 +1880,9 @@ impl DevNode {
         self.block_store.sync()?;
         self.event_store.sync()?;
         self.side_event_store.sync()?;
+        // Synced with the block, so a crash cannot leave the block store holding a
+        // transaction the index has never heard of.
+        self.tx_index.sync()?;
         self.state_store.commit(height, self.ledger.q_root())?;
         // The state log only ever grows while the node runs, so give it a chance
         // to shed superseded copies. The call stats the file and returns unless a
@@ -2057,7 +2050,7 @@ impl DevNode {
     }
 
     pub fn finalized_height(&self, tx_id: &str) -> Option<Height> {
-        self.tx_index.get(tx_id).copied()
+        self.tx_index.get(&tx_key(tx_id)).ok().flatten()
     }
 
     pub fn is_pending(&self, tx_id: &str) -> bool {
