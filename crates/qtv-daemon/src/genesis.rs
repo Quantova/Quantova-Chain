@@ -8,7 +8,7 @@ use qtv_crypto::sha3;
 use qtv_devnet::config::DEFAULT_SLOTS;
 use qtv_governance::GuardianSet;
 use qtv_node::bridge::{operator_pop_ok, OperatorSet};
-use qtv_node::fee::FeeParams;
+use qtv_node::fee::{asset_tag, FeeParams};
 use qtv_node::node::{Genesis, GenesisAccount, GenesisBridgedAsset, Root, ValidatorSpec};
 
 use crate::config::{parse_kv, Field};
@@ -147,6 +147,7 @@ impl GenesisFile {
             native_unit: native_unit.ok_or("the genesis is missing 'fee_native_unit'")?,
             max_fee_native: max_fee_native.ok_or("the genesis is missing 'fee_max_native'")?,
             chain_id: chain_binding,
+            native_asset: asset_tag(&asset),
         };
         if fee_params.rate_micro_usd_per_qtov == 0 {
             return Err(
@@ -382,7 +383,7 @@ fn parse_account(field: &Field) -> Result<GenesisAccount, String> {
 
 fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) -> [u8; 32] {
     let mut buf: Vec<u8> = Vec::new();
-    buf.extend_from_slice(b"QTV-GENESIS-V4");
+    buf.extend_from_slice(b"QTV-GENESIS-V5");
     put_bytes(&mut buf, chain_id.as_bytes());
     put_bytes(&mut buf, message.as_bytes());
     buf.extend_from_slice(&genesis.genesis_time.to_le_bytes());
@@ -391,6 +392,7 @@ fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) ->
     buf.extend_from_slice(&genesis.fee_params.rate_micro_usd_per_qtov.to_le_bytes());
     buf.extend_from_slice(&genesis.fee_params.native_unit.to_le_bytes());
     buf.extend_from_slice(&genesis.fee_params.max_fee_native.to_le_bytes());
+    buf.extend_from_slice(&genesis.fee_params.native_asset);
     if let Some(dest_chain) = genesis.bridge_dest_chain {
         buf.extend_from_slice(&dest_chain.to_le_bytes());
     }
@@ -452,6 +454,7 @@ mod tests {
                 native_unit: 1_000_000,
                 max_fee_native: 10_000,
                 chain_id: 42,
+                native_asset: asset_tag("QDEVNET"),
             },
             accounts: vec![account(1, 100), account(2, 100)],
             validators: vec![validator(1, 2_000), validator(2, 2_000)],
@@ -507,14 +510,28 @@ mod tests {
     }
 
     #[test]
-    fn an_unset_bridge_dest_chain_reproduces_the_v4_genesis_hash() {
+    fn the_native_asset_moves_off_the_frozen_v4_preimage() {
         let genesis = sample_genesis(None);
         let produced = genesis_hash("Q-test-net-1", "genesis", 64, &genesis);
         let legacy = legacy_v4_hash("Q-test-net-1", "genesis", 64, &genesis);
-        assert_eq!(
+        assert_ne!(
             produced, legacy,
-            "an unset bridge destination must hash to the exact pre-field V4 preimage, so a node \
-             carrying the field reproduces the genesis hash the live testnet was launched on"
+            "committing the native asset into the preimage is a genesis format change, so it \
+             must never silently reproduce the frozen V4 hash a node already trusts"
+        );
+    }
+
+    #[test]
+    fn a_different_native_asset_moves_the_genesis_hash() {
+        let mut qtov = sample_genesis(None);
+        qtov.fee_params.native_asset = asset_tag("QTOV");
+        let mut tqtov = sample_genesis(None);
+        tqtov.fee_params.native_asset = asset_tag("TQTOV");
+        let qtov_hash = genesis_hash("Q-test-net-1", "genesis", 64, &qtov);
+        let tqtov_hash = genesis_hash("Q-test-net-1", "genesis", 64, &tqtov);
+        assert_ne!(
+            qtov_hash, tqtov_hash,
+            "two genesis files naming a different native asset must never hash the same"
         );
     }
 
