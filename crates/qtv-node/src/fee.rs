@@ -13,6 +13,26 @@ pub const MICRO_USD_FLOOR: u128 = 500;
 
 pub const MICRO_USD_CEILING: u128 = 1000;
 
+/// The native asset a genesis names, folded into an eight byte tag so it stays
+/// plain old data alongside the rest of these constants. Governance checks this
+/// tag against `QTOV_ASSET_TAG` rather than against any balance held on the chain, so a
+/// vote never has a live token to buy, only a genesis fact no one can forge
+/// without also changing the genesis hash every other node already agreed to.
+pub type AssetTag = [u8; 8];
+
+pub const fn asset_tag(name: &str) -> AssetTag {
+    let bytes = name.as_bytes();
+    let mut tag = [0u8; 8];
+    let mut i = 0;
+    while i < bytes.len() && i < 8 {
+        tag[i] = bytes[i];
+        i += 1;
+    }
+    tag
+}
+
+pub const QTOV_ASSET_TAG: AssetTag = asset_tag("QTOV");
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FeeParams {
     pub transfer_micro_usd: u128,
@@ -20,6 +40,7 @@ pub struct FeeParams {
     pub native_unit: u128,
     pub max_fee_native: u64,
     pub chain_id: u64,
+    pub native_asset: AssetTag,
 }
 
 impl FeeParams {
@@ -30,6 +51,7 @@ impl FeeParams {
             native_unit: 1_000_000,
             max_fee_native: 1_000,
             chain_id: qtv_tx::LOCAL_CHAIN_ID,
+            native_asset: asset_tag("QDEVNET"),
         }
     }
 
@@ -125,6 +147,7 @@ mod tests {
             native_unit: 1_000_000,
             max_fee_native: 1_000,
             chain_id: qtv_tx::LOCAL_CHAIN_ID,
+            native_asset: asset_tag("QDEVNET"),
         };
         let dear = FeeParams {
             rate_micro_usd_per_qtov: 2_000_000,
@@ -141,6 +164,7 @@ mod tests {
             native_unit: 1_000_000,
             max_fee_native: 1_000,
             chain_id: qtv_tx::LOCAL_CHAIN_ID,
+            native_asset: asset_tag("QDEVNET"),
         };
         assert_eq!(fresh.native_fee(MICRO_USD_CEILING), 1_000);
         let stale_low = FeeParams {
@@ -158,6 +182,7 @@ mod tests {
             native_unit: u128::from(u64::MAX),
             max_fee_native: u64::MAX,
             chain_id: qtv_tx::LOCAL_CHAIN_ID,
+            native_asset: asset_tag("QDEVNET"),
         };
         assert_eq!(p.transfer_fee(), u64::MAX);
     }
@@ -170,6 +195,7 @@ mod tests {
             native_unit: 1_000_000,
             max_fee_native: 1_000,
             chain_id: qtv_tx::LOCAL_CHAIN_ID,
+            native_asset: asset_tag("QDEVNET"),
         };
         assert_eq!(p.transfer_fee(), 0);
     }
