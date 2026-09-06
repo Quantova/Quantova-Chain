@@ -16,7 +16,7 @@ use qtv_tx::Wrapper;
 #[cfg(any(test, feature = "test-fixtures"))]
 use crate::consensus::{header_value, Beacon, Consensus, ConsensusValidator, Parent};
 use crate::execution::execute_transfer;
-use crate::fee::FeeParams;
+use crate::fee::{FeeParams, QTOV_ASSET_TAG};
 use crate::ledger::{Account, Ledger};
 use crate::mempool::validate_verified;
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -307,6 +307,14 @@ fn dispatch_governance(
     fee_params: &FeeParams,
     now: u64,
 ) -> bool {
+    // Governance moves by referendum, not by whatever a chain happens to call its
+    // native unit today. A genesis names its real asset once and that name is
+    // baked into the genesis hash every node already agreed to, so this checks a
+    // fact fixed at launch, never a live balance. Until a genesis actually names
+    // QTOV, there is nothing here to vote with, propose against, or enact.
+    if fee_params.native_asset != QTOV_ASSET_TAG {
+        return false;
+    }
     let sender = wrapper.body().sender().to_string();
     if ledger.is_blacklisted(&sender) {
         return false;
@@ -1958,6 +1966,13 @@ mod tests {
         derive(&SEED, index)
     }
 
+    fn devnet_with_governance() -> FeeParams {
+        FeeParams {
+            native_asset: crate::fee::QTOV_ASSET_TAG,
+            ..FeeParams::devnet()
+        }
+    }
+
     #[test]
     fn committee_weights_use_live_bonds_and_fall_back_when_state_is_bare() {
         let base = vec![
@@ -3049,7 +3064,7 @@ mod tests {
 
     #[test]
     fn a_governance_transaction_drives_a_referendum_through_the_executor() {
-        let fee = FeeParams::devnet();
+        let fee = devnet_with_governance();
         let mut ledger = Ledger::new();
         let proposer = keypair(100);
         let voter = keypair(101);
@@ -3078,8 +3093,35 @@ mod tests {
     }
 
     #[test]
-    fn a_frozen_voter_still_votes_but_still_cannot_move_value() {
+    fn governance_is_inert_on_any_chain_that_is_not_named_qtov() {
         let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let proposer = keypair(102);
+        let voter = keypair(103);
+        fund(&mut ledger, &proposer, 2_260_000 * 1_000_000);
+        fund(&mut ledger, &voter, 10_000 * 1_000_000);
+        ledger.seed_validator_bond(&voter.address(), 10_000 * 1_000_000);
+
+        let propose = gov_call_tx(&proposer, propose_price_args(70_000_000), 0, &fee);
+        let vote = gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee);
+        assert!(
+            execute_ordered(&mut ledger, &[propose, vote], &fee, 0).is_empty(),
+            "a genesis that does not name QTOV has nothing to propose or vote with"
+        );
+        assert!(ledger.gov_referendum(1).is_none());
+        assert_eq!(ledger.gov_total_locked(), 0);
+
+        let mut enact = qtv_codec::Encoder::new();
+        enact.put_u8(3);
+        enact.put_u64(1);
+        let enact_tx = gov_call_tx(&proposer, enact.into_bytes(), 0, &fee);
+        assert!(execute_ordered(&mut ledger, &[enact_tx], &fee, 15 * 86_400).is_empty());
+        assert_eq!(ledger.stake_price(), 0);
+    }
+
+    #[test]
+    fn a_frozen_voter_still_votes_but_still_cannot_move_value() {
+        let fee = devnet_with_governance();
         let mut ledger = Ledger::new();
         let proposer = keypair(150);
         let voter = keypair(151);
@@ -3136,7 +3178,7 @@ mod tests {
 
     #[test]
     fn a_governance_blacklist_stops_the_address_from_transacting() {
-        let fee = FeeParams::devnet();
+        let fee = devnet_with_governance();
         let mut ledger = Ledger::new();
         let proposer = keypair(112);
         let voter = keypair(113);
@@ -3192,7 +3234,7 @@ mod tests {
         // callable and kept paying out while the freeze was nominally in force. Since
         // a non native asset only ever moves when its own contract moves it, this was
         // the one control governance had for stopping exactly that.
-        let fee = FeeParams::devnet();
+        let fee = devnet_with_governance();
         let mut ledger = Ledger::new();
         let proposer = keypair(150);
         let voter = keypair(151);
@@ -3265,7 +3307,7 @@ mod tests {
 
     #[test]
     fn a_governance_freeze_stops_a_sender_but_still_lets_it_receive() {
-        let fee = FeeParams::devnet();
+        let fee = devnet_with_governance();
         let mut ledger = Ledger::new();
         let proposer = keypair(140);
         let voter = keypair(141);
@@ -3373,7 +3415,7 @@ mod tests {
 
     #[test]
     fn a_blacklisted_sender_is_refused_for_every_operation_not_only_a_transfer() {
-        let fee = FeeParams::devnet();
+        let fee = devnet_with_governance();
         let mut ledger = Ledger::new();
         let proposer = keypair(130);
         let voter = keypair(131);
@@ -3474,7 +3516,7 @@ mod tests {
 
     #[test]
     fn the_parallel_path_routes_a_governance_block_to_the_same_result() {
-        let fee = FeeParams::devnet();
+        let fee = devnet_with_governance();
         let proposer = keypair(102);
         let voter = keypair(103);
         let base = {
