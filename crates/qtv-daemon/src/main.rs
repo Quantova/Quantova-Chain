@@ -29,6 +29,30 @@ use qtv_net::PeerId;
 use qtv_node::consensus::ValidatorRegistration;
 use qtv_node::node::ValidatorSpec;
 
+#[cfg(unix)]
+static TERM_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn note_term(_signum: libc::c_int) {
+    // A signal handler runs where almost nothing is safe to call. An atomic
+    // store is the one thing this is allowed to do; everything else, closing
+    // the round out and flushing state, happens back on the driver's own
+    // thread once it next checks this flag.
+    TERM_RECEIVED.store(true, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn install_term_handler() {
+    let handler = note_term as *const () as libc::sighandler_t;
+    unsafe {
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGINT, handler);
+    }
+}
+
+#[cfg(not(unix))]
+fn install_term_handler() {}
+
 fn main() {
     let outcome = match Command::parse() {
         Ok(Command::Run { config }) => run(&config),
@@ -42,6 +66,7 @@ fn main() {
 }
 
 fn run(config_path: &Path) -> Result<(), String> {
+    install_term_handler();
     let settings = config::NodeSettings::load(config_path)?;
     let genesis_file = genesis::GenesisFile::load(&settings.genesis_path)?;
 
@@ -166,7 +191,7 @@ fn run(config_path: &Path) -> Result<(), String> {
 
     let stop_path = settings.store_dir.join("STOP");
     util::log(&format!(
-        "to stop cleanly between blocks, create the file {}",
+        "a SIGTERM, a SIGINT, or creating the file {} all stop cleanly between blocks",
         stop_path.display()
     ));
     let stopped = Arc::new(AtomicBool::new(false));
@@ -355,7 +380,11 @@ fn port_of(addr: &str) -> Result<u16, String> {
 
 fn spawn_stop_watcher(path: PathBuf, stopped: Arc<AtomicBool>) {
     thread::spawn(move || loop {
-        if path.exists() {
+        #[cfg(unix)]
+        let signaled = TERM_RECEIVED.load(Ordering::SeqCst);
+        #[cfg(not(unix))]
+        let signaled = false;
+        if signaled || path.exists() {
             stopped.store(true, Ordering::SeqCst);
             return;
         }
