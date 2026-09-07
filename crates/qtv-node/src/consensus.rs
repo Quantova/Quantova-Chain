@@ -392,6 +392,34 @@ impl Consensus {
             .admits(beacon, slot, reveal.id, &reveal.credential)
     }
 
+    /// Explains a `select` refusal that was not simply an empty committee. This
+    /// recomputes the same saturation check `select` already runs, purely to
+    /// report on it, so it changes nothing about whether a round proceeds.
+    /// `None` means the roster is saturated and something else, most likely too
+    /// few published reveals, is why a committee could not form.
+    pub fn saturation_shortfall(&self) -> Option<(usize, u64, u128, u128)> {
+        let weights = self.view().weights();
+        let total: u128 = weights
+            .iter()
+            .map(|&w| w as u128)
+            .fold(0u128, u128::saturating_add);
+        if total == 0 {
+            return None;
+        }
+        let budget = self.budget as u128;
+        let floor = total.checked_div(budget).unwrap_or(total);
+        let under: Vec<u64> = weights
+            .iter()
+            .copied()
+            .filter(|&w| w != 0 && budget.saturating_mul(w as u128) < total)
+            .collect();
+        if under.is_empty() {
+            return None;
+        }
+        let lightest = under.iter().copied().min().unwrap_or(0);
+        Some((under.len(), lightest, floor, total))
+    }
+
     pub fn select(
         &self,
         beacon: &Beacon,
@@ -732,6 +760,50 @@ mod tests {
         assert!(
             !(cert_a.is_some() && cert_b.is_some()),
             "two conflicting blocks must never both finalise"
+        );
+    }
+
+    #[test]
+    fn saturation_shortfall_names_the_stake_imbalance_a_refusal_does_not_explain() {
+        // Matches the real incident shape: one validator grows far past the rest,
+        // and the ones that stayed at the ordinary stake are what falls under the
+        // committee budget's floor once the total moves, not the large one.
+        let standard = qtv_bft::params::VALIDATOR_STAKE_QTOV;
+        let outsized = standard * 1_000;
+        let validators = vec![
+            ConsensusValidator::online(1, outsized),
+            ConsensusValidator::online(2, standard),
+            ConsensusValidator::online(3, standard),
+            ConsensusValidator::online(4, standard),
+        ];
+        let consensus = consensus_for(&validators);
+        let sim = Sim::new(&validators);
+        let beacon = genesis_beacon();
+        let published = sim.published(&consensus, &beacon, 0);
+        assert!(
+            consensus.select(&beacon, 0, &published).is_none(),
+            "the three ordinary validators now sit under the floor a single outsized stake sets, so this roster must refuse to select"
+        );
+        let (count, lightest, floor, total) = consensus
+            .saturation_shortfall()
+            .expect("a refusal caused by stake imbalance must be explained, not silent");
+        assert_eq!(count, 3, "the three ordinary validators are named, not the outsized one");
+        assert_eq!(lightest, standard, "the shortfall reports the actual light stake");
+        assert_eq!(
+            total,
+            outsized as u128 + standard as u128 * 3,
+            "the shortfall reports the actual total stake"
+        );
+        assert!(floor > lightest as u128, "the floor it failed against is above what the light validators hold");
+    }
+
+    #[test]
+    fn saturation_shortfall_is_silent_when_the_roster_is_balanced() {
+        let validators = secrets(&[true, true, true, true]);
+        let consensus = consensus_for(&validators);
+        assert!(
+            consensus.saturation_shortfall().is_none(),
+            "an equally staked roster is never the reason a committee failed to form"
         );
     }
 

@@ -179,6 +179,7 @@ source = "git+https://github.com/Quantova/Q-Crypto.git?rev=292594d18080179e30457
 name = "qtv-daemon"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "qtv-account",
  "qtv-block",
  "qtv-crypto",
