@@ -787,14 +787,23 @@ mod tests {
         let (count, lightest, floor, total) = consensus
             .saturation_shortfall()
             .expect("a refusal caused by stake imbalance must be explained, not silent");
-        assert_eq!(count, 3, "the three ordinary validators are named, not the outsized one");
-        assert_eq!(lightest, standard, "the shortfall reports the actual light stake");
+        assert_eq!(
+            count, 3,
+            "the three ordinary validators are named, not the outsized one"
+        );
+        assert_eq!(
+            lightest, standard,
+            "the shortfall reports the actual light stake"
+        );
         assert_eq!(
             total,
             outsized as u128 + standard as u128 * 3,
             "the shortfall reports the actual total stake"
         );
-        assert!(floor > lightest as u128, "the floor it failed against is above what the light validators hold");
+        assert!(
+            floor > lightest as u128,
+            "the floor it failed against is above what the light validators hold"
+        );
     }
 
     #[test]
