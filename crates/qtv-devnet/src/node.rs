@@ -776,6 +776,10 @@ impl DevNode {
         Ok(selection)
     }
 
+    pub fn saturation_shortfall(&self) -> Option<(usize, u64, u128, u128)> {
+        self.consensus.saturation_shortfall()
+    }
+
     pub fn set_block_messages(&mut self, messages: HashMap<u64, Vec<u8>>) {
         self.block_messages = messages
             .into_iter()
