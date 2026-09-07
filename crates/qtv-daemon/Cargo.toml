@@ -44,5 +44,10 @@ qtv-gateway = { path = "../qtv-gateway" }
 # id is bound through. Pinned at the same tag the rest of the graph uses.
 qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "292594d18080179e304576164f44703d410d919f" }
 
+# For a raw SIGTERM handler. A signal handler runs in a context where almost nothing
+# is safe to call, so the handler body itself is one atomic store and nothing else.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [lints]
 workspace = true
