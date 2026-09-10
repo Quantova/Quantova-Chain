@@ -252,6 +252,9 @@ fn candidate_order(a: &Wrapper, b: &Wrapper, ceiling: u128) -> std::cmp::Orderin
 pub struct Mempool {
     pending: Vec<Wrapper>,
     ids: HashSet<String>,
+    by_sender: std::collections::HashMap<String, usize>,
+    sender_nonces: std::collections::HashMap<(String, u64), usize>,
+    normal_count: usize,
     cap: usize,
     per_sender: usize,
     reserve: usize,
@@ -284,6 +287,9 @@ impl Mempool {
         Mempool {
             pending: Vec::new(),
             ids: HashSet::new(),
+            by_sender: std::collections::HashMap::new(),
+            sender_nonces: std::collections::HashMap::new(),
+            normal_count: 0,
             cap: cap.max(1),
             per_sender: per_sender.max(1),
             reserve: reserve.min(cap.saturating_sub(1)),
@@ -298,9 +304,54 @@ impl Mempool {
         }
     }
 
+    fn track(&mut self, wrapper: &Wrapper) {
+        let sender = wrapper.body().sender().to_string();
+        *self.by_sender.entry(sender.clone()).or_insert(0) += 1;
+        *self
+            .sender_nonces
+            .entry((sender, wrapper.body().nonce()))
+            .or_insert(0) += 1;
+        if !is_priority(wrapper) {
+            self.normal_count += 1;
+        }
+    }
+
+    fn untrack(&mut self, wrapper: &Wrapper) {
+        let sender = wrapper.body().sender();
+        if let Some(count) = self.by_sender.get_mut(sender) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.by_sender.remove(sender);
+            }
+        } else {
+            debug_assert!(false, "untracked a sender the index never held");
+        }
+        let nonce_key = (sender.to_string(), wrapper.body().nonce());
+        if let Some(held) = self.sender_nonces.get_mut(&nonce_key) {
+            *held = held.saturating_sub(1);
+            if *held == 0 {
+                self.sender_nonces.remove(&nonce_key);
+            }
+        }
+        if !is_priority(wrapper) {
+            debug_assert!(self.normal_count > 0, "untracked more normals than held");
+            self.normal_count = self.normal_count.saturating_sub(1);
+        }
+    }
+
+    fn hold(&mut self, wrapper: Wrapper) {
+        self.track(&wrapper);
+        self.pending.push(wrapper);
+    }
+
+    fn sender_count(&self, sender: &str) -> usize {
+        self.by_sender.get(sender).copied().unwrap_or(0)
+    }
+
     fn remove_at(&mut self, index: usize) -> Wrapper {
         let wrapper = self.pending.remove(index);
         self.ids.remove(&wrapper.id());
+        self.untrack(&wrapper);
         wrapper
     }
 
@@ -349,26 +400,18 @@ impl Mempool {
     }
 
     fn has_pending_from_sender_nonce(&self, sender: &str, nonce: u64) -> bool {
-        self.pending
-            .iter()
-            .any(|w| w.body().sender() == sender && w.body().nonce() == nonce)
+        self.sender_nonces.contains_key(&(sender.to_string(), nonce))
     }
 
     fn has_capacity(&self, incoming: &Wrapper) -> bool {
-        let sender = incoming.body().sender();
-        let sender_count = self
-            .pending
-            .iter()
-            .filter(|w| w.body().sender() == sender)
-            .count();
-        if sender_count >= self.per_sender {
+        if self.sender_count(incoming.body().sender()) >= self.per_sender {
             return false;
         }
         if is_priority(incoming) {
             return true;
         }
-        let normal = self.pending.iter().filter(|w| !is_priority(w)).count();
-        normal < self.cap.saturating_sub(self.reserve) && self.pending.len() < self.cap
+        self.normal_count < self.cap.saturating_sub(self.reserve)
+            && self.pending.len() < self.cap
     }
 
     fn charge_feeless(&mut self) -> bool {
@@ -402,13 +445,7 @@ impl Mempool {
     }
 
     fn make_room(&mut self, incoming: &Wrapper) -> Result<(), Reject> {
-        let sender = incoming.body().sender();
-        let sender_count = self
-            .pending
-            .iter()
-            .filter(|w| w.body().sender() == sender)
-            .count();
-        if sender_count >= self.per_sender {
+        if self.sender_count(incoming.body().sender()) >= self.per_sender {
             return Err(Reject::SenderQueueFull);
         }
         if is_priority(incoming) {
@@ -427,8 +464,9 @@ impl Mempool {
                 _ => Err(Reject::PoolFull),
             }
         } else {
-            let normal = self.pending.iter().filter(|w| !is_priority(w)).count();
-            if normal < self.cap.saturating_sub(self.reserve) && self.pending.len() < self.cap {
+            if self.normal_count < self.cap.saturating_sub(self.reserve)
+                && self.pending.len() < self.cap
+            {
                 return Ok(());
             }
             match self.lowest_fee_normal() {
@@ -589,7 +627,7 @@ impl Mempool {
             return Err(Reject::RateLimited);
         }
         self.make_room(&wrapper)?;
-        self.pending.push(wrapper);
+        self.hold(wrapper);
         self.ids.insert(id);
         Ok(Admitted::Fresh)
     }
@@ -723,7 +761,7 @@ impl Mempool {
             if self.make_room(&wrapper).is_err() {
                 continue;
             }
-            self.pending.push(wrapper.clone());
+            self.hold(wrapper.clone());
             self.ids.insert(id);
             admitted.push(wrapper);
         }
@@ -760,7 +798,15 @@ impl Mempool {
 
     pub fn remove_included(&mut self, ids: &[String]) {
         let included: HashSet<&str> = ids.iter().map(String::as_str).collect();
-        self.pending.retain(|w| !included.contains(w.id().as_str()));
+        let mut kept = Vec::with_capacity(self.pending.len());
+        for wrapper in std::mem::take(&mut self.pending) {
+            if included.contains(wrapper.id().as_str()) {
+                self.untrack(&wrapper);
+            } else {
+                kept.push(wrapper);
+            }
+        }
+        self.pending = kept;
         for id in ids {
             self.ids.remove(id);
         }
@@ -1219,6 +1265,74 @@ mod tests {
             3,
             "the safety transaction displaced a fee competing transfer, not another safety one"
         );
+    }
+
+    fn indexes_agree_with_a_fresh_scan(pool: &Mempool) {
+        for wrapper in &pool.pending {
+            let sender = wrapper.body().sender();
+            let scanned = pool
+                .pending
+                .iter()
+                .filter(|w| w.body().sender() == sender)
+                .count();
+            assert_eq!(
+                pool.sender_count(sender),
+                scanned,
+                "the per sender index drifted from the pool"
+            );
+            assert!(
+                pool.has_pending_from_sender_nonce(sender, wrapper.body().nonce()),
+                "a held transaction is missing from the nonce index"
+            );
+        }
+        let scanned_normal = pool.pending.iter().filter(|w| !is_priority(w)).count();
+        assert_eq!(
+            pool.normal_count, scanned_normal,
+            "the normal count drifted from the pool"
+        );
+        assert_eq!(pool.ids.len(), pool.pending.len(), "the id set drifted");
+    }
+
+    #[test]
+    fn the_sender_indexes_survive_admission_eviction_and_inclusion() {
+        let params = FeeParams::devnet();
+        let fee = u128::from(params.transfer_fee());
+        let mut ledger = Ledger::new();
+        let mut pool = Mempool::with_limits(8, 4, 2);
+        let recipient = keypair(500);
+        let senders: Vec<_> = (0..10u64).map(keypair).collect();
+        for s in &senders {
+            fund(&mut ledger, s, 10_000_000);
+        }
+
+        let mut admitted = Vec::new();
+        for s in &senders {
+            let tx = signed_transfer(s, &recipient.address(), 100, 0, fee);
+            let id = tx.id();
+            if pool.admit(tx, &ledger, &params).is_ok() {
+                admitted.push(id);
+            }
+            indexes_agree_with_a_fresh_scan(&pool);
+        }
+        assert!(pool.len() <= 8, "the pool respects its cap");
+        assert!(!admitted.is_empty(), "some transactions were taken");
+
+        pool.remove_included(&admitted);
+        indexes_agree_with_a_fresh_scan(&pool);
+
+        for s in &senders {
+            let tx = signed_transfer(s, &recipient.address(), 200, 0, fee);
+            let _ = pool.admit(tx, &ledger, &params);
+            indexes_agree_with_a_fresh_scan(&pool);
+        }
+
+        let all: Vec<String> = pool.pending.iter().map(|w| w.id()).collect();
+        pool.remove_included(&all);
+        indexes_agree_with_a_fresh_scan(&pool);
+        assert_eq!(pool.len(), 0);
+        assert!(pool.by_sender.is_empty(), "the index empties with the pool");
+        assert!(pool.sender_nonces.is_empty());
+        assert_eq!(pool.normal_count, 0);
     }
 
     #[test]
