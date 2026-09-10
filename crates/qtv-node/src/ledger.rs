@@ -1,6 +1,8 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use std::sync::OnceLock;
+
 use qtv_codec::{from_bytes, to_bytes, Decode, Decoder, Encode, Encoder, Error};
 use qtv_crypto::sha3;
 use qtv_governance::{
@@ -425,14 +427,22 @@ fn stake_attest_key(id: &[u8; 32]) -> Key {
     sha3::sha3_256(&input)
 }
 
+fn cached_address(cell: &'static OnceLock<String>, tag: &[u8]) -> String {
+    cell.get_or_init(|| {
+        qtv_idfmt::render_address(&sha3::sha3_256(tag))
+            .expect("a full hash reaches the address floor")
+    })
+    .clone()
+}
+
 pub fn evidence_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/evidence"))
-        .expect("a full hash reaches the address floor")
+    static EVIDENCE_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&EVIDENCE_ADDRESS, b"qtv/evidence")
 }
 
 pub fn registration_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/registration"))
-        .expect("a full hash reaches the address floor")
+    static REGISTRATION_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&REGISTRATION_ADDRESS, b"qtv/registration")
 }
 
 fn address_id(address: &str) -> Option<[u8; 32]> {
@@ -446,39 +456,39 @@ fn address_id(address: &str) -> Option<[u8; 32]> {
 }
 
 pub fn stake_system_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/stake/system"))
-        .expect("a full hash reaches the address floor")
+    static STAKE_SYSTEM_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&STAKE_SYSTEM_ADDRESS, b"qtv/stake/system")
 }
 
 #[cfg(test)]
 pub(crate) fn fault_probe_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/native/fault-probe"))
-        .expect("a full hash reaches the address floor")
+    static FAULT_PROBE_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&FAULT_PROBE_ADDRESS, b"qtv/native/fault-probe")
 }
 
 pub fn stake_claim_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/stake/claim"))
-        .expect("a full hash reaches the address floor")
+    static STAKE_CLAIM_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&STAKE_CLAIM_ADDRESS, b"qtv/stake/claim")
 }
 
 pub fn stake_exit_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/stake/exit"))
-        .expect("a full hash reaches the address floor")
+    static STAKE_EXIT_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&STAKE_EXIT_ADDRESS, b"qtv/stake/exit")
 }
 
 pub fn stake_withdraw_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/stake/withdraw"))
-        .expect("a full hash reaches the address floor")
+    static STAKE_WITHDRAW_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&STAKE_WITHDRAW_ADDRESS, b"qtv/stake/withdraw")
 }
 
 pub fn grants_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/gov/grants"))
-        .expect("a full hash reaches the address floor")
+    static GRANTS_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&GRANTS_ADDRESS, b"qtv/gov/grants")
 }
 
 pub fn stake_treasury_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(STAKE_TREASURY_TAG))
-        .expect("a full hash reaches the address floor")
+    static STAKE_TREASURY_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&STAKE_TREASURY_ADDRESS, STAKE_TREASURY_TAG)
 }
 
 const GOV_NEXT_TAG: &[u8] = b"qtv/gov/next";
@@ -596,63 +606,63 @@ fn gov_lock_key(voter: &[u8; 32]) -> Key {
 }
 
 pub fn gov_system_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/gov/system"))
-        .expect("a full hash reaches the address floor")
+    static GOV_SYSTEM_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&GOV_SYSTEM_ADDRESS, b"qtv/gov/system")
 }
 
 pub fn key_register_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/key/register"))
-        .expect("a full hash reaches the address floor")
+    static KEY_REGISTER_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&KEY_REGISTER_ADDRESS, b"qtv/key/register")
 }
 
 pub fn bridge_freeze_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/freeze/system"))
-        .expect("a full hash reaches the address floor")
+    static BRIDGE_FREEZE_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&BRIDGE_FREEZE_ADDRESS, b"qtv/bridge/freeze/system")
 }
 
 pub fn bridge_unfreeze_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/unfreeze/system"))
-        .expect("a full hash reaches the address floor")
+    static BRIDGE_UNFREEZE_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&BRIDGE_UNFREEZE_ADDRESS, b"qtv/bridge/unfreeze/system")
 }
 
 pub fn bridge_bond_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/bond"))
-        .expect("a full hash reaches the address floor")
+    static BRIDGE_BOND_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&BRIDGE_BOND_ADDRESS, b"qtv/bridge/bond")
 }
 
 pub fn bridge_guardian_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/guardian/system"))
-        .expect("a full hash reaches the address floor")
+    static BRIDGE_GUARDIAN_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&BRIDGE_GUARDIAN_ADDRESS, b"qtv/bridge/guardian/system")
 }
 
 pub fn bridge_mint_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/mint/system"))
-        .expect("a full hash reaches the address floor")
+    static BRIDGE_MINT_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&BRIDGE_MINT_ADDRESS, b"qtv/bridge/mint/system")
 }
 
 pub fn bridge_btc_mint_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/mint/btc/system"))
-        .expect("a full hash reaches the address floor")
+    static BRIDGE_BTC_MINT_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&BRIDGE_BTC_MINT_ADDRESS, b"qtv/bridge/mint/btc/system")
 }
 
 pub fn bridge_eth_mint_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/mint/eth/system"))
-        .expect("a full hash reaches the address floor")
+    static BRIDGE_ETH_MINT_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&BRIDGE_ETH_MINT_ADDRESS, b"qtv/bridge/mint/eth/system")
 }
 
 pub fn bridge_cosmos_mint_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/mint/cosmos/system"))
-        .expect("a full hash reaches the address floor")
+    static BRIDGE_COSMOS_MINT_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&BRIDGE_COSMOS_MINT_ADDRESS, b"qtv/bridge/mint/cosmos/system")
 }
 
 pub fn bridge_exit_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/exit/system"))
-        .expect("a full hash reaches the address floor")
+    static BRIDGE_EXIT_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&BRIDGE_EXIT_ADDRESS, b"qtv/bridge/exit/system")
 }
 
 pub fn bridge_settle_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/bridge/settle/system"))
-        .expect("a full hash reaches the address floor")
+    static BRIDGE_SETTLE_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&BRIDGE_SETTLE_ADDRESS, b"qtv/bridge/settle/system")
 }
 
 const VM_CODE_TAG: &[u8] = b"qtv/vm/code/";
@@ -723,8 +733,8 @@ fn decode_slot_leaf(bytes: &[u8]) -> Option<([u8; 32], StorageKey, u64)> {
 }
 
 pub fn vm_deploy_address() -> String {
-    qtv_idfmt::render_address(&sha3::sha3_256(b"qtv/vm/deploy"))
-        .expect("a full hash reaches the address floor")
+    static VM_DEPLOY_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&VM_DEPLOY_ADDRESS, b"qtv/vm/deploy")
 }
 
 pub fn contract_address(deployer: &str, nonce: u64) -> Option<String> {
