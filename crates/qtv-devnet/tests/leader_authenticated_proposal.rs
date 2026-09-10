@@ -527,3 +527,80 @@ fn a_full_fabricated_set_is_never_accepted() {
         "a poisoned shard is rejected before it can pin or reassemble"
     );
 }
+
+#[test]
+fn a_cached_view_change_is_not_counted_once_its_signer_leaves_the_committee() {
+    let base = unique_base("justification_stale_member");
+    let alice = user(0);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let config = config(&base, &[true, true, true, true, true, true, true], accounts);
+    let mut nodes = open_nodes(&config);
+
+    let selection = nodes[0].select().expect("committee");
+    let l0 = leader_for(&selection, 0);
+    let l0_idx = idx(&config, l0);
+    let l2 = leader_for(&selection, 2);
+    let l2_idx = idx(&config, l2);
+
+    let proposal_x = nodes[l0_idx].build_proposal(&selection);
+    let mut prevotes: Vec<Attestation> = Vec::new();
+    for i in 0..nodes.len() {
+        if let Some(prevote) = prevote_of(&nodes[i].on_proposal(&selection, l0, proposal_x.clone()))
+        {
+            prevotes.push(prevote);
+        }
+    }
+    for i in 0..nodes.len() {
+        for prevote in &prevotes {
+            let _ = nodes[i].on_prevote(&selection, prevote.clone());
+        }
+    }
+    for i in 0..nodes.len() {
+        if i == l2_idx {
+            continue;
+        }
+        let record = nodes[i].make_view_change(2);
+        nodes[l2_idx].collect_view_change(&selection, record.clone());
+    }
+    let genuine = nodes[l2_idx]
+        .build_justified_proposal(&selection, 2)
+        .expect("a quorum of view changes justifies a proposal")
+        .justification;
+
+    let observer = (0..nodes.len())
+        .find(|&i| i != l2_idx)
+        .expect("an observer that did not assemble the justification");
+    let (valid, verified) = nodes[observer].measure_justification(&selection, &genuine, 2);
+    assert!(valid, "the genuine justification is accepted and cached");
+    assert!(verified > 0, "the first pass verifies the records");
+
+    let signers: Vec<u64> = genuine.iter().map(|r| r.att.from).collect();
+    let mut rotated = selection.clone();
+    for member in rotated.commitment.members.iter_mut() {
+        if signers.contains(&member.id) {
+            member.id += 1_000_000;
+        }
+    }
+    assert_eq!(
+        rotated.commitment.members.len(),
+        selection.commitment.members.len(),
+        "the committee keeps its size, only the seats change hands"
+    );
+    assert!(
+        signers
+            .iter()
+            .all(|id| rotated.commitment.member(*id).is_none()),
+        "none of the cached signers hold a seat any more"
+    );
+
+    let (still_valid, recount) = nodes[observer].measure_justification(&rotated, &genuine, 2);
+    assert_eq!(
+        recount, 0,
+        "the cache still spares the signature verification"
+    );
+    assert!(
+        !still_valid,
+        "a cached record whose signer is no longer in the committee does not count toward the quorum"
+    );
+}
+

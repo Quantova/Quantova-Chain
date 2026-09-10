@@ -90,8 +90,27 @@ const STATE_COMPACT_CHECK_BLOCKS: u64 = 1000;
 const MAX_FUTURE_PROPOSALS: usize = 256;
 
 const MAX_VIEW_CHANGES_PER_SENDER: usize = 64;
+const MAX_ROUND_VIEW_CHANGES: usize = 8192;
 
 const MAX_JUSTIFICATION_VERIFICATIONS: u64 = 4 * qtv_sampler::params::COMMITTEE_BUDGET;
+
+fn evict_fairly<T>(buffer: &mut Vec<T>, incoming: u64, sender_of: impl Fn(&T) -> u64) {
+    let mut counts: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    for item in buffer.iter() {
+        *counts.entry(sender_of(item)).or_default() += 1;
+    }
+    let heaviest = counts
+        .iter()
+        .max_by_key(|(id, count)| (**count, **id != incoming, std::cmp::Reverse(**id)))
+        .map(|(id, _)| *id);
+    let Some(heaviest) = heaviest else {
+        return;
+    };
+    if let Some(pos) = buffer.iter().position(|item| sender_of(item) == heaviest) {
+        buffer.remove(pos);
+    }
+}
+
 
 const MAX_JUSTIFICATION_CACHE: usize = 4096;
 
@@ -1403,7 +1422,7 @@ impl DevNode {
             return;
         }
         if self.prevotes.len() >= MAX_ROUND_ATTESTATIONS {
-            self.prevotes.remove(0);
+            evict_fairly(&mut self.prevotes, prevote.from, |p| p.from);
         }
         self.prevotes.push(prevote.clone());
     }
@@ -1465,6 +1484,9 @@ impl DevNode {
         }
         if !self.verify_view_change_polka(selection, &record) {
             return;
+        }
+        if self.view_changes.len() >= MAX_ROUND_VIEW_CHANGES {
+            evict_fairly(&mut self.view_changes, record.att.from, |r| r.att.from);
         }
         self.view_changes.push(record);
     }
@@ -1573,6 +1595,9 @@ impl DevNode {
             }
             let digest = crate::wire::view_change_digest(record);
             if self.justification_verified.contains(&digest) {
+                if selection.commitment.member(record.att.from).is_none() {
+                    continue;
+                }
                 seen.push(record.att.from);
                 valid.push(record.clone());
                 continue;
@@ -1803,7 +1828,7 @@ impl DevNode {
             return;
         }
         if self.round_atts.len() >= MAX_ROUND_ATTESTATIONS {
-            self.round_atts.remove(0);
+            evict_fairly(&mut self.round_atts, attestation.from, |a| a.from);
         }
         self.round_atts.push(attestation.clone());
     }
@@ -2437,5 +2462,54 @@ mod tests {
             1,
             "a threshold above the whole committee saturates to one"
         );
+    }
+}
+
+#[cfg(test)]
+mod eviction_fairness_tests {
+    use super::evict_fairly;
+
+    #[test]
+    fn a_flooding_sender_loses_its_entries_before_a_quiet_one_loses_its_only_entry() {
+        let mut buffer: Vec<(u64, u64)> = Vec::new();
+        for slot in 0..64u64 {
+            buffer.push((7, slot));
+        }
+        buffer.push((3, 0));
+        for slot in 64..128u64 {
+            buffer.push((9, slot));
+        }
+        for _ in 0..96 {
+            evict_fairly(&mut buffer, 11, |item| item.0);
+        }
+        assert!(
+            buffer.iter().any(|item| item.0 == 3),
+            "the lone honest entry survives while the floods are trimmed"
+        );
+        assert!(
+            buffer.iter().filter(|item| item.0 == 7).count() < 64,
+            "the heaviest sender loses entries first"
+        );
+        assert!(
+            buffer.iter().filter(|item| item.0 == 9).count() < 64,
+            "the second flood is trimmed as well"
+        );
+    }
+
+    #[test]
+    fn an_incoming_sender_is_evicted_last_when_the_counts_tie() {
+        let mut buffer: Vec<(u64, u64)> = vec![(1, 0), (2, 0)];
+        evict_fairly(&mut buffer, 1, |item| item.0);
+        assert!(
+            buffer.iter().any(|item| item.0 == 1),
+            "a tie does not evict the sender that is arriving"
+        );
+    }
+
+    #[test]
+    fn an_empty_buffer_is_left_alone() {
+        let mut buffer: Vec<(u64, u64)> = Vec::new();
+        evict_fairly(&mut buffer, 1, |item| item.0);
+        assert!(buffer.is_empty());
     }
 }
