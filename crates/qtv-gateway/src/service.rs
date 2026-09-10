@@ -591,9 +591,11 @@ fn chain_params(node: &DevNode) -> Json {
 
 fn validators(node: &DevNode) -> Json {
     let ledger = node.ledger();
+    let ids = ledger.validator_ids();
+    let total = ids.len();
     let mut list = Vec::new();
-    for id in ledger.validator_ids() {
-        let Ok(address) = qtv_idfmt::render_address(&id) else {
+    for id in ids.iter().take(MAX_LIST_ITEMS) {
+        let Ok(address) = qtv_idfmt::render_address(id) else {
             continue;
         };
         let stake = ledger.staked_weight(&address);
@@ -603,7 +605,8 @@ fn validators(node: &DevNode) -> Json {
         ]));
     }
     object(vec![
-        ("count", Json::Int(list.len() as u64)),
+        ("count", Json::Int(total as u64)),
+        ("returned", Json::Int(list.len() as u64)),
         ("validators", Json::Array(list)),
     ])
 }
