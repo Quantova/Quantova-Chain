@@ -32,6 +32,30 @@ struct FrameBuffer {
 }
 
 impl FrameBuffer {
+    fn heaviest_source(&self) -> Option<u64> {
+        let mut tally: Vec<(u64, usize)> = Vec::new();
+        for (source, frame) in self.frames.iter() {
+            match tally.iter_mut().find(|(id, _)| id == source) {
+                Some((_, bytes)) => *bytes += frame.len(),
+                None => tally.push((*source, frame.len())),
+            }
+        }
+        tally.into_iter().max_by_key(|&(_, bytes)| bytes).map(|(id, _)| id)
+    }
+
+    fn evict_one(&mut self, incoming: u64) {
+        let target = self.heaviest_source().unwrap_or(incoming);
+        if let Some(at) = self.frames.iter().position(|(source, _)| *source == target) {
+            if let Some((_, dropped)) = self.frames.remove(at) {
+                self.bytes -= dropped.len();
+                return;
+            }
+        }
+        if let Some((_, dropped)) = self.frames.pop_front() {
+            self.bytes -= dropped.len();
+        }
+    }
+
     fn push(&mut self, source: u64, frame: Vec<u8>) {
         if frame.len() > MAX_BUFFERED_BYTES {
             return;
@@ -40,9 +64,7 @@ impl FrameBuffer {
             && (self.frames.len() + 1 > MAX_BUFFERED_FRAMES
                 || self.bytes + frame.len() > MAX_BUFFERED_BYTES)
         {
-            if let Some((_, dropped)) = self.frames.pop_front() {
-                self.bytes -= dropped.len();
-            }
+            self.evict_one(source);
         }
         self.bytes += frame.len();
         self.frames.push_back((source, frame));
@@ -700,5 +722,35 @@ mod tests {
         assert_eq!(held.len(), 64);
         assert_eq!(buffer.len(), 0, "the buffer is empty after a drain");
         assert_eq!(buffer.byte_len(), 0, "the byte count resets on a drain");
+    }
+}
+
+#[cfg(test)]
+mod ingress_fairness_tests {
+    use super::{FrameBuffer, MAX_BUFFERED_FRAMES};
+
+    #[test]
+    fn a_flooding_peer_cannot_evict_every_other_peers_frames() {
+        let mut buf = FrameBuffer::default();
+        for _ in 0..16 {
+            buf.push(1, vec![0u8; 64]);
+        }
+        for _ in 0..(MAX_BUFFERED_FRAMES * 2) {
+            buf.push(99, vec![0u8; 64]);
+        }
+        let honest = buf.frames.iter().filter(|(s, _)| *s == 1).count();
+        assert!(
+            honest > 0,
+            "a peer flooding the ingress must not be able to evict every frame an honest peer buffered"
+        );
+    }
+
+    #[test]
+    fn the_buffer_stays_within_its_frame_bound() {
+        let mut buf = FrameBuffer::default();
+        for i in 0..(MAX_BUFFERED_FRAMES + 500) {
+            buf.push((i % 7) as u64, vec![0u8; 32]);
+        }
+        assert!(buf.frames.len() <= MAX_BUFFERED_FRAMES);
     }
 }

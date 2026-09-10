@@ -15,6 +15,7 @@ deny = [
     "secp256k1",
     "rsa",
     "bls12_381",
+    { name = "blst", wrappers = ["q-bls"] },
     "ark-ec",
     "ark-bls12-381",
     "ark-groth16",
