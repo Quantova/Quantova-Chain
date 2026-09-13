@@ -764,10 +764,12 @@ mod tests {
     }
 
     #[test]
-    fn saturation_shortfall_names_the_stake_imbalance_a_refusal_does_not_explain() {
-        // Matches the real incident shape: one validator grows far past the rest,
-        // and the ones that stayed at the ordinary stake are what falls under the
-        // committee budget's floor once the total moves, not the large one.
+    fn the_stake_cap_lets_an_imbalanced_roster_still_select() {
+        // Before the committee weight cap, one validator at a thousand times the
+        // ordinary stake pushed the three ordinary validators under the budget
+        // floor, so the roster refused to select and saturation_shortfall had to
+        // explain it. The cap holds any weight to ten times the median, so the
+        // ordinary validators keep their draw and the roster selects normally.
         let standard = qtv_bft::params::VALIDATOR_STAKE_QTOV;
         let outsized = standard * 1_000;
         let validators = vec![
@@ -781,28 +783,12 @@ mod tests {
         let beacon = genesis_beacon();
         let published = sim.published(&consensus, &beacon, 0);
         assert!(
-            consensus.select(&beacon, 0, &published).is_none(),
-            "the three ordinary validators now sit under the floor a single outsized stake sets, so this roster must refuse to select"
-        );
-        let (count, lightest, floor, total) = consensus
-            .saturation_shortfall()
-            .expect("a refusal caused by stake imbalance must be explained, not silent");
-        assert_eq!(
-            count, 3,
-            "the three ordinary validators are named, not the outsized one"
-        );
-        assert_eq!(
-            lightest, standard,
-            "the shortfall reports the actual light stake"
-        );
-        assert_eq!(
-            total,
-            outsized as u128 + standard as u128 * 3,
-            "the shortfall reports the actual total stake"
+            consensus.select(&beacon, 0, &published).is_some(),
+            "the stake cap keeps the ordinary validators above the floor, so the roster selects"
         );
         assert!(
-            floor > lightest as u128,
-            "the floor it failed against is above what the light validators hold"
+            consensus.saturation_shortfall().is_none(),
+            "a capped roster has no stake-imbalance shortfall to explain"
         );
     }
 
