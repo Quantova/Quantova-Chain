@@ -809,7 +809,7 @@ fn bridge_mint_fact(
         if asset.requires_stark {
             let prover = operators.operators.first().map(|(id, _)| *id)?;
             if crate::bridge::check_stark(&fact, artifact.stark.as_ref(), prover)
-                != crate::bridge::StarkCheck::BoundUnverified
+                != crate::bridge::StarkCheck::Verified
             {
                 return None;
             }
@@ -5948,12 +5948,12 @@ mod tests {
             statement_digest: bound.statement_digest(0),
             proof: vec![1u8; 32],
         });
-        assert_eq!(
-            execute_ordered(&mut ledger, &[mint_tx(&relayer, &b, &fee)], &fee, 0).len(),
-            1,
-            "a stark-bound asset mints on a correctly bound STARK envelope"
+        assert!(
+            execute_ordered(&mut ledger, &[mint_tx(&relayer, &b, &fee)], &fee, 0).is_empty(),
+            "a recomputable hash binding is not a proof, so a stark-bound asset refuses it too"
         );
-        assert_eq!(ledger.bridged_balance(&asset, &recipient_id), 100_000);
+        assert_eq!(ledger.bridged_supply(&asset), 0);
+        assert_eq!(ledger.bridged_balance(&asset, &recipient_id), 0);
     }
 
     #[test]
