@@ -12,6 +12,11 @@ pub const MAX_BTC_HEADERS: usize = 4096;
 pub const MAX_BTC_RAW_TX: usize = 1 << 16;
 pub const BITCOIN_MINT_SOURCE_CHAIN: u32 = 0xFFFF_FF01;
 
+/// Per-deposit sanity cap in satoshis: the total supply of bitcoin that will ever
+/// exist (21,000,000 BTC). No single honest deposit can exceed this, so a proof that
+/// claims more is malformed or hostile and is refused before it can mint.
+pub const MAX_BTC_DEPOSIT_SATS: u128 = 21_000_000 * 100_000_000;
+
 struct Cursor<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -220,7 +225,7 @@ pub fn verify_bitcoin_mint(
         &anchor.deposit_script,
     )
     .ok()?;
-    if deposit.amount == 0 {
+    if deposit.amount == 0 || deposit.amount > MAX_BTC_DEPOSIT_SATS {
         return None;
     }
     Some(Fact {
