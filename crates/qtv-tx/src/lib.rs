@@ -80,6 +80,7 @@ pub struct Body {
     chain_id: u64,
     call: Call,
     in_asset: Option<[u8; 32]>,
+    valid_until: u64,
 }
 
 impl Body {
@@ -105,12 +106,22 @@ impl Body {
             chain_id,
             call,
             in_asset: None,
+            valid_until: 0,
         }
     }
 
     pub fn carrying(mut self, issuer: [u8; 32]) -> Self {
         self.in_asset = Some(issuer);
         self
+    }
+
+    pub fn valid_until(mut self, height: u64) -> Self {
+        self.valid_until = height;
+        self
+    }
+
+    pub fn valid_until_height(&self) -> u64 {
+        self.valid_until
     }
 
     pub fn in_asset(&self) -> Option<[u8; 32]> {
@@ -157,6 +168,7 @@ impl Encode for Body {
         self.value.encode(encoder);
         self.chain_id.encode(encoder);
         encoder.put_bytes(self.in_asset.as_ref().map(|a| a.as_slice()).unwrap_or(&[]));
+        self.valid_until.encode(encoder);
     }
 }
 

@@ -1349,6 +1349,10 @@ fn execute_ordered_across(
         if wrapper.body().chain_id() != fee_params.chain_id {
             continue;
         }
+        let valid_until = wrapper.body().valid_until_height();
+        if valid_until != 0 && ledger.execution_height() > valid_until {
+            continue;
+        }
         // Both ends of the call. A freeze stops spending, so a plain transfer into a
         // frozen account still lands, but a contract is never a sender and gating only
         // the sender left a frozen contract callable.
