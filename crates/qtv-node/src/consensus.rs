@@ -442,19 +442,11 @@ impl Consensus {
         let commitment = CommitteeCommitment::from_member_keys(slot, member_keys, self.budget)
             .with_total_weight(registered_weight);
         let leader = view.elect_leader(&committee, beacon, slot)?.id;
-        let total: u128 = weights
-            .iter()
-            .map(|&w| w as u128)
-            .fold(0u128, u128::saturating_add);
-        let saturated = total > 0
-            && weights
-                .iter()
-                .all(|&w| w == 0 || (self.budget as u128).saturating_mul(w as u128) >= total);
-        if !saturated {
-            return None;
-        }
         let expected = qtv_sampler::sortition::expected_committee(&weights, self.budget);
-        let tau = qtv_sampler::params::finality_threshold(expected.max(committee.len() as u64));
+        let tau = qtv_sampler::params::finality_threshold_for_draw(
+            expected,
+            committee.len() as u64,
+        );
         let reveals = committee.reveals();
         Some(Selection {
             commitment,
@@ -803,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn a_subsampling_committee_refuses_to_select() {
+    fn a_subsampling_committee_selects_with_the_threshold_at_the_expected_floor() {
         let validators: Vec<ConsensusValidator> = (0..650u64)
             .map(|i| ConsensusValidator::online(i + 1, qtv_bft::params::VALIDATOR_STAKE_QTOV))
             .collect();
@@ -812,9 +804,13 @@ mod tests {
         let beacon = genesis_beacon();
         for slot in 0..8u64 {
             let published = sim.published(&consensus, &beacon, slot);
+            let selection = consensus
+                .select(&beacon, slot, &published)
+                .expect("a subsampling committee selects instead of halting the chain");
             assert!(
-                consensus.select(&beacon, slot, &published).is_none(),
-                "a subsampling committee cannot bound its true draw from the collected reveals, so it refuses to select rather than finalise on a suppressible count"
+                selection.tau
+                    >= qtv_sampler::params::finality_threshold(selection.expected),
+                "the threshold stays at the expected draw so a suppressed subset cannot finalise"
             );
         }
     }
