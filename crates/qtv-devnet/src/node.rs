@@ -1160,6 +1160,7 @@ impl DevNode {
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();
         self.mempool.remove_included(&staged.included_ids);
+        self.mempool.revalidate(&self.ledger);
         self.push_finalized(FinalizedBlock {
             block: chain_block,
             leader: leader_for(selection, staged.view),
@@ -2293,6 +2294,7 @@ impl DevNode {
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();
         self.mempool.remove_included(&included_ids);
+        self.mempool.revalidate(&self.ledger);
         self.push_finalized(FinalizedBlock {
             block,
             leader,
