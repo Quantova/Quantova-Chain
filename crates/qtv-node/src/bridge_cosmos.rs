@@ -7,7 +7,6 @@ use qlc_cosmos::commit::{BlockIdFlag, Commit, CommitSig, Header};
 use qlc_cosmos::light::TrustedState;
 use qlc_cosmos::proof::{ExistenceProof, InnerOp, LeafOp};
 use qlc_cosmos::proto::{BlockId, Timestamp};
-use qlc_cosmos::sha256::sha256;
 use qlc_cosmos::validator::{ValidatorInfo, ValidatorSet};
 use qlc_cosmos::verify_trustless_deposit;
 
@@ -462,6 +461,7 @@ pub fn verify_cosmos_mint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qlc_cosmos::sha256::sha256;
 
     fn dummy_validator_set(n: usize) -> ValidatorSet {
         ValidatorSet {
