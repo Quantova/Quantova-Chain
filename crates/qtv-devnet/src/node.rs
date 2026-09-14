@@ -160,6 +160,7 @@ pub enum SyncError {
     WrongHeight,
     WrongParent,
     WrongBeacon,
+    WrongTime,
     NoCommittee,
     BadCertificate,
     WrongSubject,
@@ -255,6 +256,7 @@ pub struct DevNode {
     height: Height,
     view: View,
     parent_header_hash: [u8; 32],
+    parent_time: u64,
     parent_val: Parent,
     genesis_time: u64,
     block_store: BlockStore,
@@ -347,6 +349,7 @@ impl DevNode {
             height: qtv_bft::params::MIN_HEIGHT,
             view: 0,
             parent_header_hash: [0u8; 32],
+            parent_time: 0,
             parent_val: Parent::Genesis,
             genesis_time: devnet.genesis_time,
             block_store,
@@ -711,6 +714,7 @@ impl DevNode {
             });
         }
         self.parent_header_hash = header.hash();
+        self.parent_time = header.time();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
         self.beacon = Beacon::from_seed(*header.beacon_seed());
         let head_epoch = self.consensus.epoch_for(head);
@@ -968,6 +972,7 @@ impl DevNode {
             || *header.parent_hash() != self.parent_header_hash
             || header.beacon_seed() != self.beacon.seed()
             || header.time() > qtv_node::node::wall_clock_seconds().saturating_add(120)
+            || header.time() < self.parent_time
         {
             return Err(RoundError::ProposalRejected);
         }
@@ -1133,6 +1138,7 @@ impl DevNode {
             .beacon
             .advance_from_reveals(self.slot(), &selection.reveals);
         self.parent_header_hash = chain_block.header_hash();
+        self.parent_time = chain_block.header().time();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
         let finalised_height = self.height;
         if qtv_sampler::epoch::is_epoch_start(finalised_height, self.consensus.epoch_len()) {
@@ -2196,6 +2202,9 @@ impl DevNode {
         if header.beacon_seed() != self.beacon.seed() {
             return Err(SyncError::WrongBeacon);
         }
+        if header.time() < self.parent_time {
+            return Err(SyncError::WrongTime);
+        }
         let certificate = crate::wire::certificate_from_bytes(block.certificate())
             .map_err(|_| SyncError::BadCertificate)?;
         let subject =
@@ -2268,6 +2277,7 @@ impl DevNode {
             .beacon
             .advance_from_reveals(self.slot(), &selection.reveals);
         self.parent_header_hash = block.header_hash();
+        self.parent_time = block.header().time();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
         self.height += 1;
         self.view = 0;

@@ -402,6 +402,7 @@ impl Driver {
         match message {
             Message::Tx(transaction) => self.node.admit_gossiped(transaction),
             Message::CodedProposal(coded) => {
+                self.assembler.set_round_height(self.node.height());
                 let outcome = {
                     let node = &self.node;
                     self.assembler

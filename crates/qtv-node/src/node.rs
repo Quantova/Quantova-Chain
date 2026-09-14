@@ -1180,17 +1180,19 @@ fn dispatch_vm(
             let mut genesis_memory =
                 vec![0u8; crate::ledger::CONTRACT_CONTEXT_BYTES + params.len()];
             genesis_memory[crate::ledger::CONTRACT_CONTEXT_BYTES..].copy_from_slice(params);
-            let genesis_ok = ledger.call_contract(
-                &sender,
-                &contract,
-                genesis,
-                &genesis_memory,
-                now_seconds,
-                meter,
-                value,
-                in_asset,
-                fee_params.chain_id,
-            );
+            let genesis_ok = ledger.apply_atomic(|l| {
+                l.call_contract(
+                    &sender,
+                    &contract,
+                    genesis,
+                    &genesis_memory,
+                    now_seconds,
+                    meter,
+                    value,
+                    in_asset,
+                    fee_params.chain_id,
+                )
+            });
             let declares_genesis = crate::execution::decode_container(container)
                 .map(|c| c.entries.iter().any(|e| e.selector == genesis))
                 .unwrap_or(false);
@@ -1201,17 +1203,19 @@ fn dispatch_vm(
     } else if args.len() >= 4 {
         let selector = [args[0], args[1], args[2], args[3]];
         if selector != qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE) {
-            ledger.call_contract(
-                &sender,
-                &target,
-                selector,
-                &args[4..],
-                now_seconds,
-                meter,
-                value,
-                in_asset,
-                fee_params.chain_id,
-            );
+            let _call_ok = ledger.apply_atomic(|l| {
+                l.call_contract(
+                    &sender,
+                    &target,
+                    selector,
+                    &args[4..],
+                    now_seconds,
+                    meter,
+                    value,
+                    in_asset,
+                    fee_params.chain_id,
+                )
+            });
         }
     }
     true
