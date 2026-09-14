@@ -788,6 +788,36 @@ fn dispatch_bridge_eth_update(ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
     }
 }
 
+pub(crate) fn is_bridge_cosmos_update(wrapper: &Wrapper) -> bool {
+    wrapper.body().call().target() == crate::ledger::bridge_cosmos_update_address()
+}
+
+fn dispatch_bridge_cosmos_update(ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
+    if ledger.bridge_is_frozen() {
+        return false;
+    }
+    if wrapper.body().call().args().len() > crate::bridge_cosmos::MAX_COSMOS_UPDATE_BYTES {
+        return false;
+    }
+    let proof = match crate::bridge_cosmos::CosmosUpdateProof::decode(wrapper.body().call().args()) {
+        Some(proof) => proof,
+        None => return false,
+    };
+    let anchor = match ledger.bridge_cosmos_anchor(proof.config_selector) {
+        Some(anchor) => anchor,
+        None => return false,
+    };
+    let now =
+        crate::bridge_cosmos::chain_now(ledger.chain_genesis_time(), ledger.execution_height());
+    match crate::bridge_cosmos::verify_cosmos_anchor_update(&anchor, &proof, now) {
+        Some(next) => {
+            ledger.seed_bridge_cosmos_anchor(&next);
+            true
+        }
+        None => false,
+    }
+}
+
 pub(crate) fn is_bridge_exit(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::bridge_exit_address()
 }
@@ -1396,6 +1426,12 @@ fn execute_ordered_across(
         }
         if is_bridge_eth_update(wrapper) {
             if ledger.apply_atomic(|l| dispatch_bridge_eth_update(l, wrapper)) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
+        if is_bridge_cosmos_update(wrapper) {
+            if ledger.apply_atomic(|l| dispatch_bridge_cosmos_update(l, wrapper)) {
                 included.push(wrapper.clone());
             }
             continue;

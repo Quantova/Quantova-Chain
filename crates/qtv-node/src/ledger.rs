@@ -676,6 +676,11 @@ pub fn bridge_eth_update_address() -> String {
     cached_address(&BRIDGE_ETH_UPDATE_ADDRESS, b"qtv/bridge/update/eth/system")
 }
 
+pub fn bridge_cosmos_update_address() -> String {
+    static BRIDGE_COSMOS_UPDATE_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&BRIDGE_COSMOS_UPDATE_ADDRESS, b"qtv/bridge/update/cosmos/system")
+}
+
 pub fn bridge_exit_address() -> String {
     static BRIDGE_EXIT_ADDRESS: OnceLock<String> = OnceLock::new();
     cached_address(&BRIDGE_EXIT_ADDRESS, b"qtv/bridge/exit/system")

@@ -4,7 +4,7 @@
 use crate::bridge::{Direction, Fact, FACT_VERSION};
 use qlc_cosmos::chain::{ChainConfig, FAMILY};
 use qlc_cosmos::commit::{BlockIdFlag, Commit, CommitSig, Header};
-use qlc_cosmos::light::TrustedState;
+use qlc_cosmos::light::{verify_transition, TrustedState};
 use qlc_cosmos::proof::{ExistenceProof, InnerOp, LeafOp};
 use qlc_cosmos::proto::{BlockId, Timestamp};
 use qlc_cosmos::validator::{ValidatorInfo, ValidatorSet};
@@ -405,6 +405,82 @@ impl CosmosMintProof {
     }
 }
 
+pub const MAX_COSMOS_UPDATE_BYTES: usize = 1 << 20;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CosmosUpdateProof {
+    pub config_selector: u8,
+    pub trusted_validators: ValidatorSet,
+    pub new_header: Header,
+    pub new_commit: Commit,
+    pub new_validators: ValidatorSet,
+}
+
+impl CosmosUpdateProof {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(self.config_selector);
+        encode_validator_set(&mut out, &self.trusted_validators);
+        encode_header(&mut out, &self.new_header);
+        encode_commit(&mut out, &self.new_commit);
+        encode_validator_set(&mut out, &self.new_validators);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<CosmosUpdateProof> {
+        let mut cursor = Cursor::new(bytes);
+        let config_selector = cursor.u8()?;
+        let trusted_validators = decode_validator_set(&mut cursor)?;
+        let new_header = decode_header(&mut cursor)?;
+        let new_commit = decode_commit(&mut cursor)?;
+        let new_validators = decode_validator_set(&mut cursor)?;
+        cursor.done().then_some(CosmosUpdateProof {
+            config_selector,
+            trusted_validators,
+            new_header,
+            new_commit,
+            new_validators,
+        })
+    }
+}
+
+pub fn verify_cosmos_anchor_update(
+    anchor: &CosmosAnchor,
+    proof: &CosmosUpdateProof,
+    now: Timestamp,
+) -> Option<CosmosAnchor> {
+    if proof.config_selector != anchor.config_selector {
+        return None;
+    }
+    let cfg = config_for_selector(anchor.config_selector)?;
+    if proof.trusted_validators.hash() != anchor.trusted_validators_hash {
+        return None;
+    }
+    let trusted = TrustedState {
+        height: anchor.trusted_height,
+        time: anchor.trusted_time,
+        header_hash: [0u8; 32],
+        validators: proof.trusted_validators.clone(),
+        next_validators_hash: Vec::new(),
+    };
+    let next = verify_transition(
+        &cfg,
+        &trusted,
+        &proof.new_header,
+        &proof.new_commit,
+        &proof.new_validators,
+        now,
+    )
+    .ok()?;
+    Some(CosmosAnchor {
+        config_selector: anchor.config_selector,
+        trusted_height: next.height,
+        trusted_time: next.time,
+        trusted_validators_hash: proof.new_validators.hash(),
+        asset_id: anchor.asset_id,
+    })
+}
+
 pub fn verify_cosmos_mint(
     anchor: &CosmosAnchor,
     proof: &CosmosMintProof,
@@ -462,6 +538,36 @@ pub fn verify_cosmos_mint(
 mod tests {
     use super::*;
     use qlc_cosmos::sha256::sha256;
+
+    fn dummy_update_proof() -> CosmosUpdateProof {
+        CosmosUpdateProof {
+            config_selector: 0,
+            trusted_validators: dummy_validator_set(4),
+            new_header: dummy_header(),
+            new_commit: dummy_commit(),
+            new_validators: dummy_validator_set(4),
+        }
+    }
+
+    #[test]
+    fn a_cosmos_update_proof_round_trips_through_its_wire_encoding() {
+        let proof = dummy_update_proof();
+        assert_eq!(CosmosUpdateProof::decode(&proof.encode()), Some(proof));
+    }
+
+    #[test]
+    fn a_cosmos_update_for_a_set_that_does_not_match_the_anchor_is_refused() {
+        let proof = dummy_update_proof();
+        let anchor = CosmosAnchor {
+            config_selector: 0,
+            trusted_height: 100,
+            trusted_time: Timestamp { seconds: 1_700_000_000, nanos: 0 },
+            trusted_validators_hash: [0xff; 32],
+            asset_id: [0x0e; 16],
+        };
+        let now = Timestamp { seconds: 1_700_000_100, nanos: 0 };
+        assert_eq!(verify_cosmos_anchor_update(&anchor, &proof, now), None);
+    }
 
     fn dummy_validator_set(n: usize) -> ValidatorSet {
         ValidatorSet {
