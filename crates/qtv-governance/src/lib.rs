@@ -267,11 +267,11 @@ pub struct Tally {
 }
 
 impl Tally {
-    pub fn record(&mut self, aye: bool, stake: u64) {
+    pub fn record(&mut self, aye: bool, weight: u128) {
         if aye {
-            self.aye_stake = self.aye_stake.saturating_add(stake as u128);
+            self.aye_stake = self.aye_stake.saturating_add(weight);
         } else {
-            self.nay_stake = self.nay_stake.saturating_add(stake as u128);
+            self.nay_stake = self.nay_stake.saturating_add(weight);
         }
     }
 
@@ -1034,6 +1034,18 @@ mod tests {
         assert_eq!(Conviction::Year.weight(1_000), 1_500);
         assert_eq!(Conviction::TwoYear.weight(1_000), 2_500);
         assert_eq!(Conviction::TwoYear.lock_seconds(), 2 * YEAR_SECONDS);
+    }
+
+    #[test]
+    fn conviction_multiplies_the_recorded_vote_weight() {
+        assert_eq!(Conviction::Liquid.weight(1_000), 1_000);
+        assert_eq!(Conviction::Year.weight(1_000), 1_500);
+        assert_eq!(Conviction::TwoYear.weight(1_000), 2_500);
+        let mut liquid = Tally::default();
+        liquid.record(true, Conviction::Liquid.weight(1_000));
+        let mut locked = Tally::default();
+        locked.record(true, Conviction::TwoYear.weight(1_000));
+        assert!(locked.aye_stake > liquid.aye_stake);
     }
 
     #[test]

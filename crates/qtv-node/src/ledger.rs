@@ -3185,7 +3185,7 @@ impl Ledger {
         }
         self.set_gov_lock(&voter_id, &lock);
         self.set_gov_total_locked(self.gov_total_locked() + stake as u128);
-        referendum.tally.record(aye, stake);
+        referendum.tally.record(aye, conviction.weight(stake));
         self.set_gov_referendum(referendum_id, &referendum);
         self.set_gov_ballot(
             referendum_id,
