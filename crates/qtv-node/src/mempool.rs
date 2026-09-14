@@ -237,6 +237,7 @@ fn is_feeless(wrapper: &Wrapper) -> bool {
         || crate::node::is_bridge_settle(wrapper)
         || crate::node::is_evidence(wrapper)
         || crate::node::is_bridge_guardian(wrapper)
+        || crate::node::is_bridge_eth_update(wrapper)
 }
 
 fn candidate_order(a: &Wrapper, b: &Wrapper, ceiling: u128) -> std::cmp::Ordering {
