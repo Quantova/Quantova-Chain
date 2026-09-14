@@ -796,6 +796,28 @@ impl Mempool {
         refs.into_iter().cloned().collect()
     }
 
+    /// After a block, drop every pending transaction that can no longer execute:
+    /// a nonce at or below the sender's committed nonce (already spent or superseded),
+    /// or a sender now blacklisted or frozen. Without this a stale ceiling-fee entry
+    /// sits in the pool forever, because eviction needs a strictly higher fee and fees
+    /// are clamped to the ceiling, so the pool can be wedged full of dead entries.
+    pub fn revalidate(&mut self, ledger: &Ledger) {
+        let mut kept = Vec::with_capacity(self.pending.len());
+        for wrapper in std::mem::take(&mut self.pending) {
+            let sender = wrapper.body().sender();
+            let account = ledger.account(sender);
+            let stale = wrapper.body().nonce() < account.nonce;
+            let barred = ledger.is_blacklisted(sender) || ledger.is_frozen(sender);
+            if stale || barred {
+                self.ids.remove(wrapper.id().as_str());
+                self.untrack(&wrapper);
+            } else {
+                kept.push(wrapper);
+            }
+        }
+        self.pending = kept;
+    }
+
     pub fn remove_included(&mut self, ids: &[String]) {
         let included: HashSet<&str> = ids.iter().map(String::as_str).collect();
         let mut kept = Vec::with_capacity(self.pending.len());
@@ -841,6 +863,33 @@ mod tests {
         let call = transfer_call(to, amount);
         let body = Body::new(from.address(), nonce, TRANSFER_METER, fee, call);
         sign(from, &body)
+    }
+
+    #[test]
+    fn revalidate_sweeps_a_stale_nonce_and_unwedges_a_full_pool() {
+        let params = FeeParams::devnet();
+        let ceiling = u128::from(params.ceiling_fee());
+        let mut ledger = Ledger::new();
+        let mut pool = Mempool::with_limits(1, 100, 0);
+
+        let alice = keypair(1);
+        fund(&mut ledger, &alice, 1_000_000_000);
+        let tx = signed_transfer(&alice, &keypair(9).address(), 100, 0, ceiling);
+        assert!(matches!(pool.admit(tx, &ledger, &params), Ok(Admitted::Fresh)));
+        assert_eq!(pool.pending_len(), 1);
+
+        // The account's nonce advances (its nonce-0 transfer executed in a block),
+        // so the pooled nonce-0 entry can never execute again.
+        let mut acct = ledger.account(&alice.address());
+        acct.nonce = 1;
+        ledger.set_account(&alice.address(), &acct);
+
+        pool.revalidate(&ledger);
+        assert_eq!(
+            pool.pending_len(),
+            0,
+            "a stale-nonce entry must be swept so the ceiling-fee pool is not wedged"
+        );
     }
 
     #[test]
