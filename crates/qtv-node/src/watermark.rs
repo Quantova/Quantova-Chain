@@ -89,6 +89,107 @@ fn decode_mark(bytes: &[u8]) -> Option<(u64, u64)> {
     }
 }
 
+/// A durable record of the last prevote a validator cast, so a crash and restart cannot
+/// let it prevote a second, conflicting value at a view it already voted in. The
+/// in-memory record of prevotes is lost on restart; this one is not. Unlike the block
+/// [`SignGuard`] this also remembers the value, so re-broadcasting the identical prevote
+/// after a restart is still allowed while a different value at the same view is refused.
+#[derive(Debug)]
+pub struct PrevoteGuard {
+    path: PathBuf,
+    mark: Option<(u64, u64, [u8; 32])>,
+}
+
+impl PrevoteGuard {
+    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let mark = match fs::read(&path) {
+            Ok(bytes) => match decode_prevote(&bytes) {
+                Some(mark) => Some(mark),
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "the prevote watermark file is present but unreadable; refusing to \
+                         prevote so a corrupt watermark cannot re-enable a conflicting prevote",
+                    ));
+                }
+            },
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err),
+        };
+        Ok(PrevoteGuard { path, mark })
+    }
+
+    /// True if prevoting `value` at `(height, view)` does not conflict with a prior
+    /// prevote: a strictly newer height/view is always allowed, the same height/view is
+    /// allowed only for the identical value, and an older height/view is refused.
+    pub fn permits(&self, height: u64, view: u64, value: &[u8; 32]) -> bool {
+        match &self.mark {
+            Some((mh, mv, mval)) => {
+                let here = (height, view);
+                let there = (*mh, *mv);
+                match here.cmp(&there) {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Equal => value == mval,
+                    std::cmp::Ordering::Less => false,
+                }
+            }
+            None => true,
+        }
+    }
+
+    pub fn try_prevote(&mut self, height: u64, view: u64, value: &[u8; 32]) -> io::Result<bool> {
+        if !self.permits(height, view, value) {
+            return Ok(false);
+        }
+        // Only advance the mark forwards; re-broadcasting the same prevote must not
+        // rewind it below a later view already reached.
+        if self
+            .mark
+            .as_ref()
+            .map(|(mh, mv, _)| (height, view) >= (*mh, *mv))
+            .unwrap_or(true)
+        {
+            self.persist(height, view, value)?;
+            self.mark = Some((height, view, *value));
+        }
+        Ok(true)
+    }
+
+    fn persist(&self, height: u64, view: u64, value: &[u8; 32]) -> io::Result<()> {
+        let mut bytes = [0u8; 52];
+        bytes[0..8].copy_from_slice(&height.to_le_bytes());
+        bytes[8..16].copy_from_slice(&view.to_le_bytes());
+        bytes[16..48].copy_from_slice(value);
+        let checksum = crc32(&bytes[0..48]);
+        bytes[48..52].copy_from_slice(&checksum.to_le_bytes());
+        let temp = self.path.with_extension("tmp");
+        let mut file = fs::File::create(&temp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, &self.path)?;
+        if let Some(dir) = self.path.parent() {
+            let _ = fs::File::open(dir).and_then(|d| d.sync_all());
+        }
+        Ok(())
+    }
+}
+
+fn decode_prevote(bytes: &[u8]) -> Option<(u64, u64, [u8; 32])> {
+    if bytes.len() != 52 {
+        return None;
+    }
+    let stored = u32::from_le_bytes(bytes[48..52].try_into().ok()?);
+    if crc32(&bytes[0..48]) != stored {
+        return None;
+    }
+    let height = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
+    let view = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
+    let mut value = [0u8; 32];
+    value.copy_from_slice(&bytes[16..48]);
+    Some((height, view, value))
+}
+
 fn crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {
@@ -123,6 +224,42 @@ mod tests {
     fn cleanup(path: &Path) {
         std::fs::remove_file(path).ok();
         std::fs::remove_file(path.with_extension("tmp")).ok();
+    }
+
+    #[test]
+    fn a_restart_refuses_a_conflicting_prevote_but_allows_the_same_one() {
+        let path = temp_path("prevote-restart");
+        let a = [0xaau8; 32];
+        let b = [0xbbu8; 32];
+        {
+            let mut guard = PrevoteGuard::open(&path).unwrap();
+            assert!(guard.try_prevote(7, 2, &a).unwrap(), "first prevote is allowed");
+        }
+        // Simulate a crash and restart: a fresh guard reads the persisted mark.
+        {
+            let mut guard = PrevoteGuard::open(&path).unwrap();
+            assert!(
+                !guard.try_prevote(7, 2, &b).unwrap(),
+                "a different value at the same height and view is refused after restart"
+            );
+            assert!(
+                guard.try_prevote(7, 2, &a).unwrap(),
+                "re-broadcasting the identical prevote is still allowed"
+            );
+            assert!(
+                !guard.try_prevote(7, 1, &a).unwrap(),
+                "an older view is refused after restart"
+            );
+            assert!(
+                guard.try_prevote(7, 3, &b).unwrap(),
+                "a newer view is allowed and advances the mark"
+            );
+            assert!(
+                !guard.try_prevote(7, 3, &a).unwrap(),
+                "once advanced, a conflicting value at the new view is refused too"
+            );
+        }
+        cleanup(&path);
     }
 
     #[test]

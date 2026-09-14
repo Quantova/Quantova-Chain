@@ -22,7 +22,7 @@ use qtv_node::ledger::{
 };
 use qtv_node::mempool::{Admitted, Mempool, Reject};
 use qtv_node::node::{execute_ordered, reweigh_roster, Genesis, GenesisAccount};
-use qtv_node::watermark::SignGuard;
+use qtv_node::watermark::{PrevoteGuard, SignGuard};
 use qtv_sampler::committee::PublishedReveal;
 use qtv_store::{BlockStore, BurnArchive, BurnArchiveEntry, EventStore, StateStore, TxIndex};
 use qtv_tx::{Body, Call, Wrapper};
@@ -290,6 +290,7 @@ pub struct DevNode {
     epoch_conflicted: HashSet<u64>,
     epoch_conflict_notes: Vec<RegisterNote>,
     sign_guard: SignGuard,
+    prevote_guard: PrevoteGuard,
     finality: FinalityLedger,
     guarded_height: Option<Height>,
     fatal: Option<Fatal>,
@@ -322,6 +323,7 @@ impl DevNode {
         let state_store = StateStore::open(node.store_dir.join("state.log"))?;
         let burn_archive = BurnArchive::open(node.store_dir.join("burns.log"))?;
         let sign_guard = SignGuard::open(node.store_dir.join("sign.watermark"))?;
+        let prevote_guard = PrevoteGuard::open(node.store_dir.join("prevote.watermark"))?;
 
         let roster: Vec<ValidatorRegistration> = devnet.roster();
 
@@ -380,6 +382,7 @@ impl DevNode {
             epoch_conflicted: HashSet::new(),
             epoch_conflict_notes: Vec::new(),
             sign_guard,
+            prevote_guard,
             finality: FinalityLedger::new(),
             guarded_height: None,
             fatal: None,
@@ -1327,6 +1330,14 @@ impl DevNode {
             if *already != value {
                 return Vec::new();
             }
+        }
+        // A durable guard so that a crash and restart cannot let this node prevote a
+        // second, conflicting value at a view it already voted in. It refuses an older
+        // view and a different value at the same view, exactly like the in-memory record
+        // above, but it survives a restart that empties that record.
+        match self.prevote_guard.try_prevote(self.height, view, &value) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return Vec::new(),
         }
         let committee = self.current_committee_digest();
         let subject = prevote_subject(self.height, view, value);
