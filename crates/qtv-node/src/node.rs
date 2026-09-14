@@ -1099,6 +1099,14 @@ const VM_BLOCK_METER_BUDGET: u64 = 50_000_000;
 const MAX_TX_METER: u64 = VM_BLOCK_METER_BUDGET / 4;
 const MAX_VM_ARGS: usize = 128 * 1024;
 
+pub(crate) fn vm_meter_fee(meter: u64, fee_params: &FeeParams) -> u64 {
+    let units = meter.div_ceil(crate::execution::TRANSFER_METER).max(1);
+    u128::from(fee_params.transfer_fee())
+        .saturating_mul(u128::from(units))
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 pub(crate) fn is_vm_op(ledger: &Ledger, wrapper: &Wrapper) -> bool {
     let target = wrapper.body().call().target();
     target == crate::ledger::vm_deploy_address() || ledger.is_contract(target)
@@ -1123,11 +1131,10 @@ pub(crate) fn vm_admissible(
     {
         return false;
     }
-    if body.fee() < u128::from(fee_params.transfer_fee()) {
+    let charged = vm_meter_fee(body.meter_limit(), fee_params);
+    if body.fee() < u128::from(charged) {
         return false;
     }
-    let charged = u64::try_from(body.fee().min(u128::from(fee_params.ceiling_fee())))
-        .unwrap_or_else(|_| fee_params.ceiling_fee());
     // The same test dispatch applies, so a transaction that can never execute is never
     // admitted. Admitting one weaker than dispatch parks it in the pool for ever: it is
     // refused at execution, so it is never included, so nothing ever removes it, and the
@@ -1180,13 +1187,7 @@ fn dispatch_vm(
     }
     // Charge the declared limit unless a completed call reports less.
     ledger.arm_vm_meter(wrapper.body().meter_limit());
-    let charged = u64::try_from(
-        wrapper
-            .body()
-            .fee()
-            .min(u128::from(fee_params.ceiling_fee())),
-    )
-    .unwrap_or_else(|_| fee_params.ceiling_fee());
+    let charged = vm_meter_fee(wrapper.body().meter_limit(), fee_params);
     let value = wrapper.body().value();
     let in_asset = wrapper.body().in_asset();
     let native_debit = if in_asset.is_none() { value } else { 0 };
@@ -2081,7 +2082,7 @@ mod tests {
             from.address(),
             nonce,
             meter,
-            u128::from(fee.transfer_fee()),
+            u128::from(vm_meter_fee(meter, fee)),
             call,
         );
         sign(from, &body)
@@ -2101,7 +2102,7 @@ mod tests {
             from.address(),
             nonce,
             meter,
-            u128::from(fee.transfer_fee()),
+            u128::from(vm_meter_fee(meter, fee)),
             call,
             value,
             qtv_tx::LOCAL_CHAIN_ID,
@@ -2142,6 +2143,15 @@ mod tests {
             ledger.stake_pool() >= pool_before,
             "the stake pool record stays a coherent balance and is never clobbered"
         );
+    }
+
+    #[test]
+    fn a_vm_call_is_priced_per_meter() {
+        let fee = FeeParams::devnet();
+        let base = fee.transfer_fee();
+        assert_eq!(vm_meter_fee(crate::execution::TRANSFER_METER, &fee), base);
+        assert_eq!(vm_meter_fee(crate::execution::TRANSFER_METER * 10, &fee), base * 10);
+        assert!(vm_meter_fee(MAX_TX_METER, &fee) > base * 1000);
     }
 
     #[test]
@@ -2413,7 +2423,7 @@ mod tests {
     #[test]
     fn a_contract_sends_and_receives_real_native_funds_with_value_conserved() {
         let fee = FeeParams::devnet();
-        let charged = fee.transfer_fee();
+        let charged = vm_meter_fee(100_000, &fee);
         let mut ledger = Ledger::new();
         let deployer = keypair(180);
         let payee = keypair(181);
@@ -2538,7 +2548,7 @@ mod tests {
         );
         assert_eq!(
             ledger.balance(&payee.address()),
-            payee_before - fee.transfer_fee(),
+            payee_before - vm_meter_fee(100_000, &fee),
             "the caller minted no funds and only paid the fee"
         );
     }

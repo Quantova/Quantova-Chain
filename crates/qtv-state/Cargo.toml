@@ -10,7 +10,7 @@ repository.workspace = true
 description = "The sparse Merkle state trie and its proofs for the Quantova stack."
 
 [dependencies]
-qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "292594d18080179e304576164f44703d410d919f" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "bfee34d4b655d2e94a2615fd5005ed7253fa0028" }
 qtv-codec = { path = "../qtv-codec" }
 
 [lints]
