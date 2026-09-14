@@ -265,6 +265,7 @@ pub struct Mempool {
     mint_attempts: usize,
     settle_attempts: usize,
     guardian_attempts: usize,
+    mint_sources: std::collections::HashSet<(u32, [u8; 32])>,
     ceiling: u128,
 }
 
@@ -300,6 +301,7 @@ impl Mempool {
             mint_attempts: 0,
             settle_attempts: 0,
             guardian_attempts: 0,
+            mint_sources: std::collections::HashSet::new(),
             ceiling: u128::MAX,
         }
     }
@@ -313,6 +315,11 @@ impl Mempool {
             .or_insert(0) += 1;
         if !is_priority(wrapper) {
             self.normal_count += 1;
+        }
+        if crate::node::is_bridge_mint(wrapper) {
+            if let Some(key) = crate::node::bridge_mint_source_key(wrapper) {
+                self.mint_sources.insert(key);
+            }
         }
     }
 
@@ -336,6 +343,11 @@ impl Mempool {
         if !is_priority(wrapper) {
             debug_assert!(self.normal_count > 0, "untracked more normals than held");
             self.normal_count = self.normal_count.saturating_sub(1);
+        }
+        if crate::node::is_bridge_mint(wrapper) {
+            if let Some(key) = crate::node::bridge_mint_source_key(wrapper) {
+                self.mint_sources.remove(&key);
+            }
         }
     }
 
@@ -382,10 +394,7 @@ impl Mempool {
             Some(source_key) => source_key,
             None => return false,
         };
-        self.pending.iter().any(|w| {
-            crate::node::is_bridge_mint(w)
-                && crate::node::bridge_mint_source_key(w) == Some(source_key)
-        })
+        self.mint_sources.contains(&source_key)
     }
 
     fn duplicate_settle(&self, incoming: &Wrapper) -> bool {
