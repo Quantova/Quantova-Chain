@@ -174,12 +174,10 @@ fn respond<S: Read + Write>(
     identity: &Identity,
     expected: Option<&PeerId>,
 ) -> Result<Channel<S>> {
-    let mut kem_seed = [0u8; 32];
-    let mut kem_z = [0u8; 32];
-    fill_random(&mut kem_seed)?;
-    fill_random(&mut kem_z)?;
-    let (encaps_key, decaps_key) = ml_kem::keygen(&kem_seed, &kem_z);
-
+    // Read the initiator's hello before spending any post-quantum work. A peer that
+    // connects and then stays silent (or dribbles bytes) is dropped by the read timeout
+    // without ever costing a fresh ML-KEM keygen or an ML-DSA signature, so an idle or
+    // slow-loris flood cannot pin the responder's CPU.
     let initiator_public: ml_dsa::PublicKey = read_array(&mut stream)?;
     let client_random: [u8; 32] = read_array(&mut stream)?;
 
@@ -187,6 +185,12 @@ fn respond<S: Read + Write>(
     if expected.is_some_and(|pin| &peer != pin) {
         return Err(Error::UnexpectedPeer);
     }
+
+    let mut kem_seed = [0u8; 32];
+    let mut kem_z = [0u8; 32];
+    fill_random(&mut kem_seed)?;
+    fill_random(&mut kem_z)?;
+    let (encaps_key, decaps_key) = ml_kem::keygen(&kem_seed, &kem_z);
 
     let mut transcript = Transcript::new();
     transcript.absorb(&initiator_public);
