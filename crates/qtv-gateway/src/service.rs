@@ -113,6 +113,12 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
             let bytes = crate::json::from_hex(&hex).map_err(|e| {
                 ClientError::bad("bad_request", format!("the tx field is not hex, {e}"))
             })?;
+            if bytes.len() > MAX_TX_BYTES {
+                return Err(ClientError::bad(
+                    "too_large",
+                    "the transaction is larger than the node accepts",
+                ));
+            }
             Ok(Request::Submit(bytes))
         }
         "get_block" => {
@@ -198,6 +204,11 @@ fn string_field(body: &Json, key: &str) -> Result<String, ClientError> {
 }
 
 const MAX_STORAGE_KEYS: usize = 64;
+
+/// Cap a submitted transaction before it reaches the node. A legitimate transaction,
+/// including a full contract deploy, fits well under this; a larger body is refused
+/// here so no validator spends a post-quantum signature verification on it.
+const MAX_TX_BYTES: usize = 256 * 1024;
 
 fn key_list(body: &Json) -> Result<Vec<[u8; 32]>, ClientError> {
     let array = body
