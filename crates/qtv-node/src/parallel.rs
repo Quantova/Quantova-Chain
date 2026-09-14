@@ -172,6 +172,7 @@ pub fn execute_parallel(
     let grants_address = crate::ledger::grants_address();
     ledger.bridge_expire(now_seconds);
     ledger.guardian_expire(now_seconds);
+    ledger.guardian_apply_due_enact(now_seconds);
     if candidates.iter().any(|wrapper| {
         let (sender, target) = access(wrapper);
         round_proposer.as_deref() == Some(sender)

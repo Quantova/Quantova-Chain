@@ -534,9 +534,7 @@ fn guardian_enact_action(act: &GuardianAct) -> Option<Action> {
         return None;
     }
     match action {
-        Action::CommitteeRotate { .. }
-        | Action::AssetRegister { .. }
-        | Action::BridgeAnchorSet { .. } => Some(action),
+        Action::BridgeAnchorSet { .. } => Some(action),
         _ => None,
     }
 }

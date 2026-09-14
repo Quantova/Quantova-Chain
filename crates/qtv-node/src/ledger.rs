@@ -259,6 +259,12 @@ const BRIDGE_SEEN_TAG: &[u8] = b"qtv/bridge/seen/";
 const BRIDGE_EPOCHMINT_TAG: &[u8] = b"qtv/bridge/epochmint/";
 const BRIDGE_OPERATORS_TAG: &[u8] = b"qtv/bridge/operators";
 const GUARDIAN_ENACT_NONCE_TAG: &[u8] = b"qtv/guardian/enact-nonce";
+const GUARDIAN_PENDING_ENACT_TAG: &[u8] = b"qtv/guardian/pending-enact";
+/// Delay between a guardian anchor enactment being queued and taking effect, so the
+/// community has a window to observe and, if the change is hostile, freeze the bridge
+/// (which drops the pending enact) before it lands. Guardian keys can no longer move
+/// bridge trust roots unilaterally and instantly.
+const GUARDIAN_ENACT_DELAY_SECONDS: u64 = 24 * 60 * 60;
 const BRIDGE_VAULTBAL_TAG: &[u8] = b"qtv/bridge/vaultbal/";
 const BRIDGE_ASSET_LIST_TAG: &[u8] = b"qtv/bridge/assetlist";
 const BRIDGE_DESTCHAIN_TAG: &[u8] = b"qtv/bridge/destchain";
@@ -3608,26 +3614,70 @@ impl Ledger {
         self.write_leaf(key, to_bytes(&nonce));
     }
 
+    /// A guardian-authorised bridge enactment no longer executes immediately. It is
+    /// queued behind a veto window; only an anchor update is allowed here, and it lands
+    /// later via `guardian_apply_due_enact`. CommitteeRotate and AssetRegister are no
+    /// longer guardian powers at all and must go through the governance track.
     pub fn guardian_enact_bridge_action(
         &mut self,
         action: &Action,
         enact_nonce: u64,
         now: u64,
-        chain_id: u64,
+        _chain_id: u64,
     ) -> bool {
         if self.guardian_enact_nonce() != enact_nonce {
             return false;
         }
-        let ok = match action {
-            Action::CommitteeRotate { .. }
-            | Action::AssetRegister { .. }
-            | Action::BridgeAnchorSet { .. } => self.execute_action(action, now, chain_id).is_ok(),
-            _ => false,
-        };
-        if ok {
-            self.set_guardian_enact_nonce(enact_nonce.saturating_add(1));
+        if !matches!(action, Action::BridgeAnchorSet { .. }) {
+            return false;
         }
-        ok
+        if self.guardian_pending_enact().is_some() {
+            return false;
+        }
+        let effective_at = now.saturating_add(GUARDIAN_ENACT_DELAY_SECONDS);
+        let mut payload = effective_at.to_le_bytes().to_vec();
+        payload.extend_from_slice(&to_bytes(action));
+        self.write_leaf(stake_singleton_key(GUARDIAN_PENDING_ENACT_TAG), payload);
+        self.set_guardian_enact_nonce(enact_nonce.saturating_add(1));
+        true
+    }
+
+    pub fn guardian_pending_enact(&self) -> Option<(u64, Vec<u8>)> {
+        self.trie
+            .get(&stake_singleton_key(GUARDIAN_PENDING_ENACT_TAG))
+            .filter(|bytes| bytes.len() > 8)
+            .map(|bytes| {
+                let mut when = [0u8; 8];
+                when.copy_from_slice(&bytes[..8]);
+                (u64::from_le_bytes(when), bytes[8..].to_vec())
+            })
+    }
+
+    fn clear_guardian_pending_enact(&mut self) {
+        self.write_leaf(stake_singleton_key(GUARDIAN_PENDING_ENACT_TAG), Vec::new());
+    }
+
+    /// Called each block. Once the veto window has elapsed, a queued anchor enactment
+    /// lands, unless the bridge has been frozen in the meantime, in which case the
+    /// pending enact is dropped: a governance or guardian freeze is the veto.
+    pub fn guardian_apply_due_enact(&mut self, now: u64) {
+        let Some((effective_at, action_bytes)) = self.guardian_pending_enact() else {
+            return;
+        };
+        if now < effective_at {
+            return;
+        }
+        self.clear_guardian_pending_enact();
+        if self.bridge_freeze().is_some() {
+            return;
+        }
+        let mut decoder = Decoder::new(&action_bytes);
+        if let Ok(action) = Action::decode(&mut decoder) {
+            // BridgeAnchorSet seeds a trust root and is chain-id independent.
+            if decoder.remaining() == 0 && matches!(action, Action::BridgeAnchorSet { .. }) {
+                let _ = self.execute_action(&action, now, 0);
+            }
+        }
     }
 
     pub fn feature_version(&self, feature: &[u8]) -> u64 {
@@ -7650,10 +7700,9 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn a_guardian_enact_installs_a_bridge_anchor_on_a_running_chain() {
+    fn a_guardian_enact_queues_a_bridge_anchor_behind_a_timelock_and_a_freeze_vetoes_it() {
         use qtv_governance::Action;
         let mut l = Ledger::new();
-        let chain_id = 42u64;
 
         let btc = crate::bridge_btc::BitcoinAnchor {
             network: 0,
@@ -7663,21 +7712,6 @@ mod stake_state_tests {
             asset_id: [0x33u8; 16],
             deposit_script: vec![0x76, 0xa9, 0x14],
         };
-        assert!(l.guardian_enact_bridge_action(
-            &Action::BridgeAnchorSet {
-                corridor: 0,
-                anchor: btc.encode()
-            },
-            0,
-            0,
-            chain_id
-        ));
-        assert_eq!(
-            l.bridge_bitcoin_anchor(),
-            Some(btc),
-            "the guardian installed the bitcoin anchor at runtime"
-        );
-
         let eth = crate::bridge_eth::EthAnchor {
             config_selector: 0,
             period: 870,
@@ -7685,57 +7719,73 @@ mod stake_state_tests {
             deposit_contract: [0x55u8; 20],
             asset_id: [0x66u8; 16],
         };
+
+        // A guardian anchor enactment is queued, not installed immediately.
         assert!(l.guardian_enact_bridge_action(
-            &Action::BridgeAnchorSet {
-                corridor: 1,
-                anchor: eth.encode()
+            &Action::BridgeAnchorSet { corridor: 0, anchor: btc.encode() },
+            0,
+            0,
+            0
+        ));
+        assert_eq!(
+            l.bridge_bitcoin_anchor(),
+            None,
+            "the anchor waits behind the veto window, guardians cannot install it instantly"
+        );
+
+        // Only one enactment can be pending at a time.
+        assert!(!l.guardian_enact_bridge_action(
+            &Action::BridgeAnchorSet { corridor: 1, anchor: eth.encode() },
+            1,
+            0,
+            0
+        ));
+
+        // Nothing lands before the window elapses.
+        l.guardian_apply_due_enact(GUARDIAN_ENACT_DELAY_SECONDS - 1);
+        assert_eq!(l.bridge_bitcoin_anchor(), None);
+
+        // After the window it lands.
+        l.guardian_apply_due_enact(GUARDIAN_ENACT_DELAY_SECONDS);
+        assert_eq!(
+            l.bridge_bitcoin_anchor(),
+            Some(btc),
+            "the anchor installs once the veto window has passed"
+        );
+
+        // A CommitteeRotate can no longer be enacted by guardians at all.
+        assert!(!l.guardian_enact_bridge_action(
+            &Action::AssetRegister {
+                asset_id: [0x01u8; 16],
+                cap: 1,
+                epoch_cap: 1,
+                requires_stark: false,
             },
             1,
             0,
-            chain_id
+            0
         ));
+
+        // Queue an ethereum anchor, then freeze the bridge inside the window: the freeze
+        // is the veto and the queued enact is dropped, never installing.
+        assert!(l.guardian_enact_bridge_action(
+            &Action::BridgeAnchorSet { corridor: 1, anchor: eth.encode() },
+            1,
+            2 * GUARDIAN_ENACT_DELAY_SECONDS,
+            0
+        ));
+        let freezer = gov_addr(88);
+        fund(&mut l, &freezer, 100_000 * 1_000_000);
+        assert!(l.bridge_freeze_with_fee(&freezer, 0, 2 * GUARDIAN_ENACT_DELAY_SECONDS + 1));
+        l.guardian_apply_due_enact(3 * GUARDIAN_ENACT_DELAY_SECONDS + 1);
         assert_eq!(
             l.bridge_eth_anchor(0),
-            Some(eth),
-            "the guardian installed the ethereum anchor at runtime"
+            None,
+            "a bridge freeze during the window vetoes the queued anchor"
         );
-
-        let cosmos = crate::bridge_cosmos::CosmosAnchor {
-            config_selector: 0,
-            trusted_height: 18_400_000,
-            trusted_time: qlc_cosmos::proto::Timestamp {
-                seconds: 1_700_000_000,
-                nanos: 0,
-            },
-            trusted_validators_hash: [0x77u8; 32],
-            asset_id: [0x88u8; 16],
-        };
-        assert!(l.guardian_enact_bridge_action(
-            &Action::BridgeAnchorSet {
-                corridor: 2,
-                anchor: cosmos.encode()
-            },
-            2,
-            0,
-            chain_id
-        ));
-        assert_eq!(
-            l.bridge_cosmos_anchor(0),
-            Some(cosmos),
-            "the guardian installed the cosmos anchor at runtime"
-        );
-
         assert!(
-            !l.guardian_enact_bridge_action(
-                &Action::BridgeAnchorSet {
-                    corridor: 9,
-                    anchor: vec![0x00]
-                },
-                3,
-                0,
-                chain_id
-            ),
-            "an unknown corridor is refused"
+            l.guardian_pending_enact().is_none(),
+            "the vetoed enact is cleared from the queue"
         );
     }
 

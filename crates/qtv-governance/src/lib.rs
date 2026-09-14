@@ -770,7 +770,9 @@ impl GuardianSet {
     }
 
     pub fn well_formed(&self) -> bool {
-        self.threshold >= 2 && (self.threshold as usize) <= self.members.len()
+        self.threshold >= 2
+            && (self.threshold as usize) <= self.members.len()
+            && (self.threshold as usize).saturating_mul(2) > self.members.len()
     }
 
     pub fn is_member(&self, id: &[u8; 32]) -> bool {
