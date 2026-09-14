@@ -393,9 +393,15 @@ impl CosmosMintProof {
     }
 
     pub fn source_key(&self) -> (u32, [u8; 32]) {
+        // Must match the executed mint's source_ref exactly, so bind the same leaf hash
+        // the ledger records. An empty store name here only means an unknown selector,
+        // which verify_cosmos_mint rejects anyway.
+        let store_name = config_for_selector(self.config_selector)
+            .map(|cfg| cfg.bridge_store_name)
+            .unwrap_or(&[]);
         (
             cosmos_source_chain(self.config_selector),
-            sha256(&self.proof.key),
+            qlc_cosmos::proof::deposit_source_ref(store_name, &self.proof),
         )
     }
 }
@@ -621,11 +627,21 @@ mod tests {
     }
 
     #[test]
-    fn the_source_key_is_per_chain_and_hashes_the_deposit_key() {
+    fn the_source_key_is_per_chain_and_binds_the_leaf_hash() {
         let proof = dummy_proof();
         let (chain, reference) = proof.source_key();
         assert_eq!(chain, cosmos_source_chain(0));
-        assert_eq!(reference, sha256(&proof.proof.key));
+        let store_name = config_for_selector(0).unwrap().bridge_store_name;
+        assert_eq!(
+            reference,
+            qlc_cosmos::proof::deposit_source_ref(store_name, &proof.proof),
+            "the dedup key binds the committed leaf hash, matching the minted source_ref"
+        );
+        assert_ne!(
+            reference,
+            sha256(&proof.proof.key),
+            "keying on the raw key would let a prefix/key re-split double-mint"
+        );
         assert_ne!(cosmos_source_chain(0), cosmos_source_chain(1));
     }
 
