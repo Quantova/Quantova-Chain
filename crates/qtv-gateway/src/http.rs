@@ -400,7 +400,29 @@ fn handle_connection(
             break;
         }
         if let Some(value) = header_value(trimmed, "content-length") {
-            content_length = value.parse().unwrap_or(0);
+            // A malformed length must not silently become zero: that lets a client
+            // frame a body the server then ignores, the basis of request smuggling.
+            match value.trim().parse::<usize>() {
+                Ok(n) => content_length = n,
+                Err(_) => {
+                    return write_error(
+                        &mut stream,
+                        400,
+                        "bad_request",
+                        "the content-length header is not a number",
+                    );
+                }
+            }
+        }
+        if header_value(trimmed, "transfer-encoding").is_some() {
+            // We frame bodies by content-length only. A transfer-encoding (chunked)
+            // header alongside it is a smuggling vector, so it is refused outright.
+            return write_error(
+                &mut stream,
+                400,
+                "bad_request",
+                "transfer-encoding is not supported, send a content-length body",
+            );
         }
         if let Some(value) = header_value(trimmed, "x-forwarded-for") {
             forwarded_for = Some(value.to_string());
@@ -1023,6 +1045,26 @@ mod tests {
             ),
         );
         assert!(response.starts_with("HTTP/1.1 413"), "{response}");
+    }
+
+    #[test]
+    fn a_malformed_content_length_is_refused_not_read_as_zero() {
+        let port = serve_stub();
+        let response = round_trip(
+            port,
+            "POST /v1/node_info HTTP/1.1\r\nHost: x\r\nContent-Length: notanumber\r\n\r\n{}",
+        );
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    }
+
+    #[test]
+    fn a_transfer_encoding_header_is_refused() {
+        let port = serve_stub();
+        let response = round_trip(
+            port,
+            "POST /v1/node_info HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        );
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
     }
 
     #[test]
