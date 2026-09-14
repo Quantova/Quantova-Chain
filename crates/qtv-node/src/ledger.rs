@@ -3221,6 +3221,9 @@ impl Ledger {
         let referendum = self
             .gov_referendum(referendum_id)
             .ok_or(EnactError::Unknown)?;
+        if !referendum.enactable(now) {
+            return Err(EnactError::NotApproved);
+        }
         let scope_ok = match &action {
             Action::FreezeRecovery {
                 scope,
@@ -4983,14 +4986,14 @@ mod stake_state_tests {
             id,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0
         ));
-        assert_eq!(l.balance(&voter), 5_000 * 1_000_000);
-        assert_eq!(l.gov_total_locked(), 5_000 * 1_000_000);
+        assert_eq!(l.balance(&voter), 2_000 * 1_000_000);
+        assert_eq!(l.gov_total_locked(), 8_000 * 1_000_000);
         assert!(!l.gov_vote(&voter, id, true, qtv_governance::Conviction::Liquid, 100, 0));
 
-        let close = 14 * 86_400 + 1;
+        let close = 21 * 86_400 + 1;
         assert_eq!(
             l.gov_conclude(id, close),
             Some(qtv_governance::Status::Approved)
@@ -5043,7 +5046,7 @@ mod stake_state_tests {
             id,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
 
@@ -5052,16 +5055,16 @@ mod stake_state_tests {
             key: b"price".to_vec(),
             value: 70_000_000u128.to_le_bytes().to_vec(),
         };
-        l.gov_enact(id, 14 * 86_400 + 1, TEST_CHAIN).unwrap();
+        l.gov_enact(id, 21 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert_eq!(l.stake_price(), 70_000_000);
-        assert!(l.gov_enact(id, 14 * 86_400 + 1, TEST_CHAIN).is_err());
+        assert!(l.gov_enact(id, 21 * 86_400 + 1, TEST_CHAIN).is_err());
         let receipt = l.gov_receipt(id).unwrap();
         assert_eq!(receipt.referendum, id);
         assert_eq!(
             receipt.proposal_hash,
             sha3::sha3_256(&qtv_codec::to_bytes(&action))
         );
-        assert_eq!(receipt.enacted_at, 14 * 86_400 + 1);
+        assert_eq!(receipt.enacted_at, 21 * 86_400 + 1);
         assert!(receipt.tally.aye_stake > 0);
     }
 
@@ -5121,10 +5124,10 @@ mod stake_state_tests {
             id,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
-        l.gov_enact(id, 14 * 86_400 + 1, TEST_CHAIN).unwrap();
+        l.gov_enact(id, 21 * 86_400 + 1, TEST_CHAIN).unwrap();
 
         assert!(l.feature_active(b"parallel_state"));
         assert_eq!(l.feature_version(b"parallel_state"), 2);
@@ -5135,7 +5138,7 @@ mod stake_state_tests {
                     feature: b"parallel_state".to_vec(),
                     version: 1,
                 },
-                14 * 86_400 + 1,
+                21 * 86_400 + 1,
                 TEST_CHAIN,
             ),
             Err(EnactError::BadValue),
@@ -5147,7 +5150,7 @@ mod stake_state_tests {
                     feature: b"parallel_state".to_vec(),
                     version: 0,
                 },
-                14 * 86_400 + 1,
+                21 * 86_400 + 1,
                 TEST_CHAIN,
             ),
             Err(EnactError::BadValue),
@@ -5199,10 +5202,10 @@ mod stake_state_tests {
             id,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
-        l.gov_enact(id, 14 * 86_400 + 1, TEST_CHAIN).unwrap();
+        l.gov_enact(id, 21 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert_eq!(l.stake_price(), 70_000_000);
     }
 
@@ -5311,8 +5314,8 @@ mod stake_state_tests {
         let ordinary = gov_addr(41);
         let bonded = gov_addr(99);
         let voter = gov_addr(42);
-        fund(&mut l, &voter, 20_000 * 1_000_000);
-        l.seed_validator_bond(&voter, 5_000 * 1_000_000);
+        fund(&mut l, &voter, 40_000 * 1_000_000);
+        l.seed_validator_bond(&voter, 16_000 * 1_000_000);
 
         let hit = l
             .gov_propose(
@@ -5329,12 +5332,12 @@ mod stake_state_tests {
             hit,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            16_000 * 1_000_000,
             0,
         );
         assert!(!l.is_frozen(&ordinary));
         assert!(!l.is_frozen(&bonded));
-        l.gov_enact(hit, 2 * 86_400 + 1, TEST_CHAIN).unwrap();
+        l.gov_enact(hit, 3 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert!(l.is_frozen(&ordinary));
         assert!(
             l.is_frozen(&bonded),
@@ -5345,7 +5348,7 @@ mod stake_state_tests {
             bond_before,
             "the freeze never confiscates the consensus bond"
         );
-        assert_eq!(l.total_staked(), 10_000 * 1_000_000);
+        assert_eq!(l.total_staked(), 21_000 * 1_000_000);
 
         let pot = l
             .gov_propose(
@@ -5362,11 +5365,11 @@ mod stake_state_tests {
             pot,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            16_000 * 1_000_000,
             0,
         );
         assert_eq!(
-            l.gov_enact(pot, 2 * 86_400 + 1, TEST_CHAIN),
+            l.gov_enact(pot, 3 * 86_400 + 1, TEST_CHAIN),
             Err(EnactError::Constitution(
                 qtv_governance::Violation::FreezeTouchesProtected
             ))
@@ -5395,10 +5398,10 @@ mod stake_state_tests {
             id,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
-        l.gov_enact(id, 3 * 86_400 + 1, TEST_CHAIN).unwrap();
+        l.gov_enact(id, 10 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert_eq!(l.balance(&target), 100_000 * 1_000_000);
     }
 
@@ -5422,10 +5425,10 @@ mod stake_state_tests {
             id,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
-        l.gov_enact(id, 3 * 86_400 + 1, TEST_CHAIN).unwrap();
+        l.gov_enact(id, 10 * 86_400 + 1, TEST_CHAIN).unwrap();
 
         let kinds: Vec<&str> = l.side_events().iter().map(SideEvent::kind).collect();
         assert!(
@@ -5553,7 +5556,7 @@ mod stake_state_tests {
         };
         let proposer = gov_addr(80);
         fund(&mut l, &proposer, 5_000_000 * 1_000_000);
-        let close = 14 * 86_400 + 1;
+        let close = 21 * 86_400 + 1;
 
         let lone = l
             .gov_propose(&proposer, qtv_governance::Track::ChainUpgrade, action(), 0)
@@ -5570,10 +5573,10 @@ mod stake_state_tests {
             0
         ));
         assert!(
-            l.gov_referendum(lone)
-                .unwrap()
-                .tally
-                .approved(l.gov_total_locked()),
+            {
+                let r = l.gov_referendum(lone).unwrap();
+                r.tally.approved(l.gov_total_locked(), r.track.threshold_bps())
+            },
             "the lone vote would have carried under a self referential electorate"
         );
         assert_eq!(
@@ -5586,13 +5589,13 @@ mod stake_state_tests {
             .gov_propose(&proposer, qtv_governance::Track::ChainUpgrade, action(), 0)
             .unwrap();
         let backer = gov_addr(90);
-        fund(&mut l, &backer, 6_000_000 * 1_000_000);
+        fund(&mut l, &backer, 8_000_000 * 1_000_000);
         assert!(l.gov_vote(
             &backer,
             real,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000_000 * 1_000_000,
+            7_000_000 * 1_000_000,
             0
         ));
         assert_eq!(
@@ -5634,14 +5637,14 @@ mod stake_state_tests {
             "the live stake collapsed"
         );
         assert!(
-            l.gov_referendum(id)
-                .unwrap()
-                .tally
-                .approved(u128::from(l.total_staked())),
+            {
+                let r = l.gov_referendum(id).unwrap();
+                r.tally.approved(u128::from(l.total_staked()), r.track.threshold_bps())
+            },
             "against the collapsed live electorate the minority would have carried"
         );
 
-        let close = 14 * 86_400 + 1;
+        let close = 21 * 86_400 + 1;
         assert_eq!(
             l.gov_conclude(id, close),
             Some(qtv_governance::Status::Rejected),
@@ -5690,10 +5693,10 @@ mod stake_state_tests {
             id,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
-        l.gov_enact(id, 2 * 86_400 + 1, TEST_CHAIN).unwrap();
+        l.gov_enact(id, 3 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert!(
             !l.is_frozen(&target),
             "the full vote reversed the emergency freeze"
@@ -5734,10 +5737,10 @@ mod stake_state_tests {
             id,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
-        l.gov_enact(id, 2 * 86_400 + 1, TEST_CHAIN).unwrap();
+        l.gov_enact(id, 3 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert!(l.is_frozen(&target));
 
         l.guardian_expire(100 * 86_400);
@@ -5822,10 +5825,10 @@ mod stake_state_tests {
             id,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
-        l.gov_enact(id, 2 * 86_400 + 1, TEST_CHAIN).unwrap();
+        l.gov_enact(id, 3 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert!(!l.is_frozen(&target), "a vote clears the account freeze");
 
         assert!(
@@ -5958,9 +5961,9 @@ mod stake_state_tests {
                 to: [52u8; 32].to_vec(),
                 amount: 12_000 * 1_000_000,
             },
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
         );
-        l.gov_enact(from_grants, 3 * 86_400 + 1, TEST_CHAIN)
+        l.gov_enact(from_grants, 10 * 86_400 + 1, TEST_CHAIN)
             .unwrap();
         assert_eq!(l.balance(&recipient), 12_000 * 1_000_000);
         assert_eq!(l.balance(&grants), 28_000 * 1_000_000);
@@ -5972,9 +5975,9 @@ mod stake_state_tests {
                 to: [52u8; 32].to_vec(),
                 amount: 5_000 * 1_000_000,
             },
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
         );
-        l.gov_enact(from_treasury, 3 * 86_400 + 1, TEST_CHAIN)
+        l.gov_enact(from_treasury, 10 * 86_400 + 1, TEST_CHAIN)
             .unwrap();
         assert_eq!(l.balance(&recipient), 17_000 * 1_000_000);
         assert_eq!(l.stake_treasury(), 0);
@@ -5991,7 +5994,7 @@ mod stake_state_tests {
             10_000 * 1_000_000,
         );
         assert_eq!(
-            l.gov_enact(steal, 3 * 86_400 + 1, TEST_CHAIN),
+            l.gov_enact(steal, 10 * 86_400 + 1, TEST_CHAIN),
             Err(EnactError::BadAddress)
         );
         assert_eq!(l.balance(&user), 9_000 * 1_000_000);
@@ -6028,16 +6031,16 @@ mod stake_state_tests {
             .unwrap();
         let voter = gov_addr(27);
         fund(&mut l, &voter, 10_000 * 1_000_000);
-        l.seed_validator_bond(&voter, 5_000 * 1_000_000);
+        l.seed_validator_bond(&voter, 8_000 * 1_000_000);
         l.gov_vote(
             &voter,
             id,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
-        l.gov_enact(id, 6 * 3_600 + 1, TEST_CHAIN).unwrap();
+        l.gov_enact(id, 7 * 3_600 + 1, TEST_CHAIN).unwrap();
 
         assert_eq!(
             l.balance(&thief),
@@ -6055,7 +6058,7 @@ mod stake_state_tests {
         );
         assert_eq!(
             l.total_staked(),
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             "only the honest voter's bond remains staked"
         );
         assert_eq!(
@@ -6100,7 +6103,7 @@ mod stake_state_tests {
             0,
         );
         assert!(
-            l.gov_enact(id, 6 * 3_600 + 1, TEST_CHAIN).is_err(),
+            l.gov_enact(id, 7 * 3_600 + 1, TEST_CHAIN).is_err(),
             "a recovery aimed at a reserved protocol pot is refused"
         );
     }
@@ -6134,16 +6137,16 @@ mod stake_state_tests {
             .unwrap();
         let voter = gov_addr(27);
         fund(&mut l, &voter, 10_000 * 1_000_000);
-        l.seed_validator_bond(&voter, 5_000 * 1_000_000);
+        l.seed_validator_bond(&voter, 8_000 * 1_000_000);
         l.gov_vote(
             &voter,
             id,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
-        l.gov_enact(id, 6 * 3_600 + 1, TEST_CHAIN).unwrap();
+        l.gov_enact(id, 7 * 3_600 + 1, TEST_CHAIN).unwrap();
 
         assert_eq!(l.balance(&honest), 0, "the free balance is still recovered");
         assert_eq!(
@@ -6189,16 +6192,16 @@ mod stake_state_tests {
             .unwrap();
         let voter = gov_addr(27);
         fund(&mut l, &voter, 10_000 * 1_000_000);
-        l.seed_validator_bond(&voter, 5_000 * 1_000_000);
+        l.seed_validator_bond(&voter, 8_000 * 1_000_000);
         l.gov_vote(
             &voter,
             id,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
-        l.gov_enact(id, 6 * 3_600 + 1, TEST_CHAIN).unwrap();
+        l.gov_enact(id, 7 * 3_600 + 1, TEST_CHAIN).unwrap();
 
         assert!(
             l.stake_bond(&[41u8; 32]).is_none(),
@@ -6216,7 +6219,7 @@ mod stake_state_tests {
         );
         assert_eq!(
             l.total_staked(),
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             "the whole bond left the stake, only the voter remains"
         );
         assert_eq!(
@@ -6955,10 +6958,10 @@ mod stake_state_tests {
             unseen,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
-        l.gov_enact(unseen, 5 * 86_400 + 1, TEST_CHAIN).unwrap();
+        l.gov_enact(unseen, 12 * 86_400 + 1, TEST_CHAIN).unwrap();
 
         assert!(
             !l.bridge_is_frozen(),
@@ -6974,7 +6977,7 @@ mod stake_state_tests {
             bond,
             "the slashed bond lands in the treasury"
         );
-        assert_eq!(l.bridge_last_lift(), Some(5 * 86_400 + 1));
+        assert_eq!(l.bridge_last_lift(), Some(12 * 86_400 + 1));
     }
 
     #[test]
@@ -6999,11 +7002,11 @@ mod stake_state_tests {
             open,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
         assert_eq!(
-            l.gov_enact(open, 5 * 86_400 + 1, TEST_CHAIN),
+            l.gov_enact(open, 12 * 86_400 + 1, TEST_CHAIN),
             Err(EnactError::BridgeNotFrozen),
             "an early unfreeze is refused when no freeze is active"
         );
@@ -7020,7 +7023,7 @@ mod stake_state_tests {
         let proposer = gov_addr(88);
         fund(&mut l, &proposer, 2_250_000 * 1_000_000);
         let voter = gov_addr(89);
-        fund(&mut l, &voter, 10_000 * 1_000_000);
+        fund(&mut l, &voter, 30_000 * 1_000_000);
 
         let thin = l
             .gov_propose(
@@ -7037,11 +7040,11 @@ mod stake_state_tests {
             thin,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
         assert_eq!(
-            l.gov_enact(thin, 14 * 86_400 + 1, TEST_CHAIN),
+            l.gov_enact(thin, 21 * 86_400 + 1, TEST_CHAIN),
             Err(EnactError::BadValue),
             "a set whose threshold outruns its membership never lands"
         );
@@ -7069,10 +7072,10 @@ mod stake_state_tests {
             rotate,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             14 * 86_400 + 2,
         );
-        l.gov_enact(rotate, 28 * 86_400 + 3, TEST_CHAIN).unwrap();
+        l.gov_enact(rotate, 36 * 86_400 + 3, TEST_CHAIN).unwrap();
         assert_eq!(l.guardian_set().threshold, 3);
         assert_eq!(
             l.guardian_set().members,
@@ -7113,11 +7116,11 @@ mod stake_state_tests {
             bad,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
         assert_eq!(
-            l.gov_enact(bad, 5 * 86_400 + 1, TEST_CHAIN),
+            l.gov_enact(bad, 12 * 86_400 + 1, TEST_CHAIN),
             Err(EnactError::BadValue),
             "a key that cannot prove possession sinks the whole rotation"
         );
@@ -7147,10 +7150,10 @@ mod stake_state_tests {
             rotate,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             5 * 86_400 + 2,
         );
-        l.gov_enact(rotate, 10 * 86_400 + 3, TEST_CHAIN).unwrap();
+        l.gov_enact(rotate, 18 * 86_400 + 3, TEST_CHAIN).unwrap();
         let set = l.bridge_operator_set().unwrap();
         assert_eq!(set.operators.len(), 3);
         assert_eq!(set.threshold, 2);
@@ -7172,7 +7175,7 @@ mod stake_state_tests {
             10_000 * 1_000_000,
             10 * 86_400 + 4,
         );
-        l.gov_enact(revoke, 15 * 86_400 + 5, TEST_CHAIN).unwrap();
+        l.gov_enact(revoke, 23 * 86_400 + 5, TEST_CHAIN).unwrap();
         assert!(
             l.bridge_operator_set().unwrap().is_revoked(1),
             "a vote strikes a single operator from the seated committee"
@@ -7209,11 +7212,11 @@ mod stake_state_tests {
             dup,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
         assert_eq!(
-            l.gov_enact(dup, 5 * 86_400 + 1, TEST_CHAIN),
+            l.gov_enact(dup, 12 * 86_400 + 1, TEST_CHAIN),
             Err(EnactError::BadValue),
             "two operator ids may not share one public key"
         );
@@ -7239,11 +7242,11 @@ mod stake_state_tests {
             single,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             5 * 86_400 + 2,
         );
         assert_eq!(
-            l.gov_enact(single, 10 * 86_400 + 3, TEST_CHAIN),
+            l.gov_enact(single, 18 * 86_400 + 3, TEST_CHAIN),
             Err(EnactError::BadValue),
             "a committee needs a threshold of at least two"
         );
@@ -7284,11 +7287,11 @@ mod stake_state_tests {
             weak,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
         assert_eq!(
-            l.gov_enact(weak, 5 * 86_400 + 1, TEST_CHAIN),
+            l.gov_enact(weak, 12 * 86_400 + 1, TEST_CHAIN),
             Err(EnactError::BadValue),
             "a committee threshold below a two thirds supermajority is refused"
         );
@@ -7321,10 +7324,10 @@ mod stake_state_tests {
             advance,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
-        l.gov_enact(advance, 5 * 86_400 + 1, TEST_CHAIN).unwrap();
+        l.gov_enact(advance, 12 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert_eq!(l.bridge_epoch(), 1, "only a vote advances the epoch");
 
         let asset = [0xA1u8; 16];
@@ -7347,10 +7350,10 @@ mod stake_state_tests {
             register,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             5 * 86_400 + 2,
         );
-        l.gov_enact(register, 10 * 86_400 + 3, TEST_CHAIN).unwrap();
+        l.gov_enact(register, 18 * 86_400 + 3, TEST_CHAIN).unwrap();
         let registered = l.bridged_asset(&asset).unwrap();
         assert_eq!(registered.cap, 1_000_000);
         assert_eq!(registered.epoch_cap, 250_000);
@@ -7364,7 +7367,7 @@ mod stake_state_tests {
         let proposer = gov_addr(80);
         fund(&mut l, &proposer, 1_500_000 * 1_000_000);
         let voter = gov_addr(81);
-        fund(&mut l, &voter, 10_000 * 1_000_000);
+        fund(&mut l, &voter, 30_000 * 1_000_000);
         let vault = vec![0x0Cu8; 32];
 
         let open = l
@@ -7382,11 +7385,11 @@ mod stake_state_tests {
             open,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
         assert_eq!(
-            l.gov_enact(open, 5 * 86_400 + 1, TEST_CHAIN),
+            l.gov_enact(open, 12 * 86_400 + 1, TEST_CHAIN),
             Err(EnactError::BridgeNotFrozen),
             "a migration is rejected while the bridge is open"
         );
@@ -7411,10 +7414,10 @@ mod stake_state_tests {
             migrate,
             true,
             qtv_governance::Conviction::Liquid,
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             0,
         );
-        l.gov_enact(migrate, 5 * 86_400 + 1, TEST_CHAIN).unwrap();
+        l.gov_enact(migrate, 12 * 86_400 + 1, TEST_CHAIN).unwrap();
         assert_eq!(
             l.bridge_pool_vault(),
             Some([0x0Cu8; 32]),
@@ -7442,10 +7445,10 @@ mod stake_state_tests {
                 id,
                 true,
                 qtv_governance::Conviction::Liquid,
-                5_000 * 1_000_000,
+                8_000 * 1_000_000,
                 at,
             );
-            l.gov_enact(id, at + 5 * 86_400 + 1, TEST_CHAIN).unwrap();
+            l.gov_enact(id, at + 12 * 86_400 + 1, TEST_CHAIN).unwrap();
         }
 
         let mut l = Ledger::new();
