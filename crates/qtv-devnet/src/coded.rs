@@ -215,6 +215,7 @@ pub struct ProposalAssembler {
     pinned: HashMap<(u64, u64), [u8; DIGEST_LEN]>,
     prepin_tokens: HashMap<u64, u32>,
     horizon: u64,
+    round_height: u64,
     bytes: usize,
     max_bytes: usize,
 }
@@ -246,6 +247,7 @@ impl ProposalAssembler {
             pinned: HashMap::new(),
             prepin_tokens: HashMap::new(),
             horizon: 0,
+            round_height: 0,
             bytes: 0,
             max_bytes: MAX_ASSEMBLER_BYTES,
         }
@@ -268,6 +270,12 @@ impl ProposalAssembler {
         self.prepin_tokens.clear();
     }
 
+    /// The node's current consensus height. A coded proposal is only admitted for
+    /// this height or the next one; anything else is refused before it can steer prune.
+    pub fn set_round_height(&mut self, height: u64) {
+        self.round_height = height;
+    }
+
     pub fn admit(
         &mut self,
         coded: CodedProposal,
@@ -285,7 +293,13 @@ impl ProposalAssembler {
             return None;
         }
         let height = coded.header.height();
-        self.prune(height);
+        if self.round_height != 0
+            && (height < self.round_height || height > self.round_height.saturating_add(1))
+        {
+            return None;
+        }
+        let prune_floor = if self.round_height != 0 { self.round_height } else { height };
+        self.prune(prune_floor);
 
         let slot = (height, coded.view);
         match self.pinned.get(&slot).copied() {

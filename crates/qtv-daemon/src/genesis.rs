@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use std::path::Path;
+use std::collections::HashSet;
 
 use qtv_account::address_for_key;
 use qtv_crypto::sha3;
@@ -275,6 +276,42 @@ fn enforce_no_capture(
     validators: &[ValidatorSpec],
     accounts: &[GenesisAccount],
 ) -> Result<(), String> {
+    let mut ids = HashSet::new();
+    let mut bonds = HashSet::new();
+    let mut roots = HashSet::new();
+    let mut attest = HashSet::new();
+    let mut peers = HashSet::new();
+    for v in validators {
+        let attest_pk: &[u8] = &v.attest_pk;
+        let p2p_public: &[u8] = &v.p2p_public;
+        if !ids.insert(v.id) {
+            return Err(format!("genesis validator id {} appears on more than one line", v.id));
+        }
+        if !bonds.insert(v.bond_address.clone()) {
+            return Err(format!(
+                "genesis validator {} reuses bond address {}, already claimed by another line;                  duplicate key material multiplies one operator into several committee seats",
+                v.id, v.bond_address
+            ));
+        }
+        if !roots.insert(v.root.digest) {
+            return Err(format!(
+                "genesis validator {} reuses a sortition root already claimed by another line",
+                v.id
+            ));
+        }
+        if !attest.insert(attest_pk.to_vec()) {
+            return Err(format!(
+                "genesis validator {} reuses an attestation public key already claimed by another line",
+                v.id
+            ));
+        }
+        if !peers.insert(p2p_public.to_vec()) {
+            return Err(format!(
+                "genesis validator {} reuses a peer identity key already claimed by another line",
+                v.id
+            ));
+        }
+    }
     if validators.len() >= 2 {
         let total_stake: u128 = validators.iter().map(|v| v.stake as u128).sum();
         for v in validators {
@@ -574,6 +611,23 @@ mod tests {
             enforce_no_capture(&validators, &accounts).is_ok(),
             "a lone bootstrap validator and faucet has no committee to capture from"
         );
+    }
+
+    #[test]
+    fn cloned_key_material_under_two_ids_is_rejected() {
+        // C1: one operator registers its own key material under two ids. Each id
+        // would be an independent committee seat, all met by one signature. The
+        // genesis must refuse it.
+        let secret = [9u8; 32];
+        // Two clones share one secret but sit at a small stake among honest peers,
+        // so the stake-share cap is satisfied and the ONLY reason to reject is the
+        // reused key material.
+        let clone_a = ValidatorSpec::from_secret(1, 2_000, true, &secret, 64);
+        let clone_b = ValidatorSpec::from_secret(2, 2_000, true, &secret, 64);
+        let set = vec![clone_a, clone_b, validator(3, 2_000), validator(4, 2_000), validator(5, 2_000)];
+        let err = enforce_no_capture(&set, &[account(1, 100)])
+            .expect_err("cloned key material must be rejected");
+        assert!(err.contains("reuses"), "expected a reuse rejection, got: {err}");
     }
 
     #[test]
