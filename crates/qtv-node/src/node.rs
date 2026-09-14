@@ -868,7 +868,19 @@ pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_i
     } else if is_bridge_cosmos_mint(wrapper) {
         crate::bridge_cosmos::MAX_COSMOS_MINT_BYTES
     } else {
-        max_mint_artifact_bytes(ledger)
+        // Only an asset that actually requires a STARK is allowed the extra megabyte of
+        // fee-less block space. Every other federated mint is capped tight so it cannot
+        // reserve a megabyte for free per submission.
+        let base = max_mint_artifact_bytes(ledger);
+        let requires_stark = crate::bridge::MintArtifact::decode(wrapper.body().call().args())
+            .and_then(|a| ledger.bridged_asset(&a.attestation.fact.asset_id))
+            .map(|asset| asset.requires_stark)
+            .unwrap_or(false);
+        if requires_stark {
+            base
+        } else {
+            base.saturating_sub(MAX_BRIDGE_STARK_BYTES)
+        }
     };
     if wrapper.body().call().args().len() > max_bytes {
         return false;
