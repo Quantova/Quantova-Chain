@@ -36,7 +36,9 @@ echo "Generating the faucet wallet"
 FAUCET=$("$QCORE" new)
 FAUCET_SEED=$(printf '%s\n' "$FAUCET" | awk '/^seed/{print $2}')
 FAUCET_ADDR=$(printf '%s\n' "$FAUCET" | awk '/^address/{print $2}')
-FAUCET_PUBKEY=$("$QCORE" pubkey "$FAUCET_SEED" 0 | awk '/^pubkey/{print $2}')
+# Derive the pubkey without putting the seed on the command line, where it would show
+# in ps and /proc/<pid>/cmdline to every local user. qcore reads env:VAR itself.
+FAUCET_PUBKEY=$(FAUCET_SEED="$FAUCET_SEED" "$QCORE" pubkey env:FAUCET_SEED 0 | awk '/^pubkey/{print $2}')
 
 # One TQTOV is one million Quon, the base unit the ledger accounts in.
 FAUCET_QUON=$(( FAUCET_TQTOV * 1000000 ))
@@ -81,14 +83,18 @@ echo "Faucet float $FAUCET_TQTOV TQTOV"
 echo "Faucet addr  $FAUCET_ADDR"
 echo "Height horizon $SLOTS blocks"
 echo
-echo "Save the faucet seed now. It is shown once and is not stored anywhere."
-echo "  FAUCET_OPERATOR_SEED=$FAUCET_SEED"
+# Write the seed to an owner-only file rather than echoing it to the terminal, where it
+# would land in scrollback, screen sharing and any log that captures stdout.
+SEED_FILE="$OUT/faucet.seed"
+( umask 077; printf 'FAUCET_OPERATOR_SEED=%s\n' "$FAUCET_SEED" > "$SEED_FILE" )
+echo "The faucet seed was written to $SEED_FILE (mode 600). Move it somewhere safe and"
+echo "delete it from this host once stored. It is not written anywhere else."
 echo
 echo "Next steps"
 echo "  1. Start the node"
 echo "       quantovad --config $OUT/node.conf"
-echo "  2. Start the faucet with the seed above"
-echo "       cd faucet-service && FAUCET_OPERATOR_SEED=<seed> FAUCET_RPC=http://$RPC npm start"
+echo "  2. Start the faucet, taking the seed from the file rather than the command line"
+echo "       cd faucet-service && set -a; . $SEED_FILE; set +a; FAUCET_RPC=http://$RPC npm start"
 echo "  3. Point the explorer indexer at http://$RPC"
 echo
 echo "The node holds only its own secret in $KEYSTORE and reads every peer's public registration from"
