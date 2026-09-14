@@ -31,7 +31,7 @@ pub const MAX_SESSION_EMISSION_BPS: u64 = 500;
 /// fast one vote can expand it. At one hundred percent a single proposal may at
 /// most double the supply, which stops a captured vote minting the world in one
 /// step while leaving a real expansion a handful of votes rather than years.
-pub const GOV_MINT_MAX_BPS: u64 = 10_000;
+pub const GOV_MINT_MAX_BPS: u64 = 200;
 
 /// A share of supply alone would be zero on a young chain, which is the same
 /// bootstrap deadlock an absolute cap creates from the other direction. The
@@ -737,8 +737,8 @@ mod tests {
         let supply = 10_000_000 * QTOV;
         assert_eq!(
             gov_mint_ceiling(supply),
-            supply,
-            "one proposal may at most double the supply once the share clears the floor"
+            200_000 * QTOV,
+            "a year of governance minting is capped at two percent of supply once the share clears the floor"
         );
         assert_eq!(
             gov_mint_ceiling(supply / 1000),

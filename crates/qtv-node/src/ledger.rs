@@ -351,6 +351,15 @@ fn bridge_cosmos_anchor_key(selector: u8) -> Key {
     sha3::sha3_256(&input)
 }
 
+const GOV_MINT_PERIOD_TAG: &[u8] = b"qtv/gov/mint-period/";
+
+fn gov_mint_period_key(period: u64) -> Key {
+    let mut input = Vec::with_capacity(GOV_MINT_PERIOD_TAG.len() + 8);
+    input.extend_from_slice(GOV_MINT_PERIOD_TAG);
+    input.extend_from_slice(&period.to_le_bytes());
+    sha3::sha3_256(&input)
+}
+
 fn bridge_epochmint_key(asset_id: &[u8; 16], epoch: u64) -> Key {
     let mut input = Vec::with_capacity(BRIDGE_EPOCHMINT_TAG.len() + asset_id.len() + 8);
     input.extend_from_slice(BRIDGE_EPOCHMINT_TAG);
@@ -1911,6 +1920,18 @@ impl Ledger {
         self.write_leaf(bridge_seen_key(source_chain, source_ref), vec![1]);
     }
 
+    pub fn gov_minted_in_period(&self, period: u64) -> u128 {
+        self.trie
+            .get(&gov_mint_period_key(period))
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical gov mint total"))
+            .unwrap_or(0)
+    }
+
+    fn set_gov_minted_in_period(&mut self, period: u64, amount: u128) {
+        self.write_leaf(gov_mint_period_key(period), to_bytes(&amount));
+    }
+
     pub fn bridge_epoch_minted(&self, asset_id: &[u8; 16], epoch: u64) -> u128 {
         self.trie
             .get(&bridge_epochmint_key(asset_id, epoch))
@@ -3246,6 +3267,18 @@ impl Ledger {
         match action {
             Action::Mint { to, amount } => {
                 let addr = id_bytes_to_address(to).ok_or(EnactError::BadAddress)?;
+                // Cumulative annual ceiling: governance may mint at most gov_mint_ceiling
+                // of supply per year across ALL referenda, so a captured governance
+                // cannot mint the chain a few percent at a time across many votes, nor
+                // double the supply in one referendum.
+                let period = now / qtv_governance::YEAR_SECONDS;
+                let already = self.gov_minted_in_period(period);
+                let after_period = already
+                    .checked_add(u128::from(*amount))
+                    .ok_or(EnactError::Overflow)?;
+                if after_period > u128::from(qtv_staking::gov_mint_ceiling(self.total_supply())) {
+                    return Err(EnactError::BadValue);
+                }
                 let mut account = self.account(&addr);
                 account.balance = account
                     .balance
@@ -3255,11 +3288,9 @@ impl Ledger {
                     .total_supply()
                     .checked_add(*amount)
                     .ok_or(EnactError::Overflow)?;
-                if *amount > qtv_staking::gov_mint_ceiling(self.total_supply()) {
-                    return Err(EnactError::BadValue);
-                }
                 self.set_account(&addr, &account);
                 self.set_total_supply(supply);
+                self.set_gov_minted_in_period(period, after_period);
                 self.record_mint_event(&addr, *amount);
                 self.record_side_event(SideEvent::Mint {
                     to: addr,
