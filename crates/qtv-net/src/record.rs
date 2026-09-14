@@ -44,8 +44,13 @@ impl Sealer {
         if self.sequence == u64::MAX {
             return Err(Error::Handshake("record sequence exhausted"));
         }
-        let nonce = record_nonce(&self.iv, self.sequence);
-        let aad = self.sequence.to_be_bytes();
+        // Consume the sequence BEFORE the write. A partial write followed by a retry
+        // must never reseal under the same nonce; reusing a ChaCha20-Poly1305 nonce
+        // leaks the keystream and lets the tag be forged.
+        let sequence = self.sequence;
+        self.sequence += 1;
+        let nonce = record_nonce(&self.iv, sequence);
+        let aad = sequence.to_be_bytes();
         let (ciphertext, tag) = chacha20poly1305::seal(&self.key, &nonce, &aad, plaintext);
 
         let length = (ciphertext.len() + TAG_BYTES) as u32;
@@ -55,8 +60,6 @@ impl Sealer {
         frame.extend_from_slice(&tag);
         writer.write_all(&frame)?;
         writer.flush()?;
-
-        self.sequence += 1;
         Ok(())
     }
 }

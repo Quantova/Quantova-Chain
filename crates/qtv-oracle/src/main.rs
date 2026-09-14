@@ -69,7 +69,16 @@ fn keygen(a: &[String]) {
         secrets.push_str(&format!("{id} {}\n", hexs(&sk)));
         committee.push_str(&format!("{id} {} {}\n", hexs(&pk), hexs(&pop)));
     }
-    fs::write(format!("{prefix}.secrets"), secrets).expect("write secrets");
+    let secrets_path = format!("{prefix}.secrets");
+    fs::write(&secrets_path, &secrets).expect("write secrets");
+    // The secrets file holds every operator's signing key. Make it owner-only rather
+    // than leaving it world-readable at the process umask.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&secrets_path, fs::Permissions::from_mode(0o600))
+            .expect("restrict the secrets file to the owner");
+    }
     fs::write(format!("{prefix}.committee"), committee).expect("write committee");
     eprintln!("wrote {prefix}.secrets + {prefix}.committee ({n} operators, threshold {threshold}, chain {chain_id})");
 }

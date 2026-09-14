@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Result as IoResult, Write};
-use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -231,10 +231,12 @@ pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>, allow: Vec<Ip
         let limiter = Arc::new(Limiter::default());
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            let ip = stream
-                .peer_addr()
-                .map(|addr| addr.ip())
-                .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+            let ip = limiter_key(
+                stream
+                    .peer_addr()
+                    .map(|addr| addr.ip())
+                    .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+            );
             if !allow.is_empty() && !allow.contains(&ip) {
                 stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
                 let _ = write_error(
@@ -316,6 +318,22 @@ pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>, allow: Vec<Ip
     });
 }
 
+/// The key a rate limit is charged against. An IPv6 caller controls a whole /64 (or
+/// larger), so keying on the full 128-bit address would let one allocation mint
+/// unlimited identities. Collapse IPv6 to its /64 prefix; IPv4 is used whole.
+fn limiter_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => {
+            let mut segments = v6.segments();
+            for seg in segments.iter_mut().skip(4) {
+                *seg = 0;
+            }
+            IpAddr::V6(Ipv6Addr::from(segments))
+        }
+    }
+}
+
 fn forwarded_client_ip(header: &Option<String>) -> Option<IpAddr> {
     let value = header.as_ref()?;
     let rightmost = value.split(',').next_back()?.trim();
@@ -391,7 +409,7 @@ fn handle_connection(
 
     let mut _forwarded_guard: Option<ForwardedGuard> = None;
     if loopback_only {
-        let client = forwarded_client_ip(&forwarded_for).unwrap_or(peer);
+        let client = limiter_key(forwarded_client_ip(&forwarded_for).unwrap_or(peer));
         match limiter.admit_forwarded(client, MAX_CONNECTIONS_PER_IP, Instant::now()) {
             Admit::Ok => {
                 _forwarded_guard = Some(ForwardedGuard {
