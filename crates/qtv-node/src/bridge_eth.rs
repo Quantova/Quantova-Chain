@@ -9,7 +9,10 @@ use qlc_ethereum::config::{
     arbitrum, avalanche, base, bnb_chain, ethereum, optimism, polygon, robinhood_chain,
     EvmChainConfig,
 };
-use qlc_ethereum::engine::{DepositProof, ExecutionCommit, LightClientStore, LightClientUpdate};
+use qlc_ethereum::engine::{
+    advance_period, apply_sync_committee_update, DepositProof, ExecutionCommit, LightClientStore,
+    LightClientUpdate, SyncCommitteeUpdate,
+};
 use qlc_ethereum::verify_trustless_deposit;
 use qtv_crypto::sha3;
 
@@ -324,6 +327,89 @@ impl EthMintProof {
     }
 }
 
+pub const MAX_ETH_UPDATE_BYTES: usize = 1 << 18;
+
+fn encode_committee_update(out: &mut Vec<u8>, update: &SyncCommitteeUpdate) {
+    encode_header(out, &update.attested_header);
+    encode_committee(out, &update.next_sync_committee);
+    encode_branch(out, &update.next_sync_committee_branch);
+    encode_aggregate(out, &update.sync_aggregate);
+    out.extend_from_slice(&update.signature_slot.to_le_bytes());
+}
+
+fn decode_committee_update(cursor: &mut Cursor) -> Option<SyncCommitteeUpdate> {
+    let attested_header = decode_header(cursor)?;
+    let next_sync_committee = decode_committee(cursor)?;
+    let next_sync_committee_branch = decode_branch(cursor)?;
+    let sync_aggregate = decode_aggregate(cursor)?;
+    let signature_slot = cursor.u64()?;
+    Some(SyncCommitteeUpdate {
+        attested_header,
+        next_sync_committee,
+        next_sync_committee_branch,
+        sync_aggregate,
+        signature_slot,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EthUpdateProof {
+    pub config_selector: u8,
+    pub current_sync_committee: SyncCommittee,
+    pub update: SyncCommitteeUpdate,
+}
+
+impl EthUpdateProof {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(self.config_selector);
+        encode_committee(&mut out, &self.current_sync_committee);
+        encode_committee_update(&mut out, &self.update);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<EthUpdateProof> {
+        let mut cursor = Cursor::new(bytes);
+        let config_selector = cursor.u8()?;
+        let current_sync_committee = decode_committee(&mut cursor)?;
+        let update = decode_committee_update(&mut cursor)?;
+        cursor.done().then_some(EthUpdateProof {
+            config_selector,
+            current_sync_committee,
+            update,
+        })
+    }
+}
+
+pub fn verify_eth_committee_update(anchor: &EthAnchor, proof: &EthUpdateProof) -> Option<EthAnchor> {
+    if proof.config_selector != anchor.config_selector {
+        return None;
+    }
+    let config = config_for_selector(anchor.config_selector)?;
+    if proof.current_sync_committee.pubkeys.len() != config.sync_committee_size {
+        return None;
+    }
+    if proof.current_sync_committee.hash_tree_root() != anchor.sync_committee_root {
+        return None;
+    }
+    let mut store = LightClientStore::from_trusted_committee(
+        config,
+        anchor.period,
+        proof.current_sync_committee.clone(),
+        proof.update.attested_header,
+    );
+    let verifier = Bls12381AggregateVerifier::new();
+    apply_sync_committee_update(&mut store, &proof.update, &verifier).ok()?;
+    advance_period(&mut store).ok()?;
+    Some(EthAnchor {
+        config_selector: anchor.config_selector,
+        period: anchor.period.saturating_add(1),
+        sync_committee_root: store.current_sync_committee().hash_tree_root(),
+        deposit_contract: anchor.deposit_contract,
+        asset_id: anchor.asset_id,
+    })
+}
+
 pub fn verify_eth_mint(anchor: &EthAnchor, proof: &EthMintProof, dest_chain: u32) -> Option<Fact> {
     if proof.config_selector != anchor.config_selector {
         return None;
@@ -414,6 +500,42 @@ mod tests {
                 receipt_proof: vec![vec![0xa1, 0xa2], vec![], vec![0xb1; 40]],
             },
         }
+    }
+
+    fn dummy_update_proof() -> EthUpdateProof {
+        EthUpdateProof {
+            config_selector: 3,
+            current_sync_committee: dummy_committee(5),
+            update: SyncCommitteeUpdate {
+                attested_header: dummy_header(0x30),
+                next_sync_committee: dummy_committee(5),
+                next_sync_committee_branch: vec![[0x51; 32], [0x52; 32]],
+                sync_aggregate: SyncAggregate {
+                    participation: vec![true, false, true, true, false],
+                    signature: BlsSignature([0x7a; SIGNATURE_LEN]),
+                },
+                signature_slot: 0x00ff_00ff_00ff_00ff,
+            },
+        }
+    }
+
+    #[test]
+    fn an_eth_update_proof_round_trips_through_its_wire_encoding() {
+        let proof = dummy_update_proof();
+        assert_eq!(EthUpdateProof::decode(&proof.encode()), Some(proof));
+    }
+
+    #[test]
+    fn an_eth_update_for_a_committee_that_does_not_match_the_anchor_is_refused() {
+        let proof = dummy_update_proof();
+        let anchor = EthAnchor {
+            config_selector: 3,
+            period: 5,
+            sync_committee_root: [0xff; 32],
+            deposit_contract: [0xbc; 20],
+            asset_id: [0x0e; 16],
+        };
+        assert_eq!(verify_eth_committee_update(&anchor, &proof), None);
     }
 
     #[test]
