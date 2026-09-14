@@ -848,10 +848,17 @@ fn supply(node: &DevNode) -> Json {
     )])
 }
 
+/// Upper bound on how many events a single get_events / get_side_events response
+/// returns, so a height with a very large number of events cannot force an unbounded
+/// response. A caller that sees `truncated` reads the rest by another means.
+const MAX_EVENTS_PER_RESPONSE: usize = 4_096;
+
 fn events(node: &DevNode, height: u64) -> Json {
-    let items: Vec<Json> = node
-        .events_at(height)
+    let all = node.events_at(height);
+    let total = all.len();
+    let items: Vec<Json> = all
         .iter()
+        .take(MAX_EVENTS_PER_RESPONSE)
         .map(|event| {
             object(vec![
                 ("contract", Json::str(&event.contract)),
@@ -863,20 +870,26 @@ fn events(node: &DevNode, height: u64) -> Json {
     object(vec![
         ("height", Json::Int(height)),
         ("count", Json::Int(items.len() as u64)),
+        ("total", Json::Int(total as u64)),
+        ("truncated", Json::Bool(total > items.len())),
         ("events", Json::Array(items)),
     ])
 }
 
 fn side_events(node: &DevNode, height: u64) -> Json {
-    let items: Vec<Json> = node
-        .side_events_at(height)
+    let all = node.side_events_at(height);
+    let total = all.len();
+    let items: Vec<Json> = all
         .iter()
+        .take(MAX_EVENTS_PER_RESPONSE)
         .enumerate()
         .map(|(index, event)| side_event_json(index as u64, event))
         .collect();
     object(vec![
         ("height", Json::Int(height)),
         ("count", Json::Int(items.len() as u64)),
+        ("total", Json::Int(total as u64)),
+        ("truncated", Json::Bool(total > items.len())),
         ("events", Json::Array(items)),
     ])
 }
