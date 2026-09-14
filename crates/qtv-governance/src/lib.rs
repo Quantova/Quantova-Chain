@@ -100,6 +100,27 @@ impl Track {
         }
     }
 
+    /// Supermajority a track needs, in basis points of the electorate stake. Value and
+    /// protocol tracks need two thirds; the justice tracks that seize or ban need three
+    /// quarters. A 40% plurality can no longer carry a mint or a seizure.
+    pub const fn threshold_bps(&self) -> u128 {
+        match self {
+            Track::ChainUpgrade | Track::Mint | Track::BridgeMigration => 6_667,
+            Track::FreezeRecovery | Track::BlacklistKill => 7_500,
+        }
+    }
+
+    /// Delay between a referendum passing and its action taking effect, so the
+    /// community can react to a captured vote. Value/protocol tracks wait a week; the
+    /// emergency justice tracks wait a short window but never zero.
+    pub const fn enactment_delay(&self) -> u64 {
+        match self {
+            Track::ChainUpgrade | Track::Mint | Track::BridgeMigration => 7 * DAY_SECONDS,
+            Track::BlacklistKill => DAY_SECONDS,
+            Track::FreezeRecovery => HOUR_SECONDS,
+        }
+    }
+
     pub fn from_code(code: u8) -> Option<Track> {
         Track::all().into_iter().find(|track| track.code() == code)
     }
@@ -258,12 +279,12 @@ impl Tally {
         self.aye_stake.saturating_add(self.nay_stake)
     }
 
-    pub fn approved(&self, electorate_stake: u128) -> bool {
+    pub fn approved(&self, electorate_stake: u128, threshold_bps: u128) -> bool {
         electorate_stake > 0
             && self.turnout().saturating_mul(BPS_DENOM)
                 >= electorate_stake.saturating_mul(PARTICIPATION_FLOOR_BPS)
             && self.aye_stake.saturating_mul(BPS_DENOM)
-                >= electorate_stake.saturating_mul(THRESHOLD_BPS)
+                >= electorate_stake.saturating_mul(threshold_bps)
             && self.aye_stake > self.nay_stake
     }
 }
@@ -862,6 +883,11 @@ impl Referendum {
         now >= self.decides_at()
     }
 
+    /// True once both the decision period and the enactment delay have elapsed.
+    pub fn enactable(&self, now: u64) -> bool {
+        now >= self.decides_at().saturating_add(self.track.enactment_delay())
+    }
+
     pub fn resolve(&mut self, now: u64, electorate_stake: u128) -> Status {
         if self.status != Status::Deciding {
             return self.status;
@@ -873,7 +899,7 @@ impl Referendum {
         if !self.ready(now) {
             return Status::Deciding;
         }
-        self.status = if self.tally.approved(electorate_stake) {
+        self.status = if self.tally.approved(electorate_stake, self.track.threshold_bps()) {
             Status::Approved
         } else {
             Status::Rejected
@@ -882,7 +908,7 @@ impl Referendum {
     }
 
     pub fn deposit_refunded(&self, electorate_stake: u128) -> bool {
-        !self.killed && self.tally.approved(electorate_stake)
+        !self.killed && self.tally.approved(electorate_stake, self.track.threshold_bps())
     }
 }
 
@@ -1009,34 +1035,30 @@ mod tests {
     }
 
     #[test]
-    fn a_tally_passes_at_forty_percent_of_total_staked_and_fails_just_below() {
+    fn a_tally_passes_at_the_supermajority_and_fails_just_below() {
+        let t = Track::Mint.threshold_bps();
         let mut pass = Tally::default();
-        pass.record(true, 400_000);
-        assert!(pass.approved(1_000_000));
-
+        pass.record(true, 666_700);
+        assert!(pass.approved(1_000_000, t));
         let mut fail = Tally::default();
-        fail.record(true, 399_999);
-        assert!(!fail.approved(1_000_000));
-
+        fail.record(true, 666_699);
+        assert!(!fail.approved(1_000_000, t));
         let mut none = Tally::default();
-        none.record(true, 500_000);
-        assert!(!none.approved(0));
+        none.record(true, 700_000);
+        assert!(!none.approved(0, t));
     }
 
     #[test]
-    fn a_minority_aye_cannot_carry_a_proposal_over_a_nay_majority() {
+    fn a_sub_supermajority_aye_cannot_carry_a_proposal() {
+        let t = Track::Mint.threshold_bps();
         let mut opposed = Tally::default();
-        opposed.record(true, 400_000);
-        opposed.record(false, 600_000);
-        assert!(
-            !opposed.approved(1_000_000),
-            "a forty percent aye must not overrule a sixty percent nay"
-        );
-
+        opposed.record(true, 600_000);
+        opposed.record(false, 400_000);
+        assert!(!opposed.approved(1_000_000, t), "sixty percent is below two thirds");
         let mut carried = Tally::default();
-        carried.record(true, 450_000);
-        carried.record(false, 400_000);
-        assert!(carried.approved(1_000_000));
+        carried.record(true, 700_000);
+        carried.record(false, 100_000);
+        assert!(carried.approved(1_000_000, t));
     }
 
     #[test]
@@ -1058,7 +1080,7 @@ mod tests {
             0,
             Track::ChainUpgrade.deposit(),
         );
-        passed.tally.record(true, 40_000);
+        passed.tally.record(true, 70_000);
         assert!(passed.deposit_refunded(100_000));
 
         let mut miss = Referendum::open(
@@ -1086,7 +1108,7 @@ mod tests {
     #[test]
     fn a_referendum_decides_only_when_its_window_closes() {
         let mut r = Referendum::open(1, Track::Mint, vec![1; 32], 1_000, Track::Mint.deposit());
-        r.tally.record(true, 40_000);
+        r.tally.record(true, 70_000);
         assert_eq!(
             r.resolve(1_000 + 3 * DAY_SECONDS - 1, 100_000),
             Status::Deciding
@@ -1237,14 +1259,15 @@ mod tests {
     fn a_proposal_below_the_participation_floor_is_rejected() {
         let electorate = 1_000_000u128;
         let mut thin = Tally::default();
+        let t = Track::Mint.threshold_bps();
         thin.record(true, 200_000);
         assert!(thin.turnout() * BPS_DENOM < electorate * PARTICIPATION_FLOOR_BPS);
-        assert!(!thin.approved(electorate));
+        assert!(!thin.approved(electorate, t));
 
         let mut full = Tally::default();
-        full.record(true, 450_000);
+        full.record(true, 700_000);
         assert!(full.turnout() * BPS_DENOM >= electorate * PARTICIPATION_FLOOR_BPS);
-        assert!(full.approved(electorate));
+        assert!(full.approved(electorate, t));
     }
 
     #[test]

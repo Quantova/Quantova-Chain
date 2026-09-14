@@ -3077,23 +3077,23 @@ mod tests {
         ledger.seed_validator_bond(&voter.address(), 10_000 * 1_000_000);
 
         let propose = gov_call_tx(&proposer, propose_price_args(70_000_000), 0, &fee);
-        let vote = gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee);
+        let vote = gov_call_tx(&voter, vote_args(1, true, 0, 8_000 * 1_000_000), 0, &fee);
         let included = execute_ordered(&mut ledger, &[propose, vote], &fee, 0);
         assert_eq!(included.len(), 2);
         assert!(ledger.gov_referendum(1).is_some());
-        assert_eq!(ledger.gov_total_locked(), 5_000 * 1_000_000);
+        assert_eq!(ledger.gov_total_locked(), 8_000 * 1_000_000);
         assert_eq!(ledger.stake_price(), 0);
 
         let mut enact = qtv_codec::Encoder::new();
         enact.put_u8(3);
         enact.put_u64(1);
         let enact_tx = gov_call_tx(&proposer, enact.into_bytes(), 1, &fee);
-        let included = execute_ordered(&mut ledger, &[enact_tx], &fee, 15 * 86_400);
+        let included = execute_ordered(&mut ledger, &[enact_tx], &fee, 22 * 86_400);
         assert_eq!(included.len(), 1);
         assert_eq!(ledger.stake_price(), 70_000_000);
 
         let bad = gov_call_tx(&proposer, vec![99u8], 2, &fee);
-        assert!(execute_ordered(&mut ledger, &[bad], &fee, 15 * 86_400).is_empty());
+        assert!(execute_ordered(&mut ledger, &[bad], &fee, 22 * 86_400).is_empty());
     }
 
     #[test]
@@ -3107,7 +3107,7 @@ mod tests {
         ledger.seed_validator_bond(&voter.address(), 10_000 * 1_000_000);
 
         let propose = gov_call_tx(&proposer, propose_price_args(70_000_000), 0, &fee);
-        let vote = gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee);
+        let vote = gov_call_tx(&voter, vote_args(1, true, 0, 8_000 * 1_000_000), 0, &fee);
         assert!(
             execute_ordered(&mut ledger, &[propose, vote], &fee, 0).is_empty(),
             "a genesis that does not name QTOV has nothing to propose or vote with"
@@ -3119,7 +3119,7 @@ mod tests {
         enact.put_u8(3);
         enact.put_u64(1);
         let enact_tx = gov_call_tx(&proposer, enact.into_bytes(), 0, &fee);
-        assert!(execute_ordered(&mut ledger, &[enact_tx], &fee, 15 * 86_400).is_empty());
+        assert!(execute_ordered(&mut ledger, &[enact_tx], &fee, 22 * 86_400).is_empty());
         assert_eq!(ledger.stake_price(), 0);
     }
 
@@ -3160,7 +3160,7 @@ mod tests {
             "the quorum froze the voter"
         );
 
-        let vote = gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee);
+        let vote = gov_call_tx(&voter, vote_args(1, true, 0, 8_000 * 1_000_000), 0, &fee);
         let escape = transfer(&voter, &payee.address(), 1_000 * 1_000_000, 1, &fee);
         let included = execute_ordered(&mut ledger, &[vote, escape], &fee, 0);
         assert_eq!(
@@ -3170,7 +3170,7 @@ mod tests {
         );
         assert_eq!(
             ledger.gov_total_locked(),
-            5_000 * 1_000_000,
+            8_000 * 1_000_000,
             "a frozen electorate can never be silenced against a guardian caucus"
         );
         assert_eq!(
@@ -3199,7 +3199,7 @@ mod tests {
         let mut propose_args = vec![1u8];
         propose_args.extend_from_slice(&qtv_codec::to_bytes(&action));
         let propose = gov_call_tx(&proposer, propose_args, 0, &fee);
-        let vote = gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee);
+        let vote = gov_call_tx(&voter, vote_args(1, true, 0, 8_000 * 1_000_000), 0, &fee);
         execute_ordered(&mut ledger, &[propose, vote], &fee, 0);
 
         let mut enact = qtv_codec::Encoder::new();
@@ -3287,7 +3287,7 @@ mod tests {
             &mut ledger,
             &[
                 gov_call_tx(&proposer, propose_args, 0, &fee),
-                gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee),
+                gov_call_tx(&voter, vote_args(1, true, 0, 8_000 * 1_000_000), 0, &fee),
             ],
             &fee,
             0,
@@ -3299,12 +3299,12 @@ mod tests {
             &mut ledger,
             &[gov_call_tx(&proposer, enact.into_bytes(), 1, &fee)],
             &fee,
-            2 * 86_400,
+            3 * 86_400,
         );
         assert!(ledger.is_frozen(&contract), "governance froze the contract");
 
         assert!(
-            execute_ordered(&mut ledger, &[call_it(1)], &fee, 2 * 86_400).is_empty(),
+            execute_ordered(&mut ledger, &[call_it(1)], &fee, 3 * 86_400).is_empty(),
             "a frozen contract must not be callable"
         );
     }
@@ -3333,7 +3333,7 @@ mod tests {
             &mut ledger,
             &[
                 gov_call_tx(&proposer, propose_args, 0, &fee),
-                gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee),
+                gov_call_tx(&voter, vote_args(1, true, 0, 8_000 * 1_000_000), 0, &fee),
             ],
             &fee,
             0,
@@ -3345,18 +3345,18 @@ mod tests {
             &mut ledger,
             &[gov_call_tx(&proposer, enact.into_bytes(), 1, &fee)],
             &fee,
-            2 * 86_400,
+            3 * 86_400,
         );
         assert!(ledger.is_frozen(&hostile.address()));
 
         let out = transfer(&hostile, &peer.address(), 100 * 1_000_000, 0, &fee);
         assert!(
-            execute_ordered(&mut ledger, &[out], &fee, 2 * 86_400).is_empty(),
+            execute_ordered(&mut ledger, &[out], &fee, 3 * 86_400).is_empty(),
             "a frozen account cannot send"
         );
         let into = transfer(&peer, &hostile.address(), 100 * 1_000_000, 0, &fee);
         assert_eq!(
-            execute_ordered(&mut ledger, &[into], &fee, 2 * 86_400).len(),
+            execute_ordered(&mut ledger, &[into], &fee, 3 * 86_400).len(),
             1,
             "a frozen account still receives"
         );
@@ -3437,7 +3437,7 @@ mod tests {
             &mut ledger,
             &[
                 gov_call_tx(&proposer, propose_args, 0, &fee),
-                gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee),
+                gov_call_tx(&voter, vote_args(1, true, 0, 8_000 * 1_000_000), 0, &fee),
             ],
             &fee,
             0,
@@ -3531,7 +3531,7 @@ mod tests {
         };
         let block = vec![
             gov_call_tx(&proposer, propose_price_args(70_000_000), 0, &fee),
-            gov_call_tx(&voter, vote_args(1, true, 0, 5_000 * 1_000_000), 0, &fee),
+            gov_call_tx(&voter, vote_args(1, true, 0, 8_000 * 1_000_000), 0, &fee),
         ];
         let mut sequential = base.clone();
         execute_ordered(&mut sequential, &block, &fee, 0);
