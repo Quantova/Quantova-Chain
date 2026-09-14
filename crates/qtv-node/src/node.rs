@@ -4143,7 +4143,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bridge_freeze_auto_expires_across_blocks_and_refunds_the_bond() {
+    fn a_bridge_freeze_auto_expires_across_blocks_and_forfeits_the_bond() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
         let freezer = keypair(221);
@@ -4175,8 +4175,8 @@ mod tests {
         );
         assert_eq!(
             ledger.balance(&freezer.address()),
-            start - charged,
-            "auto expiry refunds the whole bond"
+            start - charged - qtv_governance::BRIDGE_FREEZE_BOND,
+            "auto expiry forfeits the bond rather than refunding it"
         );
     }
 

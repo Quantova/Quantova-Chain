@@ -1529,7 +1529,11 @@ impl Ledger {
     pub fn bridge_expire(&mut self, now: u64) {
         if let Some(record) = self.bridge_freeze() {
             if now >= record.until {
-                self.lift_bridge_freeze(now, FreezeLift::Refund);
+                // A good-faith freezer unfreezes early and is refunded. Letting a
+                // freeze run the full duration keeps the bridge down for the maximum
+                // window, which is the griefing shape, so the bond is forfeited on
+                // expiry rather than refunded for free.
+                self.lift_bridge_freeze(now, FreezeLift::Slash);
             }
         }
     }
@@ -6797,10 +6801,12 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn an_expired_bridge_freeze_returns_the_full_bond_and_is_never_slashed() {
+    fn an_expired_bridge_freeze_forfeits_the_bond_to_the_treasury() {
         let mut l = Ledger::new();
         let freezer = gov_addr(72);
+        let bond = qtv_governance::BRIDGE_FREEZE_BOND;
         fund(&mut l, &freezer, 1_500_000 * 1_000_000);
+        let treasury_before = l.stake_treasury();
         assert!(l.bridge_freeze_with_fee(&freezer, 0, 1_000));
         let until = 1_000 + qtv_governance::BRIDGE_FREEZE_DURATION;
 
@@ -6812,12 +6818,15 @@ mod stake_state_tests {
             !l.bridge_is_frozen(),
             "the freeze lifts itself at the horizon"
         );
+        // Letting a freeze run to expiry is the griefing shape; the bond is forfeited
+        // to the treasury rather than refunded, so keeping the bridge down has a cost.
         assert_eq!(
             l.balance(&freezer),
-            1_500_000 * 1_000_000,
-            "auto expiry returns the whole bond"
+            1_500_000 * 1_000_000 - bond,
+            "auto expiry does not refund the bond"
         );
         assert_eq!(l.balance(&bridge_bond_address()), 0);
+        assert_eq!(l.stake_treasury(), treasury_before + bond);
         assert_eq!(l.bridge_last_lift(), Some(until));
     }
 
