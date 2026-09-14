@@ -538,9 +538,9 @@ impl Mempool {
             if !self.feeless_has_room() {
                 return Err(Reject::RateLimited);
             }
-            if !self.charge_feeless_attempt_for(&wrapper) {
-                return Err(Reject::RateLimited);
-            }
+            // The per-lane attempt counter is charged only AFTER the item passes its
+            // admissibility check below, so garbage cannot drain the lane budget and
+            // censor honest evidence.
         }
         if crate::node::is_vm_op(ledger, &wrapper) {
             if !CONTRACTS_ENABLED {
@@ -583,17 +583,29 @@ impl Mempool {
             if !crate::node::evidence_admissible(fee_params.chain_id, &wrapper, ledger) {
                 return Err(Reject::BadCall);
             }
+            if !self.charge_feeless_attempt_for(&wrapper) {
+                return Err(Reject::RateLimited);
+            }
         } else if crate::node::is_bridge_guardian(&wrapper) {
             if !crate::node::guardian_admissible(ledger, &wrapper, fee_params.chain_id) {
                 return Err(Reject::BadCall);
+            }
+            if !self.charge_feeless_attempt_for(&wrapper) {
+                return Err(Reject::RateLimited);
             }
         } else if crate::node::is_bridge_mint(&wrapper) {
             if !crate::node::bridge_mint_admissible(ledger, &wrapper, fee_params.chain_id) {
                 return Err(Reject::BadCall);
             }
+            if !self.charge_feeless_attempt_for(&wrapper) {
+                return Err(Reject::RateLimited);
+            }
         } else if crate::node::is_bridge_settle(&wrapper) {
             if !crate::node::bridge_settle_admissible(ledger, &wrapper, fee_params.chain_id) {
                 return Err(Reject::BadCall);
+            }
+            if !self.charge_feeless_attempt_for(&wrapper) {
+                return Err(Reject::RateLimited);
             }
         } else if crate::node::is_bridge_exit(&wrapper) {
             if self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce()) {

@@ -205,23 +205,28 @@ impl Driver {
         let start_height = self.node.height();
         self.disseminate_registrations(view_timeout);
         self.disseminate_reveals(view_timeout);
-        let selection = self
-            .node
-            .select()
-            .map_err(|e| match self.node.saturation_shortfall() {
-                Some((count, lightest, floor, total)) => format!(
-                    "cannot select a committee at height {start_height}: {e:?}. {count} \
-                     validator(s) hold less than the {floor} of {total} total stake this \
-                     roster's committee size requires, the lightest at {lightest}. this is a \
-                     stake imbalance, not a registration problem, and it will recur on every \
-                     restart until stake is rebalanced or the committee budget changes"
-                ),
-                None => format!(
-                    "cannot select a committee at height {start_height}: {e:?}. too few \
-                     validators re registered their rotated one time root this epoch to draw a \
-                     committee"
-                ),
-            })?;
+        let selection = match self.node.select() {
+            Ok(selection) => selection,
+            Err(e) => {
+                // A transient partition or a too-thin reveal set must not terminate the
+                // daemon. Log the reason, back off one view, and let the outer loop
+                // re-disseminate and retry rather than forcing a manual restart.
+                let reason = match self.node.saturation_shortfall() {
+                    Some((count, lightest, floor, total)) => format!(
+                        "cannot select a committee at height {start_height}: {e:?}. {count} \
+                         validator(s) hold less than the {floor} of {total} total stake this \
+                         roster needs, the lightest at {lightest}; a stake imbalance"
+                    ),
+                    None => format!(
+                        "cannot select a committee at height {start_height}: {e:?}. too few \
+                         validators re registered their rotated one time root this epoch"
+                    ),
+                };
+                log(&format!("{reason}; retrying next round"));
+                std::thread::sleep(view_timeout);
+                return Ok(());
+            }
+        };
 
         let height_start = Instant::now();
         let mut entered_view: Option<u64> = None;

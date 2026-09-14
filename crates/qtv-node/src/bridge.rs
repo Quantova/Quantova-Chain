@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use qtv_codec::{Decode, Decoder, Encode, Encoder, Error};
+use std::collections::HashSet;
 use qtv_crypto::ml_dsa::{self, PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
 use qtv_crypto::sha3;
 
@@ -451,19 +452,24 @@ pub fn quorum_attests(
     if fact.dest_chain != dest_chain || fact.direction != Direction::Deposit {
         return false;
     }
+    // No valid distinct signer set can exceed the operator count. Refusing a longer
+    // list up front bounds the work to the operator count and stops a fee-less
+    // artifact carrying ~175k signer entries from costing ~n^2 comparisons.
+    if attestation.signatures.len() > set.operators.len() {
+        return false;
+    }
     let message = fact.attest_preimage(chain_id);
-    let mut attempted: Vec<u32> = Vec::new();
-    let mut counted_keys: Vec<&[u8]> = Vec::new();
+    let mut attempted: HashSet<u32> = HashSet::new();
+    let mut counted_keys: HashSet<&[u8]> = HashSet::new();
     for signer in &attestation.signatures {
-        if attempted.contains(&signer.operator_id) {
+        if !attempted.insert(signer.operator_id) {
             continue;
         }
-        attempted.push(signer.operator_id);
         let public_key = match set.public_key(signer.operator_id) {
             Some(key) => key,
             None => continue,
         };
-        if counted_keys.contains(&public_key) {
+        if counted_keys.contains(public_key) {
             continue;
         }
         let pk: &[u8; PUBLIC_KEY_BYTES] = match public_key.try_into() {
@@ -475,7 +481,7 @@ pub fn quorum_attests(
             Err(_) => continue,
         };
         if verify_signature(pk, &message, sig, era) {
-            counted_keys.push(public_key);
+            counted_keys.insert(public_key);
         }
     }
     counted_keys.len() as u32 >= set.threshold

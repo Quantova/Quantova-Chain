@@ -110,11 +110,20 @@ pub fn code_block(block: &ChainBlock, k: usize, n: usize) -> Result<CodedBlock, 
     })
 }
 
+/// A single shard is never larger than one coding target, and the whole coded
+/// payload never exceeds one max block. Without these a Byzantine leader could pick
+/// oversized shard_len/k and force every node to spend seconds of CPU and ~128 MB
+/// per led view reconstructing before any header check runs.
+pub const MAX_CODED_BYTES: usize = 8 * 1024 * 1024;
+
 pub fn commitment_in_bounds(commitment: &Commitment) -> bool {
     commitment.k >= 1
         && commitment.n >= commitment.k
         && commitment.n <= erasure::MAX_SHARDS
         && commitment.n <= commitment.k.saturating_mul(2)
+        && commitment.shard_len <= SHARD_TARGET
+        && commitment.k.saturating_mul(commitment.shard_len) <= MAX_CODED_BYTES
+        && commitment.data_len <= commitment.k.saturating_mul(commitment.shard_len)
 }
 
 pub fn reconstruct_block(

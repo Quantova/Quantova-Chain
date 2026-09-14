@@ -2264,7 +2264,15 @@ impl DevNode {
             self.side_events_by_height
                 .retain(|&h, _| h >= self.height.saturating_sub(EVENTS_CACHED_HEIGHTS));
         }
-        self.persist(&block).map_err(|_| SyncError::Io)?;
+        if self.persist(&block).is_err() {
+            // The in-memory ledger has already advanced; a persist failure here would
+            // leave the node running ahead of its durable state. Halt instead of
+            // continuing corrupted.
+            self.fatal = Some(Fatal::PersistFailed {
+                height: self.height,
+            });
+            return Err(SyncError::Io);
+        }
         self.archive_burn_block(&block);
         let leader = selection
             .members
