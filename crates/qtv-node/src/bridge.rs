@@ -492,6 +492,7 @@ pub enum StarkCheck {
     Absent,
     BoundUnverified,
     Unbound,
+    Verified,
 }
 
 pub fn check_stark(fact: &Fact, stark: Option<&StarkEnvelope>, operator: u32) -> StarkCheck {
