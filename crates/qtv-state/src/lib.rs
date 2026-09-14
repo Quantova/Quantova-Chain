@@ -25,8 +25,14 @@ fn key_bit(key: &Key, level: usize) -> u8 {
     (key[level >> 3] >> (7 - (level & 7))) & 1
 }
 
+const LEAF_DOMAIN: u8 = 0x00;
+const NODE_DOMAIN: u8 = 0x01;
+
 fn leaf_hash(value: &[u8]) -> Hash {
-    sha3::sha3_256(value)
+    let mut input = Vec::with_capacity(1 + value.len());
+    input.push(LEAF_DOMAIN);
+    input.extend_from_slice(value);
+    sha3::sha3_256(&input)
 }
 
 #[cfg(test)]
@@ -37,9 +43,10 @@ thread_local! {
 fn node_hash(left: &Hash, right: &Hash) -> Hash {
     #[cfg(test)]
     NODE_HASHES.with(|count| count.set(count.get() + 1));
-    let mut input = [0u8; HASH_LEN * 2];
-    input[..HASH_LEN].copy_from_slice(left);
-    input[HASH_LEN..].copy_from_slice(right);
+    let mut input = [0u8; 1 + HASH_LEN * 2];
+    input[0] = NODE_DOMAIN;
+    input[1..1 + HASH_LEN].copy_from_slice(left);
+    input[1 + HASH_LEN..].copy_from_slice(right);
     sha3::sha3_256(&input)
 }
 
@@ -358,6 +365,16 @@ pub fn verify(key: &Key, proof: &Proof, root: &Hash) -> bool {
 mod incremental {
 
     use super::*;
+
+    #[test]
+    fn leaf_and_node_hashes_live_in_separate_domains() {
+        let a = [0x11u8; HASH_LEN];
+        let b = [0x22u8; HASH_LEN];
+        let mut concatenated = Vec::new();
+        concatenated.extend_from_slice(&a);
+        concatenated.extend_from_slice(&b);
+        assert_ne!(leaf_hash(&concatenated), node_hash(&a, &b));
+    }
 
     struct Rng(u64);
 
