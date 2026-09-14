@@ -173,11 +173,36 @@ impl BitcoinMintProof {
     }
 }
 
+/// Bitcoin Cash corridor network id. Its real headers use ASERT difficulty, which the
+/// SPV does not model, so a genuine BCH proof cannot verify while a forged
+/// constant-difficulty fork could. The corridor stays closed until ASERT lands.
+pub const NETWORK_BITCOIN_CASH: u8 = 1;
+
+/// Cumulative proof-of-work of a mint proof's header chain, big-endian, for the
+/// stateful most-work check the node applies before minting. None if the proof does
+/// not verify at all.
+pub fn bitcoin_mint_work(anchor: &BitcoinAnchor, proof: &BitcoinMintProof) -> Option<[u8; 32]> {
+    if anchor.network == NETWORK_BITCOIN_CASH {
+        return None;
+    }
+    let params = anchor.params()?;
+    let mut headers = Vec::with_capacity(proof.headers.len());
+    for raw in &proof.headers {
+        headers.push(BlockHeader::parse(raw).ok()?);
+    }
+    let chain = verify_chain(&headers, proof.start_height, &params).ok()?;
+    chain.anchored_to(&anchor.checkpoint()).ok()?;
+    Some(chain.work.to_be_bytes())
+}
+
 pub fn verify_bitcoin_mint(
     anchor: &BitcoinAnchor,
     proof: &BitcoinMintProof,
     dest_chain: u32,
 ) -> Option<Fact> {
+    if anchor.network == NETWORK_BITCOIN_CASH {
+        return None;
+    }
     let params = anchor.params()?;
     let mut headers = Vec::with_capacity(proof.headers.len());
     for raw in &proof.headers {
@@ -325,6 +350,40 @@ mod tests {
         assert_eq!(fact.source_ref, txid);
         assert_eq!(fact.source_chain, BITCOIN_MINT_SOURCE_CHAIN);
         assert_eq!(fact.dest_chain, 9);
+    }
+
+    #[test]
+    fn the_bitcoin_cash_corridor_is_closed_until_asert() {
+        let bridge = p2pkh([0x11; 20]);
+        let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return([0x42u8; 32]))]);
+        let txid = Transaction::parse(&raw).unwrap().txid();
+        let header = mine(txid);
+        let mut anchor = anchor_for(&header, bridge);
+        anchor.network = NETWORK_BITCOIN_CASH;
+        let proof = proof_for(&header, raw);
+        assert_eq!(verify_bitcoin_mint(&anchor, &proof, 9), None);
+        assert_eq!(bitcoin_mint_work(&anchor, &proof), None);
+    }
+
+    #[test]
+    fn a_proof_lighter_than_the_recorded_best_work_is_a_private_fork() {
+        let bridge = p2pkh([0x11; 20]);
+        let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return([0x42u8; 32]))]);
+        let txid = Transaction::parse(&raw).unwrap().txid();
+        let header = mine(txid);
+        let anchor = anchor_for(&header, bridge);
+        let proof = proof_for(&header, raw);
+        // The proof verifies and carries some work; a stored best that is heavier than
+        // this proof is exactly the private-fork case the node must refuse.
+        let work = bitcoin_mint_work(&anchor, &proof).expect("a real proof carries work");
+        let mut heavier = work;
+        for byte in heavier.iter_mut() {
+            if *byte != 0xff {
+                *byte += 1;
+                break;
+            }
+        }
+        assert!(work < heavier, "the recorded best work outweighs this proof");
     }
 
     #[test]

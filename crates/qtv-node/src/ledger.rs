@@ -270,6 +270,7 @@ const BRIDGE_ASSET_LIST_TAG: &[u8] = b"qtv/bridge/assetlist";
 const BRIDGE_DESTCHAIN_TAG: &[u8] = b"qtv/bridge/destchain";
 const BRIDGE_ERA_TAG: &[u8] = b"qtv/bridge/era";
 const BRIDGE_BTC_ANCHOR_TAG: &[u8] = b"qtv/bridge/btcanchor";
+const BRIDGE_BTC_BEST_WORK_TAG: &[u8] = b"qtv/bridge/btcbestwork";
 const BRIDGE_ETH_ANCHOR_TAG: &[u8] = b"qtv/bridge/ethanchor/";
 const BRIDGE_COSMOS_ANCHOR_TAG: &[u8] = b"qtv/bridge/cosmosanchor/";
 const CHAIN_GENESIS_TIME_TAG: &[u8] = b"qtv/chain/genesistime";
@@ -1835,7 +1836,33 @@ impl Ledger {
         let key = stake_singleton_key(BRIDGE_BTC_ANCHOR_TAG);
         let bytes = anchor.encode();
         self.write_leaf(key, bytes.clone());
+        // Seed the most-work floor from the anchor's committed minimum work. A deposit
+        // proof must present a chain at least this heavy, and heavier than every proof
+        // accepted since, so a private low-work fork cannot mint once the real chain is
+        // relayed.
+        if self.bridge_btc_best_work() < anchor.checkpoint_min_work {
+            self.set_bridge_btc_best_work(&anchor.checkpoint_min_work);
+        }
         (key, bytes)
+    }
+
+    pub fn bridge_btc_best_work(&self) -> [u8; 32] {
+        self.trie
+            .get(&stake_singleton_key(BRIDGE_BTC_BEST_WORK_TAG))
+            .filter(|bytes| bytes.len() == 32)
+            .map(|bytes| {
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&bytes);
+                out
+            })
+            .unwrap_or([0u8; 32])
+    }
+
+    pub fn set_bridge_btc_best_work(&mut self, work: &[u8; 32]) {
+        self.write_leaf(
+            stake_singleton_key(BRIDGE_BTC_BEST_WORK_TAG),
+            work.to_vec(),
+        );
     }
 
     pub fn bridge_eth_anchor(&self, selector: u8) -> Option<crate::bridge_eth::EthAnchor> {

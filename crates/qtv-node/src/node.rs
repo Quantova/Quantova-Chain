@@ -891,11 +891,39 @@ fn dispatch_bridge_mint(ledger: &mut Ledger, wrapper: &Wrapper, chain_id: u64) -
     if ledger.bridge_is_frozen() {
         return false;
     }
+    // Bitcoin deposits are only honoured under the heaviest header chain the node has
+    // seen (stateful most-work). A proof lighter than the retained best work is a
+    // private fork and is refused; an accepted proof ratchets the best work forward.
+    let mut btc_work: Option<[u8; 32]> = None;
+    if is_bridge_btc_mint(wrapper) {
+        let proof = match crate::bridge_btc::BitcoinMintProof::decode(wrapper.body().call().args()) {
+            Some(proof) => proof,
+            None => return false,
+        };
+        let anchor = match ledger.bridge_bitcoin_anchor() {
+            Some(anchor) => anchor,
+            None => return false,
+        };
+        let work = match crate::bridge_btc::bitcoin_mint_work(&anchor, &proof) {
+            Some(work) => work,
+            None => return false,
+        };
+        if work < ledger.bridge_btc_best_work() {
+            return false;
+        }
+        btc_work = Some(work);
+    }
     let fact = match bridge_mint_fact(ledger, wrapper, chain_id) {
         Some(fact) => fact,
         None => return false,
     };
-    ledger.bridge_mint(&fact)
+    if !ledger.bridge_mint(&fact) {
+        return false;
+    }
+    if let Some(work) = btc_work {
+        ledger.set_bridge_btc_best_work(&work);
+    }
+    true
 }
 
 pub(crate) fn is_bridge_settle(wrapper: &Wrapper) -> bool {
