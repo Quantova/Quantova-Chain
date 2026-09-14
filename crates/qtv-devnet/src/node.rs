@@ -2216,6 +2216,22 @@ impl DevNode {
         {
             return Err(SyncError::WrongSubject);
         }
+        // The rotated sortition roots for a new epoch are published in this block's
+        // registration transactions. Absorb and verify them before reconstructing the
+        // committee, otherwise verifying the first block of an epoch would deadlock on
+        // roots that can only be learned from a block we have not yet applied — which
+        // is why a node offline across an epoch boundary, or any fresh node past epoch
+        // one, could never sync.
+        if qtv_sampler::epoch::is_epoch_start(self.height, self.consensus.epoch_len()) {
+            for wrapper in block.body() {
+                if wrapper.body().call().target() == registration_address() {
+                    if let Ok(note) = decode_register_note(wrapper.body().call().args()) {
+                        self.collect_registration(note);
+                    }
+                }
+            }
+            self.apply_registrations();
+        }
         let selection = self
             .committee_for_certificate(self.height, &certificate)
             .ok_or(SyncError::NoCommittee)?;
