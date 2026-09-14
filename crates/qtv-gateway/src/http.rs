@@ -400,8 +400,6 @@ fn handle_connection(
             break;
         }
         if let Some(value) = header_value(trimmed, "content-length") {
-            // A malformed length must not silently become zero: that lets a client
-            // frame a body the server then ignores, the basis of request smuggling.
             match value.trim().parse::<usize>() {
                 Ok(n) => content_length = n,
                 Err(_) => {
@@ -415,8 +413,6 @@ fn handle_connection(
             }
         }
         if header_value(trimmed, "transfer-encoding").is_some() {
-            // We frame bodies by content-length only. A transfer-encoding (chunked)
-            // header alongside it is a smuggling vector, so it is refused outright.
             return write_error(
                 &mut stream,
                 400,

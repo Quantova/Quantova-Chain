@@ -926,9 +926,6 @@ pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_i
     } else if is_bridge_cosmos_mint(wrapper) {
         crate::bridge_cosmos::MAX_COSMOS_MINT_BYTES
     } else {
-        // Only an asset that actually requires a STARK is allowed the extra megabyte of
-        // fee-less block space. Every other federated mint is capped tight so it cannot
-        // reserve a megabyte for free per submission.
         let base = max_mint_artifact_bytes(ledger);
         let requires_stark = crate::bridge::MintArtifact::decode(wrapper.body().call().args())
             .and_then(|a| ledger.bridged_asset(&a.attestation.fact.asset_id))
@@ -961,9 +958,6 @@ fn dispatch_bridge_mint(ledger: &mut Ledger, wrapper: &Wrapper, chain_id: u64) -
     if ledger.bridge_is_frozen() {
         return false;
     }
-    // Bitcoin deposits are only honoured under the heaviest header chain the node has
-    // seen (stateful most-work). A proof lighter than the retained best work is a
-    // private fork and is refused; an accepted proof ratchets the best work forward.
     let mut btc_work: Option<[u8; 32]> = None;
     if is_bridge_btc_mint(wrapper) {
         let proof = match crate::bridge_btc::BitcoinMintProof::decode(wrapper.body().call().args()) {
@@ -1338,10 +1332,6 @@ fn execute_ordered_across(
     ledger.guardian_expire(now_seconds);
     let mut included = Vec::new();
     let mut vm_meter: u64 = 0;
-    // Fair share of the block VM budget per sender, so a single sender cannot fill the
-    // whole budget with a handful of max-meter calls and censor every other contract
-    // call in the block. One sender's calls collectively cannot exceed a quarter of
-    // the budget, leaving the rest for other senders.
     let mut sender_vm_meter: std::collections::BTreeMap<String, u64> =
         std::collections::BTreeMap::new();
     const PER_SENDER_VM_METER: u64 = VM_BLOCK_METER_BUDGET / 4;

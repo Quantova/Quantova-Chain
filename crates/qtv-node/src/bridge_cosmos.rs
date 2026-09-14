@@ -392,9 +392,6 @@ impl CosmosMintProof {
     }
 
     pub fn source_key(&self) -> (u32, [u8; 32]) {
-        // Must match the executed mint's source_ref exactly, so bind the same leaf hash
-        // the ledger records. An empty store name here only means an unknown selector,
-        // which verify_cosmos_mint rejects anyway.
         let store_name = config_for_selector(self.config_selector)
             .map(|cfg| cfg.bridge_store_name)
             .unwrap_or(&[]);

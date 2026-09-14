@@ -89,11 +89,6 @@ fn decode_mark(bytes: &[u8]) -> Option<(u64, u64)> {
     }
 }
 
-/// A durable record of the last prevote a validator cast, so a crash and restart cannot
-/// let it prevote a second, conflicting value at a view it already voted in. The
-/// in-memory record of prevotes is lost on restart; this one is not. Unlike the block
-/// [`SignGuard`] this also remembers the value, so re-broadcasting the identical prevote
-/// after a restart is still allowed while a different value at the same view is refused.
 #[derive(Debug)]
 pub struct PrevoteGuard {
     path: PathBuf,
@@ -120,9 +115,6 @@ impl PrevoteGuard {
         Ok(PrevoteGuard { path, mark })
     }
 
-    /// True if prevoting `value` at `(height, view)` does not conflict with a prior
-    /// prevote: a strictly newer height/view is always allowed, the same height/view is
-    /// allowed only for the identical value, and an older height/view is refused.
     pub fn permits(&self, height: u64, view: u64, value: &[u8; 32]) -> bool {
         match &self.mark {
             Some((mh, mv, mval)) => {
@@ -142,8 +134,6 @@ impl PrevoteGuard {
         if !self.permits(height, view, value) {
             return Ok(false);
         }
-        // Only advance the mark forwards; re-broadcasting the same prevote must not
-        // rewind it below a later view already reached.
         if self
             .mark
             .as_ref()
@@ -235,7 +225,6 @@ mod tests {
             let mut guard = PrevoteGuard::open(&path).unwrap();
             assert!(guard.try_prevote(7, 2, &a).unwrap(), "first prevote is allowed");
         }
-        // Simulate a crash and restart: a fresh guard reads the persisted mark.
         {
             let mut guard = PrevoteGuard::open(&path).unwrap();
             assert!(

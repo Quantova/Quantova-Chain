@@ -100,9 +100,6 @@ impl Track {
         }
     }
 
-    /// Supermajority a track needs, in basis points of the electorate stake. Value and
-    /// protocol tracks need two thirds; the justice tracks that seize or ban need three
-    /// quarters. A 40% plurality can no longer carry a mint or a seizure.
     pub const fn threshold_bps(&self) -> u128 {
         match self {
             Track::ChainUpgrade | Track::Mint | Track::BridgeMigration => 6_667,
@@ -110,9 +107,6 @@ impl Track {
         }
     }
 
-    /// Delay between a referendum passing and its action taking effect, so the
-    /// community can react to a captured vote. Value/protocol tracks wait a week; the
-    /// emergency justice tracks wait a short window but never zero.
     pub const fn enactment_delay(&self) -> u64 {
         match self {
             Track::ChainUpgrade | Track::Mint | Track::BridgeMigration => 7 * DAY_SECONDS,
@@ -885,7 +879,6 @@ impl Referendum {
         now >= self.decides_at()
     }
 
-    /// True once both the decision period and the enactment delay have elapsed.
     pub fn enactable(&self, now: u64) -> bool {
         now >= self.decides_at().saturating_add(self.track.enactment_delay())
     }

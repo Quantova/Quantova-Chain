@@ -848,9 +848,6 @@ fn supply(node: &DevNode) -> Json {
     )])
 }
 
-/// Upper bound on how many events a single get_events / get_side_events response
-/// returns, so a height with a very large number of events cannot force an unbounded
-/// response. A caller that sees `truncated` reads the rest by another means.
 const MAX_EVENTS_PER_RESPONSE: usize = 4_096;
 
 fn events(node: &DevNode, height: u64) -> Json {

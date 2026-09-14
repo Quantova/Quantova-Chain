@@ -135,12 +135,6 @@ fn canonical_ops(proof: &ExistenceProof) -> Result<(), ProofError> {
     Ok(())
 }
 
-/// Canonical identity of a deposit for replay protection. Bound to the committed leaf
-/// hash, not the raw key. The leaf hash fixes `leaf.prefix || len(key) || key` as one
-/// preimage, so shifting the boundary between an unbounded leaf prefix and the key (a
-/// re-split of the same physical leaf) leaves the leaf hash unchanged and yields the
-/// same source_ref. Keying on sha256(key) let such a re-split mint the same deposit
-/// twice. The node's pre-execution dedup and the executed mint MUST both use this.
 pub fn deposit_source_ref(store_name: &[u8], proof: &ExistenceProof) -> [u8; 32] {
     let leaf_hash = proof.leaf.apply(&proof.key, &proof.value);
     let mut source_pre = Vec::with_capacity(store_name.len() + 32);
