@@ -1331,10 +1331,6 @@ impl DevNode {
                 return Vec::new();
             }
         }
-        // A durable guard so that a crash and restart cannot let this node prevote a
-        // second, conflicting value at a view it already voted in. It refuses an older
-        // view and a different value at the same view, exactly like the in-memory record
-        // above, but it survives a restart that empties that record.
         match self.prevote_guard.try_prevote(self.height, view, &value) {
             Ok(true) => {}
             Ok(false) | Err(_) => return Vec::new(),

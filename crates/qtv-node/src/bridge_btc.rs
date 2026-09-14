@@ -12,9 +12,6 @@ pub const MAX_BTC_HEADERS: usize = 4096;
 pub const MAX_BTC_RAW_TX: usize = 1 << 16;
 pub const BITCOIN_MINT_SOURCE_CHAIN: u32 = 0xFFFF_FF01;
 
-/// Per-deposit sanity cap in satoshis: the total supply of bitcoin that will ever
-/// exist (21,000,000 BTC). No single honest deposit can exceed this, so a proof that
-/// claims more is malformed or hostile and is refused before it can mint.
 pub const MAX_BTC_DEPOSIT_SATS: u128 = 21_000_000 * 100_000_000;
 
 struct Cursor<'a> {
@@ -178,14 +175,8 @@ impl BitcoinMintProof {
     }
 }
 
-/// Bitcoin Cash corridor network id. Its real headers use ASERT difficulty, which the
-/// SPV does not model, so a genuine BCH proof cannot verify while a forged
-/// constant-difficulty fork could. The corridor stays closed until ASERT lands.
 pub const NETWORK_BITCOIN_CASH: u8 = 1;
 
-/// Cumulative proof-of-work of a mint proof's header chain, big-endian, for the
-/// stateful most-work check the node applies before minting. None if the proof does
-/// not verify at all.
 pub fn bitcoin_mint_work(anchor: &BitcoinAnchor, proof: &BitcoinMintProof) -> Option<[u8; 32]> {
     if anchor.network == NETWORK_BITCOIN_CASH {
         return None;
@@ -378,8 +369,6 @@ mod tests {
         let header = mine(txid);
         let anchor = anchor_for(&header, bridge);
         let proof = proof_for(&header, raw);
-        // The proof verifies and carries some work; a stored best that is heavier than
-        // this proof is exactly the private-fork case the node must refuse.
         let work = bitcoin_mint_work(&anchor, &proof).expect("a real proof carries work");
         let mut heavier = work;
         for byte in heavier.iter_mut() {

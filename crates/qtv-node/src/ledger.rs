@@ -260,10 +260,6 @@ const BRIDGE_EPOCHMINT_TAG: &[u8] = b"qtv/bridge/epochmint/";
 const BRIDGE_OPERATORS_TAG: &[u8] = b"qtv/bridge/operators";
 const GUARDIAN_ENACT_NONCE_TAG: &[u8] = b"qtv/guardian/enact-nonce";
 const GUARDIAN_PENDING_ENACT_TAG: &[u8] = b"qtv/guardian/pending-enact";
-/// Delay between a guardian anchor enactment being queued and taking effect, so the
-/// community has a window to observe and, if the change is hostile, freeze the bridge
-/// (which drops the pending enact) before it lands. Guardian keys can no longer move
-/// bridge trust roots unilaterally and instantly.
 const GUARDIAN_ENACT_DELAY_SECONDS: u64 = 24 * 60 * 60;
 const BRIDGE_VAULTBAL_TAG: &[u8] = b"qtv/bridge/vaultbal/";
 const BRIDGE_ASSET_LIST_TAG: &[u8] = b"qtv/bridge/assetlist";
@@ -1846,10 +1842,6 @@ impl Ledger {
         let key = stake_singleton_key(BRIDGE_BTC_ANCHOR_TAG);
         let bytes = anchor.encode();
         self.write_leaf(key, bytes.clone());
-        // Seed the most-work floor from the anchor's committed minimum work. A deposit
-        // proof must present a chain at least this heavy, and heavier than every proof
-        // accepted since, so a private low-work fork cannot mint once the real chain is
-        // relayed.
         if self.bridge_btc_best_work() < anchor.checkpoint_min_work {
             self.set_bridge_btc_best_work(&anchor.checkpoint_min_work);
         }
@@ -3428,10 +3420,6 @@ impl Ledger {
                                             take = take.saturating_add(from_bond);
                                         }
                                     }
-                                    // A frozen account cannot shelter stolen value in a
-                                    // governance vote lock or proposal deposit. The
-                                    // recovery reaches those too, and the global locked
-                                    // total is reduced to match.
                                     let still = seizure.amount.saturating_sub(take);
                                     if still > 0 {
                                         if let Some(mut lock) = self.gov_lock(&from_id) {
@@ -3674,10 +3662,6 @@ impl Ledger {
         self.write_leaf(key, to_bytes(&nonce));
     }
 
-    /// A guardian-authorised bridge enactment no longer executes immediately. It is
-    /// queued behind a veto window; only an anchor update is allowed here, and it lands
-    /// later via `guardian_apply_due_enact`. CommitteeRotate and AssetRegister are no
-    /// longer guardian powers at all and must go through the governance track.
     pub fn guardian_enact_bridge_action(
         &mut self,
         action: &Action,
@@ -3717,9 +3701,6 @@ impl Ledger {
         self.write_leaf(stake_singleton_key(GUARDIAN_PENDING_ENACT_TAG), Vec::new());
     }
 
-    /// Called each block. Once the veto window has elapsed, a queued anchor enactment
-    /// lands, unless the bridge has been frozen in the meantime, in which case the
-    /// pending enact is dropped: a governance or guardian freeze is the veto.
     pub fn guardian_apply_due_enact(&mut self, now: u64) {
         let Some((effective_at, action_bytes)) = self.guardian_pending_enact() else {
             return;
@@ -3733,7 +3714,6 @@ impl Ledger {
         }
         let mut decoder = Decoder::new(&action_bytes);
         if let Ok(action) = Action::decode(&mut decoder) {
-            // BridgeAnchorSet seeds a trust root and is chain-id independent.
             if decoder.remaining() == 0 && matches!(action, Action::BridgeAnchorSet { .. }) {
                 let _ = self.execute_action(&action, now, 0);
             }
@@ -3777,9 +3757,6 @@ impl Ledger {
                 if self.stake_mainnet_start() != u64::MAX {
                     return Err(EnactError::BadValue);
                 }
-                // The start day cannot be in the past. A day of 0, or any day already
-                // elapsed, would end the emission blackout the moment it is set and pay
-                // rewards immediately, defeating the blackout entirely.
                 if day < now / 86_400 {
                     return Err(EnactError::BadValue);
                 }
@@ -6122,7 +6099,6 @@ mod stake_state_tests {
         let proposer = gov_addr(26);
         fund(&mut l, &proposer, 800_000 * 1_000_000);
 
-        // The thief bonds, funds a free balance, and locks 4,000 in a governance vote.
         let thief = gov_addr(41);
         l.seed_validator_bond(&thief, 5_000 * 1_000_000);
         fund(&mut l, &thief, 6_000 * 1_000_000);
@@ -6151,8 +6127,6 @@ mod stake_state_tests {
         l.set_frozen(&[41u8; 32]);
         let victim = gov_addr(40);
 
-        // Seize more than the free balance plus bond, so the recovery has to reach into
-        // the vote lock the thief used as a shelter.
         let seizures = vec![qtv_governance::Seizure {
             from: [41u8; 32].to_vec(),
             amount: 11_000 * 1_000_000,
@@ -7869,7 +7843,6 @@ mod stake_state_tests {
             asset_id: [0x66u8; 16],
         };
 
-        // A guardian anchor enactment is queued, not installed immediately.
         assert!(l.guardian_enact_bridge_action(
             &Action::BridgeAnchorSet { corridor: 0, anchor: btc.encode() },
             0,
@@ -7882,7 +7855,6 @@ mod stake_state_tests {
             "the anchor waits behind the veto window, guardians cannot install it instantly"
         );
 
-        // Only one enactment can be pending at a time.
         assert!(!l.guardian_enact_bridge_action(
             &Action::BridgeAnchorSet { corridor: 1, anchor: eth.encode() },
             1,
@@ -7890,11 +7862,9 @@ mod stake_state_tests {
             0
         ));
 
-        // Nothing lands before the window elapses.
         l.guardian_apply_due_enact(GUARDIAN_ENACT_DELAY_SECONDS - 1);
         assert_eq!(l.bridge_bitcoin_anchor(), None);
 
-        // After the window it lands.
         l.guardian_apply_due_enact(GUARDIAN_ENACT_DELAY_SECONDS);
         assert_eq!(
             l.bridge_bitcoin_anchor(),
@@ -7902,7 +7872,6 @@ mod stake_state_tests {
             "the anchor installs once the veto window has passed"
         );
 
-        // A CommitteeRotate can no longer be enacted by guardians at all.
         assert!(!l.guardian_enact_bridge_action(
             &Action::AssetRegister {
                 asset_id: [0x01u8; 16],
@@ -7915,8 +7884,6 @@ mod stake_state_tests {
             0
         ));
 
-        // Queue an ethereum anchor, then freeze the bridge inside the window: the freeze
-        // is the veto and the queued enact is dropped, never installing.
         assert!(l.guardian_enact_bridge_action(
             &Action::BridgeAnchorSet { corridor: 1, anchor: eth.encode() },
             1,
@@ -8494,8 +8461,6 @@ mod stake_state_tests {
     fn a_mainnet_start_day_in_the_past_is_refused() {
         let mut l = Ledger::new();
         let now = 20_000 * 86_400; // ~day 20000
-        // Day 0, or any elapsed day, would lift the emission blackout the instant it is
-        // set and pay rewards immediately, so it is refused.
         assert_eq!(
             l.apply_parameter(b"mainnet_start", &0u64.to_le_bytes(), now),
             Err(EnactError::BadValue)
@@ -8504,7 +8469,6 @@ mod stake_state_tests {
             l.apply_parameter(b"mainnet_start", &19_999u64.to_le_bytes(), now),
             Err(EnactError::BadValue)
         );
-        // A start day at or beyond the current day is accepted.
         assert!(l
             .apply_parameter(b"mainnet_start", &20_001u64.to_le_bytes(), now)
             .is_ok());
