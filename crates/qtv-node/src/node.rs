@@ -1267,6 +1267,13 @@ fn execute_ordered_across(
     ledger.guardian_expire(now_seconds);
     let mut included = Vec::new();
     let mut vm_meter: u64 = 0;
+    // Fair share of the block VM budget per sender, so a single sender cannot fill the
+    // whole budget with a handful of max-meter calls and censor every other contract
+    // call in the block. One sender's calls collectively cannot exceed a quarter of
+    // the budget, leaving the rest for other senders.
+    let mut sender_vm_meter: std::collections::BTreeMap<String, u64> =
+        std::collections::BTreeMap::new();
+    const PER_SENDER_VM_METER: u64 = VM_BLOCK_METER_BUDGET / 4;
     for (index, wrapper) in candidates.iter().enumerate() {
         if wrapper.body().chain_id() != fee_params.chain_id {
             continue;
@@ -1292,6 +1299,11 @@ fn execute_ordered_across(
             if vm_meter.saturating_add(meter) > VM_BLOCK_METER_BUDGET {
                 continue;
             }
+            let sender = wrapper.body().sender().to_string();
+            let sender_used = sender_vm_meter.get(&sender).copied().unwrap_or(0);
+            if sender_used.saturating_add(meter) > PER_SENDER_VM_METER {
+                continue;
+            }
             if ledger
                 .apply_atomic(|l| dispatch_vm(l, wrapper, verified[index], fee_params, now_seconds))
             {
@@ -1299,7 +1311,10 @@ fn execute_ordered_across(
                 // the declared limit let a handful of transactions that execute
                 // nothing hold the whole block budget and censor every real contract
                 // call in the block, for a flat fee each.
-                vm_meter = vm_meter.saturating_add(ledger.last_vm_meter_used().min(meter));
+                let used = ledger.last_vm_meter_used().min(meter);
+                vm_meter = vm_meter.saturating_add(used);
+                *sender_vm_meter.entry(sender).or_insert(0) =
+                    sender_used.saturating_add(used);
                 included.push(wrapper.clone());
             }
             continue;
