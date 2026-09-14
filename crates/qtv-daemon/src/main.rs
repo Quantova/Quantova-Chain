@@ -171,8 +171,10 @@ fn run(config_path: &Path) -> Result<(), String> {
     }
 
     let port = port_of(&settings.listen)?;
-    let listener = TcpListener::bind(("0.0.0.0", port))
-        .map_err(|e| format!("binding the transport port {port}: {e}"))?;
+    // Honour the configured listen host. Binding 0.0.0.0 exposed a node an operator
+    // meant to keep on loopback to the whole network.
+    let listener = TcpListener::bind(settings.listen.as_str())
+        .map_err(|e| format!("binding the transport address {}: {e}", settings.listen))?;
     let identity = node.identity().clone();
 
     log_startup(&settings, &genesis_file, my_id, n, idx, port, &node);

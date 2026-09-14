@@ -32,8 +32,16 @@ impl Log {
             .open(path)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
-        let (frames, clean) = scan(&bytes);
+        let (frames, clean, stop) = scan(&bytes);
         if clean < bytes.len() as u64 {
+            if stop == ScanStop::Corrupt {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "log has a corrupt frame mid-stream; refusing to silently discard the \
+                     records after it, which would roll finalized state back. Recover the log \
+                     manually",
+                ));
+            }
             file.set_len(clean)?;
             file.sync_data()?;
         }
@@ -191,13 +199,46 @@ fn checksum(bytes: &[u8]) -> u32 {
     checksum_parts(&[bytes])
 }
 
-fn scan(bytes: &[u8]) -> (Vec<Vec<u8>>, u64) {
+/// Whether a single well-formed, checksum-valid frame begins exactly at `pos`.
+fn valid_frame_at(bytes: &[u8], pos: usize) -> bool {
+    if bytes.len().saturating_sub(pos) < LENGTH_WIDTH {
+        return false;
+    }
+    let mut length_bytes = [0u8; LENGTH_WIDTH];
+    length_bytes.copy_from_slice(&bytes[pos..pos + LENGTH_WIDTH]);
+    let length = u64::from_le_bytes(length_bytes) as usize;
+    let payload_start = pos + LENGTH_WIDTH;
+    let available = bytes.len() - payload_start;
+    if length > available || available - length < CHECKSUM_WIDTH {
+        return false;
+    }
+    let payload_end = payload_start + length;
+    let frame_end = payload_end + CHECKSUM_WIDTH;
+    let stored = u32::from_le_bytes(
+        bytes[payload_end..frame_end]
+            .try_into()
+            .expect("checksum slice is four bytes"),
+    );
+    stored == checksum(&bytes[pos..payload_end])
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScanStop {
+    /// The stream ended on an incomplete frame (a crash mid-write). Truncating the
+    /// torn tail is safe.
+    TornTail,
+    /// A complete frame failed its checksum. This is real corruption, not a torn
+    /// write, so later records must not be silently discarded.
+    Corrupt,
+}
+
+fn scan(bytes: &[u8]) -> (Vec<Vec<u8>>, u64, ScanStop) {
     let mut frames = Vec::new();
     let mut pos = 0usize;
     let mut clean = 0u64;
-    loop {
+    let stop = loop {
         if bytes.len() - pos < LENGTH_WIDTH {
-            break;
+            break ScanStop::TornTail;
         }
         let mut length_bytes = [0u8; LENGTH_WIDTH];
         length_bytes.copy_from_slice(&bytes[pos..pos + LENGTH_WIDTH]);
@@ -205,11 +246,11 @@ fn scan(bytes: &[u8]) -> (Vec<Vec<u8>>, u64) {
         let payload_start = pos + LENGTH_WIDTH;
         let available = bytes.len() - payload_start;
         if length > available as u64 {
-            break;
+            break ScanStop::TornTail;
         }
         let length = length as usize;
         if available - length < CHECKSUM_WIDTH {
-            break;
+            break ScanStop::TornTail;
         }
         let payload_end = payload_start + length;
         let frame_end = payload_end + CHECKSUM_WIDTH;
@@ -219,13 +260,21 @@ fn scan(bytes: &[u8]) -> (Vec<Vec<u8>>, u64) {
                 .expect("checksum slice is four bytes"),
         );
         if stored != checksum(&bytes[pos..payload_end]) {
-            break;
+            // A complete frame failed its checksum. If a valid frame follows it, this
+            // is mid-log corruption and dropping the rest would lose finalized records.
+            // If nothing valid follows, the corrupt frame is at the tail and is safe
+            // to drop. A torn write never leaves a complete-but-wrong frame, only an
+            // incomplete one (handled above), so a bad checksum is real corruption.
+            if valid_frame_at(bytes, frame_end) {
+                break ScanStop::Corrupt;
+            }
+            break ScanStop::TornTail;
         }
         frames.push(bytes[payload_start..payload_end].to_vec());
         pos = frame_end;
         clean = pos as u64;
-    }
-    (frames, clean)
+    };
+    (frames, clean, stop)
 }
 
 #[cfg(test)]
@@ -376,8 +425,8 @@ mod tests {
             bytes[target] ^= 0xFF;
             std::fs::write(&path, &bytes).unwrap();
         }
-        let (_log, frames) = Log::open(&path).unwrap();
-        assert_eq!(frames, vec![b"one".to_vec()]);
+        let err = Log::open(&path).expect_err("mid-log corruption must not silently truncate");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         std::fs::remove_file(&path).ok();
     }
 

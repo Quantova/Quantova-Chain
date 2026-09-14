@@ -67,7 +67,14 @@ impl TxIndex {
         // A torn write leaves a partial record; ignore the remainder rather than
         // reading half an id as a whole one.
         let sorted_len = sorted.metadata()?.len() as usize / RECORD;
-        let tail_len = tail.metadata()?.len() as usize / RECORD;
+        let tail_bytes = tail.metadata()?.len() as usize;
+        let tail_len = tail_bytes / RECORD;
+        if tail_bytes % RECORD != 0 {
+            // Physically drop the torn partial record. Without this the next append
+            // lands after the partial bytes and every later record misaligns, baking
+            // garbage into the sorted index at the next merge.
+            tail.set_len((tail_len * RECORD) as u64)?;
+        }
         let mut tail_mem = Vec::with_capacity(tail_len);
         {
             let mut r = std::io::BufReader::new(File::open(&tail_path)?);
