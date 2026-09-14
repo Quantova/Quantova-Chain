@@ -178,7 +178,7 @@ version = "0.1.0"
 [[package]]
 name = "qtv-crypto"
 version = "0.3.0"
-source = "git+https://github.com/Quantova/Q-Crypto.git?rev=292594d18080179e304576164f44703d410d919f#292594d18080179e304576164f44703d410d919f"
+source = "git+https://github.com/Quantova/Q-Crypto.git?rev=bfee34d4b655d2e94a2615fd5005ed7253fa0028#bfee34d4b655d2e94a2615fd5005ed7253fa0028"
 
 [[package]]
 name = "qtv-devnet"

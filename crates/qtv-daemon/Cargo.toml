@@ -42,7 +42,7 @@ qtv-gateway = { path = "../qtv-gateway" }
 
 # The audited post quantum crypto, for the SHA3 that fixes the genesis hash a chain
 # id is bound through. Pinned at the same tag the rest of the graph uses.
-qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "292594d18080179e304576164f44703d410d919f" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "bfee34d4b655d2e94a2615fd5005ed7253fa0028" }
 
 # For a raw SIGTERM handler. A signal handler runs in a context where almost nothing
 # is safe to call, so the handler body itself is one atomic store and nothing else.

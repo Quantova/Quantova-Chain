@@ -220,13 +220,9 @@ pub fn sign(account: &Account, body: &Body) -> Wrapper {
     let digest = body_digest(body);
     let scheme = account.scheme();
     let signature = match scheme {
-        SCHEME_LATTICE => {
-            let (_public, secret) = ml_dsa::keygen(account.seed());
-            let secret = Zeroizing::new(secret);
-            ml_dsa::sign(&secret, &digest, &[], &SIGN_RANDOMIZER)
-                .expect("an empty context stays within the length bound")
-                .to_vec()
-        }
+        SCHEME_LATTICE => ml_dsa::sign_from_seed(account.seed(), &digest, &[], &SIGN_RANDOMIZER)
+            .expect("an empty context stays within the length bound")
+            .to_vec(),
         SCHEME_HASH => {
             let (secret, _public) = qtv_account::hash_keypair(account.seed());
             let secret = Zeroizing::new(secret);
