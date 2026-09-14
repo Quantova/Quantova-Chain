@@ -3335,7 +3335,7 @@ impl Ledger {
                 Ok(())
             }
             Action::Parameter { key, value } => {
-                self.apply_parameter(key, value)?;
+                self.apply_parameter(key, value, now)?;
                 self.record_side_event(SideEvent::Parameter {
                     key: key.clone(),
                     value: value.clone(),
@@ -3753,7 +3753,7 @@ impl Ledger {
         (key, bytes)
     }
 
-    fn apply_parameter(&mut self, key: &[u8], value: &[u8]) -> Result<(), EnactError> {
+    fn apply_parameter(&mut self, key: &[u8], value: &[u8], now: u64) -> Result<(), EnactError> {
         match key {
             b"price" => {
                 self.set_stake_price(u128_from_le(value).ok_or(EnactError::BadValue)?);
@@ -3765,6 +3765,12 @@ impl Ledger {
                 // opens another full session emission each time it is passed, so a
                 // repeatable parameter change became a repeatable mint.
                 if self.stake_mainnet_start() != u64::MAX {
+                    return Err(EnactError::BadValue);
+                }
+                // The start day cannot be in the past. A day of 0, or any day already
+                // elapsed, would end the emission blackout the moment it is set and pay
+                // rewards immediately, defeating the blackout entirely.
+                if day < now / 86_400 {
                     return Err(EnactError::BadValue);
                 }
                 self.set_stake_mainnet_start(day);
@@ -8475,11 +8481,32 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn a_mainnet_start_day_in_the_past_is_refused() {
+        let mut l = Ledger::new();
+        let now = 20_000 * 86_400; // ~day 20000
+        // Day 0, or any elapsed day, would lift the emission blackout the instant it is
+        // set and pay rewards immediately, so it is refused.
+        assert_eq!(
+            l.apply_parameter(b"mainnet_start", &0u64.to_le_bytes(), now),
+            Err(EnactError::BadValue)
+        );
+        assert_eq!(
+            l.apply_parameter(b"mainnet_start", &19_999u64.to_le_bytes(), now),
+            Err(EnactError::BadValue)
+        );
+        // A start day at or beyond the current day is accepted.
+        assert!(l
+            .apply_parameter(b"mainnet_start", &20_001u64.to_le_bytes(), now)
+            .is_ok());
+        assert_eq!(l.stake_mainnet_start(), 20_001);
+    }
+
+    #[test]
     fn a_registered_gateway_is_recognised_and_a_parameter_sets_it() {
         let mut l = Ledger::new();
         let gateway = qtv_idfmt::render_address(&[0x0Du8; 32]).unwrap();
         assert!(!l.is_bridge_gateway(&gateway));
-        l.apply_parameter(b"bridge_gateway", &[0x0Du8; 32]).unwrap();
+        l.apply_parameter(b"bridge_gateway", &[0x0Du8; 32], 0).unwrap();
         assert_eq!(l.bridge_gateway(), Some([0x0Du8; 32]));
         assert!(l.is_bridge_gateway(&gateway));
         assert!(!l.is_bridge_gateway(&gov_addr(90)));
