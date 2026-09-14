@@ -3418,6 +3418,29 @@ impl Ledger {
                                             take = take.saturating_add(from_bond);
                                         }
                                     }
+                                    // A frozen account cannot shelter stolen value in a
+                                    // governance vote lock or proposal deposit. The
+                                    // recovery reaches those too, and the global locked
+                                    // total is reduced to match.
+                                    let still = seizure.amount.saturating_sub(take);
+                                    if still > 0 {
+                                        if let Some(mut lock) = self.gov_lock(&from_id) {
+                                            let from_lock = lock.amount.min(still);
+                                            if from_lock > 0 {
+                                                lock.amount -= from_lock;
+                                                if lock.amount == 0 {
+                                                    self.clear_gov_lock(&from_id);
+                                                } else {
+                                                    self.set_gov_lock(&from_id, &lock);
+                                                }
+                                                self.set_gov_total_locked(
+                                                    self.gov_total_locked()
+                                                        .saturating_sub(u128::from(from_lock)),
+                                                );
+                                                take = take.saturating_add(from_lock);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -6075,6 +6098,89 @@ mod stake_state_tests {
             Err(EnactError::BadAddress)
         );
         assert_eq!(l.balance(&user), 9_000 * 1_000_000);
+    }
+
+    #[test]
+    fn a_recovery_reaches_a_frozen_thiefs_governance_vote_lock() {
+        let mut l = Ledger::new();
+        let proposer = gov_addr(26);
+        fund(&mut l, &proposer, 800_000 * 1_000_000);
+
+        // The thief bonds, funds a free balance, and locks 4,000 in a governance vote.
+        let thief = gov_addr(41);
+        l.seed_validator_bond(&thief, 5_000 * 1_000_000);
+        fund(&mut l, &thief, 6_000 * 1_000_000);
+        let shelter = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::ChainUpgrade,
+                qtv_governance::Action::Parameter {
+                    key: b"price".to_vec(),
+                    value: 70_000_000u128.to_le_bytes().to_vec(),
+                },
+                0,
+            )
+            .unwrap();
+        assert!(l.gov_vote(
+            &thief,
+            shelter,
+            true,
+            qtv_governance::Conviction::Liquid,
+            4_000 * 1_000_000,
+            0
+        ));
+        assert_eq!(l.gov_lock(&[41u8; 32]).map(|lock| lock.amount), Some(4_000 * 1_000_000));
+        assert_eq!(l.balance(&thief), 2_000 * 1_000_000);
+
+        l.set_frozen(&[41u8; 32]);
+        let victim = gov_addr(40);
+
+        // Seize more than the free balance plus bond, so the recovery has to reach into
+        // the vote lock the thief used as a shelter.
+        let seizures = vec![qtv_governance::Seizure {
+            from: [41u8; 32].to_vec(),
+            amount: 11_000 * 1_000_000,
+        }];
+        let scope = sha3::sha3_256(&qtv_governance::Action::recovery_scope_preimage(
+            TEST_CHAIN,
+            &[40u8; 32],
+            &seizures,
+        ));
+        let action = qtv_governance::Action::FreezeRecovery {
+            scope,
+            victim: [40u8; 32].to_vec(),
+            seizures,
+        };
+        let id = l
+            .gov_propose(&proposer, qtv_governance::Track::FreezeRecovery, action, 0)
+            .unwrap();
+        let voter = gov_addr(27);
+        fund(&mut l, &voter, 30_000 * 1_000_000);
+        l.seed_validator_bond(&voter, 20_000 * 1_000_000);
+        assert!(l.gov_vote(
+            &voter,
+            id,
+            true,
+            qtv_governance::Conviction::Liquid,
+            20_000 * 1_000_000,
+            0
+        ));
+        l.gov_enact(id, 7 * 3_600 + 1, TEST_CHAIN).unwrap();
+
+        assert!(
+            l.gov_lock(&[41u8; 32]).is_none(),
+            "the thief's governance vote lock is emptied by the recovery"
+        );
+        assert_eq!(
+            l.balance(&victim),
+            11_000 * 1_000_000,
+            "the victim is made whole from free balance, bond, and the vote lock"
+        );
+        assert_eq!(
+            l.balance(&thief),
+            0,
+            "nothing the thief held is left sheltered"
+        );
     }
 
     #[test]
