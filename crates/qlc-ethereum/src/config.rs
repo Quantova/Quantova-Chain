@@ -79,6 +79,11 @@ impl EvmChainConfig {
 
 pub const MAINNET_ELECTRA_EPOCH: u64 = 364_032;
 
+// MUST be confirmed against the live Ethereum mainnet config before the ETH corridor is
+// armed. The corridor cannot verify a post-Fulu sync-committee signature without this
+// fork present, so it is added here; the exact activation epoch is an operational value.
+pub const MAINNET_FULU_EPOCH: u64 = 411_072;
+
 fn beacon_forks() -> Vec<Fork> {
     vec![
         Fork {
@@ -104,6 +109,10 @@ fn beacon_forks() -> Vec<Fork> {
         Fork {
             epoch: MAINNET_ELECTRA_EPOCH,
             version: ForkVersion([0x05, 0x00, 0x00, 0x00]),
+        },
+        Fork {
+            epoch: MAINNET_FULU_EPOCH,
+            version: ForkVersion([0x06, 0x00, 0x00, 0x00]),
         },
     ]
 }
@@ -297,7 +306,9 @@ mod tests {
         assert_eq!(eth.fork_version_at_epoch(74240), ForkVersion([1, 0, 0, 0]));
         assert_eq!(eth.fork_version_at_epoch(200000), ForkVersion([3, 0, 0, 0]));
         assert_eq!(eth.fork_version_at_epoch(300000), ForkVersion([4, 0, 0, 0]));
-        assert_eq!(eth.fork_version_at_epoch(999999), ForkVersion([5, 0, 0, 0]));
+        // Post-Electra but pre-Fulu resolves to Electra; post-Fulu resolves to Fulu.
+        assert_eq!(eth.fork_version_at_epoch(400000), ForkVersion([5, 0, 0, 0]));
+        assert_eq!(eth.fork_version_at_epoch(999999), ForkVersion([6, 0, 0, 0]));
     }
 
     #[test]
