@@ -763,7 +763,7 @@ impl DevNode {
     pub fn submit_hinted(
         &mut self,
         transaction: Wrapper,
-        hint: Option<qtv_node::mempool::VerifyHint>,
+        hint: Option<qtv_node::mempool::AdmitHint>,
     ) -> Result<Admitted, Reject> {
         let admitted = self.mempool.admit(
             transaction.clone(),
@@ -777,8 +777,12 @@ impl DevNode {
         Ok(admitted)
     }
 
-    pub fn verify_key_for(&self, wrapper: &Wrapper) -> Option<Vec<u8>> {
-        qtv_node::mempool::signed_lane_key(&self.ledger, wrapper).map(|hint| hint.public_key)
+    pub fn ledger_snapshot(&self) -> qtv_node::ledger::Ledger {
+        self.ledger.clone()
+    }
+
+    pub fn fee_params(&self) -> qtv_node::fee::FeeParams {
+        self.fee_params
     }
 
     pub fn submit_batch(&mut self, batch: Vec<Wrapper>) {
