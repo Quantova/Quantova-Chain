@@ -84,6 +84,9 @@ pub fn verify_chain(
     let pow_limit = compact_to_target(params.pow_limit_bits);
     let mut work = U256::ZERO;
     for (i, h) in headers.iter().enumerate() {
+        if U256::from_compact(h.bits).to_compact() != h.bits {
+            return Err(SpvError::NonCanonicalBits { index: i });
+        }
         if !h.meets_pow() {
             return Err(SpvError::PowNotMet);
         }
@@ -345,6 +348,31 @@ mod tests {
             verify_chain(&headers, 0, &easy),
             Err(SpvError::MedianTimePast { index: 12 }),
             "a header backdated below the median of the last eleven must be refused"
+        );
+    }
+
+    #[test]
+    fn a_non_canonical_bits_encoding_is_refused() {
+        let easy = NetworkParams {
+            pow_limit_bits: 0x207f_ffff,
+            ..BITCOIN
+        };
+        let mut h = BlockHeader {
+            version: 1,
+            prev_block: [0u8; 32],
+            merkle_root: [0x11u8; 32],
+            timestamp: 1_700_000_000,
+            bits: 0x207f_ffff,
+            nonce: 0,
+        };
+        while !h.meets_pow() {
+            h.nonce += 1;
+        }
+        h.bits |= 0x0080_0000;
+        assert_eq!(
+            verify_chain(&[h], 0, &easy),
+            Err(SpvError::NonCanonicalBits { index: 0 }),
+            "a bits word carrying the sign bit is not the canonical target encoding"
         );
     }
 

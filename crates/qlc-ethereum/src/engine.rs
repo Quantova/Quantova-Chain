@@ -214,7 +214,7 @@ fn select_committee(
     let signature_period = store.config.sync_committee_period(signature_slot);
     if signature_period == store.period {
         Ok(&store.current_sync_committee)
-    } else if signature_period == store.period + 1 {
+    } else if signature_period == store.period.saturating_add(1) {
         store
             .next_sync_committee
             .as_ref()
