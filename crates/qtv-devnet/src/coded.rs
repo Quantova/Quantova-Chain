@@ -307,7 +307,11 @@ impl ProposalAssembler {
         {
             return None;
         }
-        let prune_floor = if self.round_height != 0 { self.round_height } else { height };
+        let prune_floor = if self.round_height != 0 {
+            self.round_height
+        } else {
+            height
+        };
         self.prune(prune_floor);
 
         let slot = (height, coded.view);

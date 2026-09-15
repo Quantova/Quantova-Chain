@@ -111,7 +111,6 @@ fn evict_fairly<T>(buffer: &mut Vec<T>, incoming: u64, sender_of: impl Fn(&T) ->
     }
 }
 
-
 const MAX_JUSTIFICATION_CACHE: usize = 4096;
 
 const MAX_SERVE_BLOCKS: u64 = 256;

@@ -880,7 +880,9 @@ impl Referendum {
     }
 
     pub fn enactable(&self, now: u64) -> bool {
-        now >= self.decides_at().saturating_add(self.track.enactment_delay())
+        now >= self
+            .decides_at()
+            .saturating_add(self.track.enactment_delay())
     }
 
     pub fn resolve(&mut self, now: u64, electorate_stake: u128) -> Status {
@@ -894,7 +896,10 @@ impl Referendum {
         if !self.ready(now) {
             return Status::Deciding;
         }
-        self.status = if self.tally.approved(electorate_stake, self.track.threshold_bps()) {
+        self.status = if self
+            .tally
+            .approved(electorate_stake, self.track.threshold_bps())
+        {
             Status::Approved
         } else {
             Status::Rejected
@@ -903,7 +908,10 @@ impl Referendum {
     }
 
     pub fn deposit_refunded(&self, electorate_stake: u128) -> bool {
-        !self.killed && self.tally.approved(electorate_stake, self.track.threshold_bps())
+        !self.killed
+            && self
+                .tally
+                .approved(electorate_stake, self.track.threshold_bps())
     }
 }
 
@@ -1061,7 +1069,10 @@ mod tests {
         let mut opposed = Tally::default();
         opposed.record(true, 600_000);
         opposed.record(false, 400_000);
-        assert!(!opposed.approved(1_000_000, t), "sixty percent is below two thirds");
+        assert!(
+            !opposed.approved(1_000_000, t),
+            "sixty percent is below two thirds"
+        );
         let mut carried = Tally::default();
         carried.record(true, 700_000);
         carried.record(false, 100_000);

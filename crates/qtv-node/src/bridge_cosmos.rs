@@ -558,11 +558,17 @@ mod tests {
         let anchor = CosmosAnchor {
             config_selector: 0,
             trusted_height: 100,
-            trusted_time: Timestamp { seconds: 1_700_000_000, nanos: 0 },
+            trusted_time: Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 0,
+            },
             trusted_validators_hash: [0xff; 32],
             asset_id: [0x0e; 16],
         };
-        let now = Timestamp { seconds: 1_700_000_100, nanos: 0 };
+        let now = Timestamp {
+            seconds: 1_700_000_100,
+            nanos: 0,
+        };
         assert_eq!(verify_cosmos_anchor_update(&anchor, &proof, now), None);
     }
 

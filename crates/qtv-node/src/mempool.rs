@@ -411,7 +411,8 @@ impl Mempool {
     }
 
     fn has_pending_from_sender_nonce(&self, sender: &str, nonce: u64) -> bool {
-        self.sender_nonces.contains_key(&(sender.to_string(), nonce))
+        self.sender_nonces
+            .contains_key(&(sender.to_string(), nonce))
     }
 
     fn has_capacity(&self, incoming: &Wrapper) -> bool {
@@ -421,8 +422,7 @@ impl Mempool {
         if is_priority(incoming) {
             return true;
         }
-        self.normal_count < self.cap.saturating_sub(self.reserve)
-            && self.pending.len() < self.cap
+        self.normal_count < self.cap.saturating_sub(self.reserve) && self.pending.len() < self.cap
     }
 
     fn charge_feeless(&mut self) -> bool {
@@ -898,7 +898,10 @@ mod tests {
         let alice = keypair(1);
         fund(&mut ledger, &alice, 1_000_000_000);
         let tx = signed_transfer(&alice, &keypair(9).address(), 100, 0, ceiling);
-        assert!(matches!(pool.admit(tx, &ledger, &params), Ok(Admitted::Fresh)));
+        assert!(matches!(
+            pool.admit(tx, &ledger, &params),
+            Ok(Admitted::Fresh)
+        ));
         assert_eq!(pool.pending_len(), 1);
 
         // The account's nonce advances (its nonce-0 transfer executed in a block),

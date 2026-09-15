@@ -799,7 +799,8 @@ fn dispatch_bridge_cosmos_update(ledger: &mut Ledger, wrapper: &Wrapper) -> bool
     if wrapper.body().call().args().len() > crate::bridge_cosmos::MAX_COSMOS_UPDATE_BYTES {
         return false;
     }
-    let proof = match crate::bridge_cosmos::CosmosUpdateProof::decode(wrapper.body().call().args()) {
+    let proof = match crate::bridge_cosmos::CosmosUpdateProof::decode(wrapper.body().call().args())
+    {
         Some(proof) => proof,
         None => return false,
     };
@@ -960,7 +961,8 @@ fn dispatch_bridge_mint(ledger: &mut Ledger, wrapper: &Wrapper, chain_id: u64) -
     }
     let mut btc_work: Option<[u8; 32]> = None;
     if is_bridge_btc_mint(wrapper) {
-        let proof = match crate::bridge_btc::BitcoinMintProof::decode(wrapper.body().call().args()) {
+        let proof = match crate::bridge_btc::BitcoinMintProof::decode(wrapper.body().call().args())
+        {
             Some(proof) => proof,
             None => return false,
         };
@@ -1378,8 +1380,7 @@ fn execute_ordered_across(
                 // call in the block, for a flat fee each.
                 let used = ledger.last_vm_meter_used().min(meter);
                 vm_meter = vm_meter.saturating_add(used);
-                *sender_vm_meter.entry(sender).or_insert(0) =
-                    sender_used.saturating_add(used);
+                *sender_vm_meter.entry(sender).or_insert(0) = sender_used.saturating_add(used);
                 included.push(wrapper.clone());
             }
             continue;
@@ -2214,7 +2215,10 @@ mod tests {
         let fee = FeeParams::devnet();
         let base = fee.transfer_fee();
         assert_eq!(vm_meter_fee(crate::execution::TRANSFER_METER, &fee), base);
-        assert_eq!(vm_meter_fee(crate::execution::TRANSFER_METER * 10, &fee), base * 10);
+        assert_eq!(
+            vm_meter_fee(crate::execution::TRANSFER_METER * 10, &fee),
+            base * 10
+        );
         assert!(vm_meter_fee(MAX_TX_METER, &fee) > base * 1000);
     }
 

@@ -837,8 +837,14 @@ mod tests {
     fn a_wrapper_carries_its_validity_height_through_the_wire() {
         let sender = qtv_idfmt::render_address(&[0x11u8; 32]).unwrap();
         let target = qtv_idfmt::render_address(&[0x22u8; 32]).unwrap();
-        let body = Body::new(sender, 4, 21_000, 1_000_000, Call::new(target, vec![1, 2, 3]))
-            .valid_until(9_000);
+        let body = Body::new(
+            sender,
+            4,
+            21_000,
+            1_000_000,
+            Call::new(target, vec![1, 2, 3]),
+        )
+        .valid_until(9_000);
         let wrapper = Wrapper::new(body, 1, vec![0xabu8; 8]);
         let bytes = Message::Tx(wrapper.clone()).encode();
         match Message::decode(&bytes).unwrap() {

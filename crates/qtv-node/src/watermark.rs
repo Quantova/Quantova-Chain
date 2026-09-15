@@ -223,7 +223,10 @@ mod tests {
         let b = [0xbbu8; 32];
         {
             let mut guard = PrevoteGuard::open(&path).unwrap();
-            assert!(guard.try_prevote(7, 2, &a).unwrap(), "first prevote is allowed");
+            assert!(
+                guard.try_prevote(7, 2, &a).unwrap(),
+                "first prevote is allowed"
+            );
         }
         {
             let mut guard = PrevoteGuard::open(&path).unwrap();

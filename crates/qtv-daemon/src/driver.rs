@@ -40,7 +40,10 @@ impl FrameBuffer {
                 None => tally.push((*source, frame.len())),
             }
         }
-        tally.into_iter().max_by_key(|&(_, bytes)| bytes).map(|(id, _)| id)
+        tally
+            .into_iter()
+            .max_by_key(|&(_, bytes)| bytes)
+            .map(|(id, _)| id)
     }
 
     fn evict_one(&mut self, incoming: u64) {
