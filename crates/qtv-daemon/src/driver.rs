@@ -33,7 +33,9 @@ struct VerifyJob {
 
 struct VerifyDone {
     wrapper: Wrapper,
-    hint: AdmitHint,
+    // None means verification panicked on a malformed submission. The consensus thread
+    // then rejects it outright rather than re-running the same panic inline.
+    hint: Option<AdmitHint>,
     tx_id: String,
     reply: Sender<Result<Json, ClientError>>,
 }
@@ -74,7 +76,10 @@ fn start_verify_pool() -> (SyncSender<VerifyJob>, Receiver<VerifyDone>) {
                 Ok(job) => job,
                 Err(_) => return,
             };
-            let hint = admission_hint(&wrapper, &ledger, &fee_params);
+            let hint = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                admission_hint(&wrapper, &ledger, &fee_params)
+            }))
+            .ok();
             let done = VerifyDone {
                 wrapper,
                 hint,
@@ -241,7 +246,12 @@ impl Driver {
             })
             .unwrap_or_default();
         for done in completed {
-            let result = self.node.submit_hinted(done.wrapper, Some(done.hint));
+            let result = match done.hint {
+                Some(hint) => self.node.submit_hinted(done.wrapper, Some(hint)),
+                // Verification panicked on this submission. Reject it outright rather
+                // than re-running the same panic on the consensus thread.
+                None => Err(qtv_node::mempool::Reject::BadCall),
+            };
             let _ = done
                 .reply
                 .send(Ok(qtv_gateway::submit_reply(result, &done.tx_id)));
