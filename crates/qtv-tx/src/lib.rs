@@ -215,9 +215,7 @@ impl Encode for Wrapper {
 }
 
 fn body_digest(body: &Body) -> [u8; 32] {
-    let mut input = to_bytes(body);
-    input.extend_from_slice(DOMAIN_TX);
-    sha3::sha3_256(&input)
+    sha3::sha3_256(&to_bytes(body))
 }
 
 pub fn sign(account: &Account, body: &Body) -> Wrapper {
@@ -232,14 +230,14 @@ pub fn sign(account: &Account, body: &Body) -> Wrapper {
     let digest = body_digest(body);
     let scheme = account.scheme();
     let signature = match scheme {
-        SCHEME_LATTICE => ml_dsa::sign_from_seed(account.seed(), &digest, &[], &SIGN_RANDOMIZER)
-            .expect("an empty context stays within the length bound")
+        SCHEME_LATTICE => ml_dsa::sign_from_seed(account.seed(), &digest, DOMAIN_TX, &SIGN_RANDOMIZER)
+            .expect("the domain context stays within the length bound")
             .to_vec(),
         SCHEME_HASH => {
             let (secret, _public) = qtv_account::hash_keypair(account.seed());
             let secret = Zeroizing::new(secret);
-            slh_dsa::sign(&secret, &digest, &[], &SIGN_RANDOMIZER_HASH)
-                .expect("an empty context stays within the length bound")
+            slh_dsa::sign(&secret, &digest, DOMAIN_TX, &SIGN_RANDOMIZER_HASH)
+                .expect("the domain context stays within the length bound")
                 .to_vec()
         }
         #[cfg(feature = "fn-dsa")]
@@ -274,7 +272,7 @@ pub fn verify(wrapper: &Wrapper, public_key: &[u8]) -> bool {
                 Ok(signature) => signature,
                 Err(_) => return false,
             };
-            ml_dsa::verify(public_key, &digest, signature, &[])
+            ml_dsa::verify(public_key, &digest, signature, DOMAIN_TX)
         }
         SCHEME_HASH => {
             let public_key: &[u8; slh_dsa::PUBLIC_KEY_BYTES] = match public_key.try_into() {
@@ -284,7 +282,7 @@ pub fn verify(wrapper: &Wrapper, public_key: &[u8]) -> bool {
             if wrapper.signature.len() != slh_dsa::SIGNATURE_BYTES {
                 return false;
             }
-            slh_dsa::verify(public_key, &digest, &wrapper.signature, &[])
+            slh_dsa::verify(public_key, &digest, &wrapper.signature, DOMAIN_TX)
         }
         #[cfg(feature = "fn-dsa")]
         SCHEME_FALCON => false,

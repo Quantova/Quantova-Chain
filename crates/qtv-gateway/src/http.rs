@@ -6,18 +6,18 @@ use std::io::{BufRead, BufReader, Read, Result as IoResult, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
-
-static CORS_ORIGIN: OnceLock<Option<String>> = OnceLock::new();
-
-fn cors_origin() -> Option<&'static str> {
-    CORS_ORIGIN.get().and_then(|o| o.as_deref())
-}
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::json::{self, object, Json};
 use crate::service::build_request;
 use crate::GatewayCall;
+
+static CORS_ORIGIN: OnceLock<Option<String>> = OnceLock::new();
+
+fn cors_origin() -> Option<&'static str> {
+    CORS_ORIGIN.get().and_then(|o| o.as_deref())
+}
 
 const MAX_BODY: usize = 1024 * 1024;
 
@@ -1013,7 +1013,7 @@ mod tests {
                 let _ = call.reply.send(Ok(object(vec![("ok", Json::Bool(true))])));
             }
         });
-        serve(listener, tx, Vec::new());
+        serve(listener, tx, Vec::new(), None);
         port
     }
 
@@ -1115,6 +1115,7 @@ mod tests {
             listener,
             tx,
             vec![IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))],
+            None,
         );
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let _ = stream.write_all(b"POST /v1/node_info HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}");

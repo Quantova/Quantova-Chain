@@ -336,6 +336,6 @@ fn the_signed_transaction_reproduces_the_qcore_js_payable_vector() {
     assert!(verify(&wrapper, sender.public_key()));
     assert_eq!(
         wrapper.id(),
-        "QTX1HUT8HQ3VXZA0075DQFZHVSG5H63UNUHJT4L20ZK3AD054Q6TS3QQ2GTHUD"
+        "QTX1XSW6UVTL4QVDRUHCWAWFK7WFAXK88Q0YKAPQYKDPVTX0377Q7S3Q86N0NR"
     );
 }
