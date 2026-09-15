@@ -328,7 +328,17 @@ impl DevNode {
 
         let genesis = devnet.genesis();
         let genesis_accounts = genesis.accounts.clone();
+        // The genesis total is summed with saturating adds, so a mis-authored genesis
+        // whose balances and bonds overrun a u64 would clamp here and start the chain
+        // with a supply that no longer equals what the accounts hold. Refuse it rather
+        // than run with a total that breaks conservation from the first block.
         let genesis_supply = genesis_supply_value(&genesis, &roster);
+        if genesis_supply == u64::MAX {
+            return Err(RoundError::GenesisOverSupply {
+                supply: genesis_supply,
+                max: u64::MAX,
+            });
+        }
 
         let secret = node.secret;
         let mut dev = DevNode {
@@ -2450,10 +2460,43 @@ fn serve_ceiling(from: Height, to: Height) -> Height {
 
 #[cfg(test)]
 mod tests {
-    use super::{serve_ceiling, view_sync_blocking, Height, MAX_SERVE_BLOCKS};
+    use super::{
+        genesis_supply_value, serve_ceiling, view_sync_blocking, Height, MAX_SERVE_BLOCKS,
+    };
+    use qtv_node::fee::FeeParams;
+    use qtv_node::node::{Genesis, GenesisAccount};
 
     fn span(from: Height, ceiling: Height) -> u64 {
         ceiling - from + 1
+    }
+
+    #[test]
+    fn a_genesis_whose_balances_overrun_a_u64_saturates_so_open_can_refuse_it() {
+        let huge = GenesisAccount {
+            address: String::new(),
+            balance: u64::MAX,
+            scheme: 0,
+            public_key: Vec::new(),
+        };
+        let genesis = Genesis {
+            fee_params: FeeParams::devnet(),
+            accounts: vec![huge.clone(), huge],
+            validators: Vec::new(),
+            genesis_time: 0,
+            guardians: Default::default(),
+            bridge_dest_chain: None,
+            bridge_operators: None,
+            bridged_assets: Vec::new(),
+            bridge_era: None,
+            bridge_bitcoin_anchor: None,
+            bridge_eth_anchors: Vec::new(),
+            bridge_cosmos_anchor: None,
+        };
+        assert_eq!(
+            genesis_supply_value(&genesis, &[]),
+            u64::MAX,
+            "an overrunning genesis total saturates, which is the state open refuses"
+        );
     }
 
     #[test]
