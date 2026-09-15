@@ -65,6 +65,14 @@ pub fn bits_expectation(
     }
 }
 
+const MEDIAN_TIME_SPAN: usize = 11;
+
+fn median_time_past(window: &[BlockHeader]) -> u32 {
+    let mut times: Vec<u32> = window.iter().map(|h| h.timestamp).collect();
+    times.sort_unstable();
+    times[times.len() / 2]
+}
+
 pub fn verify_chain(
     headers: &[BlockHeader],
     start_height: u32,
@@ -95,6 +103,9 @@ pub fn verify_chain(
                 check_retarget_boundary(&headers[i - interval], prev, h, params)?;
             } else {
                 bits_expectation(height, prev.bits, h.bits, params, i)?;
+            }
+            if i >= MEDIAN_TIME_SPAN && h.timestamp <= median_time_past(&headers[i - MEDIAN_TIME_SPAN..i]) {
+                return Err(SpvError::MedianTimePast { index: i });
             }
         }
         work = work.wrapping_add(&block_work(h.bits));
@@ -296,6 +307,44 @@ mod tests {
         assert_eq!(
             verify_chain(&headers, 0, &BITCOIN),
             Err(SpvError::BrokenLink { index: 2 })
+        );
+    }
+
+    #[test]
+    fn a_backdated_timestamp_below_the_median_of_eleven_is_rejected() {
+        let easy = NetworkParams {
+            pow_limit_bits: 0x207f_ffff,
+            ..BITCOIN
+        };
+        let mine = |prev: [u8; 32], root: [u8; 32], timestamp: u32| {
+            let mut h = BlockHeader {
+                version: 1,
+                prev_block: prev,
+                merkle_root: root,
+                timestamp,
+                bits: 0x207f_ffff,
+                nonce: 0,
+            };
+            while !h.meets_pow() {
+                h.nonce = h.nonce.wrapping_add(1);
+            }
+            h
+        };
+        let mut headers = Vec::new();
+        let mut prev = [0u8; 32];
+        for i in 0..12u32 {
+            let h = mine(prev, [i as u8 + 1; 32], 1_700_000_000 + i * 600);
+            prev = h.block_hash();
+            headers.push(h);
+        }
+        // A 13th header whose timestamp sits at or below the median of the prior eleven
+        // is a backdate; the median-time-past rule refuses it.
+        let backdated = mine(prev, [0xff; 32], 1_700_000_000);
+        headers.push(backdated);
+        assert_eq!(
+            verify_chain(&headers, 0, &easy),
+            Err(SpvError::MedianTimePast { index: 12 }),
+            "a header backdated below the median of the last eleven must be refused"
         );
     }
 
