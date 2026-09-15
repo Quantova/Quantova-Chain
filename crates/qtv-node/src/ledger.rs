@@ -3599,6 +3599,14 @@ impl Ledger {
                 if *cap == 0 || *epoch_cap == 0 {
                     return Err(EnactError::BadValue);
                 }
+                // A stark requirement cannot be honoured because the FRI verification is
+                // unwired, and check_stark never returns Verified, so such an asset would
+                // be unmintable. Genesis refuses this for the same reason; refuse it here
+                // too rather than register a bridged asset that promises a proof it cannot
+                // check.
+                if *requires_stark {
+                    return Err(EnactError::BadValue);
+                }
                 self.register_bridged_asset(asset_id, *cap, *epoch_cap, *requires_stark);
                 self.record_side_event(SideEvent::AssetRegister {
                     asset_id: *asset_id,
@@ -7506,7 +7514,7 @@ mod stake_state_tests {
                     asset_id: asset,
                     cap: 1_000_000,
                     epoch_cap: 250_000,
-                    requires_stark: true,
+                    requires_stark: false,
                 },
                 5 * 86_400 + 2,
             )
@@ -7523,7 +7531,31 @@ mod stake_state_tests {
         let registered = l.bridged_asset(&asset).unwrap();
         assert_eq!(registered.cap, 1_000_000);
         assert_eq!(registered.epoch_cap, 250_000);
-        assert!(registered.requires_stark);
+        assert!(!registered.requires_stark);
+    }
+
+    #[test]
+    fn governance_refuses_to_register_a_stark_required_asset_while_fri_is_unwired() {
+        let mut l = Ledger::new();
+        let asset = [0xB7u8; 16];
+        assert_eq!(
+            l.execute_action(
+                &qtv_governance::Action::AssetRegister {
+                    asset_id: asset,
+                    cap: 1_000_000,
+                    epoch_cap: 250_000,
+                    requires_stark: true,
+                },
+                0,
+                TEST_CHAIN,
+            ),
+            Err(EnactError::BadValue),
+            "a stark requirement is refused at runtime because no stark is ever verified"
+        );
+        assert!(
+            l.bridged_asset(&asset).is_none(),
+            "the asset must not be registered"
+        );
     }
 
     #[test]
