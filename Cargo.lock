@@ -78,7 +78,7 @@ dependencies = [
 [[package]]
 name = "q-vrf"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=c39a46ac6e1f4d729ae0fef7f03f16b2165a0e97#c39a46ac6e1f4d729ae0fef7f03f16b2165a0e97"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=27582fec9376a0a8dca59cebcdbf3316bd7e2f6a#27582fec9376a0a8dca59cebcdbf3316bd7e2f6a"
 dependencies = [
  "qtv-crypto 0.3.0 (git+https://github.com/Quantova/Q-Crypto.git?rev=292594d18080179e304576164f44703d410d919f)",
 ]
@@ -137,7 +137,7 @@ dependencies = [
 [[package]]
 name = "qtv-attest"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=c39a46ac6e1f4d729ae0fef7f03f16b2165a0e97#c39a46ac6e1f4d729ae0fef7f03f16b2165a0e97"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=27582fec9376a0a8dca59cebcdbf3316bd7e2f6a#27582fec9376a0a8dca59cebcdbf3316bd7e2f6a"
 dependencies = [
  "qtv-bft",
  "qtv-crypto 0.3.0 (git+https://github.com/Quantova/Q-Crypto.git?rev=292594d18080179e304576164f44703d410d919f)",
@@ -147,7 +147,7 @@ dependencies = [
 [[package]]
 name = "qtv-bft"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=c39a46ac6e1f4d729ae0fef7f03f16b2165a0e97#c39a46ac6e1f4d729ae0fef7f03f16b2165a0e97"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=27582fec9376a0a8dca59cebcdbf3316bd7e2f6a#27582fec9376a0a8dca59cebcdbf3316bd7e2f6a"
 dependencies = [
  "qtv-crypto 0.3.0 (git+https://github.com/Quantova/Q-Crypto.git?rev=292594d18080179e304576164f44703d410d919f)",
 ]
@@ -320,7 +320,7 @@ dependencies = [
 [[package]]
 name = "qtv-sampler"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=c39a46ac6e1f4d729ae0fef7f03f16b2165a0e97#c39a46ac6e1f4d729ae0fef7f03f16b2165a0e97"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=27582fec9376a0a8dca59cebcdbf3316bd7e2f6a#27582fec9376a0a8dca59cebcdbf3316bd7e2f6a"
 dependencies = [
  "q-vrf",
  "qtv-crypto 0.3.0 (git+https://github.com/Quantova/Q-Crypto.git?rev=292594d18080179e304576164f44703d410d919f)",
