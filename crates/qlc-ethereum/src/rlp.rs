@@ -15,6 +15,7 @@ pub enum RlpError {
     Trailing,
     OversizeLength,
     NestingTooDeep,
+    NonCanonicalLength,
 }
 
 pub const MAX_DEPTH: usize = 32;
@@ -105,10 +106,18 @@ fn decode_item(bytes: &[u8], depth: usize) -> Result<(Rlp, usize), RlpError> {
         if end > bytes.len() {
             return Err(RlpError::Truncated);
         }
+        // A single byte below 0x80 must be encoded as itself, not as a one byte string.
+        if len == 1 && bytes[1] < 0x80 {
+            return Err(RlpError::NonCanonicalLength);
+        }
         Ok((Rlp::Bytes(bytes[1..end].to_vec()), end))
     } else if prefix < 0xc0 {
         let of_len = (prefix - 0xb7) as usize;
         let len = read_length(&bytes[1..], of_len)?;
+        // A payload shorter than 56 bytes must use the short form, not a long length.
+        if len < 56 {
+            return Err(RlpError::NonCanonicalLength);
+        }
         let start = 1 + of_len;
         let end = start.checked_add(len).ok_or(RlpError::OversizeLength)?;
         if end > bytes.len() {
@@ -127,6 +136,10 @@ fn decode_item(bytes: &[u8], depth: usize) -> Result<(Rlp, usize), RlpError> {
     } else {
         let of_len = (prefix - 0xf7) as usize;
         let len = read_length(&bytes[1..], of_len)?;
+        // A list body shorter than 56 bytes must use the short form.
+        if len < 56 {
+            return Err(RlpError::NonCanonicalLength);
+        }
         let start = 1 + of_len;
         let end = start.checked_add(len).ok_or(RlpError::OversizeLength)?;
         if end > bytes.len() {
@@ -161,6 +174,24 @@ pub fn decode(bytes: &[u8]) -> Result<Rlp, RlpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_canonical_encodings_are_refused() {
+        // A single byte below 0x80 dressed up as a one byte string.
+        assert_eq!(decode(&[0x81, 0x05]), Err(RlpError::NonCanonicalLength));
+        // A five byte string in long form, which must use the short form.
+        let mut long_short = vec![0xb8, 0x05];
+        long_short.extend_from_slice(&[1, 2, 3, 4, 5]);
+        assert_eq!(decode(&long_short), Err(RlpError::NonCanonicalLength));
+        // A two item list dressed up as a long list.
+        assert_eq!(
+            decode(&[0xf8, 0x02, 0x01, 0x02]),
+            Err(RlpError::NonCanonicalLength)
+        );
+        // The canonical forms still decode.
+        assert_eq!(decode(&[0x05]), Ok(Rlp::Bytes(vec![0x05])));
+        assert_eq!(decode(&[0x81, 0x80]), Ok(Rlp::Bytes(vec![0x80])));
+    }
 
     #[test]
     fn nesting_past_the_limit_is_refused_rather_than_overflowing_the_stack() {
