@@ -53,6 +53,23 @@ fn install_term_handler() {
 #[cfg(not(unix))]
 fn install_term_handler() {}
 
+#[cfg(unix)]
+fn raise_descriptor_limit() {
+    unsafe {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_cur < limit.rlim_max {
+            limit.rlim_cur = limit.rlim_max;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn raise_descriptor_limit() {}
+
 fn main() {
     let outcome = match Command::parse() {
         Ok(Command::Run { config }) => run(&config),
@@ -67,6 +84,7 @@ fn main() {
 
 fn run(config_path: &Path) -> Result<(), String> {
     install_term_handler();
+    raise_descriptor_limit();
     let settings = config::NodeSettings::load(config_path)?;
     let genesis_file = genesis::GenesisFile::load(&settings.genesis_path)?;
 
