@@ -262,6 +262,18 @@ fn is_signed_lane(wrapper: &Wrapper) -> bool {
         && !crate::node::is_registration(wrapper)
 }
 
+fn funding_gate_passes(wrapper: &Wrapper, ledger: &Ledger, fee_params: &FeeParams) -> bool {
+    let account = ledger.account(wrapper.body().sender());
+    let charged = u64::try_from(
+        wrapper
+            .body()
+            .fee()
+            .min(u128::from(fee_params.ceiling_fee())),
+    )
+    .unwrap_or_else(|_| fee_params.ceiling_fee());
+    wrapper.body().nonce() == account.nonce && account.balance >= charged
+}
+
 // The verdicts a worker thread computes for a submitted transaction against a ledger
 // snapshot so the consensus thread never runs a post quantum verify or a bridge proof
 // check. The signature carries the key it was checked against, and admit only trusts it
@@ -271,13 +283,20 @@ fn is_signed_lane(wrapper: &Wrapper) -> bool {
 pub struct AdmitHint {
     pub signature: Option<VerifyHint>,
     pub feeless_ok: Option<bool>,
+    pub key_register_ok: Option<bool>,
 }
 
 pub fn admission_hint(wrapper: &Wrapper, ledger: &Ledger, fee_params: &FeeParams) -> AdmitHint {
     let mut hint = AdmitHint::default();
-    if is_signed_lane(wrapper) {
+    if crate::node::is_key_register(wrapper) {
+        // Only spend a worker verify on a submission whose cheap funding checks already
+        // pass, so an unfunded flood cannot burn worker cpu either.
+        if funding_gate_passes(wrapper, ledger, fee_params) {
+            hint.key_register_ok = Some(crate::node::key_register_signature(wrapper));
+        }
+    } else if is_signed_lane(wrapper) {
         let key = ledger.account(wrapper.body().sender()).public_key;
-        if !key.is_empty() {
+        if !key.is_empty() && funding_gate_passes(wrapper, ledger, fee_params) {
             hint.signature = Some(VerifyHint {
                 ok: qtv_tx::verify(wrapper, &key),
                 public_key: key,
@@ -581,6 +600,7 @@ impl Mempool {
     ) -> Result<Admitted, Reject> {
         let signature_hint = hint.and_then(|hint| hint.signature.as_ref());
         let feeless_hint = hint.and_then(|hint| hint.feeless_ok);
+        let key_register_hint = hint.and_then(|hint| hint.key_register_ok);
         if !chain_ok(&wrapper, fee_params) {
             return Err(Reject::WrongChain);
         }
@@ -646,7 +666,14 @@ impl Mempool {
                 return Err(Reject::SenderQueueFull);
             }
             let account = ledger.account(wrapper.body().sender());
-            if crate::node::key_register_admissible(&wrapper, &account, fee_params).is_none() {
+            if crate::node::key_register_admissible(
+                &wrapper,
+                &account,
+                fee_params,
+                key_register_hint,
+            )
+            .is_none()
+            {
                 return Err(Reject::BadCall);
             }
         } else if wrapper.body().call().target() == crate::ledger::gov_system_address() {
@@ -824,7 +851,7 @@ impl Mempool {
                 !self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce())
                     && {
                         let account = ledger.account(wrapper.body().sender());
-                        crate::node::key_register_admissible(&wrapper, &account, fee_params)
+                        crate::node::key_register_admissible(&wrapper, &account, fee_params, None)
                             .is_some()
                     }
             } else if wrapper.body().call().target() == crate::ledger::gov_system_address() {
@@ -1193,6 +1220,7 @@ mod tests {
                 ok: true,
             }),
             feeless_ok: None,
+            key_register_ok: None,
         };
         let mut pool = Mempool::new();
         assert_eq!(
@@ -1207,6 +1235,7 @@ mod tests {
                 ok: false,
             }),
             feeless_ok: None,
+            key_register_ok: None,
         };
         let mut pool = Mempool::new();
         assert_eq!(
@@ -1221,6 +1250,7 @@ mod tests {
                 ok: false,
             }),
             feeless_ok: None,
+            key_register_ok: None,
         };
         let mut pool = Mempool::new();
         assert_eq!(
@@ -1245,6 +1275,7 @@ mod tests {
         let deny = AdmitHint {
             signature: None,
             feeless_ok: Some(false),
+            key_register_ok: None,
         };
         let mut pool = Mempool::new();
         assert_eq!(
@@ -1258,6 +1289,7 @@ mod tests {
         let allow = AdmitHint {
             signature: None,
             feeless_ok: Some(true),
+            key_register_ok: None,
         };
         let mut pool = Mempool::new();
         assert_eq!(

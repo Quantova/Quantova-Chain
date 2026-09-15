@@ -271,6 +271,7 @@ pub(crate) fn key_register_admissible(
     wrapper: &Wrapper,
     account: &Account,
     fee_params: &FeeParams,
+    signature_ok: Option<bool>,
 ) -> Option<Vec<u8>> {
     let body = wrapper.body();
     if body.call().target() != crate::ledger::key_register_address() {
@@ -283,9 +284,8 @@ pub(crate) fn key_register_admissible(
     if qtv_account::address_for_key(wrapper.scheme(), &public_key).as_str() != body.sender() {
         return None;
     }
-    if !qtv_tx::verify(wrapper, &public_key) {
-        return None;
-    }
+    // The cheap nonce, meter and funding checks run before the post quantum verify so a
+    // flood of self signed registrations for unfunded accounts cannot force a verify.
     if body.nonce() != account.nonce || body.meter_limit() < crate::execution::TRANSFER_METER {
         return None;
     }
@@ -297,7 +297,23 @@ pub(crate) fn key_register_admissible(
     if account.balance < charged {
         return None;
     }
+    // The registration signs the very key it registers, so the verify is a pure function
+    // of the wrapper. A worker may precompute it off the consensus thread.
+    let verified = signature_ok.unwrap_or_else(|| qtv_tx::verify(wrapper, &public_key));
+    if !verified {
+        return None;
+    }
     Some(public_key)
+}
+
+pub(crate) fn key_register_signature(wrapper: &Wrapper) -> bool {
+    let public_key = wrapper.body().call().args().to_vec();
+    if qtv_account::address_for_key(wrapper.scheme(), &public_key).as_str()
+        != wrapper.body().sender()
+    {
+        return false;
+    }
+    qtv_tx::verify(wrapper, &public_key)
 }
 
 fn dispatch_governance(
@@ -367,7 +383,7 @@ fn dispatch_key_register(ledger: &mut Ledger, wrapper: &Wrapper, fee_params: &Fe
         return false;
     }
     let account = ledger.account(&sender);
-    let public_key = match key_register_admissible(wrapper, &account, fee_params) {
+    let public_key = match key_register_admissible(wrapper, &account, fee_params, None) {
         Some(key) => key,
         None => return false,
     };
@@ -3052,6 +3068,43 @@ mod tests {
             call,
         );
         sign(from, &body)
+    }
+
+    #[test]
+    fn key_register_checks_funding_before_the_signature_and_honours_a_precomputed_verdict() {
+        let fee = FeeParams::devnet();
+        let user = keypair(150);
+        let reg = register_tx(&user, 0, &fee);
+
+        let unfunded = Account {
+            nonce: 0,
+            balance: 0,
+            scheme: 0,
+            public_key: Vec::new(),
+        };
+        assert!(
+            key_register_admissible(&reg, &unfunded, &fee, Some(true)).is_none(),
+            "an unfunded registration is refused before the signature is consulted"
+        );
+
+        let funded = Account {
+            nonce: 0,
+            balance: 100_000,
+            scheme: 0,
+            public_key: Vec::new(),
+        };
+        assert!(
+            key_register_admissible(&reg, &funded, &fee, Some(false)).is_none(),
+            "a false precomputed verdict rejects the registration"
+        );
+        assert!(
+            key_register_admissible(&reg, &funded, &fee, Some(true)).is_some(),
+            "a true precomputed verdict admits without re-verifying"
+        );
+        assert!(
+            key_register_admissible(&reg, &funded, &fee, None).is_some(),
+            "with no hint the verify runs inline and admits a genuine registration"
+        );
     }
 
     #[test]
