@@ -5,7 +5,13 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Result as IoResult, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+static CORS_ORIGIN: OnceLock<Option<String>> = OnceLock::new();
+
+fn cors_origin() -> Option<&'static str> {
+    CORS_ORIGIN.get().and_then(|o| o.as_deref())
+}
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -222,7 +228,13 @@ impl Limiter {
     }
 }
 
-pub fn serve(listener: TcpListener, requests: Sender<GatewayCall>, allow: Vec<IpAddr>) {
+pub fn serve(
+    listener: TcpListener,
+    requests: Sender<GatewayCall>,
+    allow: Vec<IpAddr>,
+    cors_origin: Option<String>,
+) {
+    let _ = CORS_ORIGIN.set(cors_origin.filter(|o| !o.is_empty()));
     let loopback_only = listener
         .local_addr()
         .map(|addr| addr.ip().is_loopback())
@@ -629,13 +641,20 @@ fn write_error(stream: &mut TcpStream, code: u16, error: &str, message: &str) ->
 }
 
 fn write_response(stream: &mut TcpStream, code: u16, body: &str) -> IoResult<()> {
+    let cors = match cors_origin() {
+        Some(origin) => format!(
+            "Access-Control-Allow-Origin: {origin}\r\n\
+             Access-Control-Allow-Methods: POST, OPTIONS\r\n\
+             Access-Control-Allow-Headers: Content-Type\r\n\
+             Vary: Origin\r\n"
+        ),
+        None => String::new(),
+    };
     let response = format!(
         "HTTP/1.1 {code} {reason}\r\n\
          Content-Type: application/json\r\n\
          Content-Length: {len}\r\n\
-         Access-Control-Allow-Origin: *\r\n\
-         Access-Control-Allow-Methods: POST, OPTIONS\r\n\
-         Access-Control-Allow-Headers: Content-Type\r\n\
+         {cors}\
          Connection: close\r\n\
          \r\n\
          {body}",
@@ -1006,6 +1025,19 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         response
+    }
+
+    #[test]
+    fn the_default_response_carries_no_wildcard_cors_header() {
+        let port = serve_stub();
+        let response = round_trip(
+            port,
+            "POST /v1/node_info HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}",
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin"),
+            "no CORS origin is advertised unless an operator configures a specific one: {response}"
+        );
     }
 
     #[test]
