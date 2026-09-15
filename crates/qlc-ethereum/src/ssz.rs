@@ -70,7 +70,7 @@ pub fn is_valid_merkle_branch(
     }
     let mut value = *leaf;
     for (i, sibling) in branch.iter().enumerate() {
-        if (index >> i) & 1 == 1 {
+        if branch_bit(index, i) {
             value = hash_pair(sibling, &value);
         } else {
             value = hash_pair(&value, sibling);
@@ -79,10 +79,16 @@ pub fn is_valid_merkle_branch(
     &value == root
 }
 
+// The bit of `index` at position `i`, treating every position at or beyond the width of
+// the index as zero so an over-long branch shifts to zero rather than panicking.
+fn branch_bit(index: u64, i: usize) -> bool {
+    i < 64 && (index >> i) & 1 == 1
+}
+
 pub fn merkle_root_from_branch(leaf: &[u8; 32], branch: &[[u8; 32]], index: u64) -> [u8; 32] {
     let mut value = *leaf;
     for (i, sibling) in branch.iter().enumerate() {
-        if (index >> i) & 1 == 1 {
+        if branch_bit(index, i) {
             value = hash_pair(sibling, &value);
         } else {
             value = hash_pair(&value, sibling);
