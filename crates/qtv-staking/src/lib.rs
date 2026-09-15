@@ -340,10 +340,8 @@ impl StakeLedger {
             None => return 0,
         };
         self.treasury += taken;
-        if let Fault::Attributable = fault {
-            self.bonds.remove(id);
-            self.banned.insert(*id);
-        }
+        self.bonds.remove(id);
+        self.banned.insert(*id);
         taken
     }
 

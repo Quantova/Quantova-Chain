@@ -1860,7 +1860,7 @@ impl Ledger {
             .filter(|bytes| bytes.len() == 32)
             .map(|bytes| {
                 let mut out = [0u8; 32];
-                out.copy_from_slice(&bytes);
+                out.copy_from_slice(bytes);
                 out
             })
             .unwrap_or([0u8; 32])
@@ -3924,23 +3924,13 @@ impl Ledger {
                 disposition: SLASH_DISPOSITION_TREASURY,
             });
         }
-        if let qtv_staking::Fault::Attributable = fault {
-            self.clear_stake_bond(&id);
-            self.set_stake_banned(&id);
-            let forfeited = self.stake_rewards_outstanding(&id);
-            if forfeited > 0 {
-                self.set_stake_treasury(self.stake_treasury() + forfeited);
-            }
-            self.clear_stake_rewards(&id);
-        } else {
-            self.set_stake_bond(
-                &id,
-                &Bond {
-                    amount: bond.amount - taken,
-                    ..bond
-                },
-            );
+        self.clear_stake_bond(&id);
+        self.set_stake_banned(&id);
+        let forfeited = self.stake_rewards_outstanding(&id);
+        if forfeited > 0 {
+            self.set_stake_treasury(self.stake_treasury() + forfeited);
         }
+        self.clear_stake_rewards(&id);
         taken
     }
 
