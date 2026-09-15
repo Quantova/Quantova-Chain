@@ -233,7 +233,7 @@ impl Clone for Trie {
             cache: Mutex::new(
                 self.cache
                     .lock()
-                    .expect("root cache mutex is not poisoned")
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .clone(),
             ),
             persist_dirty: self.persist_dirty.clone(),
@@ -277,7 +277,7 @@ impl Trie {
         self.leaves.insert(key, value);
         self.cache
             .get_mut()
-            .expect("root cache mutex is not poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .changed
             .insert(key);
         self.persist_dirty.insert(key);
@@ -288,7 +288,7 @@ impl Trie {
         if existed {
             self.cache
                 .get_mut()
-                .expect("root cache mutex is not poisoned")
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .changed
                 .insert(*key);
             self.persist_dirty.insert(*key);
@@ -305,7 +305,10 @@ impl Trie {
     }
 
     pub fn root(&self) -> Hash {
-        let mut cache = self.cache.lock().expect("root cache mutex is not poisoned");
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if cache.changed.is_empty() {
             return cache.root;
         }
@@ -548,7 +551,7 @@ mod incremental {
         let before: HashMap<NodeId, Hash> = trie
             .cache
             .lock()
-            .expect("root cache mutex is not poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .nodes
             .clone();
         reset_node_hashes();
@@ -558,7 +561,7 @@ mod incremental {
         let after = trie
             .cache
             .lock()
-            .expect("root cache mutex is not poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .nodes
             .clone();
 
