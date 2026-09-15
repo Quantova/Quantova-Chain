@@ -193,6 +193,7 @@ dependencies = [
  "qtv-governance",
  "qtv-net",
  "qtv-node",
+ "qtv-tx",
 ]
 
 [[package]]

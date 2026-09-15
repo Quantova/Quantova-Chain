@@ -45,6 +45,21 @@ pub struct TransferPlan {
     pub fee: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyHint {
+    pub public_key: Vec<u8>,
+    pub ok: bool,
+}
+
+fn verified(wrapper: &Wrapper, public_key: &[u8], hint: Option<&VerifyHint>) -> bool {
+    if let Some(hint) = hint {
+        if !public_key.is_empty() && hint.public_key == public_key {
+            return hint.ok;
+        }
+    }
+    qtv_tx::verify(wrapper, public_key)
+}
+
 pub fn validate(
     wrapper: &Wrapper,
     ledger: &Ledger,
@@ -239,6 +254,23 @@ fn is_feeless(wrapper: &Wrapper) -> bool {
         || crate::node::is_bridge_guardian(wrapper)
         || crate::node::is_bridge_eth_update(wrapper)
         || crate::node::is_bridge_cosmos_update(wrapper)
+}
+
+pub fn signed_lane_key(ledger: &Ledger, wrapper: &Wrapper) -> Option<VerifyHint> {
+    if is_feeless(wrapper)
+        || crate::node::is_key_register(wrapper)
+        || crate::node::is_registration(wrapper)
+    {
+        return None;
+    }
+    let key = ledger.account(wrapper.body().sender()).public_key;
+    if key.is_empty() {
+        return None;
+    }
+    Some(VerifyHint {
+        ok: false,
+        public_key: key,
+    })
 }
 
 fn candidate_order(a: &Wrapper, b: &Wrapper, ceiling: u128) -> std::cmp::Ordering {
@@ -507,6 +539,7 @@ impl Mempool {
         wrapper: Wrapper,
         ledger: &Ledger,
         fee_params: &FeeParams,
+        hint: Option<&VerifyHint>,
     ) -> Result<Admitted, Reject> {
         if !chain_ok(&wrapper, fee_params) {
             return Err(Reject::WrongChain);
@@ -564,7 +597,7 @@ impl Mempool {
             if !sender_prevalidated(&wrapper, &account, fee_params) {
                 return Err(Reject::BadCall);
             }
-            let signature_ok = qtv_tx::verify(&wrapper, &account.public_key);
+            let signature_ok = verified(&wrapper, &account.public_key, hint);
             if !crate::node::vm_admissible(&wrapper, &account, fee_params, signature_ok) {
                 return Err(Reject::BadCall);
             }
@@ -584,7 +617,7 @@ impl Mempool {
             if !sender_prevalidated(&wrapper, &account, fee_params) {
                 return Err(Reject::BadCall);
             }
-            let signature_ok = qtv_tx::verify(&wrapper, &account.public_key);
+            let signature_ok = verified(&wrapper, &account.public_key, hint);
             if crate::node::governance_admissible(&wrapper, &account, fee_params, signature_ok)
                 .is_none()
             {
@@ -626,7 +659,7 @@ impl Mempool {
             if !sender_prevalidated(&wrapper, &account, fee_params) {
                 return Err(Reject::BadCall);
             }
-            let signature_ok = qtv_tx::verify(&wrapper, &account.public_key);
+            let signature_ok = verified(&wrapper, &account.public_key, hint);
             if crate::node::bridge_exit_admissible(
                 ledger,
                 &wrapper,
@@ -644,7 +677,17 @@ impl Mempool {
             if self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce()) {
                 return Err(Reject::SenderQueueFull);
             }
-            validate(&wrapper, ledger, fee_params)?;
+            let account = ledger.account(wrapper.body().sender());
+            match hint {
+                Some(hint)
+                    if !account.public_key.is_empty() && hint.public_key == account.public_key =>
+                {
+                    plan_verified(&wrapper, &account, fee_params, hint.ok)?;
+                }
+                _ => {
+                    validate(&wrapper, ledger, fee_params)?;
+                }
+            }
         }
         if is_feeless(&wrapper) && !self.charge_feeless() {
             return Err(Reject::RateLimited);
@@ -899,7 +942,7 @@ mod tests {
         fund(&mut ledger, &alice, 1_000_000_000);
         let tx = signed_transfer(&alice, &keypair(9).address(), 100, 0, ceiling);
         assert!(matches!(
-            pool.admit(tx, &ledger, &params),
+            pool.admit(tx, &ledger, &params, None),
             Ok(Admitted::Fresh)
         ));
         assert_eq!(pool.pending_len(), 1);
@@ -929,7 +972,7 @@ mod tests {
         fund(&mut ledger, &alice, 1_000_000_000);
         let at_ceiling = signed_transfer(&alice, &keypair(9).address(), 100, 0, ceiling);
         assert!(matches!(
-            pool.admit(at_ceiling, &ledger, &params),
+            pool.admit(at_ceiling, &ledger, &params, None),
             Ok(Admitted::Fresh)
         ));
 
@@ -937,7 +980,7 @@ mod tests {
         fund(&mut ledger, &bob, 1_000_000_000);
         let above_ceiling = signed_transfer(&bob, &keypair(9).address(), 100, 0, u128::MAX);
         assert_eq!(
-            pool.admit(above_ceiling, &ledger, &params),
+            pool.admit(above_ceiling, &ledger, &params, None),
             Err(Reject::PoolFull),
             "a fee above the ceiling wins no priority it never pays for"
         );
@@ -983,12 +1026,12 @@ mod tests {
         let mut pool = Mempool::new();
 
         assert_eq!(
-            pool.admit(tx.clone(), &ledger, &params),
+            pool.admit(tx.clone(), &ledger, &params, None),
             Ok(Admitted::Fresh)
         );
         assert!(pool.contains(&id), "the admitted id is in the set");
         assert_eq!(
-            pool.admit(tx.clone(), &ledger, &params),
+            pool.admit(tx.clone(), &ledger, &params, None),
             Ok(Admitted::Known),
             "a resubmission before inclusion is known through the set"
         );
@@ -1000,7 +1043,7 @@ mod tests {
             "and left the id set, so the set did not drift"
         );
         assert_eq!(
-            pool.admit(tx, &ledger, &params),
+            pool.admit(tx, &ledger, &params, None),
             Ok(Admitted::Fresh),
             "the same tx admits fresh again, proving the set was cleaned"
         );
@@ -1061,7 +1104,7 @@ mod tests {
         let params = FeeParams::devnet();
         let (ledger, tx, _offender) = seeded_evidence(&[9u8; 32]);
         let mut pool = Mempool::new();
-        assert_eq!(pool.admit(tx, &ledger, &params), Ok(Admitted::Fresh));
+        assert_eq!(pool.admit(tx, &ledger, &params, None), Ok(Admitted::Fresh));
         assert_eq!(
             pool.len(),
             1,
@@ -1073,11 +1116,61 @@ mod tests {
         let _ = bare;
         let mut pool = Mempool::new();
         assert_eq!(
-            pool.admit(forged, &empty, &params),
+            pool.admit(forged, &empty, &params, None),
             Err(Reject::BadCall),
             "evidence naming an offender with no attestation key in state is refused"
         );
         assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn the_verify_hint_matches_inline_admission_and_the_verdict_is_honoured() {
+        let params = FeeParams::devnet();
+        let alice = keypair(1);
+        let bob = keypair(2);
+        let mut ledger = Ledger::new();
+        fund(&mut ledger, &alice, 1_000_000_000);
+        let key = alice.public_key().to_vec();
+        let tx = signed_transfer(
+            &alice,
+            &bob.address(),
+            100,
+            0,
+            u128::from(params.transfer_fee()),
+        );
+
+        let good = VerifyHint {
+            public_key: key.clone(),
+            ok: true,
+        };
+        let mut pool = Mempool::new();
+        assert_eq!(
+            pool.admit(tx.clone(), &ledger, &params, Some(&good)),
+            Ok(Admitted::Fresh),
+            "a correct hint admits exactly as the inline verify would"
+        );
+
+        let bad = VerifyHint {
+            public_key: key.clone(),
+            ok: false,
+        };
+        let mut pool = Mempool::new();
+        assert_eq!(
+            pool.admit(tx.clone(), &ledger, &params, Some(&bad)),
+            Err(Reject::BadSignature),
+            "the worker verdict is honoured so a false verdict rejects a valid signature"
+        );
+
+        let stale = VerifyHint {
+            public_key: vec![0u8; key.len()],
+            ok: false,
+        };
+        let mut pool = Mempool::new();
+        assert_eq!(
+            pool.admit(tx, &ledger, &params, Some(&stale)),
+            Ok(Admitted::Fresh),
+            "a hint whose key does not match the sender falls back to a real verify"
+        );
     }
 
     #[test]
@@ -1095,7 +1188,7 @@ mod tests {
         );
         let mut pool = Mempool::new();
         assert_eq!(
-            pool.admit(tx.clone(), &ledger, &params),
+            pool.admit(tx.clone(), &ledger, &params, None),
             Err(Reject::BadCall),
             "a user registration tx is refused at admission"
         );
@@ -1113,14 +1206,20 @@ mod tests {
 
         let (_bare, forged, _) = seeded_evidence(&[11u8; 32]);
         let empty = Ledger::new();
-        assert_eq!(pool.admit(forged, &empty, &params), Err(Reject::BadCall));
+        assert_eq!(
+            pool.admit(forged, &empty, &params, None),
+            Err(Reject::BadCall)
+        );
         assert_eq!(
             pool.feeless_admits, 0,
             "an inadmissible feeless call must not spend the feeless window"
         );
 
         let (ledger, valid, _) = seeded_evidence(&[9u8; 32]);
-        assert_eq!(pool.admit(valid, &ledger, &params), Ok(Admitted::Fresh));
+        assert_eq!(
+            pool.admit(valid, &ledger, &params, None),
+            Ok(Admitted::Fresh)
+        );
         assert_eq!(
             pool.feeless_admits, 1,
             "an admitted feeless call spends one unit of the window"
@@ -1151,7 +1250,7 @@ mod tests {
         let tx = signed_transfer(&attacker, &alias, 1_000, 0, fee);
         assert!(
             matches!(
-                pool.admit(tx, &ledger, &params),
+                pool.admit(tx, &ledger, &params, None),
                 Err(Reject::BadCall) | Err(Reject::SelfTransfer)
             ),
             "a lowercase aliased recipient must be refused after its signature verifies"
@@ -1163,7 +1262,7 @@ mod tests {
             &Body::new(alias.clone(), 0, TRANSFER_METER, fee, call),
         );
         assert_eq!(
-            pool.admit(tx, &ledger, &params),
+            pool.admit(tx, &ledger, &params, None),
             Err(Reject::UnknownSender),
             "a non canonical sender is refused"
         );
@@ -1180,7 +1279,7 @@ mod tests {
             vec![0u8; 8],
         );
         assert!(
-            pool.admit(forged, &ledger, &params).is_err(),
+            pool.admit(forged, &ledger, &params, None).is_err(),
             "a hand crafted mixed case recipient is refused at admission"
         );
 
@@ -1196,13 +1295,13 @@ mod tests {
             vec![0u8; 8],
         );
         assert!(
-            pool.admit(forged, &ledger, &params).is_err(),
+            pool.admit(forged, &ledger, &params, None).is_err(),
             "a hand crafted unparseable recipient is refused at admission"
         );
 
         let tx = signed_transfer(&attacker, &victim.address(), 1_000, 0, fee);
         assert!(
-            pool.admit(tx, &ledger, &params).is_ok(),
+            pool.admit(tx, &ledger, &params, None).is_ok(),
             "a canonical transfer still admits after the gate"
         );
         assert_eq!(
@@ -1238,7 +1337,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            pool.admit(aliased, &ledger, &params),
+            pool.admit(aliased, &ledger, &params, None),
             Err(Reject::UnknownSender),
             "a non canonical sender is refused before lane dispatch, not only on the transfer lane"
         );
@@ -1259,7 +1358,7 @@ mod tests {
             ),
         );
         assert_ne!(
-            pool.admit(canonical, &ledger, &params),
+            pool.admit(canonical, &ledger, &params, None),
             Err(Reject::UnknownSender),
             "a canonical sender passes the sender gate and reaches its lane"
         );
@@ -1280,7 +1379,7 @@ mod tests {
             u128::from(params.transfer_fee()),
         );
         let mut pool = Mempool::new();
-        assert!(pool.admit(tx, &ledger, &params).is_ok());
+        assert!(pool.admit(tx, &ledger, &params, None).is_ok());
         assert_eq!(pool.len(), 1);
     }
 
@@ -1302,13 +1401,13 @@ mod tests {
             let sender = keypair(100 + i);
             fund(&mut ledger, &sender, 10_000_000);
             let tx = signed_transfer(&sender, &recipient.address(), 100, 0, fee);
-            assert!(pool.admit(tx, &ledger, &params).is_ok());
+            assert!(pool.admit(tx, &ledger, &params, None).is_ok());
         }
         for i in 0..2u64 {
             let guardian = keypair(140 + i);
             fund(&mut ledger, &guardian, 10_000_000);
             assert!(pool
-                .admit(gov_release(&guardian, 0, fee), &ledger, &params)
+                .admit(gov_release(&guardian, 0, fee), &ledger, &params, None)
                 .is_ok());
         }
         assert_eq!(pool.len(), 4, "the pool is at its hard cap");
@@ -1317,7 +1416,7 @@ mod tests {
         fund(&mut ledger, &crowd, 10_000_000);
         let crowd_tx = signed_transfer(&crowd, &recipient.address(), 100, 0, fee);
         assert_eq!(
-            pool.admit(crowd_tx, &ledger, &params),
+            pool.admit(crowd_tx, &ledger, &params, None),
             Err(Reject::PoolFull),
             "a fee competing transfer cannot exceed the bound"
         );
@@ -1326,7 +1425,7 @@ mod tests {
         let sentinel = keypair(170);
         fund(&mut ledger, &sentinel, 10_000_000);
         assert!(
-            pool.admit(gov_release(&sentinel, 0, fee), &ledger, &params)
+            pool.admit(gov_release(&sentinel, 0, fee), &ledger, &params, None)
                 .is_ok(),
             "a safety transaction is always includable through the reserved lane"
         );
@@ -1384,7 +1483,7 @@ mod tests {
         for s in &senders {
             let tx = signed_transfer(s, &recipient.address(), 100, 0, fee);
             let id = tx.id();
-            if pool.admit(tx, &ledger, &params).is_ok() {
+            if pool.admit(tx, &ledger, &params, None).is_ok() {
                 admitted.push(id);
             }
             indexes_agree_with_a_fresh_scan(&pool);
@@ -1397,7 +1496,7 @@ mod tests {
 
         for s in &senders {
             let tx = signed_transfer(s, &recipient.address(), 200, 0, fee);
-            let _ = pool.admit(tx, &ledger, &params);
+            let _ = pool.admit(tx, &ledger, &params, None);
             indexes_agree_with_a_fresh_scan(&pool);
         }
 
@@ -1420,11 +1519,11 @@ mod tests {
         let recipient = keypair(1);
         fund(&mut ledger, &spammer, 10_000_000);
         let first = signed_transfer(&spammer, &recipient.address(), 100, 0, fee);
-        assert!(pool.admit(first, &ledger, &params).is_ok());
+        assert!(pool.admit(first, &ledger, &params, None).is_ok());
         for amount in 1..8u64 {
             let flood = signed_transfer(&spammer, &recipient.address(), 100 + amount, 0, fee);
             assert_eq!(
-                pool.admit(flood, &ledger, &params),
+                pool.admit(flood, &ledger, &params, None),
                 Err(Reject::SenderQueueFull),
                 "a sender cannot queue a second transfer at the same nonce"
             );
@@ -1452,7 +1551,7 @@ mod tests {
         );
         let mut pool = Mempool::new();
         assert_eq!(
-            pool.admit(sign(&alice, &foreign), &ledger, &params),
+            pool.admit(sign(&alice, &foreign), &ledger, &params, None),
             Err(Reject::WrongChain)
         );
         assert!(pool.is_empty());
@@ -1466,7 +1565,9 @@ mod tests {
             0,
             params.chain_id,
         );
-        assert!(pool.admit(sign(&alice, &native), &ledger, &params).is_ok());
+        assert!(pool
+            .admit(sign(&alice, &native), &ledger, &params, None)
+            .is_ok());
         assert_eq!(pool.len(), 1);
     }
 
@@ -1488,7 +1589,10 @@ mod tests {
         sig[0] ^= 1;
         tx = Wrapper::new(tx.body().clone(), tx.scheme(), sig);
         let mut pool = Mempool::new();
-        assert_eq!(pool.admit(tx, &ledger, &params), Err(Reject::BadSignature));
+        assert_eq!(
+            pool.admit(tx, &ledger, &params, None),
+            Err(Reject::BadSignature)
+        );
         assert!(pool.is_empty());
     }
 
@@ -1508,7 +1612,7 @@ mod tests {
         );
         let mut pool = Mempool::new();
         assert_eq!(
-            pool.admit(tx, &ledger, &params),
+            pool.admit(tx, &ledger, &params, None),
             Err(Reject::InsufficientFunds)
         );
     }
@@ -1565,7 +1669,7 @@ mod tests {
         );
         let mut pool = Mempool::new();
         assert_eq!(
-            pool.admit(tx, &ledger, &params),
+            pool.admit(tx, &ledger, &params, None),
             Err(Reject::BadNonce {
                 expected: 0,
                 got: 3
@@ -1590,7 +1694,7 @@ mod tests {
         let tx = Wrapper::new(good.body().clone(), 99, good.signature().to_vec());
         let mut pool = Mempool::new();
         assert_eq!(
-            pool.admit(tx, &ledger, &params),
+            pool.admit(tx, &ledger, &params, None),
             Err(Reject::UnsupportedScheme)
         );
         assert!(pool.is_empty());
@@ -1612,10 +1716,10 @@ mod tests {
         );
         let mut pool = Mempool::new();
         assert_eq!(
-            pool.admit(tx.clone(), &ledger, &params),
+            pool.admit(tx.clone(), &ledger, &params, None),
             Ok(Admitted::Fresh)
         );
-        assert_eq!(pool.admit(tx, &ledger, &params), Ok(Admitted::Known));
+        assert_eq!(pool.admit(tx, &ledger, &params, None), Ok(Admitted::Known));
         assert_eq!(pool.len(), 1);
     }
 
@@ -1632,8 +1736,8 @@ mod tests {
         let low = signed_transfer(&alice, &carol.address(), 100, 0, base);
         let high = signed_transfer(&bob, &carol.address(), 100, 0, base + 5);
         let mut pool = Mempool::new();
-        pool.admit(low.clone(), &ledger, &params).unwrap();
-        pool.admit(high.clone(), &ledger, &params).unwrap();
+        pool.admit(low.clone(), &ledger, &params, None).unwrap();
+        pool.admit(high.clone(), &ledger, &params, None).unwrap();
         let ordered = pool.candidates();
         assert_eq!(ordered[0].id(), high.id());
         assert_eq!(ordered[1].id(), low.id());
@@ -1651,7 +1755,7 @@ mod tests {
             let sender = keypair(i);
             fund(&mut ledger, &sender, 10_000);
             let tx = signed_transfer(&sender, &carol.address(), 100, 0, base + u128::from(i));
-            pool.admit(tx.clone(), &ledger, &params).unwrap();
+            pool.admit(tx.clone(), &ledger, &params, None).unwrap();
             submitted.push(tx);
         }
         assert_eq!(pool.pending_len(), 12, "every admitted tx is pending");
@@ -1727,7 +1831,7 @@ mod tests {
 
         let mut reference = Mempool::new();
         for tx in &batch {
-            let _ = reference.admit(tx.clone(), &ledger, &params);
+            let _ = reference.admit(tx.clone(), &ledger, &params, None);
         }
         let reference_ids = ids(&reference.candidates());
         assert!(

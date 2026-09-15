@@ -1828,7 +1828,7 @@ impl Node {
 
     pub fn submit(&mut self, transaction: Wrapper) -> Result<Admitted, Reject> {
         self.mempool
-            .admit(transaction, &self.ledger, &self.fee_params)
+            .admit(transaction, &self.ledger, &self.fee_params, None)
     }
 
     pub fn produce(&mut self) -> Result<&Finalized, ProduceError> {
@@ -5307,7 +5307,7 @@ mod tests {
         let resident = signed_artifact(&resident_fact, &sk0, &sk1);
         let mut pool = crate::mempool::Mempool::new();
         assert_eq!(
-            pool.admit(mint_tx(&keypair(430), &resident, &fee), &ledger, &fee),
+            pool.admit(mint_tx(&keypair(430), &resident, &fee), &ledger, &fee, None),
             Ok(crate::mempool::Admitted::Fresh)
         );
 
@@ -5315,7 +5315,7 @@ mod tests {
         for i in 0..128u64 {
             let dup = mint_tx(&keypair(600 + i), &resident, &fee);
             assert_eq!(
-                pool.admit(dup, &ledger, &fee),
+                pool.admit(dup, &ledger, &fee, None),
                 Ok(crate::mempool::Admitted::Known)
             );
         }
@@ -5332,7 +5332,7 @@ mod tests {
         for i in 0..128u64 {
             let tx = mint_tx(&keypair(800 + i), &replayed, &fee);
             assert_eq!(
-                pool.admit(tx, &ledger, &fee),
+                pool.admit(tx, &ledger, &fee, None),
                 Err(crate::mempool::Reject::BadCall)
             );
         }
@@ -5361,7 +5361,7 @@ mod tests {
             source_ref[..8].copy_from_slice(&i.to_le_bytes());
             let fact = deposit_fact(recipient_id, asset, 1, source_ref);
             let artifact = signed_artifact(&fact, &sk0, &sk1);
-            if pool.admit(mint_tx(&relayer, &artifact, &fee), &ledger, &fee)
+            if pool.admit(mint_tx(&relayer, &artifact, &fee), &ledger, &fee, None)
                 == Err(crate::mempool::Reject::RateLimited)
             {
                 rate_limited += 1;
@@ -5407,7 +5407,7 @@ mod tests {
         crate::bridge::VERIFY_CALLS.with(|c| c.set(0));
         for _ in 0..(crate::mempool::DEFAULT_FEELESS_ADMITS_PER_WINDOW + 8) {
             assert_eq!(
-                seen_pool.admit(mint_tx(&relayer, &replayed, &fee), &ledger, &fee),
+                seen_pool.admit(mint_tx(&relayer, &replayed, &fee), &ledger, &fee, None),
                 Err(crate::mempool::Reject::BadCall)
             );
         }
@@ -5423,7 +5423,7 @@ mod tests {
             &sk1,
         );
         assert_eq!(
-            seen_pool.admit(mint_tx(&relayer, &genuine, &fee), &ledger, &fee),
+            seen_pool.admit(mint_tx(&relayer, &genuine, &fee), &ledger, &fee, None),
             Ok(crate::mempool::Admitted::Fresh),
             "a genuine mint still admits after a seen replay flood that spent no budget"
         );
@@ -5438,7 +5438,7 @@ mod tests {
                 &sk1,
             );
             assert_eq!(
-                spoof_pool.admit(mint_tx(&relayer, &junk, &fee), &ledger, &fee),
+                spoof_pool.admit(mint_tx(&relayer, &junk, &fee), &ledger, &fee, None),
                 Err(crate::mempool::Reject::BadCall)
             );
         }
@@ -5448,7 +5448,7 @@ mod tests {
             &sk1,
         );
         assert_eq!(
-            spoof_pool.admit(mint_tx(&relayer, &own, &fee), &ledger, &fee),
+            spoof_pool.admit(mint_tx(&relayer, &own, &fee), &ledger, &fee, None),
             Ok(crate::mempool::Admitted::Fresh),
             "junk spoofing the relayer's address cannot starve the relayer within the global window"
         );
@@ -5777,7 +5777,7 @@ mod tests {
 
         let mut pool = crate::mempool::Mempool::new();
         assert!(
-            pool.admit(exit.clone(), &ledger, &fee).is_err(),
+            pool.admit(exit.clone(), &ledger, &fee, None).is_err(),
             "a disabled exit is refused at admission"
         );
 
@@ -5955,7 +5955,7 @@ mod tests {
 
         let mut open_pool = crate::mempool::Mempool::new();
         assert!(
-            open_pool.admit(exit.clone(), &ledger, &fee).is_ok(),
+            open_pool.admit(exit.clone(), &ledger, &fee, None).is_ok(),
             "an unfrozen exit is admitted"
         );
 
@@ -5971,7 +5971,7 @@ mod tests {
 
         let mut frozen_pool = crate::mempool::Mempool::new();
         assert!(
-            frozen_pool.admit(exit, &ledger, &fee).is_err(),
+            frozen_pool.admit(exit, &ledger, &fee, None).is_err(),
             "a frozen exit is refused at admission"
         );
     }
@@ -6039,10 +6039,10 @@ mod tests {
 
         let mut pool = crate::mempool::Mempool::new();
         assert!(pool
-            .admit(mint_tx(&relayer_a, &artifact, &fee), &ledger, &fee)
+            .admit(mint_tx(&relayer_a, &artifact, &fee), &ledger, &fee, None)
             .is_ok());
         assert!(pool
-            .admit(mint_tx(&relayer_b, &artifact, &fee), &ledger, &fee)
+            .admit(mint_tx(&relayer_b, &artifact, &fee), &ledger, &fee, None)
             .is_ok());
         assert_eq!(
             pool.len(),
@@ -6069,8 +6069,13 @@ mod tests {
         });
         let mut pool = crate::mempool::Mempool::new();
         assert!(
-            pool.admit(mint_tx(&relayer, &small_artifact, &fee), &ledger, &fee)
-                .is_ok(),
+            pool.admit(
+                mint_tx(&relayer, &small_artifact, &fee),
+                &ledger,
+                &fee,
+                None
+            )
+            .is_ok(),
             "a normally sized artifact is admitted"
         );
 
@@ -6081,7 +6086,7 @@ mod tests {
             proof: vec![0u8; 2 * 1024 * 1024],
         });
         assert!(
-            pool.admit(mint_tx(&relayer, &big_artifact, &fee), &ledger, &fee)
+            pool.admit(mint_tx(&relayer, &big_artifact, &fee), &ledger, &fee, None)
                 .is_err(),
             "an oversized mint artifact is refused"
         );

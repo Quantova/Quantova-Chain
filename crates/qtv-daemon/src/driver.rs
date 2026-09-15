@@ -4,17 +4,83 @@
 use std::collections::VecDeque;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use qtv_devnet::coded::{code_proposal, ProposalAssembler};
-use qtv_devnet::wire::Message;
+use qtv_devnet::wire::{wrapper_from_bytes, Message};
 use qtv_devnet::{leader_for, DevNode};
 use qtv_net::Channel;
 use qtv_node::consensus::Selection;
+use qtv_node::mempool::VerifyHint;
+use qtv_tx::Wrapper;
 
-use qtv_gateway::{GatewayCall, NodeContext};
+use qtv_gateway::{ClientError, GatewayCall, Json, NodeContext, Request};
+
+const VERIFY_WORKERS: usize = 4;
+
+struct VerifyJob {
+    wrapper: Wrapper,
+    public_key: Vec<u8>,
+    tx_id: String,
+    reply: Sender<Result<Json, ClientError>>,
+}
+
+struct VerifyDone {
+    wrapper: Wrapper,
+    hint: VerifyHint,
+    tx_id: String,
+    reply: Sender<Result<Json, ClientError>>,
+}
+
+// A pool of worker threads that run the post quantum signature verify for submitted
+// transactions off the consensus thread. The consensus thread only reads the sender
+// key and finalises admission with the returned verdict, so a burst of submissions
+// cannot delay block production.
+fn start_verify_pool() -> (SyncSender<VerifyJob>, Receiver<VerifyDone>) {
+    let (job_tx, job_rx) = sync_channel::<VerifyJob>(4096);
+    let (done_tx, done_rx) = channel::<VerifyDone>();
+    let job_rx = Arc::new(Mutex::new(job_rx));
+    let workers = thread::available_parallelism()
+        .map(|n| n.get().min(VERIFY_WORKERS))
+        .unwrap_or(1)
+        .max(1);
+    for _ in 0..workers {
+        let job_rx = Arc::clone(&job_rx);
+        let done_tx = done_tx.clone();
+        thread::spawn(move || loop {
+            let job = {
+                let guard = match job_rx.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return,
+                };
+                guard.recv()
+            };
+            let VerifyJob {
+                wrapper,
+                public_key,
+                tx_id,
+                reply,
+            } = match job {
+                Ok(job) => job,
+                Err(_) => return,
+            };
+            let ok = qtv_tx::verify(&wrapper, &public_key);
+            let done = VerifyDone {
+                wrapper,
+                hint: VerifyHint { public_key, ok },
+                tx_id,
+                reply,
+            };
+            if done_tx.send(done).is_err() {
+                return;
+            }
+        });
+    }
+    (job_tx, done_rx)
+}
 
 use crate::mesh::Mesh;
 use crate::util::{hex, log};
@@ -104,6 +170,8 @@ pub struct Driver {
     budget: u64,
     rpc_context: Option<NodeContext>,
     rpc_requests: Option<Receiver<GatewayCall>>,
+    verify_jobs: Option<SyncSender<VerifyJob>>,
+    verify_done: Option<Receiver<VerifyDone>>,
 }
 
 impl Driver {
@@ -134,6 +202,8 @@ impl Driver {
             budget: u64::MAX,
             rpc_context: None,
             rpc_requests: None,
+            verify_jobs: None,
+            verify_done: None,
         }
     }
 
@@ -144,16 +214,60 @@ impl Driver {
 
     fn serve_rpc(&mut self) {
         const RPC_CALLS_PER_TICK: usize = 128;
-        let Some(requests) = self.rpc_requests.as_ref() else {
-            return;
+        if self.verify_jobs.is_none() {
+            let (jobs, done) = start_verify_pool();
+            self.verify_jobs = Some(jobs);
+            self.verify_done = Some(done);
+        }
+        // Finalise any submissions the verify pool has now checked. Admission is cheap
+        // here because the post quantum verify already ran on a worker thread; the
+        // verdict is carried back as a hint and reused unless the sender key changed.
+        let completed: Vec<VerifyDone> = self
+            .verify_done
+            .as_ref()
+            .map(|done| {
+                std::iter::from_fn(|| done.try_recv().ok())
+                    .take(RPC_CALLS_PER_TICK)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for done in completed {
+            let result = self.node.submit_hinted(done.wrapper, Some(done.hint));
+            let _ = done
+                .reply
+                .send(Ok(qtv_gateway::submit_reply(result, &done.tx_id)));
+        }
+
+        let calls: Vec<GatewayCall> = match self.rpc_requests.as_ref() {
+            Some(requests) => std::iter::from_fn(|| requests.try_recv().ok())
+                .take(RPC_CALLS_PER_TICK)
+                .collect(),
+            None => return,
         };
-        let calls: Vec<GatewayCall> = std::iter::from_fn(|| requests.try_recv().ok())
-            .take(RPC_CALLS_PER_TICK)
-            .collect();
-        let Some(context) = self.rpc_context.as_ref() else {
+        if self.rpc_context.is_none() {
             return;
-        };
+        }
         for call in calls {
+            // A signed transaction submission has its heavy verify run on the pool
+            // rather than inline, so it never competes with block production.
+            if let Request::Submit(bytes) = &call.request {
+                if let Ok(wrapper) = wrapper_from_bytes(bytes) {
+                    if let Some(public_key) = self.node.verify_key_for(&wrapper) {
+                        if let Some(jobs) = self.verify_jobs.as_ref() {
+                            let job = VerifyJob {
+                                tx_id: wrapper.id(),
+                                wrapper,
+                                public_key,
+                                reply: call.reply.clone(),
+                            };
+                            if jobs.try_send(job).is_ok() {
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            let context = self.rpc_context.as_ref().unwrap();
             let request = call.request;
             let node = &mut self.node;
             let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {

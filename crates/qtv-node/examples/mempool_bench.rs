@@ -59,7 +59,7 @@ fn main() {
         let before = pool.pending_len();
         let start = Instant::now();
         for wrapper in batch {
-            let _ = pool.admit(wrapper, &ledger, &params);
+            let _ = pool.admit(wrapper, &ledger, &params, None);
         }
         let micros = start.elapsed().as_micros() / BATCH as u128;
         println!(
