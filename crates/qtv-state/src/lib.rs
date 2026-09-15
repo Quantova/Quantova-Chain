@@ -3,8 +3,8 @@
 
 #![forbid(unsafe_code)]
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Mutex;
 
 use qtv_codec::{Decode, Decoder, Encode, Encoder, Error};
 use qtv_crypto::sha3;
@@ -217,12 +217,28 @@ struct RootCache {
     changed: BTreeSet<Key>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Trie {
     leaves: BTreeMap<Key, Vec<u8>>,
     defaults: Vec<Hash>,
-    cache: RefCell<RootCache>,
+    cache: Mutex<RootCache>,
     persist_dirty: BTreeSet<Key>,
+}
+
+impl Clone for Trie {
+    fn clone(&self) -> Self {
+        Trie {
+            leaves: self.leaves.clone(),
+            defaults: self.defaults.clone(),
+            cache: Mutex::new(
+                self.cache
+                    .lock()
+                    .expect("root cache mutex is not poisoned")
+                    .clone(),
+            ),
+            persist_dirty: self.persist_dirty.clone(),
+        }
+    }
 }
 
 impl Default for Trie {
@@ -242,7 +258,7 @@ impl Trie {
         Trie {
             leaves: BTreeMap::new(),
             defaults,
-            cache: RefCell::new(cache),
+            cache: Mutex::new(cache),
             persist_dirty: BTreeSet::new(),
         }
     }
@@ -259,14 +275,22 @@ impl Trie {
 
     pub fn insert(&mut self, key: Key, value: Vec<u8>) {
         self.leaves.insert(key, value);
-        self.cache.get_mut().changed.insert(key);
+        self.cache
+            .get_mut()
+            .expect("root cache mutex is not poisoned")
+            .changed
+            .insert(key);
         self.persist_dirty.insert(key);
     }
 
     pub fn remove(&mut self, key: &Key) -> bool {
         let existed = self.leaves.remove(key).is_some();
         if existed {
-            self.cache.get_mut().changed.insert(*key);
+            self.cache
+                .get_mut()
+                .expect("root cache mutex is not poisoned")
+                .changed
+                .insert(*key);
             self.persist_dirty.insert(*key);
         }
         existed
@@ -281,7 +305,7 @@ impl Trie {
     }
 
     pub fn root(&self) -> Hash {
-        let mut cache = self.cache.borrow_mut();
+        let mut cache = self.cache.lock().expect("root cache mutex is not poisoned");
         if cache.changed.is_empty() {
             return cache.root;
         }
@@ -521,12 +545,22 @@ mod incremental {
         );
 
         let target = keys[keys.len() / 3];
-        let before: HashMap<NodeId, Hash> = trie.cache.borrow().nodes.clone();
+        let before: HashMap<NodeId, Hash> = trie
+            .cache
+            .lock()
+            .expect("root cache mutex is not poisoned")
+            .nodes
+            .clone();
         reset_node_hashes();
         trie.insert(target, b"a new account record".to_vec());
         let _ = trie.root();
         let single = node_hashes();
-        let after = trie.cache.borrow().nodes.clone();
+        let after = trie
+            .cache
+            .lock()
+            .expect("root cache mutex is not poisoned")
+            .nodes
+            .clone();
 
         for (id, hash) in &after {
             let moved = before.get(id) != Some(hash);

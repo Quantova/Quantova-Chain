@@ -256,21 +256,59 @@ fn is_feeless(wrapper: &Wrapper) -> bool {
         || crate::node::is_bridge_cosmos_update(wrapper)
 }
 
-pub fn signed_lane_key(ledger: &Ledger, wrapper: &Wrapper) -> Option<VerifyHint> {
-    if is_feeless(wrapper)
-        || crate::node::is_key_register(wrapper)
-        || crate::node::is_registration(wrapper)
-    {
-        return None;
+fn is_signed_lane(wrapper: &Wrapper) -> bool {
+    !is_feeless(wrapper)
+        && !crate::node::is_key_register(wrapper)
+        && !crate::node::is_registration(wrapper)
+}
+
+// The verdicts a worker thread computes for a submitted transaction against a ledger
+// snapshot so the consensus thread never runs a post quantum verify or a bridge proof
+// check. The signature carries the key it was checked against, and admit only trusts it
+// when that key still matches the sender; the feeless verdict is a spam filter only,
+// since block execution re-verifies every bridge operation before it moves value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdmitHint {
+    pub signature: Option<VerifyHint>,
+    pub feeless_ok: Option<bool>,
+}
+
+pub fn admission_hint(wrapper: &Wrapper, ledger: &Ledger, fee_params: &FeeParams) -> AdmitHint {
+    let mut hint = AdmitHint::default();
+    if is_signed_lane(wrapper) {
+        let key = ledger.account(wrapper.body().sender()).public_key;
+        if !key.is_empty() {
+            hint.signature = Some(VerifyHint {
+                ok: qtv_tx::verify(wrapper, &key),
+                public_key: key,
+            });
+        }
+    } else if crate::node::is_evidence(wrapper) {
+        hint.feeless_ok = Some(crate::node::evidence_admissible(
+            fee_params.chain_id,
+            wrapper,
+            ledger,
+        ));
+    } else if crate::node::is_bridge_guardian(wrapper) {
+        hint.feeless_ok = Some(crate::node::guardian_admissible(
+            ledger,
+            wrapper,
+            fee_params.chain_id,
+        ));
+    } else if crate::node::is_bridge_mint(wrapper) {
+        hint.feeless_ok = Some(crate::node::bridge_mint_admissible(
+            ledger,
+            wrapper,
+            fee_params.chain_id,
+        ));
+    } else if crate::node::is_bridge_settle(wrapper) {
+        hint.feeless_ok = Some(crate::node::bridge_settle_admissible(
+            ledger,
+            wrapper,
+            fee_params.chain_id,
+        ));
     }
-    let key = ledger.account(wrapper.body().sender()).public_key;
-    if key.is_empty() {
-        return None;
-    }
-    Some(VerifyHint {
-        ok: false,
-        public_key: key,
-    })
+    hint
 }
 
 fn candidate_order(a: &Wrapper, b: &Wrapper, ceiling: u128) -> std::cmp::Ordering {
@@ -539,8 +577,10 @@ impl Mempool {
         wrapper: Wrapper,
         ledger: &Ledger,
         fee_params: &FeeParams,
-        hint: Option<&VerifyHint>,
+        hint: Option<&AdmitHint>,
     ) -> Result<Admitted, Reject> {
+        let signature_hint = hint.and_then(|hint| hint.signature.as_ref());
+        let feeless_hint = hint.and_then(|hint| hint.feeless_ok);
         if !chain_ok(&wrapper, fee_params) {
             return Err(Reject::WrongChain);
         }
@@ -597,7 +637,7 @@ impl Mempool {
             if !sender_prevalidated(&wrapper, &account, fee_params) {
                 return Err(Reject::BadCall);
             }
-            let signature_ok = verified(&wrapper, &account.public_key, hint);
+            let signature_ok = verified(&wrapper, &account.public_key, signature_hint);
             if !crate::node::vm_admissible(&wrapper, &account, fee_params, signature_ok) {
                 return Err(Reject::BadCall);
             }
@@ -617,35 +657,43 @@ impl Mempool {
             if !sender_prevalidated(&wrapper, &account, fee_params) {
                 return Err(Reject::BadCall);
             }
-            let signature_ok = verified(&wrapper, &account.public_key, hint);
+            let signature_ok = verified(&wrapper, &account.public_key, signature_hint);
             if crate::node::governance_admissible(&wrapper, &account, fee_params, signature_ok)
                 .is_none()
             {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_evidence(&wrapper) {
-            if !crate::node::evidence_admissible(fee_params.chain_id, &wrapper, ledger) {
+            if !feeless_hint.unwrap_or_else(|| {
+                crate::node::evidence_admissible(fee_params.chain_id, &wrapper, ledger)
+            }) {
                 return Err(Reject::BadCall);
             }
             if !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
         } else if crate::node::is_bridge_guardian(&wrapper) {
-            if !crate::node::guardian_admissible(ledger, &wrapper, fee_params.chain_id) {
+            if !feeless_hint.unwrap_or_else(|| {
+                crate::node::guardian_admissible(ledger, &wrapper, fee_params.chain_id)
+            }) {
                 return Err(Reject::BadCall);
             }
             if !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
         } else if crate::node::is_bridge_mint(&wrapper) {
-            if !crate::node::bridge_mint_admissible(ledger, &wrapper, fee_params.chain_id) {
+            if !feeless_hint.unwrap_or_else(|| {
+                crate::node::bridge_mint_admissible(ledger, &wrapper, fee_params.chain_id)
+            }) {
                 return Err(Reject::BadCall);
             }
             if !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
         } else if crate::node::is_bridge_settle(&wrapper) {
-            if !crate::node::bridge_settle_admissible(ledger, &wrapper, fee_params.chain_id) {
+            if !feeless_hint.unwrap_or_else(|| {
+                crate::node::bridge_settle_admissible(ledger, &wrapper, fee_params.chain_id)
+            }) {
                 return Err(Reject::BadCall);
             }
             if !self.charge_feeless_attempt_for(&wrapper) {
@@ -659,7 +707,7 @@ impl Mempool {
             if !sender_prevalidated(&wrapper, &account, fee_params) {
                 return Err(Reject::BadCall);
             }
-            let signature_ok = verified(&wrapper, &account.public_key, hint);
+            let signature_ok = verified(&wrapper, &account.public_key, signature_hint);
             if crate::node::bridge_exit_admissible(
                 ledger,
                 &wrapper,
@@ -678,7 +726,7 @@ impl Mempool {
                 return Err(Reject::SenderQueueFull);
             }
             let account = ledger.account(wrapper.body().sender());
-            match hint {
+            match signature_hint {
                 Some(hint)
                     if !account.public_key.is_empty() && hint.public_key == account.public_key =>
                 {
@@ -1139,9 +1187,12 @@ mod tests {
             u128::from(params.transfer_fee()),
         );
 
-        let good = VerifyHint {
-            public_key: key.clone(),
-            ok: true,
+        let good = AdmitHint {
+            signature: Some(VerifyHint {
+                public_key: key.clone(),
+                ok: true,
+            }),
+            feeless_ok: None,
         };
         let mut pool = Mempool::new();
         assert_eq!(
@@ -1150,9 +1201,12 @@ mod tests {
             "a correct hint admits exactly as the inline verify would"
         );
 
-        let bad = VerifyHint {
-            public_key: key.clone(),
-            ok: false,
+        let bad = AdmitHint {
+            signature: Some(VerifyHint {
+                public_key: key.clone(),
+                ok: false,
+            }),
+            feeless_ok: None,
         };
         let mut pool = Mempool::new();
         assert_eq!(
@@ -1161,15 +1215,55 @@ mod tests {
             "the worker verdict is honoured so a false verdict rejects a valid signature"
         );
 
-        let stale = VerifyHint {
-            public_key: vec![0u8; key.len()],
-            ok: false,
+        let stale = AdmitHint {
+            signature: Some(VerifyHint {
+                public_key: vec![0u8; key.len()],
+                ok: false,
+            }),
+            feeless_ok: None,
         };
         let mut pool = Mempool::new();
         assert_eq!(
             pool.admit(tx, &ledger, &params, Some(&stale)),
             Ok(Admitted::Fresh),
             "a hint whose key does not match the sender falls back to a real verify"
+        );
+    }
+
+    #[test]
+    fn the_feeless_hint_is_honoured_for_a_bridge_lane() {
+        let params = FeeParams::devnet();
+        let (ledger, tx, _offender) = seeded_evidence(&[9u8; 32]);
+
+        let mut pool = Mempool::new();
+        assert_eq!(
+            pool.admit(tx.clone(), &ledger, &params, None),
+            Ok(Admitted::Fresh),
+            "inline admissibility admits valid evidence"
+        );
+
+        let deny = AdmitHint {
+            signature: None,
+            feeless_ok: Some(false),
+        };
+        let mut pool = Mempool::new();
+        assert_eq!(
+            pool.admit(tx, &ledger, &params, Some(&deny)),
+            Err(Reject::BadCall),
+            "a false feeless verdict from the worker rejects the submission"
+        );
+
+        let (_bare, forged, _offender) = seeded_evidence(&[11u8; 32]);
+        let empty = Ledger::new();
+        let allow = AdmitHint {
+            signature: None,
+            feeless_ok: Some(true),
+        };
+        let mut pool = Mempool::new();
+        assert_eq!(
+            pool.admit(forged, &empty, &params, Some(&allow)),
+            Ok(Admitted::Fresh),
+            "the consensus thread consumes the worker verdict rather than re-running the proof"
         );
     }
 

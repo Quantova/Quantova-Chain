@@ -14,7 +14,9 @@ use qtv_devnet::wire::{wrapper_from_bytes, Message};
 use qtv_devnet::{leader_for, DevNode};
 use qtv_net::Channel;
 use qtv_node::consensus::Selection;
-use qtv_node::mempool::VerifyHint;
+use qtv_node::fee::FeeParams;
+use qtv_node::ledger::Ledger;
+use qtv_node::mempool::{admission_hint, AdmitHint};
 use qtv_tx::Wrapper;
 
 use qtv_gateway::{ClientError, GatewayCall, Json, NodeContext, Request};
@@ -23,22 +25,26 @@ const VERIFY_WORKERS: usize = 4;
 
 struct VerifyJob {
     wrapper: Wrapper,
-    public_key: Vec<u8>,
+    ledger: Arc<Ledger>,
+    fee_params: FeeParams,
     tx_id: String,
     reply: Sender<Result<Json, ClientError>>,
 }
 
 struct VerifyDone {
     wrapper: Wrapper,
-    hint: VerifyHint,
+    hint: AdmitHint,
     tx_id: String,
     reply: Sender<Result<Json, ClientError>>,
 }
 
-// A pool of worker threads that run the post quantum signature verify for submitted
-// transactions off the consensus thread. The consensus thread only reads the sender
-// key and finalises admission with the returned verdict, so a burst of submissions
-// cannot delay block production.
+// A pool of worker threads that run every submitted transaction's heavy verification
+// off the consensus thread. Signed transactions have their post quantum signature
+// checked, and feeless bridge submissions have their operator and foreign chain proofs
+// checked, all against a ledger snapshot. The consensus thread only finalises admission
+// with the returned verdict, so a burst of submissions cannot delay block production.
+// Block execution re-verifies every bridge operation, so the snapshot verdict is only a
+// spam filter and can never move value on a stale read.
 fn start_verify_pool() -> (SyncSender<VerifyJob>, Receiver<VerifyDone>) {
     let (job_tx, job_rx) = sync_channel::<VerifyJob>(4096);
     let (done_tx, done_rx) = channel::<VerifyDone>();
@@ -60,17 +66,18 @@ fn start_verify_pool() -> (SyncSender<VerifyJob>, Receiver<VerifyDone>) {
             };
             let VerifyJob {
                 wrapper,
-                public_key,
+                ledger,
+                fee_params,
                 tx_id,
                 reply,
             } = match job {
                 Ok(job) => job,
                 Err(_) => return,
             };
-            let ok = qtv_tx::verify(&wrapper, &public_key);
+            let hint = admission_hint(&wrapper, &ledger, &fee_params);
             let done = VerifyDone {
                 wrapper,
-                hint: VerifyHint { public_key, ok },
+                hint,
                 tx_id,
                 reply,
             };
@@ -172,6 +179,7 @@ pub struct Driver {
     rpc_requests: Option<Receiver<GatewayCall>>,
     verify_jobs: Option<SyncSender<VerifyJob>>,
     verify_done: Option<Receiver<VerifyDone>>,
+    verify_snapshot: Option<(u64, Arc<Ledger>)>,
 }
 
 impl Driver {
@@ -204,6 +212,7 @@ impl Driver {
             rpc_requests: None,
             verify_jobs: None,
             verify_done: None,
+            verify_snapshot: None,
         }
     }
 
@@ -247,22 +256,38 @@ impl Driver {
         if self.rpc_context.is_none() {
             return;
         }
+
+        // Refresh the read-only ledger snapshot the workers verify against, at most
+        // once per block and only when there is a submission to serve. The snapshot is
+        // shared by reference count, so each job clone is cheap.
+        let fee_params = self.node.fee_params();
+        if calls
+            .iter()
+            .any(|call| matches!(call.request, Request::Submit(_)))
+        {
+            let height = self.node.height();
+            if self.verify_snapshot.as_ref().map(|(h, _)| *h) != Some(height) {
+                self.verify_snapshot = Some((height, Arc::new(self.node.ledger_snapshot())));
+            }
+        }
+        let snapshot = self.verify_snapshot.as_ref().map(|(_, l)| Arc::clone(l));
+
         for call in calls {
-            // A signed transaction submission has its heavy verify run on the pool
-            // rather than inline, so it never competes with block production.
+            // A submission has its heavy verification run on the pool against a ledger
+            // snapshot rather than inline, so a post quantum signature or a bridge proof
+            // never competes with block production.
             if let Request::Submit(bytes) = &call.request {
-                if let Ok(wrapper) = wrapper_from_bytes(bytes) {
-                    if let Some(public_key) = self.node.verify_key_for(&wrapper) {
-                        if let Some(jobs) = self.verify_jobs.as_ref() {
-                            let job = VerifyJob {
-                                tx_id: wrapper.id(),
-                                wrapper,
-                                public_key,
-                                reply: call.reply.clone(),
-                            };
-                            if jobs.try_send(job).is_ok() {
-                                continue;
-                            }
+                if let (Some(ledger), Some(jobs)) = (snapshot.as_ref(), self.verify_jobs.as_ref()) {
+                    if let Ok(wrapper) = wrapper_from_bytes(bytes) {
+                        let job = VerifyJob {
+                            tx_id: wrapper.id(),
+                            wrapper,
+                            ledger: Arc::clone(ledger),
+                            fee_params,
+                            reply: call.reply.clone(),
+                        };
+                        if jobs.try_send(job).is_ok() {
+                            continue;
                         }
                     }
                 }
