@@ -247,7 +247,7 @@ fn run(config_path: &Path) -> Result<(), String> {
                 allow.len()
             ));
         }
-        qtv_gateway::serve(rpc_listener, requests_tx, allow);
+        qtv_gateway::serve(rpc_listener, requests_tx, allow, settings.rpc_cors_origin.clone());
     } else {
         util::log("no RPC configured, the node runs with no client facing surface");
     }

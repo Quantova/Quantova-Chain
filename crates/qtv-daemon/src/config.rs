@@ -80,6 +80,7 @@ pub struct NodeSettings {
     pub peers: Vec<(u64, String)>,
     pub rpc_listen: Option<String>,
     pub rpc_allow: Vec<String>,
+    pub rpc_cors_origin: Option<String>,
     pub block_messages_path: Option<PathBuf>,
     pub checkpoint: Option<(u64, [u8; 32])>,
 }
@@ -100,6 +101,7 @@ impl NodeSettings {
         let mut peers: Vec<(u64, String)> = Vec::new();
         let mut rpc_listen: Option<String> = None;
         let mut rpc_allow: Vec<String> = Vec::new();
+        let mut rpc_cors_origin: Option<String> = None;
         let mut block_messages_path: Option<PathBuf> = None;
         let mut checkpoint: Option<(u64, [u8; 32])> = None;
 
@@ -132,6 +134,7 @@ impl NodeSettings {
                     }
                     rpc_allow = addrs;
                 }
+                "rpc_cors_origin" => rpc_cors_origin = Some(field.value.clone()),
                 "block_messages" => block_messages_path = Some(PathBuf::from(&field.value)),
                 "checkpoint" => checkpoint = Some(parse_checkpoint(field)?),
                 other => return Err(field.error(&format!("unknown config key '{other}'"))),
@@ -158,6 +161,7 @@ impl NodeSettings {
             peers,
             rpc_listen,
             rpc_allow,
+            rpc_cors_origin,
             block_messages_path,
             checkpoint,
         })
