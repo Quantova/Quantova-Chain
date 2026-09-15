@@ -420,7 +420,7 @@ fn parse_account(field: &Field) -> Result<GenesisAccount, String> {
 
 fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) -> [u8; 32] {
     let mut buf: Vec<u8> = Vec::new();
-    buf.extend_from_slice(b"QTV-GENESIS-V5");
+    buf.extend_from_slice(b"QTV-GENESIS-V6");
     put_bytes(&mut buf, chain_id.as_bytes());
     put_bytes(&mut buf, message.as_bytes());
     buf.extend_from_slice(&genesis.genesis_time.to_le_bytes());
@@ -456,6 +456,68 @@ fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) ->
         buf.push(a.scheme);
         put_bytes(&mut buf, &a.public_key);
         buf.extend_from_slice(&a.balance.to_le_bytes());
+    }
+
+    let mut guardians = genesis.guardians.members.clone();
+    guardians.sort_unstable();
+    buf.extend_from_slice(&genesis.guardians.threshold.to_le_bytes());
+    buf.extend_from_slice(&(guardians.len() as u64).to_le_bytes());
+    for member in &guardians {
+        buf.extend_from_slice(member);
+    }
+
+    match &genesis.bridge_operators {
+        Some(set) => {
+            buf.push(1);
+            buf.extend_from_slice(&set.threshold.to_le_bytes());
+            let mut operators = set.operators.clone();
+            operators.sort_by_key(|(id, _)| *id);
+            buf.extend_from_slice(&(operators.len() as u64).to_le_bytes());
+            for (id, key) in &operators {
+                buf.extend_from_slice(&id.to_le_bytes());
+                put_bytes(&mut buf, key);
+            }
+            let mut revoked = set.revoked.clone();
+            revoked.sort_unstable();
+            buf.extend_from_slice(&(revoked.len() as u64).to_le_bytes());
+            for id in &revoked {
+                buf.extend_from_slice(&id.to_le_bytes());
+            }
+        }
+        None => buf.push(0),
+    }
+
+    let mut assets = genesis.bridged_assets.clone();
+    assets.sort_by_key(|a| a.asset_id);
+    buf.extend_from_slice(&(assets.len() as u64).to_le_bytes());
+    for a in &assets {
+        buf.extend_from_slice(&a.asset_id);
+        buf.extend_from_slice(&a.cap.to_le_bytes());
+        buf.extend_from_slice(&a.epoch_cap.to_le_bytes());
+        buf.push(a.requires_stark as u8);
+    }
+
+    put_bytes(&mut buf, &genesis.bridge_era.unwrap_or([0u8; 32]));
+
+    match &genesis.bridge_bitcoin_anchor {
+        Some(anchor) => {
+            buf.push(1);
+            put_bytes(&mut buf, &anchor.encode());
+        }
+        None => buf.push(0),
+    }
+    let mut eth_anchors = genesis.bridge_eth_anchors.clone();
+    eth_anchors.sort_by_key(|a| a.config_selector);
+    buf.extend_from_slice(&(eth_anchors.len() as u64).to_le_bytes());
+    for anchor in &eth_anchors {
+        put_bytes(&mut buf, &anchor.encode());
+    }
+    match &genesis.bridge_cosmos_anchor {
+        Some(anchor) => {
+            buf.push(1);
+            put_bytes(&mut buf, &anchor.encode());
+        }
+        None => buf.push(0),
     }
 
     sha3::sha3_256(&buf)
@@ -570,6 +632,44 @@ mod tests {
             qtov_hash, tqtov_hash,
             "two genesis files naming a different native asset must never hash the same"
         );
+    }
+
+    #[test]
+    fn the_guardian_operator_and_asset_caps_bind_into_the_genesis_hash() {
+        let base = genesis_hash("Q-test-net-1", "genesis", 64, &sample_genesis(None));
+
+        let mut g = sample_genesis(None);
+        g.guardians = qtv_governance::GuardianSet::new(vec![[9u8; 32], [8u8; 32], [7u8; 32]], 2);
+        assert_ne!(base, genesis_hash("Q-test-net-1", "genesis", 64, &g),
+            "the guardian set must bind into the genesis hash");
+
+        let mut o = sample_genesis(None);
+        o.bridge_operators = Some(qtv_node::bridge::OperatorSet::new(
+            vec![(1u32, vec![0xaa; 48]), (2u32, vec![0xbb; 48])],
+            2,
+        ));
+        assert_ne!(base, genesis_hash("Q-test-net-1", "genesis", 64, &o),
+            "the bridge operator set must bind into the genesis hash");
+
+        let mut a = sample_genesis(None);
+        a.bridged_assets = vec![GenesisBridgedAsset {
+            asset_id: [0x5a; 16],
+            cap: 1_000_000,
+            epoch_cap: 100_000,
+            requires_stark: false,
+        }];
+        let a_hash = genesis_hash("Q-test-net-1", "genesis", 64, &a);
+        assert_ne!(base, a_hash, "an asset cap must bind into the genesis hash");
+
+        let mut a2 = sample_genesis(None);
+        a2.bridged_assets = vec![GenesisBridgedAsset {
+            asset_id: [0x5a; 16],
+            cap: 2_000_000,
+            epoch_cap: 100_000,
+            requires_stark: false,
+        }];
+        assert_ne!(a_hash, genesis_hash("Q-test-net-1", "genesis", 64, &a2),
+            "changing only an asset cap must move the genesis hash");
     }
 
     #[test]
