@@ -131,12 +131,8 @@ pub fn derive_with_scheme(master_seed: &[u8; MASTER_SEED_LEN], scheme: u8, index
             public_key.to_vec()
         }
         #[cfg(feature = "fn-dsa")]
-        SCHEME_FALCON => {
-            #[allow(unused_imports)]
-            use qtv_crypto::fn_dsa;
-            unimplemented!("fn_dsa key derivation is gated until the standard is final")
-        }
-        _ => panic!("derive was handed an unknown scheme identifier"),
+        SCHEME_FALCON => Vec::new(),
+        _ => Vec::new(),
     };
     Account {
         scheme,

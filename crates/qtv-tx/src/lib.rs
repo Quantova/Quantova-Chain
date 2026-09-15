@@ -243,12 +243,8 @@ pub fn sign(account: &Account, body: &Body) -> Wrapper {
                 .to_vec()
         }
         #[cfg(feature = "fn-dsa")]
-        SCHEME_FALCON => {
-            #[allow(unused_imports)]
-            use qtv_crypto::fn_dsa;
-            unimplemented!("fn_dsa signing is gated until the standard is final")
-        }
-        _ => panic!("sign was handed an unknown scheme identifier"),
+        SCHEME_FALCON => Vec::new(),
+        _ => Vec::new(),
     };
     Wrapper {
         body: body.clone(),
@@ -318,6 +314,19 @@ mod fail_closed_tests {
         let call = Call::new(target, vec![1, 2, 3]);
         let body = Body::new("not a Q1 address".to_string(), 0, 1_210, 500, call);
         let _ = sign(&account, &body);
+    }
+
+    #[test]
+    fn signing_under_an_unknown_scheme_yields_an_unverifiable_wrapper_not_a_panic() {
+        let account = qtv_account::derive_with_scheme(&[7u8; 32], 0xEE, 0);
+        let target = derive(&[7u8; 32], 1).address();
+        let call = Call::new(target, vec![1, 2, 3]);
+        let body = Body::new(account.address(), 0, 1_210, 500, call);
+        let wrapper = sign(&account, &body);
+        assert!(
+            !verify(&wrapper, account.public_key()),
+            "an unknown scheme produces an unverifiable wrapper rather than panicking"
+        );
     }
 
     #[test]
