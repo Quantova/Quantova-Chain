@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use qtv_codec::{Decode, Decoder, Encode, Encoder, Error};
-use std::collections::HashSet;
 use qtv_crypto::ml_dsa::{self, PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
 use qtv_crypto::sha3;
+use std::collections::HashSet;
 
 pub const ATTEST_DOMAIN: &[u8] = b"QUANTOVA/Q-ORACLE/ATTEST/v1";
 pub const STATEMENT_DOMAIN: &[u8] = b"QUANTOVA/Q-ORACLE/BRIDGE-PROVER/v1";

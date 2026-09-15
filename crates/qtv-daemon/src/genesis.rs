@@ -1,8 +1,8 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use std::path::Path;
 use std::collections::HashSet;
+use std::path::Path;
 
 use qtv_account::address_for_key;
 use qtv_crypto::sha3;
@@ -285,7 +285,10 @@ fn enforce_no_capture(
         let attest_pk: &[u8] = &v.attest_pk;
         let p2p_public: &[u8] = &v.p2p_public;
         if !ids.insert(v.id) {
-            return Err(format!("genesis validator id {} appears on more than one line", v.id));
+            return Err(format!(
+                "genesis validator id {} appears on more than one line",
+                v.id
+            ));
         }
         if !bonds.insert(v.bond_address.clone()) {
             return Err(format!(
@@ -640,16 +643,22 @@ mod tests {
 
         let mut g = sample_genesis(None);
         g.guardians = qtv_governance::GuardianSet::new(vec![[9u8; 32], [8u8; 32], [7u8; 32]], 2);
-        assert_ne!(base, genesis_hash("Q-test-net-1", "genesis", 64, &g),
-            "the guardian set must bind into the genesis hash");
+        assert_ne!(
+            base,
+            genesis_hash("Q-test-net-1", "genesis", 64, &g),
+            "the guardian set must bind into the genesis hash"
+        );
 
         let mut o = sample_genesis(None);
         o.bridge_operators = Some(qtv_node::bridge::OperatorSet::new(
             vec![(1u32, vec![0xaa; 48]), (2u32, vec![0xbb; 48])],
             2,
         ));
-        assert_ne!(base, genesis_hash("Q-test-net-1", "genesis", 64, &o),
-            "the bridge operator set must bind into the genesis hash");
+        assert_ne!(
+            base,
+            genesis_hash("Q-test-net-1", "genesis", 64, &o),
+            "the bridge operator set must bind into the genesis hash"
+        );
 
         let mut a = sample_genesis(None);
         a.bridged_assets = vec![GenesisBridgedAsset {
@@ -668,8 +677,11 @@ mod tests {
             epoch_cap: 100_000,
             requires_stark: false,
         }];
-        assert_ne!(a_hash, genesis_hash("Q-test-net-1", "genesis", 64, &a2),
-            "changing only an asset cap must move the genesis hash");
+        assert_ne!(
+            a_hash,
+            genesis_hash("Q-test-net-1", "genesis", 64, &a2),
+            "changing only an asset cap must move the genesis hash"
+        );
     }
 
     #[test]
@@ -724,10 +736,19 @@ mod tests {
         // reused key material.
         let clone_a = ValidatorSpec::from_secret(1, 2_000, true, &secret, 64);
         let clone_b = ValidatorSpec::from_secret(2, 2_000, true, &secret, 64);
-        let set = vec![clone_a, clone_b, validator(3, 2_000), validator(4, 2_000), validator(5, 2_000)];
+        let set = vec![
+            clone_a,
+            clone_b,
+            validator(3, 2_000),
+            validator(4, 2_000),
+            validator(5, 2_000),
+        ];
         let err = enforce_no_capture(&set, &[account(1, 100)])
             .expect_err("cloned key material must be rejected");
-        assert!(err.contains("reuses"), "expected a reuse rejection, got: {err}");
+        assert!(
+            err.contains("reuses"),
+            "expected a reuse rejection, got: {err}"
+        );
     }
 
     #[test]

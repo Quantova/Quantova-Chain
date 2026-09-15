@@ -377,7 +377,10 @@ mod tests {
                 break;
             }
         }
-        assert!(work < heavier, "the recorded best work outweighs this proof");
+        assert!(
+            work < heavier,
+            "the recorded best work outweighs this proof"
+        );
     }
 
     #[test]

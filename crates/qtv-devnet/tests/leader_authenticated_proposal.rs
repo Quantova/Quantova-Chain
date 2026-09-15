@@ -603,4 +603,3 @@ fn a_cached_view_change_is_not_counted_once_its_signer_leaves_the_committee() {
         "a cached record whose signer is no longer in the committee does not count toward the quorum"
     );
 }
-

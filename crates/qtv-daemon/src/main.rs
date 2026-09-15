@@ -60,7 +60,8 @@ fn raise_descriptor_limit() {
             rlim_cur: 0,
             rlim_max: 0,
         };
-        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_cur < limit.rlim_max {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_cur < limit.rlim_max
+        {
             limit.rlim_cur = limit.rlim_max;
             libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
         }
@@ -247,7 +248,12 @@ fn run(config_path: &Path) -> Result<(), String> {
                 allow.len()
             ));
         }
-        qtv_gateway::serve(rpc_listener, requests_tx, allow, settings.rpc_cors_origin.clone());
+        qtv_gateway::serve(
+            rpc_listener,
+            requests_tx,
+            allow,
+            settings.rpc_cors_origin.clone(),
+        );
     } else {
         util::log("no RPC configured, the node runs with no client facing surface");
     }

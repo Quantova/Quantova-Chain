@@ -381,7 +381,10 @@ impl EthUpdateProof {
     }
 }
 
-pub fn verify_eth_committee_update(anchor: &EthAnchor, proof: &EthUpdateProof) -> Option<EthAnchor> {
+pub fn verify_eth_committee_update(
+    anchor: &EthAnchor,
+    proof: &EthUpdateProof,
+) -> Option<EthAnchor> {
     if proof.config_selector != anchor.config_selector {
         return None;
     }

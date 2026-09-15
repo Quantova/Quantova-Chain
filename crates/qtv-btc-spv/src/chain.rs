@@ -107,7 +107,9 @@ pub fn verify_chain(
             } else {
                 bits_expectation(height, prev.bits, h.bits, params, i)?;
             }
-            if i >= MEDIAN_TIME_SPAN && h.timestamp <= median_time_past(&headers[i - MEDIAN_TIME_SPAN..i]) {
+            if i >= MEDIAN_TIME_SPAN
+                && h.timestamp <= median_time_past(&headers[i - MEDIAN_TIME_SPAN..i])
+            {
                 return Err(SpvError::MedianTimePast { index: i });
             }
         }

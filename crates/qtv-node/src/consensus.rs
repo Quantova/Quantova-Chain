@@ -443,10 +443,8 @@ impl Consensus {
             .with_total_weight(registered_weight);
         let leader = view.elect_leader(&committee, beacon, slot)?.id;
         let expected = qtv_sampler::sortition::expected_committee(&weights, self.budget);
-        let tau = qtv_sampler::params::finality_threshold_for_draw(
-            expected,
-            committee.len() as u64,
-        );
+        let tau =
+            qtv_sampler::params::finality_threshold_for_draw(expected, committee.len() as u64);
         let reveals = committee.reveals();
         Some(Selection {
             commitment,
@@ -808,8 +806,7 @@ mod tests {
                 .select(&beacon, slot, &published)
                 .expect("a subsampling committee selects instead of halting the chain");
             assert!(
-                selection.tau
-                    >= qtv_sampler::params::finality_threshold(selection.expected),
+                selection.tau >= qtv_sampler::params::finality_threshold(selection.expected),
                 "the threshold stays at the expected draw so a suppressed subset cannot finalise"
             );
         }

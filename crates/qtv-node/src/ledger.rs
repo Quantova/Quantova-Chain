@@ -664,7 +664,10 @@ pub fn bridge_eth_mint_address() -> String {
 
 pub fn bridge_cosmos_mint_address() -> String {
     static BRIDGE_COSMOS_MINT_ADDRESS: OnceLock<String> = OnceLock::new();
-    cached_address(&BRIDGE_COSMOS_MINT_ADDRESS, b"qtv/bridge/mint/cosmos/system")
+    cached_address(
+        &BRIDGE_COSMOS_MINT_ADDRESS,
+        b"qtv/bridge/mint/cosmos/system",
+    )
 }
 
 pub fn bridge_eth_update_address() -> String {
@@ -674,7 +677,10 @@ pub fn bridge_eth_update_address() -> String {
 
 pub fn bridge_cosmos_update_address() -> String {
     static BRIDGE_COSMOS_UPDATE_ADDRESS: OnceLock<String> = OnceLock::new();
-    cached_address(&BRIDGE_COSMOS_UPDATE_ADDRESS, b"qtv/bridge/update/cosmos/system")
+    cached_address(
+        &BRIDGE_COSMOS_UPDATE_ADDRESS,
+        b"qtv/bridge/update/cosmos/system",
+    )
 }
 
 pub fn bridge_exit_address() -> String {
@@ -1861,10 +1867,7 @@ impl Ledger {
     }
 
     pub fn set_bridge_btc_best_work(&mut self, work: &[u8; 32]) {
-        self.write_leaf(
-            stake_singleton_key(BRIDGE_BTC_BEST_WORK_TAG),
-            work.to_vec(),
-        );
+        self.write_leaf(stake_singleton_key(BRIDGE_BTC_BEST_WORK_TAG), work.to_vec());
     }
 
     pub fn bridge_eth_anchor(&self, selector: u8) -> Option<crate::bridge_eth::EthAnchor> {
@@ -5668,7 +5671,8 @@ mod stake_state_tests {
         assert!(
             {
                 let r = l.gov_referendum(lone).unwrap();
-                r.tally.approved(l.gov_total_locked(), r.track.threshold_bps())
+                r.tally
+                    .approved(l.gov_total_locked(), r.track.threshold_bps())
             },
             "the lone vote would have carried under a self referential electorate"
         );
@@ -5732,7 +5736,8 @@ mod stake_state_tests {
         assert!(
             {
                 let r = l.gov_referendum(id).unwrap();
-                r.tally.approved(u128::from(l.total_staked()), r.track.threshold_bps())
+                r.tally
+                    .approved(u128::from(l.total_staked()), r.track.threshold_bps())
             },
             "against the collapsed live electorate the minority would have carried"
         );
@@ -6121,7 +6126,10 @@ mod stake_state_tests {
             4_000 * 1_000_000,
             0
         ));
-        assert_eq!(l.gov_lock(&[41u8; 32]).map(|lock| lock.amount), Some(4_000 * 1_000_000));
+        assert_eq!(
+            l.gov_lock(&[41u8; 32]).map(|lock| lock.amount),
+            Some(4_000 * 1_000_000)
+        );
         assert_eq!(l.balance(&thief), 2_000 * 1_000_000);
 
         l.set_frozen(&[41u8; 32]);
@@ -7839,7 +7847,10 @@ mod stake_state_tests {
         };
 
         assert!(l.guardian_enact_bridge_action(
-            &Action::BridgeAnchorSet { corridor: 0, anchor: btc.encode() },
+            &Action::BridgeAnchorSet {
+                corridor: 0,
+                anchor: btc.encode()
+            },
             0,
             0,
             0
@@ -7851,7 +7862,10 @@ mod stake_state_tests {
         );
 
         assert!(!l.guardian_enact_bridge_action(
-            &Action::BridgeAnchorSet { corridor: 1, anchor: eth.encode() },
+            &Action::BridgeAnchorSet {
+                corridor: 1,
+                anchor: eth.encode()
+            },
             1,
             0,
             0
@@ -7880,7 +7894,10 @@ mod stake_state_tests {
         ));
 
         assert!(l.guardian_enact_bridge_action(
-            &Action::BridgeAnchorSet { corridor: 1, anchor: eth.encode() },
+            &Action::BridgeAnchorSet {
+                corridor: 1,
+                anchor: eth.encode()
+            },
             1,
             2 * GUARDIAN_ENACT_DELAY_SECONDS,
             0
@@ -8475,7 +8492,8 @@ mod stake_state_tests {
         let mut l = Ledger::new();
         let gateway = qtv_idfmt::render_address(&[0x0Du8; 32]).unwrap();
         assert!(!l.is_bridge_gateway(&gateway));
-        l.apply_parameter(b"bridge_gateway", &[0x0Du8; 32], 0).unwrap();
+        l.apply_parameter(b"bridge_gateway", &[0x0Du8; 32], 0)
+            .unwrap();
         assert_eq!(l.bridge_gateway(), Some([0x0Du8; 32]));
         assert!(l.is_bridge_gateway(&gateway));
         assert!(!l.is_bridge_gateway(&gov_addr(90)));

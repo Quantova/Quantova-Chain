@@ -26,7 +26,13 @@ fn fund(ledger: &mut Ledger, account: &KeyAccount, balance: u64) {
 }
 
 fn transfer(from: &KeyAccount, to: &str, fee: u128) -> Wrapper {
-    let body = Body::new(from.address(), 0, TRANSFER_METER, fee, transfer_call(to, 100));
+    let body = Body::new(
+        from.address(),
+        0,
+        TRANSFER_METER,
+        fee,
+        transfer_call(to, 100),
+    );
     sign(from, &body)
 }
 
