@@ -757,13 +757,28 @@ impl DevNode {
     }
 
     pub fn submit(&mut self, transaction: Wrapper) -> Result<Admitted, Reject> {
-        let admitted = self
-            .mempool
-            .admit(transaction.clone(), &self.ledger, &self.fee_params)?;
+        self.submit_hinted(transaction, None)
+    }
+
+    pub fn submit_hinted(
+        &mut self,
+        transaction: Wrapper,
+        hint: Option<qtv_node::mempool::VerifyHint>,
+    ) -> Result<Admitted, Reject> {
+        let admitted = self.mempool.admit(
+            transaction.clone(),
+            &self.ledger,
+            &self.fee_params,
+            hint.as_ref(),
+        )?;
         if admitted == Admitted::Fresh {
             self.outbox.push(transaction);
         }
         Ok(admitted)
+    }
+
+    pub fn verify_key_for(&self, wrapper: &Wrapper) -> Option<Vec<u8>> {
+        qtv_node::mempool::signed_lane_key(&self.ledger, wrapper).map(|hint| hint.public_key)
     }
 
     pub fn submit_batch(&mut self, batch: Vec<Wrapper>) {
@@ -780,7 +795,7 @@ impl DevNode {
     pub fn admit_gossiped(&mut self, transaction: Wrapper) {
         let _ = self
             .mempool
-            .admit(transaction, &self.ledger, &self.fee_params);
+            .admit(transaction, &self.ledger, &self.fee_params, None);
     }
 
     pub fn admit_gossiped_batch(&mut self, batch: Vec<Wrapper>) {

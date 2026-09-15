@@ -1208,9 +1208,13 @@ fn submit(node: &mut DevNode, bytes: Vec<u8>) -> Json {
         }
     };
     let tx_id = wrapper.id();
-    match node.submit(wrapper) {
-        Ok(Admitted::Fresh) => accepted(&tx_id, "fresh"),
-        Ok(Admitted::Known) => accepted(&tx_id, "known"),
+    submit_reply(node.submit(wrapper), &tx_id)
+}
+
+pub fn submit_reply(result: Result<Admitted, Reject>, tx_id: &str) -> Json {
+    match result {
+        Ok(Admitted::Fresh) => accepted(tx_id, "fresh"),
+        Ok(Admitted::Known) => accepted(tx_id, "known"),
         Err(reject) => rejected(reject),
     }
 }
