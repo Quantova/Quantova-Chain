@@ -51,8 +51,6 @@ pub const UNBONDING_DAYS: u64 = 21;
 pub const EARLIEST_EXIT_DAYS: u64 = BOND_LOCK_DAYS + UNBONDING_DAYS;
 
 pub const SLASH_ATTRIBUTABLE_BPS: u128 = 10_000;
-pub const SLASH_LIVENESS_MINOR_BPS: u128 = 100;
-pub const SLASH_LIVENESS_MAJOR_BPS: u128 = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Session {
@@ -116,15 +114,11 @@ pub fn released(earned: u64, age_days: u64) -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fault {
     Attributable,
-    LivenessMinor,
-    LivenessMajor,
 }
 
 pub fn slash(bond: u64, fault: Fault) -> u64 {
     let bps = match fault {
         Fault::Attributable => SLASH_ATTRIBUTABLE_BPS,
-        Fault::LivenessMinor => SLASH_LIVENESS_MINOR_BPS,
-        Fault::LivenessMajor => SLASH_LIVENESS_MAJOR_BPS,
     };
     ((bond as u128) * bps / SLASH_ATTRIBUTABLE_BPS) as u64
 }
@@ -517,8 +511,6 @@ mod tests {
     fn attributable_faults_take_the_whole_bond() {
         let bond = 2_000 * QTOV;
         assert_eq!(slash(bond, Fault::Attributable), bond);
-        assert_eq!(slash(bond, Fault::LivenessMinor), 20 * QTOV);
-        assert_eq!(slash(bond, Fault::LivenessMajor), 200 * QTOV);
     }
 
     #[test]
@@ -594,9 +586,6 @@ mod tests {
     fn slashing_moves_stake_to_the_treasury() {
         let mut l = StakeLedger::new(0);
         l.bond(id(1), 2_000 * QTOV, 0);
-        assert_eq!(l.slash(&id(1), Fault::LivenessMinor), 20 * QTOV);
-        assert_eq!(l.treasury(), 20 * QTOV);
-        assert_eq!(l.bond_of(&id(1)).unwrap().amount, 1_980 * QTOV);
         l.slash(&id(1), Fault::Attributable);
         assert_eq!(l.treasury(), 2_000 * QTOV);
         assert!(l.bond_of(&id(1)).is_none());

@@ -6868,23 +6868,18 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn the_bond_slash_exit_lifecycle_keeps_balance_and_stake_in_step() {
+    fn the_bond_exit_lifecycle_keeps_balance_and_stake_in_step() {
         let mut l = Ledger::new();
         let addr = qtv_idfmt::render_address(&[4u8; 32]).unwrap();
         let id = [4u8; 32];
         l.set_account(&addr, &Account::funded(5_000 * 1_000_000, 1, vec![]));
         l.bond(&addr, 2_000 * 1_000_000, 0);
-        assert_eq!(
-            l.slash_stake(&addr, qtv_staking::Fault::LivenessMinor),
-            20 * 1_000_000
-        );
-        assert_eq!(l.stake_treasury(), 20 * 1_000_000);
-        assert_eq!(l.stake_bond(&id).unwrap().amount, 1_980 * 1_000_000);
+        assert_eq!(l.stake_bond(&id).unwrap().amount, 2_000 * 1_000_000);
         assert!(!l.request_stake_exit(&addr, 89));
         assert!(l.request_stake_exit(&addr, 90));
         assert!(!l.withdraw_stake(&addr, 90 + 20));
         assert!(l.withdraw_stake(&addr, 90 + 21));
-        assert_eq!(l.balance(&addr), 3_000 * 1_000_000 + 1_980 * 1_000_000);
+        assert_eq!(l.balance(&addr), 5_000 * 1_000_000);
         assert!(l.stake_bond(&id).is_none());
     }
 
