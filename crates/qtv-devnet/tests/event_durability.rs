@@ -12,11 +12,6 @@ use support::{config, transfer, unique_base, user};
 
 #[test]
 fn events_survive_a_restart_instead_of_dying_with_the_process() {
-    // Events used to live only in a map in the node. Nothing wrote them anywhere, so a
-    // restart lost every event the chain had ever emitted, and the explorer was the one
-    // surviving record of them purely because its indexer had captured them live. That
-    // was proven against the running testnet: heights 1000, 50000 and 200000 all
-    // answered with no events at all while a height near the head answered with five.
     let base = unique_base("event-durability");
     let params = FeeParams::devnet();
     let alice = user(0);
