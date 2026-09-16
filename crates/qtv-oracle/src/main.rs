@@ -70,15 +70,24 @@ fn keygen(a: &[String]) {
         committee.push_str(&format!("{id} {} {}\n", hexs(&pk), hexs(&pop)));
     }
     let secrets_path = format!("{prefix}.secrets");
-    fs::write(&secrets_path, &secrets).expect("write secrets");
-    // The secrets file holds every operator's signing key. Make it owner-only rather
-    // than leaving it world-readable at the process umask.
+    // The secrets file holds every operator's signing key. Create it owner-only in the
+    // first place, rather than writing at the process umask and narrowing it after: the
+    // gap between the two is long enough to open the file.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&secrets_path, fs::Permissions::from_mode(0o600))
-            .expect("restrict the secrets file to the owner");
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&secrets_path)
+            .expect("open the secrets file owner only");
+        file.write_all(secrets.as_bytes()).expect("write secrets");
     }
+    #[cfg(not(unix))]
+    fs::write(&secrets_path, &secrets).expect("write secrets");
     fs::write(format!("{prefix}.committee"), committee).expect("write committee");
     eprintln!("wrote {prefix}.secrets + {prefix}.committee ({n} operators, threshold {threshold}, chain {chain_id})");
 }
