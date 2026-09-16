@@ -1348,6 +1348,7 @@ fn execute_ordered_across(
     let bridge_unfreeze_address = crate::ledger::bridge_unfreeze_address();
     ledger.bridge_expire(now_seconds);
     ledger.guardian_expire(now_seconds);
+    ledger.guardian_apply_due_enact(now_seconds);
     let mut included = Vec::new();
     let mut vm_meter: u64 = 0;
     let mut sender_vm_meter: std::collections::BTreeMap<String, u64> =
@@ -2196,6 +2197,36 @@ mod tests {
         let mut id = [0u8; 32];
         id.copy_from_slice(&payload);
         id
+    }
+
+    #[test]
+    fn a_due_guardian_enact_installs_on_the_sequential_execution_path() {
+        use qtv_governance::Action;
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let anchor = crate::bridge_btc::BitcoinAnchor {
+            network: 0,
+            checkpoint_height: 100,
+            checkpoint_hash: [0x11u8; 32],
+            checkpoint_min_work: [0x22u8; 32],
+            asset_id: [0x33u8; 16],
+            deposit_script: vec![0x76, 0xa9, 0x14],
+        };
+        assert!(ledger.guardian_enact_bridge_action(
+            &Action::BridgeAnchorSet {
+                corridor: 0,
+                anchor: anchor.encode(),
+            },
+            0,
+            0,
+            0
+        ));
+        assert!(execute_ordered(&mut ledger, &[], &fee, 24 * 60 * 60).is_empty());
+        assert_eq!(
+            ledger.bridge_bitcoin_anchor(),
+            Some(anchor),
+            "a block executed without the parallel path still enacts the due anchor"
+        );
     }
 
     #[test]
