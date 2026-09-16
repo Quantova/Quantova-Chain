@@ -205,9 +205,7 @@ fn string_field(body: &Json, key: &str) -> Result<String, ClientError> {
 
 const MAX_STORAGE_KEYS: usize = 64;
 
-/// Cap a submitted transaction before it reaches the node. A legitimate transaction,
-/// including a full contract deploy, fits well under this; a larger body is refused
-/// here so no validator spends a post-quantum signature verification on it.
+// a full contract deploy fits well under this
 const MAX_TX_BYTES: usize = 256 * 1024;
 
 fn key_list(body: &Json) -> Result<Vec<[u8; 32]>, ClientError> {
@@ -244,12 +242,6 @@ fn storage_at(node: &DevNode, address: &str, keys: &[[u8; 32]]) -> Result<Json, 
             "the address is not a q1 address",
         ));
     }
-    // Read the slots that were ASKED FOR, one trie lookup each. This used to walk the
-    // contract's whole storage and refuse with storage_too_large past about seven
-    // thousand slots, so a targeted read of one known slot failed on a contract that
-    // had simply grown, and any stranger who could create a slot in it, by taking a
-    // token balance or a name, could push it over that line permanently. The ledger
-    // has always been able to answer one exact key in one read; nothing called it.
     let id = match qtv_idfmt::parse_address(address) {
         Ok(bytes) => match <[u8; 32]>::try_from(bytes.as_slice()) {
             Ok(id) => id,
@@ -551,9 +543,7 @@ fn chain_params(node: &DevNode) -> Json {
         .map(|track| {
             object(vec![
                 ("code", Json::Int(u64::from(track.code()))),
-                // The deposit governance is actually charging, not the figure this
-                // binary was compiled with. Publishing the compiled constant after a
-                // retune sent proposers the wrong amount and cost them the fee.
+                // what governance charges now, not the compiled constant
                 ("deposit", Json::Int(ledger.gov_track_deposit(*track))),
                 (
                     "threshold_bps",
