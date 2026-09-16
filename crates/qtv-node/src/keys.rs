@@ -24,7 +24,8 @@ fn wipe(bytes: &mut [u8]) {
     for slot in bytes.iter_mut() {
         *slot = 0;
     }
-    std::hint::black_box(bytes);
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    let _ = core::hint::black_box(&*bytes);
 }
 
 pub fn load_or_generate(path: &Path) -> io::Result<[u8; SECRET_LEN]> {
