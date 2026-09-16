@@ -20,17 +20,30 @@ pub fn generate() -> [u8; SECRET_LEN] {
     secret
 }
 
+fn wipe(bytes: &mut [u8]) {
+    for slot in bytes.iter_mut() {
+        *slot = 0;
+    }
+    std::hint::black_box(bytes);
+}
+
 pub fn load_or_generate(path: &Path) -> io::Result<[u8; SECRET_LEN]> {
-    match fs::read_to_string(path) {
-        Ok(text) => parse_hex32(text.trim()).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "keystore {} must hold exactly 64 hex characters",
-                    path.display()
-                ),
-            )
-        }),
+    match fs::read(path) {
+        Ok(mut raw) => {
+            let parsed = std::str::from_utf8(&raw)
+                .ok()
+                .and_then(|text| parse_hex32(text.trim()));
+            wipe(&mut raw);
+            parsed.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "keystore {} must hold exactly 64 hex characters",
+                        path.display()
+                    ),
+                )
+            })
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let secret = generate();
             write_keystore(path, &secret)?;
