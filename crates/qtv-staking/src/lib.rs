@@ -50,6 +50,8 @@ pub const BOND_LOCK_DAYS: u64 = 90;
 pub const UNBONDING_DAYS: u64 = 21;
 pub const EARLIEST_EXIT_DAYS: u64 = BOND_LOCK_DAYS + UNBONDING_DAYS;
 
+pub const BPS_DENOM: u128 = 10_000;
+
 pub const SLASH_ATTRIBUTABLE_BPS: u128 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,13 +83,13 @@ pub fn session_emission(total_staked: u64, total_supply: u64) -> u64 {
     // alone was a backstop that could never fire.
     let staked = total_staked.min(total_supply);
     let raw = EMISSION_K.saturating_mul((staked as u128).isqrt() as u64);
-    let bound = ((total_supply as u128) * (MAX_SESSION_EMISSION_BPS as u128) / 10_000) as u64;
+    let bound = ((total_supply as u128) * (MAX_SESSION_EMISSION_BPS as u128) / BPS_DENOM) as u64;
     raw.min(bound)
 }
 
 /// The most a single governance proposal may mint against the supply that exists.
 pub fn gov_mint_ceiling(total_supply: u64) -> u64 {
-    let share = ((total_supply as u128) * (GOV_MINT_MAX_BPS as u128) / 10_000) as u64;
+    let share = ((total_supply as u128) * (GOV_MINT_MAX_BPS as u128) / BPS_DENOM) as u64;
     share.max(GOV_MINT_FLOOR)
 }
 
@@ -120,7 +122,7 @@ pub fn slash(bond: u64, fault: Fault) -> u64 {
     let bps = match fault {
         Fault::Attributable => SLASH_ATTRIBUTABLE_BPS,
     };
-    ((bond as u128) * bps / SLASH_ATTRIBUTABLE_BPS) as u64
+    ((bond as u128) * bps / BPS_DENOM) as u64
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,6 +442,20 @@ impl Decode for SessionMeter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_slash_scales_against_the_basis_point_denominator() {
+        assert_eq!(slash(1_000, Fault::Attributable), 1_000);
+        assert_eq!(
+            SLASH_ATTRIBUTABLE_BPS, BPS_DENOM,
+            "an attributable fault takes the whole bond"
+        );
+        assert_eq!(
+            ((1_000u128) * 5_000 / BPS_DENOM) as u64,
+            500,
+            "a reduced rate must take a proportional cut, not the whole bond"
+        );
+    }
 
     const QTOV: u64 = NATIVE_UNIT as u64;
 
