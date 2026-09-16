@@ -2200,6 +2200,39 @@ mod tests {
     }
 
     #[test]
+    fn a_bridge_mint_target_lands_the_same_way_in_both_executors() {
+        let fee = FeeParams::devnet();
+        let alice = keypair(711);
+        let mint_target = crate::ledger::bridge_eth_mint_address();
+
+        let mut sequential = Ledger::new();
+        fund(&mut sequential, &alice, 10_000 * 1_000_000);
+        let ordered = execute_ordered(
+            &mut sequential,
+            &[transfer(&alice, &mint_target, 10, 0, &fee)],
+            &fee,
+            0,
+        );
+
+        let mut parallel = Ledger::new();
+        fund(&mut parallel, &alice, 10_000 * 1_000_000);
+        let split = crate::parallel::execute_parallel(
+            &mut parallel,
+            &[transfer(&alice, &mint_target, 10, 0, &fee)],
+            &fee,
+            8,
+            0,
+        );
+
+        assert_eq!(ordered.len(), split.len());
+        assert_eq!(
+            sequential.q_root(),
+            parallel.q_root(),
+            "both executors agree on a bridge mint target"
+        );
+    }
+
+    #[test]
     fn both_execution_paths_drop_a_transaction_past_its_validity_window() {
         let fee = FeeParams::devnet();
         let alice = keypair(701);
