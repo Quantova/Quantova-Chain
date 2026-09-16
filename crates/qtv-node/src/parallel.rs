@@ -170,9 +170,6 @@ pub fn execute_parallel(
     let bridge_settle_address = crate::ledger::bridge_settle_address();
     let round_proposer = ledger.round_proposer().map(str::to_string);
     let grants_address = crate::ledger::grants_address();
-    ledger.bridge_expire(now_seconds);
-    ledger.guardian_expire(now_seconds);
-    ledger.guardian_apply_due_enact(now_seconds);
     if candidates.iter().any(|wrapper| {
         let (sender, target) = access(wrapper);
         round_proposer.as_deref() == Some(sender)
@@ -200,6 +197,9 @@ pub fn execute_parallel(
     }) {
         return crate::node::execute_ordered(ledger, candidates, fee_params, now_seconds);
     }
+    ledger.bridge_expire(now_seconds);
+    ledger.guardian_expire(now_seconds);
+    ledger.guardian_apply_due_enact(now_seconds);
     let layers = plan_layers(candidates);
     let mut included: Vec<usize> = Vec::new();
     let mut fees = FeeSplit::default();
