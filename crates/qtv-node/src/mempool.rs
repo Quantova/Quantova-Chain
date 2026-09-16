@@ -937,19 +937,20 @@ impl Mempool {
         refs.into_iter().cloned().collect()
     }
 
-    /// After a block, drop every pending transaction that can no longer execute:
-    /// a nonce at or below the sender's committed nonce (already spent or superseded),
-    /// or a sender now blacklisted or frozen. Without this a stale ceiling-fee entry
-    /// sits in the pool forever, because eviction needs a strictly higher fee and fees
-    /// are clamped to the ceiling, so the pool can be wedged full of dead entries.
+    // Drops what can no longer execute, a spent nonce, a barred sender, or a passed
+    // validity window. Eviction needs a strictly higher fee and fees clamp to the
+    // ceiling, so without this the pool wedges full of entries that never run.
     pub fn revalidate(&mut self, ledger: &Ledger) {
+        let height = ledger.execution_height();
         let mut kept = Vec::with_capacity(self.pending.len());
         for wrapper in std::mem::take(&mut self.pending) {
             let sender = wrapper.body().sender();
             let account = ledger.account(sender);
             let stale = wrapper.body().nonce() < account.nonce;
             let barred = ledger.is_blacklisted(sender) || ledger.is_frozen(sender);
-            if stale || barred {
+            let valid_until = wrapper.body().valid_until_height();
+            let expired = valid_until != 0 && height > valid_until;
+            if stale || barred || expired {
                 self.ids.remove(wrapper.id().as_str());
                 self.untrack(&wrapper);
             } else {
@@ -1004,6 +1005,36 @@ mod tests {
         let call = transfer_call(to, amount);
         let body = Body::new(from.address(), nonce, TRANSFER_METER, fee, call);
         sign(from, &body)
+    }
+
+    #[test]
+    fn revalidate_sweeps_an_entry_past_its_validity_window() {
+        let params = FeeParams::devnet();
+        let ceiling = u128::from(params.ceiling_fee());
+        let mut ledger = Ledger::new();
+        let mut pool = Mempool::with_limits(4, 100, 0);
+
+        let alice = keypair(1);
+        fund(&mut ledger, &alice, 1_000_000_000);
+        let call = transfer_call(&keypair(9).address(), 100);
+        let body = Body::new(alice.address(), 0, TRANSFER_METER, ceiling, call).valid_until(5);
+        assert!(matches!(
+            pool.admit(sign(&alice, &body), &ledger, &params, None),
+            Ok(Admitted::Fresh)
+        ));
+        assert_eq!(pool.pending_len(), 1);
+
+        ledger.set_execution_height(5);
+        pool.revalidate(&ledger);
+        assert_eq!(pool.pending_len(), 1, "at the window it can still execute");
+
+        ledger.set_execution_height(6);
+        pool.revalidate(&ledger);
+        assert_eq!(
+            pool.pending_len(),
+            0,
+            "an entry past its window can never execute, so it must not hold a slot"
+        );
     }
 
     #[test]
