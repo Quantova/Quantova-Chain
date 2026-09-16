@@ -1,3 +1,5 @@
+// Copyright 2026 Quantova Inc
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 use qtv_crypto::{ml_dsa, sha3};
 use std::io::Read;
 
