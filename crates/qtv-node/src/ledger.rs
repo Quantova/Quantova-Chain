@@ -3927,7 +3927,8 @@ impl Ledger {
         let taken = qtv_staking::slash(bond.amount, fault);
         let treasury = self.stake_treasury() + taken;
         self.set_stake_treasury(treasury);
-        self.debit_staked(taken);
+        // The whole bond is cleared below, so the whole bond leaves the staked total.
+        self.debit_staked(bond.amount);
         if taken > 0 {
             self.record_slash_event(address, taken);
             self.record_side_event(SideEvent::Slash {
@@ -8647,6 +8648,26 @@ mod stake_state_tests {
         let mut decoder = Decoder::new(&events[0].data);
         assert_eq!(decoder.get_bytes().unwrap(), addr.as_bytes());
         assert_eq!(decoder.get_u64().unwrap(), paid);
+    }
+
+    #[test]
+    fn a_slash_takes_the_whole_bond_out_of_the_staked_total() {
+        let mut l = Ledger::new();
+        let guilty = gov_addr(91);
+        let honest = gov_addr(92);
+        fund(&mut l, &guilty, 5_000 * 1_000_000);
+        fund(&mut l, &honest, 5_000 * 1_000_000);
+        assert!(l.bond_with_fee(&guilty, 2_000 * 1_000_000, 0, 0));
+        assert!(l.bond_with_fee(&honest, 2_000 * 1_000_000, 0, 0));
+        assert_eq!(l.total_staked(), 4_000 * 1_000_000);
+
+        l.slash_stake(&guilty, qtv_staking::Fault::Attributable);
+
+        assert_eq!(
+            l.total_staked(),
+            2_000 * 1_000_000,
+            "the staked total counts only the bonds that still exist"
+        );
     }
 
     #[test]
