@@ -27,6 +27,8 @@ const IO_TIMEOUT: Duration = Duration::from_secs(15);
 
 const REQUEST_DEADLINE: Duration = Duration::from_secs(20);
 
+const MAX_INFLIGHT_BODY: usize = 8 * 1024 * 1024;
+
 const MAX_CONNECTIONS: usize = 512;
 
 const MAX_CONNECTIONS_PER_IP: usize = 32;
@@ -59,6 +61,7 @@ struct Limiter {
 #[derive(Default)]
 struct LimiterInner {
     total: usize,
+    body_bytes: usize,
     per_ip: HashMap<IpAddr, usize>,
     per_forwarded: HashMap<IpAddr, usize>,
     rate: HashMap<IpAddr, Bucket>,
@@ -213,6 +216,26 @@ impl Limiter {
         }
     }
 
+    fn try_reserve_body(&self, want: usize) -> bool {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if inner.body_bytes.saturating_add(want) > MAX_INFLIGHT_BODY {
+            return false;
+        }
+        inner.body_bytes += want;
+        true
+    }
+
+    fn release_body(&self, held: usize) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.body_bytes = inner.body_bytes.saturating_sub(held);
+    }
+
     fn release(&self, ip: IpAddr) {
         let mut inner = self
             .inner
@@ -352,6 +375,17 @@ fn forwarded_client_ip(header: &Option<String>) -> Option<IpAddr> {
     rightmost.parse::<IpAddr>().ok()
 }
 
+struct BodyGuard {
+    limiter: Arc<Limiter>,
+    held: usize,
+}
+
+impl Drop for BodyGuard {
+    fn drop(&mut self) {
+        self.limiter.release_body(self.held);
+    }
+}
+
 struct ForwardedGuard {
     limiter: Arc<Limiter>,
     ip: IpAddr,
@@ -393,6 +427,7 @@ fn handle_connection(
     let path = parts.next().unwrap_or("").to_string();
 
     let mut content_length = 0usize;
+    let mut seen_length = false;
     let mut forwarded_for: Option<String> = None;
     loop {
         let header = match read_capped_line(&mut reader, &mut head_budget, deadline) {
@@ -412,6 +447,15 @@ fn handle_connection(
             break;
         }
         if let Some(value) = header_value(trimmed, "content-length") {
+            if seen_length {
+                return write_error(
+                    &mut stream,
+                    400,
+                    "bad_request",
+                    "the request carries more than one content-length header",
+                );
+            }
+            seen_length = true;
             match value.trim().parse::<usize>() {
                 Ok(n) => content_length = n,
                 Err(_) => {
@@ -493,6 +537,22 @@ fn handle_connection(
             "the request body is too large",
         );
     }
+
+    let _body_guard = if content_length == 0 {
+        None
+    } else if limiter.try_reserve_body(content_length) {
+        Some(BodyGuard {
+            limiter: limiter.clone(),
+            held: content_length,
+        })
+    } else {
+        return write_error(
+            &mut stream,
+            503,
+            "busy",
+            "the gateway is handling too much request data, retry shortly",
+        );
+    };
 
     let mut body = Vec::with_capacity(content_length.min(64 * 1024));
     let mut chunk = [0u8; 8192];
@@ -653,6 +713,7 @@ fn write_response(stream: &mut TcpStream, code: u16, body: &str) -> IoResult<()>
     let response = format!(
         "HTTP/1.1 {code} {reason}\r\n\
          Content-Type: application/json\r\n\
+         X-Content-Type-Options: nosniff\r\n\
          Content-Length: {len}\r\n\
          {cors}\
          Connection: close\r\n\
