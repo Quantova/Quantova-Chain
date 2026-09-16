@@ -353,9 +353,7 @@ pub fn serve(
     });
 }
 
-/// The key a rate limit is charged against. An IPv6 caller controls a whole /64 (or
-/// larger), so keying on the full 128-bit address would let one allocation mint
-/// unlimited identities. Collapse IPv6 to its /64 prefix; IPv4 is used whole.
+// v6 callers are charged per /64, v4 whole
 fn limiter_key(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V4(_) => ip,
