@@ -71,30 +71,45 @@ fn no_classical_or_elliptic_curve_crate_reaches_the_lockfile() {
     }
 }
 
+fn normal_dependents_of(crate_name: &str) -> Vec<String> {
+    let mut dependents = Vec::new();
+    for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/..")).expect("crates dir") {
+        let dir = entry.expect("entry").path();
+        let Ok(text) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
+            continue;
+        };
+        let normal = text
+            .split("\n[dependencies]")
+            .nth(1)
+            .and_then(|rest| rest.split("\n[").next())
+            .unwrap_or_default();
+        if normal
+            .lines()
+            .any(|line| line.trim_start().starts_with(crate_name))
+        {
+            dependents.push(
+                dir.file_name()
+                    .expect("crate dir")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
+    }
+    dependents.sort();
+    dependents
+}
+
 #[test]
-fn blst_is_the_only_classical_curve_and_only_q_bls_may_reach_it() {
+fn only_q_bls_carries_blst_into_a_production_build() {
     assert!(
         LOCKFILE.contains("name = \"blst\""),
         "blst left the graph, so this bound no longer describes the build and must be retired"
     );
-    let mut dependents = Vec::new();
-    for block in LOCKFILE.split("[[package]]") {
-        let name = block
-            .lines()
-            .find_map(|line| line.strip_prefix("name = "))
-            .map(|name| name.trim_matches('"'));
-        let (Some(name), true) = (name, block.contains("\"blst\"")) else {
-            continue;
-        };
-        if name != "blst" {
-            dependents.push(name.to_string());
-        }
-    }
     assert_eq!(
-        dependents,
+        normal_dependents_of("blst"),
         vec!["q-bls".to_string()],
-        "blst is admitted only to verify foreign Ethereum consensus proofs through q-bls, it \
-         must never sign or verify anything the Q chain itself relies on, so any other crate \
-         reaching it is a widening of the classical crypto surface"
+        "blst is admitted only to verify foreign Ethereum consensus proofs through q-bls. A test \
+         may reach it under dev-dependencies, but a normal dependency anywhere else ships the \
+         signing half of a classical curve into the running node"
     );
 }
