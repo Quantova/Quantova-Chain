@@ -2922,7 +2922,11 @@ impl Ledger {
                             let mut holder = [0u8; 32];
                             holder.copy_from_slice(&data[..32]);
                             let amount = u64::from_be_bytes(data[32..40].try_into().unwrap());
-                            self.mint_asset(&contract_id, &holder, u128::from(amount));
+                            // A refused mint must take the call down with it, or the
+                            // contract's own books record supply the ledger never issued.
+                            if !self.mint_asset(&contract_id, &holder, u128::from(amount)) {
+                                return false;
+                            }
                             continue;
                         }
                         self.block_events.push(BlockEvent {
