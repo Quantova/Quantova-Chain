@@ -2200,6 +2200,37 @@ mod tests {
     }
 
     #[test]
+    fn both_execution_paths_drop_a_transaction_past_its_validity_window() {
+        let fee = FeeParams::devnet();
+        let alice = keypair(701);
+        let bob = keypair(702);
+        let expired = || {
+            let body = Body::new(
+                alice.address(),
+                0,
+                TRANSFER_METER,
+                u128::from(fee.transfer_fee()),
+                transfer_call(&bob.address(), 10),
+            )
+            .valid_until(5);
+            sign(&alice, &body)
+        };
+
+        let mut sequential = Ledger::new();
+        fund(&mut sequential, &alice, 10_000 * 1_000_000);
+        sequential.set_execution_height(6);
+        assert!(execute_ordered(&mut sequential, &[expired()], &fee, 0).is_empty());
+
+        let mut parallel = Ledger::new();
+        fund(&mut parallel, &alice, 10_000 * 1_000_000);
+        parallel.set_execution_height(6);
+        assert!(
+            crate::parallel::execute_parallel(&mut parallel, &[expired()], &fee, 8, 0).is_empty(),
+            "the parallel path drops what the ordered path drops"
+        );
+    }
+
+    #[test]
     fn a_due_guardian_enact_installs_on_the_sequential_execution_path() {
         use qtv_governance::Action;
         let fee = FeeParams::devnet();

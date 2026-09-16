@@ -200,6 +200,7 @@ pub fn execute_parallel(
     ledger.bridge_expire(now_seconds);
     ledger.guardian_expire(now_seconds);
     ledger.guardian_apply_due_enact(now_seconds);
+    let height = ledger.execution_height();
     let layers = plan_layers(candidates);
     let mut included: Vec<usize> = Vec::new();
     let mut fees = FeeSplit::default();
@@ -208,6 +209,10 @@ pub fn execute_parallel(
     for layer in &layers {
         let tasks: Vec<Task<'_>> = layer
             .iter()
+            .filter(|&&index| {
+                let valid_until = candidates[index].body().valid_until_height();
+                valid_until == 0 || height <= valid_until
+            })
             .map(|&index| {
                 let wrapper = &candidates[index];
                 let (sender_address, recipient_address) = access(wrapper);
