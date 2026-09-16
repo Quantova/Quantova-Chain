@@ -159,17 +159,11 @@ pub fn execute_parallel(
     let exit_address = crate::ledger::stake_exit_address();
     let withdraw_address = crate::ledger::stake_withdraw_address();
     let gov_address = crate::ledger::gov_system_address();
-    let key_register_address = crate::ledger::key_register_address();
-    let evidence_address = crate::ledger::evidence_address();
-    let registration_address = crate::ledger::registration_address();
     let bridge_freeze_address = crate::ledger::bridge_freeze_address();
     let bridge_unfreeze_address = crate::ledger::bridge_unfreeze_address();
-    let bridge_guardian_address = crate::ledger::bridge_guardian_address();
-    let bridge_mint_address = crate::ledger::bridge_mint_address();
-    let bridge_exit_address = crate::ledger::bridge_exit_address();
-    let bridge_settle_address = crate::ledger::bridge_settle_address();
     let round_proposer = ledger.round_proposer().map(str::to_string);
     let grants_address = crate::ledger::grants_address();
+    // Ask the dispatcher's own predicates rather than a second list of addresses.
     if candidates.iter().any(|wrapper| {
         let (sender, target) = access(wrapper);
         round_proposer.as_deref() == Some(sender)
@@ -181,15 +175,17 @@ pub fn execute_parallel(
             || target == exit_address.as_str()
             || target == withdraw_address.as_str()
             || target == gov_address.as_str()
-            || target == key_register_address.as_str()
-            || target == evidence_address.as_str()
-            || target == registration_address.as_str()
             || target == bridge_freeze_address.as_str()
             || target == bridge_unfreeze_address.as_str()
-            || target == bridge_guardian_address.as_str()
-            || target == bridge_mint_address.as_str()
-            || target == bridge_exit_address.as_str()
-            || target == bridge_settle_address.as_str()
+            || crate::node::is_key_register(wrapper)
+            || crate::node::is_evidence(wrapper)
+            || crate::node::is_registration(wrapper)
+            || crate::node::is_bridge_guardian(wrapper)
+            || crate::node::is_bridge_mint(wrapper)
+            || crate::node::is_bridge_eth_update(wrapper)
+            || crate::node::is_bridge_cosmos_update(wrapper)
+            || crate::node::is_bridge_settle(wrapper)
+            || crate::node::is_bridge_exit(wrapper)
             || ledger.is_blacklisted(sender)
             || ledger.is_blacklisted(target)
             || ledger.is_frozen(sender)
