@@ -29,8 +29,8 @@ qtv-loopback = { path = "../qtv-loopback" }
 # The consensus parameters reported alongside the numbers: the committee budget,
 # the stake floor, and the slot. Pinned at the same tag the devnet uses so the
 # whole graph keeps one crypto version.
-qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "8f328d51afdd0bfeff0dd7abbb42168c49ccaffd" }
-qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "8f328d51afdd0bfeff0dd7abbb42168c49ccaffd" }
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "2879435bee9d1faacbc0181361535f403cdf5fad" }
+qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "2879435bee9d1faacbc0181361535f403cdf5fad" }
 
 [lints]
 workspace = true
