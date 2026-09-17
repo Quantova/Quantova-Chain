@@ -113,7 +113,14 @@ impl LimiterInner {
 
     fn strike(&mut self, ip: IpAddr, now: Instant) -> bool {
         if self.strikes.len() >= RATE_TABLE_CAP {
-            self.strikes.clear();
+            // Drop the entries whose strike window has already lapsed before resorting to
+            // emptying the table, so a flood of fresh addresses cannot wipe the strikes
+            // being accumulated against a live attacker.
+            self.strikes
+                .retain(|_, (_, seen)| now.saturating_duration_since(*seen) <= STRIKE_WINDOW);
+            if self.strikes.len() >= RATE_TABLE_CAP {
+                self.strikes.clear();
+            }
         }
         let entry = self.strikes.entry(ip).or_insert((0, now));
         if now.saturating_duration_since(entry.1) > STRIKE_WINDOW {
@@ -125,7 +132,23 @@ impl LimiterInner {
         }
         self.strikes.remove(&ip);
         if self.banned.len() >= RATE_TABLE_CAP {
-            self.banned.clear();
+            // Expired bans first, then the one closest to expiring. Emptying the table
+            // would release every address still serving a ban, which is exactly what a
+            // flood of fresh addresses would be aiming for.
+            self.banned.retain(|_, until| *until > now);
+            while self.banned.len() >= RATE_TABLE_CAP {
+                let soonest = self
+                    .banned
+                    .iter()
+                    .min_by_key(|(_, until)| **until)
+                    .map(|(addr, _)| *addr);
+                match soonest {
+                    Some(addr) => {
+                        self.banned.remove(&addr);
+                    }
+                    None => break,
+                }
+            }
         }
         self.banned.insert(ip, now + BAN_DURATION);
         eprintln!(
@@ -1181,5 +1204,63 @@ mod tests {
         let mut response = String::new();
         let _ = stream.read_to_string(&mut response);
         assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    }
+}
+
+#[cfg(test)]
+mod ban_table_pressure_tests {
+    use super::*;
+
+    fn ip(n: u32) -> IpAddr {
+        IpAddr::from(std::net::Ipv4Addr::from(n))
+    }
+
+    // Both tables used to empty themselves when they filled. That hands an attacker a way
+    // to clear the record: flood enough fresh addresses and every live ban is released.
+    // Expiring first means a flood can only reclaim room that was already dead.
+    #[test]
+    fn a_live_ban_survives_the_table_filling_up() {
+        let mut inner = LimiterInner::default();
+        let now = Instant::now();
+        let victim = ip(0xC0000201);
+        inner.banned.insert(victim, now + BAN_DURATION);
+
+        for i in 0..RATE_TABLE_CAP as u32 {
+            inner.banned.insert(ip(i), now + BAN_DURATION);
+        }
+        let flooder = ip(0xDEADBEEF);
+        for _ in 0..BAN_STRIKES {
+            inner.strike(flooder, now);
+        }
+
+        assert!(
+            inner.is_banned(victim, now),
+            "a live ban was released when the table filled, so a flood of fresh addresses \
+             clears the record of everyone already banned"
+        );
+    }
+
+    #[test]
+    fn expired_bans_are_the_ones_reclaimed() {
+        let mut inner = LimiterInner::default();
+        let now = Instant::now();
+        let stale = ip(1);
+        let live = ip(2);
+        inner.banned.insert(stale, now);
+        inner.banned.insert(live, now + BAN_DURATION);
+        for i in 10..(RATE_TABLE_CAP as u32 + 10) {
+            inner.banned.insert(ip(i), now);
+        }
+
+        let flooder = ip(0xDEADBEEF);
+        for _ in 0..BAN_STRIKES {
+            inner.strike(flooder, now);
+        }
+
+        assert!(inner.is_banned(live, now), "the live ban must be kept");
+        assert!(
+            inner.is_banned(flooder, now),
+            "the flooder that earned a ban must hold one"
+        );
     }
 }
