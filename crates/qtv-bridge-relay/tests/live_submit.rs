@@ -48,6 +48,13 @@ fn extract_tx_hex(body: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+fn extract_address(body: &str) -> Option<String> {
+    let start = body.find("\"address\":\"")? + "\"address\":\"".len();
+    let rest = &body[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
 fn parse_hex(text: &str) -> Vec<u8> {
     let clean = text.strip_prefix("0x").unwrap_or(text);
     (0..clean.len())
@@ -78,9 +85,15 @@ fn spawn_gateway(captured: Arc<Mutex<Option<String>>>) -> u16 {
                      \"head_height\":10,\"denomination\":\"Quon\",\
                      \"fee\":{\"transfer_quon\":\"100\"},\"version\":\"test\"}"
                     .to_string(),
-                "/v1/get_account" => "{\"address\":\"Q1acct\",\"nonce\":4,\"balance\":\"0\",\
-                     \"scheme\":1,\"has_key\":true}"
-                    .to_string(),
+                // Answer for the account that was asked about. A real gateway echoes the
+                // address back, and the client refuses an answer that names another account.
+                "/v1/get_account" => {
+                    let address = extract_address(&request).unwrap_or_default();
+                    format!(
+                        "{{\"address\":\"{address}\",\"nonce\":4,\"balance\":\"0\",\
+                         \"scheme\":1,\"has_key\":true}}"
+                    )
+                }
                 "/v1/submit_transaction" => {
                     if let Some(hex) = extract_tx_hex(&request) {
                         *captured.lock().unwrap() = Some(hex);
