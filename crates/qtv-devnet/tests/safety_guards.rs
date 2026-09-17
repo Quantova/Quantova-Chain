@@ -27,6 +27,15 @@ fn a_restarted_devnode_refuses_to_re_sign_a_height_it_already_signed() {
         );
     }
 
+    // The round above must actually have signed, or the reopen below finds no watermark
+    // and reports no refusal, which looks identical to the guard being broken. Height one
+    // is also the starting height, so it cannot stand in for this.
+    assert!(
+        cfg.nodes[0].store_dir.join("sign.watermark").exists(),
+        "the first round wrote no signing watermark, so the restart below would prove \
+         nothing about the double sign guard"
+    );
+
     let mut restarted = DevNode::open(&cfg.nodes[0], &cfg).expect("reopen");
     assert_eq!(
         restarted.height(),
