@@ -209,7 +209,7 @@ mod tests {
     const FOREIGN_SUITE_SECP256K1: u8 = 0x11;
     const FOREIGN_SUITE_BLS: u8 = 0x12;
 
-    fn ml_dsa_attestation() -> Vec<u8> {
+    pub(super) fn ml_dsa_attestation() -> Vec<u8> {
         vec![0x07u8; ML_DSA_65_SIG_LEN]
     }
 
@@ -592,4 +592,48 @@ mod tests {
             })
         );
     }
+}
+
+#[cfg(test)]
+mod same_family_boundary_tests {
+    use super::*;
+    use super::tests::ml_dsa_attestation;
+
+    // The airlock separates proofs by TIER and FAMILY. It deliberately does not separate
+    // two corridors that share both, and the registry marks many EVM chains LightClient,
+    // so an Ethereum proof does pass the airlock under an Arbitrum corridor id. What stops
+    // it is downstream and cryptographic: corridor_id is inside the ProofStatement that
+    // public_input_digest hashes, so changing the corridor changes the digest and the
+    // STARK no longer matches. This pins where that boundary actually sits, because a
+    // reader of parse_ingress alone would reasonably assume the airlock separated them.
+    #[test]
+    fn the_airlock_does_not_separate_two_corridors_of_the_same_tier_and_family() {
+        let ethereum = StarkStatement {
+            corridor_id: 2,
+            dest_chain_id: 4801,
+            nonce: 990_001,
+            kind: StatementKind::EvmLightClient,
+            public_input_digest: [9u8; 32],
+        };
+        let bytes = encode_ingress(&ml_dsa_attestation(), &ethereum, &[0x02u8; 8]);
+        assert!(
+            parse_ingress(&bytes).is_ok(),
+            "an EVM proof under the Ethereum corridor crosses"
+        );
+
+        let arbitrum = StarkStatement {
+            corridor_id: 6,
+            dest_chain_id: 4801,
+            nonce: 990_001,
+            kind: StatementKind::EvmLightClient,
+            public_input_digest: [9u8; 32],
+        };
+        let bytes = encode_ingress(&ml_dsa_attestation(), &arbitrum, &[0x02u8; 8]);
+        assert!(
+            parse_ingress(&bytes).is_ok(),
+            "the same proof kind also crosses under another EVM LightClient corridor, so the \
+             airlock is not what keeps the two apart"
+        );
+    }
+
 }
