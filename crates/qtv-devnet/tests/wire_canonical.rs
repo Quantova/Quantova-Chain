@@ -84,3 +84,40 @@ fn well_formed_frames_round_trip_to_themselves() {
         assert_eq!(&decoded.encode(), frame, "the frame re-encodes to itself");
     }
 }
+
+#[test]
+fn every_decoder_a_peer_can_reach_never_panics_on_arbitrary_bytes() {
+    let mut state: u64 = 0x2545F4914F6CDD1D;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for round in 0..60_000u64 {
+        let len = (next() % 1024) as usize;
+        let mut bytes = vec![0u8; len];
+        for b in bytes.iter_mut() {
+            *b = (next() & 0xFF) as u8;
+        }
+        // Steer a share of the corpus at the tag and length fields the decoders branch on,
+        // since uniform noise almost never forms a plausible header.
+        if bytes.len() > 9 {
+            match round % 4 {
+                0 => bytes[0] = (next() % 8) as u8,
+                1 => {
+                    bytes[0] = 1;
+                    let n = (next() % 3) as usize;
+                    bytes[1..9].copy_from_slice(&(n as u64).to_le_bytes());
+                }
+                2 => bytes[..8].copy_from_slice(&u64::MAX.to_le_bytes()),
+                _ => {}
+            }
+        }
+        let _ = qtv_devnet::wire::certificate_from_bytes(&bytes);
+        let _ = qtv_devnet::wire::chain_block_from_bytes(&bytes);
+        let _ = qtv_devnet::wire::wrapper_from_bytes(&bytes);
+        let _ = qtv_devnet::wire::decode_register_note(&bytes);
+        let _ = qtv_block::header_from_bytes(&bytes);
+    }
+}
