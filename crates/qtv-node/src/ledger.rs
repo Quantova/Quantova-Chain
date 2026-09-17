@@ -10305,6 +10305,48 @@ mod tests {
     }
 
     #[test]
+    fn a_fee_split_conserves_the_fee_to_the_unit_at_every_size() {
+        let sizes = [
+            0u64,
+            1,
+            2,
+            3,
+            7,
+            9,
+            10,
+            99,
+            100,
+            1_000,
+            9_999,
+            1_000_000,
+            u64::MAX / 2,
+            u64::MAX,
+        ];
+        for fee in sizes {
+            let split = FeeSplit::of(fee);
+            assert_eq!(
+                split.total(),
+                fee,
+                "a fee of {fee} split into {} burn, {} proposer and {} grants, which does not                  add back to the fee, so the split either loses or invents value",
+                split.burn,
+                split.proposer,
+                split.grants
+            );
+            assert!(
+                split.burn <= fee && split.proposer <= fee && split.grants <= fee,
+                "a single share of a {fee} fee exceeds the whole fee"
+            );
+        }
+
+        // Sweep the small sizes exhaustively, where the flooring dust is proportionally
+        // largest and an off by one in the remainder would show up first.
+        for fee in 0u64..5_000 {
+            let split = FeeSplit::of(fee);
+            assert_eq!(split.total(), fee, "the split of {fee} does not conserve");
+        }
+    }
+
+    #[test]
     fn a_fee_burns_seventy_percent_of_the_supply_and_a_mint_raises_it() {
         let mut ledger = Ledger::new();
         ledger.seed_supply(1_000_000);
