@@ -1592,3 +1592,84 @@ mod tests {
         assert!(BRIDGE_FREEZE_COOLDOWN > 0);
     }
 }
+
+#[cfg(test)]
+mod approval_boundary_tests {
+    use super::*;
+
+    // Approval is measured against the WHOLE electorate, not against the votes cast, so a
+    // quiet vote cannot carry a proposal. These pin the exact edges, which is where an off
+    // by one decides whether a chain upgrade or a mint passes.
+    #[test]
+    fn a_tally_exactly_on_the_threshold_passes_and_one_unit_under_does_not() {
+        let electorate = 1_000_000u128;
+        for track in Track::all() {
+            let bps = track.threshold_bps();
+            let needed = electorate * bps / BPS_DENOM;
+
+            let exact = Tally {
+                aye_stake: needed,
+                nay_stake: 0,
+            };
+            assert!(
+                exact.approved(electorate, bps),
+                "{track:?} refused a tally sitting exactly on its {bps} bps threshold"
+            );
+
+            let under = Tally {
+                aye_stake: needed - 1,
+                nay_stake: 0,
+            };
+            assert!(
+                !under.approved(electorate, bps),
+                "{track:?} carried a tally one unit under its {bps} bps threshold"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quiet_vote_cannot_carry_however_lopsided_it_is() {
+        let electorate = 1_000_000u128;
+        let track = Track::ChainUpgrade;
+        let floor = electorate * PARTICIPATION_FLOOR_BPS / BPS_DENOM;
+
+        let unanimous_but_quiet = Tally {
+            aye_stake: floor - 1,
+            nay_stake: 0,
+        };
+        assert!(
+            !unanimous_but_quiet.approved(electorate, track.threshold_bps()),
+            "a turnout under the participation floor carried a proposal, which is how a quiet \
+             vote captures governance"
+        );
+    }
+
+    #[test]
+    fn a_tie_does_not_carry() {
+        let electorate = 1_000u128;
+        let track = Track::ChainUpgrade;
+        let half = electorate * track.threshold_bps() / BPS_DENOM;
+        let tied = Tally {
+            aye_stake: half,
+            nay_stake: half,
+        };
+        assert!(
+            !tied.approved(electorate, track.threshold_bps()),
+            "an equal split must not carry, the ayes have to exceed the nays"
+        );
+    }
+
+    #[test]
+    fn an_empty_electorate_never_carries() {
+        for track in Track::all() {
+            let any = Tally {
+                aye_stake: u128::MAX,
+                nay_stake: 0,
+            };
+            assert!(
+                !any.approved(0, track.threshold_bps()),
+                "{track:?} carried against an empty electorate"
+            );
+        }
+    }
+}
