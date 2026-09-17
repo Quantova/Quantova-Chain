@@ -783,3 +783,82 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod emission_bounds_tests {
+    use super::*;
+
+    // session_emission and session_reward both narrow a u128 product back to u64. That is
+    // only sound while the bounds below hold, so assert them over the whole range rather
+    // than at the handful of points the worked examples happen to use.
+    #[test]
+    fn an_emission_never_exceeds_its_cap_or_the_supply_it_is_measured_against() {
+        let supplies = [
+            0u64,
+            1,
+            NATIVE_UNIT as u64,
+            1_000_000 * NATIVE_UNIT as u64,
+            21_000_000 * NATIVE_UNIT as u64,
+            u64::MAX / 2,
+            u64::MAX,
+        ];
+        for &supply in &supplies {
+            for &staked in &[0u64, 1, supply / 3, supply / 2, supply, u64::MAX] {
+                let emitted = session_emission(staked, supply);
+                let cap = ((supply as u128) * (MAX_SESSION_EMISSION_BPS as u128) / BPS_DENOM) as u64;
+                assert!(
+                    emitted <= cap,
+                    "emission {emitted} above the {MAX_SESSION_EMISSION_BPS} bps cap {cap} at \
+                     supply {supply} staked {staked}"
+                );
+                assert!(
+                    emitted <= supply,
+                    "emission {emitted} exceeds the supply {supply} it is measured against"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_pro_rata_shares_never_pay_out_more_than_was_emitted() {
+        let supply = 21_000_000 * NATIVE_UNIT as u64;
+        for &total_staked in &[1u64, 1_000, NATIVE_UNIT as u64, supply / 4, supply] {
+            let emitted = session_emission(total_staked, supply);
+            for parts in [1usize, 2, 3, 7, 100] {
+                let each = total_staked / parts as u64;
+                if each == 0 {
+                    continue;
+                }
+                let paid: u128 = (0..parts)
+                    .map(|_| u128::from(session_reward(each, total_staked, supply)))
+                    .sum();
+                assert!(
+                    paid <= u128::from(emitted),
+                    "{parts} stakers drew {paid} against an emission of {emitted}, which mints \
+                     value that was never issued"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_zero_staked_set_pays_nothing_and_does_not_divide_by_zero() {
+        assert_eq!(session_reward(0, 0, 1_000_000), 0);
+        assert_eq!(session_reward(500, 0, 1_000_000), 0);
+        assert_eq!(session_emission(0, 0), 0);
+    }
+
+    #[test]
+    fn the_governance_ceiling_never_exceeds_its_share_once_past_the_floor() {
+        for &supply in &[0u64, 1, GOV_MINT_FLOOR, 21_000_000 * NATIVE_UNIT as u64, u64::MAX] {
+            let ceiling = gov_mint_ceiling(supply);
+            let share = ((supply as u128) * (GOV_MINT_MAX_BPS as u128) / BPS_DENOM) as u64;
+            assert!(
+                ceiling == GOV_MINT_FLOOR || ceiling == share,
+                "the ceiling at supply {supply} is neither the floor nor the {GOV_MINT_MAX_BPS} \
+                 bps share"
+            );
+            assert!(ceiling >= GOV_MINT_FLOOR, "the ceiling fell below its floor");
+        }
+    }
+}
