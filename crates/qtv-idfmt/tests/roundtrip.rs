@@ -123,3 +123,102 @@ fn address_string_begins_with_q1() {
     let text = render_address(&raw).unwrap();
     assert!(text.starts_with("Q1"));
 }
+
+// An address is a key into the ledger and it appears in transactions, blocks and the
+// explorer. If one account can be written two ways, the two spellings index apart while
+// spending the same balance, so these pin the rules that keep the encoding unique.
+
+#[test]
+fn a_mixed_case_address_is_refused() {
+    let raw = pattern(32);
+    let text = render_address(&raw).unwrap();
+    assert_eq!(parse_address(&text).unwrap(), raw, "the honest form parses");
+
+    let lower = text.to_ascii_lowercase();
+    assert_eq!(
+        parse_address(&lower).unwrap(),
+        raw,
+        "an all lowercase spelling is the same address"
+    );
+
+    let mut mixed: String = text.clone();
+    if let Some(pos) = mixed.char_indices().rev().find_map(|(i, c)| {
+        if c.is_ascii_alphabetic() {
+            Some(i)
+        } else {
+            None
+        }
+    }) {
+        let flipped = mixed[pos..pos + 1].to_ascii_lowercase();
+        mixed.replace_range(pos..pos + 1, &flipped);
+    }
+    assert_ne!(mixed, text, "the sample really is mixed case");
+    assert_eq!(
+        parse_address(&mixed),
+        Err(Error::MixedCase),
+        "a mixed case spelling must be refused, accepting it gives one account two forms"
+    );
+}
+
+#[test]
+fn a_bech32_checksum_does_not_pass_as_bech32m() {
+    // Flipping the final data symbol moves the residue off the bech32m constant. A decoder
+    // that accepted the older bech32 constant as well would let a second checksum verify.
+    let raw = pattern(32);
+    let text = render_address(&raw).unwrap();
+    let mut bytes: Vec<char> = text.chars().collect();
+    let last = bytes.len() - 1;
+    bytes[last] = if bytes[last] == 'Q' { 'P' } else { 'Q' };
+    let altered: String = bytes.into_iter().collect();
+    assert_eq!(
+        parse_address(&altered),
+        Err(Error::BadChecksum),
+        "only the bech32m residue may verify"
+    );
+}
+
+#[test]
+fn a_truncated_or_extended_address_is_refused() {
+    let raw = pattern(32);
+    let text = render_address(&raw).unwrap();
+
+    let short = &text[..text.len() - 1];
+    assert!(
+        parse_address(short).is_err(),
+        "dropping a symbol must not still parse"
+    );
+
+    let long = format!("{text}Q");
+    assert!(
+        parse_address(&long).is_err(),
+        "appending a symbol must not still parse, a padded form is a second encoding"
+    );
+}
+
+#[test]
+fn every_rendered_kind_refuses_every_other_kind() {
+    let raw = pattern(32);
+    let renders: [(&str, String); 4] = [
+        ("address", render_address(&raw).unwrap()),
+        ("tx", render_tx(&raw).unwrap()),
+        ("block", render_block(&raw).unwrap()),
+        ("state", render_state(&raw).unwrap()),
+    ];
+    for (name, text) in &renders {
+        if *name != "address" {
+            assert!(
+                parse_address(text).is_err(),
+                "a {name} identifier parsed as an address, the prefixes must keep the kinds apart"
+            );
+        }
+        if *name != "tx" {
+            assert!(parse_tx(text).is_err(), "a {name} identifier parsed as a tx");
+        }
+        if *name != "block" {
+            assert!(
+                parse_block(text).is_err(),
+                "a {name} identifier parsed as a block"
+            );
+        }
+    }
+}
