@@ -532,3 +532,98 @@ mod merkle_tests {
         assert_eq!(MerkleProof::from_bytes(&bytes).unwrap(), proof);
     }
 }
+
+#[cfg(test)]
+mod inclusion_boundary_tests {
+    use super::*;
+
+    // verify_inclusion walks however many steps the proof carries, with no bound tying that
+    // to the depth of the tree the root was built at. A shortened path therefore reaches
+    // the root starting from an interior node. Two things keep that unreachable, and both
+    // are asserted here because the exit burn proof in q-exits depends on them.
+    //
+    // First, leaves and internal nodes are hashed under different domain bytes. Second,
+    // and this is the load bearing one, verify_inclusion takes the RAW EVENT BYTES and
+    // leaf hashes them itself, so a caller cannot hand it a digest lifted out of the tree.
+    #[test]
+    fn a_leaf_and_an_internal_node_never_share_a_digest() {
+        assert_ne!(
+            MERKLE_LEAF_DOMAIN, MERKLE_NODE_DOMAIN,
+            "the domain bytes are what separate a leaf from a node"
+        );
+        let a = leaf_hash(b"alpha");
+        let b = leaf_hash(b"beta");
+        let parent = pair_hash(&a, &b);
+        let mut concatenated = Vec::new();
+        concatenated.extend_from_slice(&a);
+        concatenated.extend_from_slice(&b);
+        assert_ne!(
+            parent,
+            leaf_hash(&concatenated),
+            "an internal node collided with a leaf, so an interior node could be presented as \
+             a committed event"
+        );
+    }
+
+    #[test]
+    fn an_interior_node_cannot_be_presented_as_an_event() {
+        let events: Vec<Vec<u8>> = (0..8u8).map(|i| vec![i; 16]).collect();
+        let leaves: Vec<[u8; ROOT_LEN]> = events.iter().map(|e| leaf_hash(e)).collect();
+        let root = merkle_root(&leaves);
+
+        let mut steps = Vec::new();
+        collect_steps(&leaves, 0, &mut steps);
+        let full = MerkleProof { steps };
+
+        // The interior node above events 0 and 1, offered with the remaining path. It is
+        // only refused because no event byte string hashes to it.
+        let interior = pair_hash(&leaves[0], &leaves[1]);
+        let shortened = MerkleProof {
+            steps: full.steps[1..].to_vec(),
+        };
+        assert!(
+            !verify_inclusion(&root, &interior, &shortened),
+            "an interior node verified as an event under a shortened path"
+        );
+        assert!(
+            verify_inclusion(&root, &events[0], &full),
+            "the honest event still verifies"
+        );
+    }
+
+    #[test]
+    fn a_truncated_path_does_not_verify_a_real_event() {
+        let events: Vec<Vec<u8>> = (0..8u8).map(|i| vec![i; 16]).collect();
+        let leaves: Vec<[u8; ROOT_LEN]> = events.iter().map(|e| leaf_hash(e)).collect();
+        let root = merkle_root(&leaves);
+        let mut steps = Vec::new();
+        collect_steps(&leaves, 3, &mut steps);
+
+        for cut in 0..steps.len() {
+            let shortened = MerkleProof {
+                steps: steps[..cut].to_vec(),
+            };
+            assert!(
+                !verify_inclusion(&root, &events[3], &shortened),
+                "a path truncated to {cut} steps verified a real event against the root"
+            );
+        }
+    }
+
+    #[test]
+    fn an_extended_path_does_not_verify_a_real_event() {
+        let events: Vec<Vec<u8>> = (0..8u8).map(|i| vec![i; 16]).collect();
+        let leaves: Vec<[u8; ROOT_LEN]> = events.iter().map(|e| leaf_hash(e)).collect();
+        let root = merkle_root(&leaves);
+        let mut steps = Vec::new();
+        collect_steps(&leaves, 3, &mut steps);
+        steps.push(MerkleStep {
+            sibling: [0x77; ROOT_LEN],
+            sibling_on_left: false,
+        });
+        assert!(
+            !verify_inclusion(&root, &events[3], &MerkleProof { steps }),
+            "an over long path verified, so the walk is not anchored to the committed depth"
+        );
+    }
+}
