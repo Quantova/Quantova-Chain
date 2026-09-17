@@ -12,10 +12,19 @@ fn a_restarted_devnode_refuses_to_re_sign_a_height_it_already_signed() {
     let base = unique_base("resign-guard");
     let cfg = config(&base, &[true], vec![]);
 
+    let watermark = cfg.nodes[0].store_dir.join("sign.watermark");
     {
         let mut node = DevNode::open(&cfg.nodes[0], &cfg).expect("open");
-        let selection = node.select().expect("a committee is selected");
-        let _ = node.enter_round(&selection, true);
+        // Entering a round only signs when this node leads the view, and the draw is not
+        // something the test controls. Drive rounds until it has signed, so the restart
+        // below is always testing the guard rather than an empty watermark.
+        for _ in 0..16 {
+            let selection = node.select().expect("a committee is selected");
+            let _ = node.enter_round(&selection, true);
+            if watermark.exists() {
+                break;
+            }
+        }
         assert_eq!(
             node.height(),
             1,
@@ -27,12 +36,12 @@ fn a_restarted_devnode_refuses_to_re_sign_a_height_it_already_signed() {
         );
     }
 
-    // The round above must actually have signed, or the reopen below finds no watermark
-    // and reports no refusal, which looks identical to the guard being broken. Height one
-    // is also the starting height, so it cannot stand in for this.
+    // Without a watermark the reopen below finds nothing to refuse, which looks identical
+    // to the guard being broken. Height one is also the starting height, so it cannot
+    // stand in for this.
     assert!(
-        cfg.nodes[0].store_dir.join("sign.watermark").exists(),
-        "the first round wrote no signing watermark, so the restart below would prove \
+        watermark.exists(),
+        "sixteen rounds wrote no signing watermark, so the restart below would prove \
          nothing about the double sign guard"
     );
 
