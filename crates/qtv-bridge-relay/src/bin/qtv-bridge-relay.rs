@@ -7,7 +7,7 @@ use qtv_bridge_relay::{Corridor, Relay, RELAY_METER, SEED_LEN};
 
 fn parse_hex(text: &str) -> Result<Vec<u8>, String> {
     let clean = text.trim().strip_prefix("0x").unwrap_or(text.trim());
-    if clean.len() % 2 != 0 {
+    if !clean.len().is_multiple_of(2) {
         return Err("the hex payload has an odd length".to_string());
     }
     (0..clean.len())
