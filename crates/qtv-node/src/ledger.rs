@@ -6716,6 +6716,93 @@ mod stake_state_tests {
         );
     }
 
+    // Everything the chain can hold value in. If a code path ever moves value without
+    // moving it between two of these, this sum stops matching the supply.
+    fn held_value(l: &Ledger, addresses: &[&str]) -> u128 {
+        let balances: u128 = addresses
+            .iter()
+            .map(|a| u128::from(l.balance(a)))
+            .sum();
+        let rewards: u128 = addresses
+            .iter()
+            .filter_map(|a| address_id(a))
+            .map(|id| u128::from(l.stake_rewards_outstanding(&id)))
+            .sum();
+        balances
+            + rewards
+            + u128::from(l.total_staked())
+            + u128::from(l.stake_pool())
+            + u128::from(l.stake_treasury())
+    }
+
+    #[test]
+    fn value_is_conserved_across_a_fee_a_bond_a_reward_and_a_slash() {
+        let mut l = Ledger::new();
+        let alice = qtv_idfmt::render_address(&[21u8; 32]).unwrap();
+        let bob = qtv_idfmt::render_address(&[22u8; 32]).unwrap();
+        let grants = grants_address();
+        let proposer = qtv_idfmt::render_address(&[23u8; 32]).unwrap();
+        let tracked = [
+            alice.as_str(),
+            bob.as_str(),
+            grants.as_str(),
+            proposer.as_str(),
+        ];
+
+        let pool = 700_000 * 1_000_000u64;
+        let funded = 10_000 * 1_000_000u64;
+        l.credit_supply(pool + funded);
+        l.seed_stake_pool(pool);
+        l.credit_account(&alice, funded);
+        l.set_round_proposer(&proposer);
+        assert_eq!(
+            held_value(&l, &tracked),
+            u128::from(l.total_supply()),
+            "the seeded ledger already fails to conserve, so nothing below would mean anything"
+        );
+
+        l.credit_account(&bob, 0);
+        l.apply_balance_delta(&alice, -(5_000i128 * 1_000_000));
+        l.credit_account(&bob, 5_000 * 1_000_000);
+        assert_eq!(
+            held_value(&l, &tracked),
+            u128::from(l.total_supply()),
+            "a plain transfer moved value without conserving it"
+        );
+
+        l.apply_balance_delta(&alice, -1_000i128);
+        l.collect_fee(1_000);
+        assert_eq!(
+            held_value(&l, &tracked),
+            u128::from(l.total_supply()),
+            "a fee did not conserve, the burned share must leave the supply by exactly the \
+             amount it left the balances"
+        );
+
+        assert!(l.bond(&bob, 2_000 * 1_000_000, 0), "bob bonds");
+        assert_eq!(
+            held_value(&l, &tracked),
+            u128::from(l.total_supply()),
+            "a bond moved value out of a balance without it arriving in the staked total"
+        );
+
+        l.set_stake_mainnet_start(0);
+        let paid = l.accrue_reward(&bob, 400);
+        assert!(paid > 0, "the reward is non zero or the step proves nothing");
+        assert_eq!(
+            held_value(&l, &tracked),
+            u128::from(l.total_supply()),
+            "an emission raised the supply without the value arriving anywhere"
+        );
+
+        assert!(l.slash_validator(&bob), "bob is slashed");
+        assert_eq!(
+            held_value(&l, &tracked),
+            u128::from(l.total_supply()),
+            "a slash destroyed value on one side only"
+        );
+    }
+
     #[test]
     fn a_slash_disposes_the_forfeited_reward_and_conserves_supply() {
         let pool = 700_000 * 1_000_000;
