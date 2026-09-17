@@ -1220,3 +1220,62 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod corridor_binding_tests {
+    use super::*;
+    use qlc_stark::corridors::{evm_light_client, EventClaim};
+
+    // The airlock separates proofs only by tier and family, and the registry marks many EVM
+    // chains as the LightClient tier. So an Ethereum proof reaches the same admission path
+    // as an Arbitrum one. The only thing keeping a deposit proved on one EVM chain from
+    // being admitted as a deposit on another is that corridor_id sits inside the statement
+    // the digest is taken over. If that ever stops being true, the separation is gone.
+    fn claim() -> EventClaim {
+        EventClaim {
+            source_ref: [4u8; 32],
+            asset_id: [5u8; 16],
+            amount: 1_000,
+            recipient: [6u8; 32],
+        }
+    }
+
+    #[test]
+    fn the_corridor_changes_the_public_input_digest() {
+        let ethereum = evm_light_client(2, qlc_stark::QUANTOVA_DEST_CHAIN_ID, 900, [3u8; 32], claim(), 64);
+        let arbitrum = evm_light_client(6, qlc_stark::QUANTOVA_DEST_CHAIN_ID, 900, [3u8; 32], claim(), 64);
+
+        assert_ne!(
+            public_input_digest(&ethereum),
+            public_input_digest(&arbitrum),
+            "two EVM corridors produced the same digest for the same event, so a deposit proved \
+             on one chain would be admissible as a deposit on the other"
+        );
+    }
+
+    #[test]
+    fn every_field_of_the_statement_moves_the_digest() {
+        let base = evm_light_client(2, qlc_stark::QUANTOVA_DEST_CHAIN_ID, 900, [3u8; 32], claim(), 64);
+        let baseline = public_input_digest(&base);
+
+        let other_anchor = evm_light_client(2, qlc_stark::QUANTOVA_DEST_CHAIN_ID, 900, [4u8; 32], claim(), 64);
+        assert_ne!(baseline, public_input_digest(&other_anchor), "the anchor must bind");
+
+        let other_block = evm_light_client(2, qlc_stark::QUANTOVA_DEST_CHAIN_ID, 901, [3u8; 32], claim(), 64);
+        assert_ne!(baseline, public_input_digest(&other_block), "the block number must bind");
+
+        let mut amount = claim();
+        amount.amount = 1_001;
+        let other_amount = evm_light_client(2, qlc_stark::QUANTOVA_DEST_CHAIN_ID, 900, [3u8; 32], amount, 64);
+        assert_ne!(baseline, public_input_digest(&other_amount), "the amount must bind");
+
+        let mut recipient = claim();
+        recipient.recipient = [7u8; 32];
+        let other_recipient =
+            evm_light_client(2, qlc_stark::QUANTOVA_DEST_CHAIN_ID, 900, [3u8; 32], recipient, 64);
+        assert_ne!(baseline, public_input_digest(&other_recipient), "the recipient must bind");
+
+        let other_depth = evm_light_client(2, qlc_stark::QUANTOVA_DEST_CHAIN_ID, 900, [3u8; 32], claim(), 32);
+        assert_ne!(baseline, public_input_digest(&other_depth), "the finality depth must bind");
+    }
+}
