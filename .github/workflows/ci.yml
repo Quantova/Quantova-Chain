@@ -41,6 +41,13 @@ jobs:
       - name: test
         working-directory: Quantova-Chain
         run: cargo test --workspace --all-features --locked
+      # The relay roots its own workspace, so --workspace above never reaches it. The
+      # sibling checkout it needs is already present, so build and test it directly.
+      - name: relay
+        working-directory: Quantova-Chain/crates/qtv-bridge-relay
+        run: |
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
       - name: supply chain gate
         working-directory: Quantova-Chain
         run: |
