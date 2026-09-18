@@ -16,6 +16,7 @@ use qtv_node::bridge::{
 use qtv_node::ledger::bridge_mint_address;
 use qtv_node::node::{build_guardian_enact_tx, guardian_enact_challenge};
 use qtv_tx::{sign, Body, Call};
+use qtv_wipe::Zeroize;
 
 const MINT_METER: u64 = 5_000_000;
 const GUARDIAN_DOMAIN: &[u8] = b"QUANTOVA/Q/BRIDGE-GUARDIAN/v1";
@@ -61,7 +62,7 @@ fn keygen(a: &[String]) {
     for id in 0..n {
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&urandom(32));
-        let (pk, sk) = ml_dsa::keygen(&seed);
+        let (pk, mut sk) = ml_dsa::keygen(&seed);
         let pop = ml_dsa::sign(
             &sk,
             &operator_pop_challenge(id, &pk, chain_id),
@@ -69,7 +70,12 @@ fn keygen(a: &[String]) {
             &[0u8; 32],
         )
         .expect("pop");
-        secrets.push_str(&format!("{id} {}\n", hexs(&sk)));
+        let mut rendered = hexs(&sk);
+        secrets.push_str(&format!("{id} {rendered}\n"));
+        // The key is on the way to a file, it does not need to outlive the write.
+        rendered.zeroize();
+        sk.zeroize();
+        seed.zeroize();
         committee.push_str(&format!("{id} {} {}\n", hexs(&pk), hexs(&pop)));
     }
     let secrets_path = format!("{prefix}.secrets");
@@ -91,6 +97,9 @@ fn keygen(a: &[String]) {
     }
     #[cfg(not(unix))]
     fs::write(&secrets_path, &secrets).expect("write secrets");
+    // Every operator signing key passed through this buffer. Drop it wiped rather than
+    // leaving it in the heap for a core dump or a swap page to carry off.
+    secrets.zeroize();
     fs::write(format!("{prefix}.committee"), committee).expect("write committee");
     eprintln!("wrote {prefix}.secrets + {prefix}.committee ({n} operators, threshold {threshold}, chain {chain_id})");
 }
@@ -142,9 +151,10 @@ fn mint(a: &[String]) {
             continue;
         }
         let id: u32 = p[0].parse().expect("operator id");
-        let sk: [u8; SECRET_KEY_BYTES] = unhex(p[1]).try_into().expect("secret key length");
+        let mut sk: [u8; SECRET_KEY_BYTES] = unhex(p[1]).try_into().expect("secret key length");
         let sig =
             ml_dsa::sign(&sk, &preimage, &attest_context(&era), &[0u8; 32]).expect("attest sign");
+        sk.zeroize();
         signatures.push(SignerSig {
             operator_id: id,
             signature: sig.to_vec(),
@@ -208,12 +218,30 @@ fn guardian_keygen(a: &[String]) {
     let prefix = &a[0];
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&urandom(32));
-    let (pk, sk) = ml_dsa::keygen(&seed);
-    fs::write(
-        format!("{prefix}.gsecret"),
-        format!("{} {}\n", hexs(&pk), hexs(&sk)),
-    )
-    .expect("write gsecret");
+    let (pk, mut sk) = ml_dsa::keygen(&seed);
+    let mut rendered = format!("{} {}\n", hexs(&pk), hexs(&sk));
+    // The guardian key is the recovery authority. Create the file owner only in the first
+    // place rather than writing at the process umask, and drop the key wiped afterwards.
+    let gsecret_path = format!("{prefix}.gsecret");
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&gsecret_path)
+            .expect("open the guardian secret owner only");
+        file.write_all(rendered.as_bytes())
+            .expect("write gsecret");
+    }
+    #[cfg(not(unix))]
+    fs::write(&gsecret_path, &rendered).expect("write gsecret");
+    rendered.zeroize();
+    sk.zeroize();
+    seed.zeroize();
     let mid = guardian_member_id_hex(&pk);
     fs::write(
         format!("{prefix}.gpub"),

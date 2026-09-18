@@ -14,6 +14,7 @@ name = "quantovad"
 path = "src/main.rs"
 
 [dependencies]
+qtv-wipe = { path = "../qtv-wipe" }
 # The account model, for deriving a funded genesis account's address from its
 # scheme and public key.
 qtv-account = { path = "../qtv-account" }
