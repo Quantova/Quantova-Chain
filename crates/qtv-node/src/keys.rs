@@ -61,9 +61,14 @@ fn write_keystore(path: &Path, secret: &[u8; SECRET_LEN]) -> io::Result<()> {
         }
     }
     let mut file = open_private(path)?;
-    file.write_all(to_hex(secret).as_bytes())?;
-    file.write_all(b"\n")?;
-    Ok(())
+    // The hex rendering is the signing key in another shape. Wipe it once it is on disk
+    // rather than leaving it in the heap for a swap page or a core dump to carry off.
+    let mut rendered = to_hex(secret);
+    let result = file
+        .write_all(rendered.as_bytes())
+        .and_then(|()| file.write_all(b"\n"));
+    qtv_wipe::Zeroize::zeroize(&mut rendered);
+    result
 }
 
 #[cfg(unix)]
