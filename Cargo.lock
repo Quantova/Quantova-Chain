@@ -299,6 +299,7 @@ dependencies = [
  "qtv-state",
  "qtv-tx",
  "qtv-vm",
+ "qtv-wipe",
 ]
 
 [[package]]
