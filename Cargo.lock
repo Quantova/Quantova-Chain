@@ -189,6 +189,7 @@ dependencies = [
  "qtv-net",
  "qtv-node",
  "qtv-tx",
+ "qtv-wipe",
 ]
 
 [[package]]
@@ -311,6 +312,7 @@ dependencies = [
  "qtv-idfmt",
  "qtv-node",
  "qtv-tx",
+ "qtv-wipe",
 ]
 
 [[package]]

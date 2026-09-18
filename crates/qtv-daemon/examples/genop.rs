@@ -22,6 +22,8 @@ fn chain_binding(name: &str) -> u64 {
     )
 }
 
+use qtv_wipe::Zeroize;
+
 fn main() {
     let name = std::env::args().nth(1).expect("chain name");
     let out = std::env::args().nth(2).expect("secret out path");
@@ -30,7 +32,7 @@ fn main() {
     for id in 0u32..3 {
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&urandom(32));
-        let (pk, sk) = ml_dsa::keygen(&seed);
+        let (pk, mut sk) = ml_dsa::keygen(&seed);
         let pop = ml_dsa::sign(
             &sk,
             &qtv_node::bridge::operator_pop_challenge(id, &pk, cid),
@@ -39,9 +41,30 @@ fn main() {
         )
         .expect("pop signs");
         println!("bridge_operator = {id} {} {}", hex(&pk), hex(&pop));
-        secrets.push_str(&format!("operator {id} seed {}\n", hex(&seed)));
+        let mut rendered = hex(&seed);
+        secrets.push_str(&format!("operator {id} seed {rendered}\n"));
+        rendered.zeroize();
+        sk.zeroize();
+        seed.zeroize();
     }
-    std::fs::write(&out, secrets).expect("write secrets");
+    // Operator seeds. Create the file owner only rather than writing at the process
+    // umask, and drop the buffer wiped once it is on disk.
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&out)
+            .expect("open the secrets file owner only");
+        file.write_all(secrets.as_bytes()).expect("write secrets");
+    }
+    #[cfg(not(unix))]
+    std::fs::write(&out, &secrets).expect("write secrets");
+    secrets.zeroize();
     eprintln!("secrets written to {out}");
 }
 
