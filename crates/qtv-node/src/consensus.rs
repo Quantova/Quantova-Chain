@@ -13,13 +13,28 @@ use qtv_sampler::validator::Registration;
 pub use qtv_attest::{Beacon, Block, Parent};
 pub use qtv_sampler::validator::DEFAULT_SLOTS;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConsensusValidator {
     pub id: u64,
     pub stake: u64,
     pub online: bool,
     pub secret: [u8; 32],
     pub bond_address: String,
+}
+
+// Written by hand rather than derived. This carries a validator signing secret, and a
+// derived Debug puts the whole key into any log line, panic message or error that
+// formats a validator.
+impl std::fmt::Debug for ConsensusValidator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConsensusValidator")
+            .field("id", &self.id)
+            .field("stake", &self.stake)
+            .field("online", &self.online)
+            .field("secret", &"[redacted]")
+            .field("bond_address", &self.bond_address)
+            .finish()
+    }
 }
 
 impl ConsensusValidator {
@@ -1149,5 +1164,45 @@ mod tests {
             })
             .any(|selection| selection.members.contains(&1));
         assert!(drawn, "a fully weighted validator was never drawn");
+    }
+}
+
+#[cfg(test)]
+mod validator_redaction_tests {
+    use super::*;
+
+    // A derived Debug here would compile, read as tidier, and put a validator signing key
+    // into every log line and panic message that formats a validator.
+    #[test]
+    fn a_consensus_validator_never_prints_its_secret() {
+        let secret = [0x5Au8; 32];
+        let validator = ConsensusValidator::from_secret(7, 1_000, true, secret);
+        let rendered = format!("{validator:?}");
+
+        assert!(
+            rendered.contains("[redacted]"),
+            "the secret must render redacted, got {rendered}"
+        );
+        assert!(
+            !rendered.contains("90, 90"),
+            "the raw secret bytes leaked into the debug rendering: {rendered}"
+        );
+        assert!(
+            rendered.contains("bond_address"),
+            "the public fields must still render, a blanket opaque Debug hides useful detail"
+        );
+    }
+
+    #[test]
+    fn a_collection_of_validators_stays_redacted() {
+        let validators: Vec<ConsensusValidator> = (0..3u64)
+            .map(|i| ConsensusValidator::from_secret(i, 1_000, true, [(i as u8) + 1; 32]))
+            .collect();
+        let rendered = format!("{validators:?}");
+        assert_eq!(
+            rendered.matches("[redacted]").count(),
+            3,
+            "every validator in a formatted collection must redact its secret"
+        );
     }
 }
