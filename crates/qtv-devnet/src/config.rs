@@ -143,3 +143,77 @@ impl DevnetConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod secret_redaction_tests {
+    use super::*;
+
+    // NodeConfig carries a validator signing secret, so its Debug is written by hand to
+    // hold it back. A future switch to derive(Debug) would compile, read as tidier, and
+    // put the key into every log line and panic message that formats a config.
+    #[test]
+    fn a_node_config_never_prints_its_secret() {
+        let secret = [0xABu8; 32];
+        let config = NodeConfig {
+            id: 1,
+            stake: 100,
+            online: true,
+            store_dir: std::path::PathBuf::from("/tmp/redaction-probe"),
+            bootstrap: vec![2],
+            address: "mem://1".to_string(),
+            secret,
+        };
+
+        let rendered = format!("{config:?}");
+        assert!(
+            rendered.contains("[redacted]"),
+            "the secret field must render as redacted, got {rendered}"
+        );
+        assert!(
+            !rendered.contains("171") && !rendered.to_lowercase().contains("ab, ab"),
+            "the raw secret bytes appear in the debug rendering: {rendered}"
+        );
+        for byte in secret.iter().take(4) {
+            assert!(
+                !rendered.contains(&format!("{byte}, {byte}, {byte}")),
+                "a run of secret bytes leaked into the debug rendering"
+            );
+        }
+    }
+
+    #[test]
+    fn a_devnet_config_never_prints_a_node_secret() {
+        let config = DevnetConfig {
+            fee_params: qtv_node::fee::FeeParams::devnet(),
+            accounts: Vec::new(),
+            nodes: vec![NodeConfig {
+                id: 1,
+                stake: 100,
+                online: true,
+                store_dir: std::path::PathBuf::from("/tmp/redaction-probe"),
+                bootstrap: Vec::new(),
+                address: "mem://1".to_string(),
+                secret: [0xCDu8; 32],
+            }],
+            genesis_time: 0,
+            fanout: crate::config::FULL_FANOUT,
+            slots: DEFAULT_SLOTS,
+            published_roster: None,
+            bridge_dest_chain: None,
+            guardians: GuardianSet::default(),
+            bridge_operators: None,
+            bridged_assets: Vec::new(),
+            bridge_era: None,
+        };
+
+        let rendered = format!("{config:?}");
+        assert!(
+            rendered.contains("[redacted]"),
+            "a config printed through the whole devnet must still redact the node secret"
+        );
+        assert!(
+            !rendered.contains("205, 205"),
+            "the node secret leaked when the enclosing config was formatted: {rendered}"
+        );
+    }
+}
