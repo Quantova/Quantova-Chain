@@ -6,11 +6,18 @@ use std::fmt;
 use qtv_crypto::{ml_dsa, sha3};
 
 use crate::{fill_random, Error, Result};
+use qtv_wipe::Zeroize;
 
 #[derive(Clone)]
 pub struct Identity {
     public: ml_dsa::PublicKey,
     secret: ml_dsa::SecretKey,
+}
+
+impl Drop for Identity {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+    }
 }
 
 impl Identity {

@@ -138,9 +138,12 @@ fn parse_hex32(hex: &str) -> Option<[u8; SECRET_LEN]> {
 }
 
 fn to_hex(bytes: &[u8; SECRET_LEN]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    // A per byte format! would leave the secret in freed temporaries the caller cannot wipe.
     let mut out = String::with_capacity(SECRET_LEN * 2);
     for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 0x0f) as usize] as char);
     }
     out
 }

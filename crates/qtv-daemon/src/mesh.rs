@@ -123,6 +123,9 @@ const INBOUND_BYTES_CAP: usize = 64 * 1024 * 1024;
 
 const PEER_MSG_PER_SEC: f64 = 5_000.0;
 
+// A peer that finishes the handshake and then sends no hello must not hold the socket.
+const HELLO_DEADLINE: Duration = Duration::from_secs(30);
+
 const PEER_MSG_BURST: f64 = 10_000.0;
 
 pub struct Mesh {
@@ -596,7 +599,11 @@ fn read_peer_with_stop(
 ) {
     // The hello has a deadline of its own. A peer that completes the handshake and then
     // sends nothing must not hold this thread and its socket for the life of the node.
+    let hello_deadline = Instant::now() + HELLO_DEADLINE;
     loop {
+        if Instant::now() >= hello_deadline {
+            return;
+        }
         match channel.recv() {
             Ok(frame) if hello_ok(&frame, &genesis_hash) => break,
             Ok(frame) => {

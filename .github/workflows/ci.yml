@@ -27,7 +27,7 @@ jobs:
           # The same revision qtv-node pins, so the relay's sibling checkout and the
           # node's git dependency are one version of the machine, never two.
           repository: Quantova/QVM
-          ref: 696aa23b52fa8d1c4f9c218c2596de431ceb2a8e
+          ref: 96007b562deefe7a1ff99a3c05e9b2032e0b178c
           path: QVM
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master

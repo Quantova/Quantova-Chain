@@ -11,6 +11,7 @@ description = "The post-quantum authenticated secure channel for the Quantova st
 
 [dependencies]
 qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "5defe0cb3e4458795e0e1bae7275a4ffbf4edb9c" }
+qtv-wipe = { path = "../qtv-wipe" }
 
 [dev-dependencies]
 qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "5defe0cb3e4458795e0e1bae7275a4ffbf4edb9c" }

@@ -381,8 +381,10 @@ impl StakeLedger {
             Some(bond) if bond.can_withdraw(now_day) => bond.amount,
             _ => return None,
         };
+        // The bond only leaves once the credit is known to fit, or the withdraw burns it.
+        let credited = balance.checked_add(amount)?;
         self.bonds.remove(id);
-        balance.checked_add(amount)
+        Some(credited)
     }
 }
 
@@ -904,6 +906,27 @@ mod withdraw_overflow_tests {
             book.withdraw_to_balance(&id, 10_000, day),
             Some(10_000 + MIN_STAKE),
             "a normal withdrawal must still add the bond back to the balance"
+        );
+    }
+}
+
+#[cfg(test)]
+mod withdraw_conservation_tests {
+    use super::*;
+
+    #[test]
+    fn a_withdraw_that_cannot_be_credited_keeps_the_bond() {
+        let mut ledger = StakeLedger::new(0);
+        let id = [7u8; 32];
+        let amount = MIN_STAKE;
+        assert!(ledger.bond(id, amount, 0));
+        assert!(ledger.request_exit(&id, EARLIEST_EXIT_DAYS));
+        let day = EARLIEST_EXIT_DAYS + UNBONDING_DAYS;
+        assert_eq!(ledger.withdraw_to_balance(&id, u64::MAX, day), None);
+        assert_eq!(
+            ledger.bond_of(&id).map(|bond| bond.amount),
+            Some(amount),
+            "the bond was destroyed by a withdraw that credited nothing"
         );
     }
 }

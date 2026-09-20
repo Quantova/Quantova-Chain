@@ -3232,10 +3232,10 @@ impl Ledger {
                 account.balance = account.balance.saturating_add(referendum.deposit);
                 self.set_account(&addr, &account);
             } else {
-                self.set_stake_treasury(self.stake_treasury() + referendum.deposit);
+                self.set_stake_treasury(self.stake_treasury().saturating_add(referendum.deposit));
             }
         } else {
-            self.set_stake_treasury(self.stake_treasury() + referendum.deposit);
+            self.set_stake_treasury(self.stake_treasury().saturating_add(referendum.deposit));
         }
         self.set_gov_referendum(referendum_id, &referendum);
         self.record_side_event(SideEvent::GovTally {
@@ -3925,7 +3925,7 @@ impl Ledger {
             None => return 0,
         };
         let taken = qtv_staking::slash(bond.amount, fault);
-        let treasury = self.stake_treasury() + taken;
+        let treasury = self.stake_treasury().saturating_add(taken);
         self.set_stake_treasury(treasury);
         // The whole bond is cleared below, so the whole bond leaves the staked total.
         self.debit_staked(bond.amount);
@@ -3941,7 +3941,7 @@ impl Ledger {
         self.set_stake_banned(&id);
         let forfeited = self.stake_rewards_outstanding(&id);
         if forfeited > 0 {
-            self.set_stake_treasury(self.stake_treasury() + forfeited);
+            self.set_stake_treasury(self.stake_treasury().saturating_add(forfeited));
         }
         self.clear_stake_rewards(&id);
         taken
@@ -3976,7 +3976,7 @@ impl Ledger {
         self.clear_stake_bond(&id);
         self.debit_staked(bond.amount);
         let mut account = self.account(address);
-        account.balance += bond.amount;
+        account.balance = account.balance.saturating_add(bond.amount);
         self.set_account(address, &account);
         self.record_unbond_event(address, bond.amount);
         self.record_side_event(SideEvent::Unbond {

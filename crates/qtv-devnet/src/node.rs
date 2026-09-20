@@ -235,8 +235,6 @@ struct Lock {
 
 /// Recent heights of events kept in memory. The store is the durable record; this is a
 /// read cache.
-const REGISTRATION_WINDOW_HEIGHTS: u64 = 4;
-
 const EVENTS_CACHED_HEIGHTS: Height = 1024;
 
 /// The index is keyed by a fixed width digest of the rendered id.
@@ -551,11 +549,6 @@ impl DevNode {
     pub fn collect_registration(&mut self, note: RegisterNote) -> bool {
         let epoch = self.consensus.epoch_for(self.height);
         if note.epoch != epoch || note.id == self.id {
-            return false;
-        }
-        // A root committed late has already seen the beacon it is drawn against.
-        let slot = qtv_sampler::epoch::slot_in_epoch(self.height, self.consensus.epoch_len());
-        if slot > REGISTRATION_WINDOW_HEIGHTS {
             return false;
         }
         let Some(reg) = self.base_roster.iter().find(|r| r.id == note.id) else {

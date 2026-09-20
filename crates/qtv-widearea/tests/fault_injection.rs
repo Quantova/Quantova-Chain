@@ -32,6 +32,7 @@ fn ingress(reports: &[RunReport]) -> RunReport {
 }
 
 #[test]
+#[ignore = "drives four host processes over real sockets against wall clock deadlines, so it must run alone, not beside the rest of the suite"]
 fn faults_degrade_honestly_over_real_sockets() {
     let healthy = base_scenario();
     let healthy_reports = run_scenario(&healthy);
