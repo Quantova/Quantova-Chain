@@ -382,7 +382,11 @@ impl StakeLedger {
             _ => return None,
         };
         self.bonds.remove(id);
-        Some(balance + amount)
+        // The function already answers with an Option, so a balance that cannot take the
+        // returned bond declines rather than panicking the node under release overflow
+        // checks. Conservation makes this unreachable, which is why it may as well be
+        // stated here rather than relied upon.
+        balance.checked_add(amount)
     }
 }
 
@@ -860,5 +864,42 @@ mod emission_bounds_tests {
             );
             assert!(ceiling >= GOV_MINT_FLOOR, "the ceiling fell below its floor");
         }
+    }
+}
+
+#[cfg(test)]
+mod withdraw_overflow_tests {
+    use super::*;
+
+    // withdraw_to_balance hands a matured bond back to an account balance. Conservation
+    // makes a sum past u64 unreachable, but release builds trap overflow, so an unchecked
+    // add would turn a broken invariant into a halted node rather than a refused call.
+    #[test]
+    fn a_withdrawal_that_cannot_fit_the_balance_declines_rather_than_panicking() {
+        let id = [7u8; 32];
+        let mut book = StakeLedger::new(1_000_000 * NATIVE_UNIT as u64);
+        assert!(book.bond(id, MIN_STAKE, 0), "the bond is taken");
+        assert!(book.request_exit(&id, BOND_LOCK_DAYS));
+
+        let day = BOND_LOCK_DAYS + UNBONDING_DAYS + 1;
+        assert_eq!(
+            book.withdraw_to_balance(&id, u64::MAX, day),
+            None,
+            "a balance that cannot take the bond must decline, not overflow"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_withdrawal_still_returns_the_sum() {
+        let id = [9u8; 32];
+        let mut book = StakeLedger::new(1_000_000 * NATIVE_UNIT as u64);
+        assert!(book.bond(id, MIN_STAKE, 0));
+        assert!(book.request_exit(&id, BOND_LOCK_DAYS));
+        let day = BOND_LOCK_DAYS + UNBONDING_DAYS + 1;
+        assert_eq!(
+            book.withdraw_to_balance(&id, 10_000, day),
+            Some(10_000 + MIN_STAKE),
+            "a normal withdrawal must still add the bond back to the balance"
+        );
     }
 }
