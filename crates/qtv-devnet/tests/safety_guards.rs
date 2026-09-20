@@ -9,36 +9,33 @@ use support::{config, unique_base};
 
 #[test]
 fn a_restarted_devnode_refuses_to_re_sign_a_height_it_already_signed() {
-    let base = unique_base("resign-guard");
-    let cfg = config(&base, &[true], vec![]);
-
-    let watermark = cfg.nodes[0].store_dir.join("sign.watermark");
-    {
+    // Only a leading draw signs, and a fresh base is what re rolls that draw.
+    let mut found = None;
+    for attempt in 0..32 {
+        let cfg = config(&unique_base("resign-guard"), &[true], vec![]);
+        let watermark = cfg.nodes[0].store_dir.join("sign.watermark");
         let mut node = DevNode::open(&cfg.nodes[0], &cfg).expect("open");
-        // Entering a round only signs when this node leads the view, and the draw is not
-        // something the test controls. Drive rounds until it has signed, so the restart
-        // below is always testing the guard rather than an empty watermark.
-        for _ in 0..16 {
-            let selection = node.select().expect("a committee is selected");
-            let _ = node.enter_round(&selection, true);
-            if watermark.exists() {
-                break;
-            }
+        let selection = node.select().expect("a committee is selected");
+        let _ = node.enter_round(&selection, true);
+        if watermark.exists() {
+            assert_eq!(
+                node.height(),
+                1,
+                "the node signed height one but did not finalise it"
+            );
+            assert!(
+                node.fatal().is_none(),
+                "signing the first height is permitted"
+            );
+            found = Some(cfg);
+            break;
         }
-        assert_eq!(
-            node.height(),
-            1,
-            "the node signed height one but did not finalise it"
-        );
-        assert!(
-            node.fatal().is_none(),
-            "signing the first height is permitted"
-        );
+        assert!(attempt < 31, "no draw in thirty two led, so nothing signed");
     }
+    let cfg = found.expect("a leading draw signed height one");
+    let watermark = cfg.nodes[0].store_dir.join("sign.watermark");
 
-    // Without a watermark the reopen below finds nothing to refuse, which looks identical
-    // to the guard being broken. Height one is also the starting height, so it cannot
-    // stand in for this.
+    // No watermark means the restart proves nothing.
     assert!(
         watermark.exists(),
         "sixteen rounds wrote no signing watermark, so the restart below would prove \

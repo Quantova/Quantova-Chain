@@ -382,10 +382,6 @@ impl StakeLedger {
             _ => return None,
         };
         self.bonds.remove(id);
-        // The function already answers with an Option, so a balance that cannot take the
-        // returned bond declines rather than panicking the node under release overflow
-        // checks. Conservation makes this unreachable, which is why it may as well be
-        // stated here rather than relied upon.
         balance.checked_add(amount)
     }
 }
@@ -809,7 +805,8 @@ mod emission_bounds_tests {
         for &supply in &supplies {
             for &staked in &[0u64, 1, supply / 3, supply / 2, supply, u64::MAX] {
                 let emitted = session_emission(staked, supply);
-                let cap = ((supply as u128) * (MAX_SESSION_EMISSION_BPS as u128) / BPS_DENOM) as u64;
+                let cap =
+                    ((supply as u128) * (MAX_SESSION_EMISSION_BPS as u128) / BPS_DENOM) as u64;
                 assert!(
                     emitted <= cap,
                     "emission {emitted} above the {MAX_SESSION_EMISSION_BPS} bps cap {cap} at \
@@ -854,7 +851,13 @@ mod emission_bounds_tests {
 
     #[test]
     fn the_governance_ceiling_never_exceeds_its_share_once_past_the_floor() {
-        for &supply in &[0u64, 1, GOV_MINT_FLOOR, 21_000_000 * NATIVE_UNIT as u64, u64::MAX] {
+        for &supply in &[
+            0u64,
+            1,
+            GOV_MINT_FLOOR,
+            21_000_000 * NATIVE_UNIT as u64,
+            u64::MAX,
+        ] {
             let ceiling = gov_mint_ceiling(supply);
             let share = ((supply as u128) * (GOV_MINT_MAX_BPS as u128) / BPS_DENOM) as u64;
             assert!(
@@ -862,7 +865,10 @@ mod emission_bounds_tests {
                 "the ceiling at supply {supply} is neither the floor nor the {GOV_MINT_MAX_BPS} \
                  bps share"
             );
-            assert!(ceiling >= GOV_MINT_FLOOR, "the ceiling fell below its floor");
+            assert!(
+                ceiling >= GOV_MINT_FLOOR,
+                "the ceiling fell below its floor"
+            );
         }
     }
 }
@@ -871,9 +877,7 @@ mod emission_bounds_tests {
 mod withdraw_overflow_tests {
     use super::*;
 
-    // withdraw_to_balance hands a matured bond back to an account balance. Conservation
-    // makes a sum past u64 unreachable, but release builds trap overflow, so an unchecked
-    // add would turn a broken invariant into a halted node rather than a refused call.
+    // A balance that cannot take the bond declines rather than trapping.
     #[test]
     fn a_withdrawal_that_cannot_fit_the_balance_declines_rather_than_panicking() {
         let id = [7u8; 32];

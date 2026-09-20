@@ -16,7 +16,7 @@ fn base_scenario() -> Scenario {
         warmup: 2,
         height_cap: (qtv_loopback::HARNESS_SLOTS as usize) - 64,
         view_ms: 400,
-        stall_secs: 5,
+        stall_secs: 30,
         up: vec![true; 4],
         slow_ms: vec![0; 4],
         validator_bin: validator_bin(),
@@ -72,6 +72,8 @@ fn faults_degrade_honestly_over_real_sockets() {
     let mut drop_two = base_scenario();
     drop_two.up[2] = false;
     drop_two.up[3] = false;
+    // Only the leg asserting a stall wants a short deadline.
+    drop_two.stall_secs = 5;
     let drop_two_reports = run_scenario(&drop_two);
     let drop_two_ingress = ingress(&drop_two_reports);
     assert!(

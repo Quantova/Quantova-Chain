@@ -212,7 +212,10 @@ fn every_rendered_kind_refuses_every_other_kind() {
             );
         }
         if *name != "tx" {
-            assert!(parse_tx(text).is_err(), "a {name} identifier parsed as a tx");
+            assert!(
+                parse_tx(text).is_err(),
+                "a {name} identifier parsed as a tx"
+            );
         }
         if *name != "block" {
             assert!(

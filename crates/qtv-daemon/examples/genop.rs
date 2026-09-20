@@ -47,8 +47,7 @@ fn main() {
         sk.zeroize();
         seed.zeroize();
     }
-    // Operator seeds. Create the file owner only rather than writing at the process
-    // umask, and drop the buffer wiped once it is on disk.
+    // Owner only, not the process umask.
     #[cfg(unix)]
     {
         use std::io::Write;

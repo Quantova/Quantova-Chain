@@ -72,7 +72,6 @@ fn keygen(a: &[String]) {
         .expect("pop");
         let mut rendered = hexs(&sk);
         secrets.push_str(&format!("{id} {rendered}\n"));
-        // The key is on the way to a file, it does not need to outlive the write.
         rendered.zeroize();
         sk.zeroize();
         seed.zeroize();
@@ -97,8 +96,6 @@ fn keygen(a: &[String]) {
     }
     #[cfg(not(unix))]
     fs::write(&secrets_path, &secrets).expect("write secrets");
-    // Every operator signing key passed through this buffer. Drop it wiped rather than
-    // leaving it in the heap for a core dump or a swap page to carry off.
     secrets.zeroize();
     fs::write(format!("{prefix}.committee"), committee).expect("write committee");
     eprintln!("wrote {prefix}.secrets + {prefix}.committee ({n} operators, threshold {threshold}, chain {chain_id})");
@@ -220,8 +217,7 @@ fn guardian_keygen(a: &[String]) {
     seed.copy_from_slice(&urandom(32));
     let (pk, mut sk) = ml_dsa::keygen(&seed);
     let mut rendered = format!("{} {}\n", hexs(&pk), hexs(&sk));
-    // The guardian key is the recovery authority. Create the file owner only in the first
-    // place rather than writing at the process umask, and drop the key wiped afterwards.
+    // Owner only, not the process umask.
     let gsecret_path = format!("{prefix}.gsecret");
     #[cfg(unix)]
     {
@@ -234,8 +230,7 @@ fn guardian_keygen(a: &[String]) {
             .mode(0o600)
             .open(&gsecret_path)
             .expect("open the guardian secret owner only");
-        file.write_all(rendered.as_bytes())
-            .expect("write gsecret");
+        file.write_all(rendered.as_bytes()).expect("write gsecret");
     }
     #[cfg(not(unix))]
     fs::write(&gsecret_path, &rendered).expect("write gsecret");

@@ -148,9 +148,6 @@ impl DevnetConfig {
 mod secret_redaction_tests {
     use super::*;
 
-    // NodeConfig carries a validator signing secret, so its Debug is written by hand to
-    // hold it back. A future switch to derive(Debug) would compile, read as tidier, and
-    // put the key into every log line and panic message that formats a config.
     #[test]
     fn a_node_config_never_prints_its_secret() {
         let secret = [0xABu8; 32];

@@ -153,9 +153,8 @@ fn every_header_field_the_sync_path_checks_is_refused_on_its_own() {
     let genuine = devnet.served_blocks(0, need, need).remove(0);
     let header = genuine.header().clone();
 
-    let rebuild = |h: Header| {
-        ChainBlock::new(h, genuine.certificate().to_vec(), genuine.body().to_vec())
-    };
+    let rebuild =
+        |h: Header| ChainBlock::new(h, genuine.certificate().to_vec(), genuine.body().to_vec());
     let header_with = |height: u64, seed: [u8; 32], time: u64| {
         Header::new(
             height,
@@ -170,7 +169,14 @@ fn every_header_field_the_sync_path_checks_is_refused_on_its_own() {
     };
 
     assert_eq!(
-        devnet.apply_synced(victim, rebuild(header_with(header.height() + 1, *header.beacon_seed(), header.time()))),
+        devnet.apply_synced(
+            victim,
+            rebuild(header_with(
+                header.height() + 1,
+                *header.beacon_seed(),
+                header.time()
+            ))
+        ),
         Err(SyncError::WrongHeight),
         "a block for another height must not be applied at this one"
     );
@@ -178,14 +184,20 @@ fn every_header_field_the_sync_path_checks_is_refused_on_its_own() {
     let mut seed = *header.beacon_seed();
     seed[0] ^= 0xff;
     assert_eq!(
-        devnet.apply_synced(victim, rebuild(header_with(header.height(), seed, header.time()))),
+        devnet.apply_synced(
+            victim,
+            rebuild(header_with(header.height(), seed, header.time()))
+        ),
         Err(SyncError::WrongBeacon),
         "a block carrying a beacon the node did not derive must be refused, or a proposer could \
          name the draw it wanted"
     );
 
     assert_eq!(
-        devnet.apply_synced(victim, rebuild(header_with(header.height(), *header.beacon_seed(), 0))),
+        devnet.apply_synced(
+            victim,
+            rebuild(header_with(header.height(), *header.beacon_seed(), 0))
+        ),
         Err(SyncError::WrongTime),
         "a block timed before its parent must be refused"
     );

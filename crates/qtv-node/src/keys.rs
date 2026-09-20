@@ -61,8 +61,7 @@ fn write_keystore(path: &Path, secret: &[u8; SECRET_LEN]) -> io::Result<()> {
         }
     }
     let mut file = open_private(path)?;
-    // The hex rendering is the signing key in another shape. Wipe it once it is on disk
-    // rather than leaving it in the heap for a swap page or a core dump to carry off.
+    // The hex rendering is the key in another shape.
     let mut rendered = to_hex(secret);
     let result = file
         .write_all(rendered.as_bytes())

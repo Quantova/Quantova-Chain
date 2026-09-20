@@ -33,7 +33,12 @@ fn crates_enabling_fixtures_normally() -> BTreeSet<String> {
             .lines()
             .any(|line| line.contains("test-fixtures") || line.contains("test-util"))
         {
-            found.insert(path.file_name().expect("a name").to_string_lossy().to_string());
+            found.insert(
+                path.file_name()
+                    .expect("a name")
+                    .to_string_lossy()
+                    .to_string(),
+            );
         }
     }
     found
@@ -71,9 +76,13 @@ fn the_fixture_enabling_crates_are_excluded_from_the_default_build() {
 #[test]
 fn the_node_and_daemon_never_enable_the_fixtures_normally() {
     for name in ["qtv-node", "qtv-daemon", "qtv-devnet", "qtv-gateway"] {
-        let manifest =
-            fs::read_to_string(Path::new(WORKSPACE).join("crates").join(name).join("Cargo.toml"))
-                .expect("the crate manifest is readable");
+        let manifest = fs::read_to_string(
+            Path::new(WORKSPACE)
+                .join("crates")
+                .join(name)
+                .join("Cargo.toml"),
+        )
+        .expect("the crate manifest is readable");
         let normal = normal_section(&manifest);
         assert!(
             !normal.contains("test-fixtures") && !normal.contains("test-util"),

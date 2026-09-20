@@ -73,7 +73,8 @@ fn no_classical_or_elliptic_curve_crate_reaches_the_lockfile() {
 
 fn normal_dependents_of(crate_name: &str) -> Vec<String> {
     let mut dependents = Vec::new();
-    for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/..")).expect("crates dir") {
+    for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/..")).expect("crates dir")
+    {
         let dir = entry.expect("entry").path();
         let Ok(text) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
             continue;

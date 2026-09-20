@@ -596,8 +596,8 @@ mod tests {
 
 #[cfg(test)]
 mod same_family_boundary_tests {
-    use super::*;
     use super::tests::ml_dsa_attestation;
+    use super::*;
 
     // The airlock separates proofs by TIER and FAMILY. It deliberately does not separate
     // two corridors that share both, and the registry marks many EVM chains LightClient,
@@ -635,5 +635,4 @@ mod same_family_boundary_tests {
              airlock is not what keeps the two apart"
         );
     }
-
 }

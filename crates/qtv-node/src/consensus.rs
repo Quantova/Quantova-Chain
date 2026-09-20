@@ -22,9 +22,7 @@ pub struct ConsensusValidator {
     pub bond_address: String,
 }
 
-// Written by hand rather than derived. This carries a validator signing secret, and a
-// derived Debug puts the whole key into any log line, panic message or error that
-// formats a validator.
+// Hand written so the signing secret never reaches a log line.
 impl std::fmt::Debug for ConsensusValidator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConsensusValidator")
@@ -1171,8 +1169,6 @@ mod tests {
 mod validator_redaction_tests {
     use super::*;
 
-    // A derived Debug here would compile, read as tidier, and put a validator signing key
-    // into every log line and panic message that formats a validator.
     #[test]
     fn a_consensus_validator_never_prints_its_secret() {
         let secret = [0x5Au8; 32];

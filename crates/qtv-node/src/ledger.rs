@@ -6719,10 +6719,7 @@ mod stake_state_tests {
     // Everything the chain can hold value in. If a code path ever moves value without
     // moving it between two of these, this sum stops matching the supply.
     fn held_value(l: &Ledger, addresses: &[&str]) -> u128 {
-        let balances: u128 = addresses
-            .iter()
-            .map(|a| u128::from(l.balance(a)))
-            .sum();
+        let balances: u128 = addresses.iter().map(|a| u128::from(l.balance(a))).sum();
         let rewards: u128 = addresses
             .iter()
             .filter_map(|a| address_id(a))
@@ -6788,7 +6785,10 @@ mod stake_state_tests {
 
         l.set_stake_mainnet_start(0);
         let paid = l.accrue_reward(&bob, 400);
-        assert!(paid > 0, "the reward is non zero or the step proves nothing");
+        assert!(
+            paid > 0,
+            "the reward is non zero or the step proves nothing"
+        );
         assert_eq!(
             held_value(&l, &tracked),
             u128::from(l.total_supply()),
