@@ -1167,6 +1167,10 @@ fn dispatch_bridge_exit(
 
 const VM_BLOCK_METER_BUDGET: u64 = 50_000_000;
 const MAX_TX_METER: u64 = VM_BLOCK_METER_BUDGET / 4;
+
+// A registration note is an id, an epoch, a root and one ML-DSA signature. Anything past
+// this is not a note, so it does not earn a free seat in a block.
+const MAX_REGISTRATION_BYTES: usize = 4096;
 const MAX_VM_ARGS: usize = 128 * 1024;
 
 pub(crate) fn vm_meter_fee(meter: u64, fee_params: &FeeParams) -> u64 {
@@ -1463,7 +1467,12 @@ fn execute_ordered_across(
             continue;
         }
         if is_registration(wrapper) {
-            included.push(wrapper.clone());
+            // The envelope is system built and carries no wrapper signature, so the bound
+            // is what stops a leader seating megabytes of junk every node stores forever.
+            // The inner note signature is checked where the note decoder lives.
+            if wrapper.body().call().args().len() <= MAX_REGISTRATION_BYTES {
+                included.push(wrapper.clone());
+            }
             continue;
         }
         let plan = match validate_verified(wrapper, ledger, fee_params, verified[index]) {
@@ -4062,6 +4071,25 @@ mod tests {
             included.len(),
             1,
             "the registration record rides in the block"
+        );
+
+        let oversized = qtv_tx::Call::new(
+            crate::ledger::registration_address(),
+            vec![0u8; MAX_REGISTRATION_BYTES + 1],
+        );
+        let body = Body::with_context(
+            crate::ledger::registration_address(),
+            0,
+            0,
+            0,
+            oversized,
+            0,
+            fee.chain_id,
+        );
+        let fat = Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new());
+        assert!(
+            execute_ordered(&mut ledger, &[fat], &fee, 0).is_empty(),
+            "a record past the note bound bought a free seat in the block"
         );
         assert_eq!(
             ledger.balance(&holder.address()),

@@ -103,6 +103,8 @@ const MAX_BUFFERED_FRAMES: usize = 8192;
 
 const MAX_BUFFERED_BYTES: usize = 32 * 1024 * 1024;
 
+const CATCH_UP_SPAN: u64 = 64;
+
 #[derive(Default)]
 struct FrameBuffer {
     frames: VecDeque<(u64, Vec<u8>)>,
@@ -416,6 +418,7 @@ impl Driver {
 
             if entered_view == Some(view) && Instant::now() >= view_deadline {
                 self.on_view_timeout(&selection);
+                self.request_catch_up();
                 view_deadline = Instant::now() + view_timeout;
             }
 
@@ -611,10 +614,21 @@ impl Driver {
                     self.node.apply_registrations();
                 }
             }
-            Message::Peers(_)
-            | Message::Status(_)
-            | Message::GetBlocks { .. }
-            | Message::Blocks(_) => {}
+            Message::GetBlocks { from, to } => {
+                let blocks = self.node.serve_blocks(from, to);
+                if !blocks.is_empty() {
+                    let reply = Message::Blocks(blocks).encode();
+                    self.send_one(source as usize, &reply);
+                }
+            }
+            Message::Blocks(blocks) => {
+                for block in blocks {
+                    if self.node.apply_synced_block(block).is_err() {
+                        break;
+                    }
+                }
+            }
+            Message::Peers(_) | Message::Status(_) => {}
         }
         self.settle(selection);
     }
@@ -675,6 +689,30 @@ impl Driver {
         }
     }
 
+    fn send_one(&mut self, q: usize, bytes: &[u8]) {
+        if q == self.idx || q >= self.send.len() {
+            return;
+        }
+        if let Some(channel) = self.send[q].as_mut() {
+            let _ = channel.send(bytes);
+        }
+    }
+
+    // Frames parked for a height above ours mean peers have moved on without us. Without
+    // this the node waits on a round the rest of the set already finalised, forever.
+    fn request_catch_up(&mut self) {
+        let Some(source) = self.buffered.heaviest_source() else {
+            return;
+        };
+        let from = self.node.height();
+        let request = Message::GetBlocks {
+            from,
+            to: from + CATCH_UP_SPAN,
+        }
+        .encode();
+        self.send_one(source as usize, &request);
+    }
+
     fn broadcast(&mut self, bytes: &[u8]) {
         for q in 0..self.n {
             if q == self.idx {
@@ -729,7 +767,19 @@ fn message_height(message: &Message) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FrameBuffer, MAX_BUFFERED_BYTES, MAX_BUFFERED_FRAMES};
+    use super::{message_height, FrameBuffer, MAX_BUFFERED_BYTES, MAX_BUFFERED_FRAMES};
+    use qtv_devnet::wire::Message;
+
+    // A node that has fallen behind only ever sees sync traffic if it is exempt from the
+    // height gate. Gating it would park the reply for a height the node cannot reach.
+    #[test]
+    fn sync_messages_are_never_height_gated() {
+        assert_eq!(
+            message_height(&Message::GetBlocks { from: 1, to: 64 }),
+            None
+        );
+        assert_eq!(message_height(&Message::Blocks(Vec::new())), None);
+    }
 
     fn within_ceilings(buffer: &FrameBuffer) {
         assert!(
