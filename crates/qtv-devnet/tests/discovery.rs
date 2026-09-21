@@ -35,6 +35,7 @@ fn chain_config(base: &std::path::Path, count: usize) -> DevnetConfig {
         bridge_operators: None,
         bridged_assets: vec![],
         bridge_era: None,
+        bridge_exit_max_amount: None,
     }
 }
 

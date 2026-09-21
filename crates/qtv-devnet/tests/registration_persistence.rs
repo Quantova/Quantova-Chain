@@ -49,6 +49,7 @@ fn config_with_slots(base: &std::path::Path, online: &[bool], slots: u64) -> Dev
         bridge_operators: None,
         bridged_assets: vec![],
         bridge_era: None,
+        bridge_exit_max_amount: None,
     }
 }
 

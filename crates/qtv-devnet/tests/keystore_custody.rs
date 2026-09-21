@@ -57,6 +57,7 @@ fn a_devnet_of_keystore_backed_nodes_stands_up_and_finalizes() {
         bridge_operators: None,
         bridged_assets: vec![],
         bridge_era: None,
+        bridge_exit_max_amount: None,
     };
 
     let mut devnet =

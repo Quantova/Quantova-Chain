@@ -8791,7 +8791,6 @@ mod stake_state_tests {
         );
     }
 
-    #[test]
     // Nesting is live: dispatch_vm runs apply_atomic inside the outer one. An inner
     // commit whose undo records were dropped would survive an outer rollback, so a
     // contract write would persist inside a transaction the block rejected.

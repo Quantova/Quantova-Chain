@@ -90,6 +90,7 @@ pub struct DevnetConfig {
     pub bridge_operators: Option<OperatorSet>,
     pub bridged_assets: Vec<GenesisBridgedAsset>,
     pub bridge_era: Option<[u8; 32]>,
+    pub bridge_exit_max_amount: Option<u128>,
 }
 
 impl DevnetConfig {
@@ -137,6 +138,7 @@ impl DevnetConfig {
             bridge_operators: self.bridge_operators.clone(),
             bridged_assets: self.bridged_assets.clone(),
             bridge_era: self.bridge_era,
+            bridge_exit_max_amount: self.bridge_exit_max_amount,
             bridge_bitcoin_anchor: None,
             bridge_eth_anchors: Vec::new(),
             bridge_cosmos_anchor: None,
@@ -201,6 +203,7 @@ mod secret_redaction_tests {
             bridge_operators: None,
             bridged_assets: Vec::new(),
             bridge_era: None,
+            bridge_exit_max_amount: None,
         };
 
         let rendered = format!("{config:?}");

@@ -84,6 +84,7 @@ fn a_genesis_of_independent_registrations_finalises_and_reproduces_no_peer_secre
         bridge_operators: None,
         bridged_assets: vec![],
         bridge_era: None,
+        bridge_exit_max_amount: None,
     };
 
     let mut devnet =

@@ -90,6 +90,9 @@ pub struct Genesis {
     pub bridge_operators: Option<crate::bridge::OperatorSet>,
     pub bridged_assets: Vec<GenesisBridgedAsset>,
     pub bridge_era: Option<[u8; 32]>,
+    // The largest single bridge exit the off chain desk will serve. Unset reads as zero,
+    // which both exit checks treat as no ceiling, so leaving it out is the open setting.
+    pub bridge_exit_max_amount: Option<u128>,
     pub bridge_bitcoin_anchor: Option<crate::bridge_btc::BitcoinAnchor>,
     pub bridge_eth_anchors: Vec<crate::bridge_eth::EthAnchor>,
     pub bridge_cosmos_anchor: Option<crate::bridge_cosmos::CosmosAnchor>,
@@ -5438,6 +5441,7 @@ mod tests {
             bridge_operators: None,
             bridged_assets: Vec::new(),
             bridge_era: None,
+            bridge_exit_max_amount: None,
             bridge_bitcoin_anchor: None,
             bridge_eth_anchors: Vec::new(),
             bridge_cosmos_anchor: cosmos,

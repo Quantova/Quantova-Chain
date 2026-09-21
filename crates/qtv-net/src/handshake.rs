@@ -205,17 +205,6 @@ fn initiate<S: Read + Write>(
     Ok(Channel::new(stream, Role::Initiator, peer, keys))
 }
 
-/// An accept that will only spend crypto on a peer already in the known set. Without it
-/// the responder does an ML-KEM keygen and an ML-DSA signature for any stranger that
-/// sends the first message, before anything proves the peer is real.
-pub fn accept_known<S: Read + Write>(
-    stream: S,
-    identity: &Identity,
-    known: &[PeerId],
-) -> Result<Channel<S>> {
-    respond_known(stream, identity, None, Some(known))
-}
-
 fn respond<S: Read + Write>(
     stream: S,
     identity: &Identity,

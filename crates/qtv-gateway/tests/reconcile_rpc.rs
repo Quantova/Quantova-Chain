@@ -51,6 +51,7 @@ fn config_with_accounts(base: &Path, accounts: Vec<GenesisAccount>) -> DevnetCon
         bridge_operators: None,
         bridged_assets: vec![],
         bridge_era: None,
+        bridge_exit_max_amount: None,
     }
 }
 

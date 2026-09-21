@@ -472,6 +472,10 @@ impl DevNode {
             let (era_key, era_value) = self.ledger.seed_bridge_era(&era);
             self.state_store.put_account(era_key, era_value)?;
         }
+        if let Some(ceiling) = genesis.bridge_exit_max_amount {
+            let (ceiling_key, ceiling_value) = self.ledger.seed_bridge_exit_max_amount(ceiling);
+            self.state_store.put_account(ceiling_key, ceiling_value)?;
+        }
         if let Some(ref operators) = genesis.bridge_operators {
             if let Some((op_key, op_value)) = self.ledger.seed_bridge_operator_set(operators) {
                 self.state_store.put_account(op_key, op_value)?;
@@ -2559,6 +2563,7 @@ mod tests {
             bridge_operators: None,
             bridged_assets: Vec::new(),
             bridge_era: None,
+            bridge_exit_max_amount: None,
             bridge_bitcoin_anchor: None,
             bridge_eth_anchors: Vec::new(),
             bridge_cosmos_anchor: None,

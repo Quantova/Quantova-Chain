@@ -42,6 +42,7 @@ impl GenesisFile {
         let mut native_unit: Option<u128> = None;
         let mut max_fee_native: Option<u64> = None;
         let mut bridge_dest_chain: Option<u32> = None;
+        let mut bridge_exit_max_amount: Option<u128> = None;
         let mut guardian_members: Vec<[u8; 32]> = Vec::new();
         let mut guardian_threshold: Option<u32> = None;
         let mut bridge_ops: Vec<(u32, Vec<u8>, Vec<u8>)> = Vec::new();
@@ -66,6 +67,9 @@ impl GenesisFile {
                 "fee_native_unit" => native_unit = Some(field.u128("fee_native_unit")?),
                 "fee_max_native" => max_fee_native = Some(field.u64("fee_max_native")?),
                 "bridge_dest_chain" => bridge_dest_chain = Some(field.u32("bridge_dest_chain")?),
+                "bridge_exit_max_amount" => {
+                    bridge_exit_max_amount = Some(field.u128("bridge_exit_max_amount")?)
+                }
                 "validator" => {}
                 "account" => accounts.push(parse_account(field)?),
                 "guardian" => {
@@ -249,6 +253,7 @@ impl GenesisFile {
             bridge_operators,
             bridged_assets: bridged,
             bridge_era: None,
+            bridge_exit_max_amount,
             bridge_bitcoin_anchor: None,
             bridge_eth_anchors: Vec::new(),
             bridge_cosmos_anchor: None,
@@ -436,6 +441,11 @@ fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) ->
     if let Some(dest_chain) = genesis.bridge_dest_chain {
         buf.extend_from_slice(&dest_chain.to_le_bytes());
     }
+    // Folded in only when the operator declared it, so every genesis file written before
+    // the ceiling existed hashes to exactly what it hashed to before.
+    if let Some(ceiling) = genesis.bridge_exit_max_amount {
+        buf.extend_from_slice(&ceiling.to_le_bytes());
+    }
 
     let mut validators = genesis.validators.clone();
     validators.sort_by_key(|v| v.id);
@@ -566,6 +576,7 @@ mod tests {
             bridge_operators: None,
             bridged_assets: Vec::new(),
             bridge_era: None,
+            bridge_exit_max_amount: None,
             bridge_bitcoin_anchor: None,
             bridge_eth_anchors: Vec::new(),
             bridge_cosmos_anchor: None,

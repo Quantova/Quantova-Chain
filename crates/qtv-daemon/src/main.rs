@@ -288,6 +288,7 @@ fn build_devnet(genesis_file: &genesis::GenesisFile) -> DevnetConfig {
         bridge_operators: genesis_file.genesis.bridge_operators.clone(),
         bridged_assets: genesis_file.genesis.bridged_assets.clone(),
         bridge_era: Some(genesis_file.hash),
+        bridge_exit_max_amount: genesis_file.genesis.bridge_exit_max_amount,
     }
 }
 

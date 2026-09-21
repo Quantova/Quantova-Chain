@@ -89,6 +89,7 @@ fn devnet_config(base: &PathBuf, validators: usize, senders: &[Account]) -> Devn
         bridge_operators: None,
         bridged_assets: vec![],
         bridge_era: None,
+        bridge_exit_max_amount: None,
     }
 }
 
