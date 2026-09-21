@@ -43,6 +43,11 @@ fn bootstrap_deadline() -> Duration {
 /// next failure to re-arm. A node is never permanently written off.
 const RECONNECT_MIN: Duration = Duration::from_millis(250);
 const RECONNECT_MAX: Duration = Duration::from_secs(10);
+
+// The shortest gap between two successful reconnects to one peer. The per dial backoff
+// resets every time a dial succeeds, so a peer that completes the handshake and then
+// stops reading can otherwise drive an unbounded post quantum re-handshake loop.
+const RECONNECT_FLOOR: Duration = Duration::from_secs(2);
 const REJOIN_QUEUE: usize = 64;
 /// Concurrent handshakes allowed from one source address, so a single host cannot
 /// hold every slot and lock a returning validator out.
@@ -215,14 +220,20 @@ pub fn build_mesh(
             let identity_w = identity_acc.clone();
             let up_w = up_acc.clone();
             let peer_ids_w = peer_ids_acc.clone();
+            // The configured validators. A stranger is refused before the responder
+            // spends an ML-KEM keygen and an ML-DSA signature on it.
+            let known_peers: Vec<PeerId> = peer_ids_acc.iter().flatten().cloned().collect();
             let worker_tx_w = worker_tx.clone();
             let inflight_w = Arc::clone(&inflight);
             thread::spawn(move || {
                 let _guard = InflightGuard(inflight_w);
                 let _ = stream.set_nonblocking(false);
-                if let Ok(channel) =
-                    Channel::accept_with_timeout(stream, &identity_w, HANDSHAKE_TIMEOUT)
-                {
+                if let Ok(channel) = Channel::accept_known_with_timeout(
+                    stream,
+                    &identity_w,
+                    HANDSHAKE_TIMEOUT,
+                    &known_peers,
+                ) {
                     let peer = channel.peer_id().clone();
                     let from = (0..n).find(|&q| {
                         q != idx
@@ -516,6 +527,8 @@ fn spawn_redialer(
     thread::spawn(move || {
         let hello = hello_frame(&genesis_hash);
         let dialling: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
+        let last_connect: Arc<Mutex<HashMap<usize, Instant>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         while let Ok(q) = down_rx.recv() {
             let (Some(addr), Some(peer)) = (
                 peer_addrs.get(q).and_then(|a| a.clone()),
@@ -531,13 +544,27 @@ fn spawn_redialer(
             let hello = hello.clone();
             let tx = rejoined_tx.clone();
             let dialling_w = Arc::clone(&dialling);
+            let last_connect_w = Arc::clone(&last_connect);
             thread::spawn(move || {
+                // Carried across dials, so a peer that drops the link straight after every
+                // handshake cannot spend a fresh handshake on us as fast as it likes.
+                if let Ok(seen) = last_connect_w.lock() {
+                    if let Some(at) = seen.get(&q) {
+                        let since = at.elapsed();
+                        if since < RECONNECT_FLOOR {
+                            thread::sleep(RECONNECT_FLOOR - since);
+                        }
+                    }
+                }
                 let mut wait = RECONNECT_MIN;
                 loop {
                     // Try immediately, a link lost to one write timeout is usually back
                     // straight away and should not cost a full backoff.
                     if let Some(channel) = connect_peer(&addr, &identity, &peer, &hello, q) {
                         log(&format!("re-established the link to peer {}", q + 1));
+                        if let Ok(mut seen) = last_connect_w.lock() {
+                            seen.insert(q, Instant::now());
+                        }
                         let _ = tx.send((q, channel));
                         break;
                     }

@@ -77,6 +77,21 @@ impl Channel<TcpStream> {
         Ok(channel)
     }
 
+    pub fn accept_known_with_timeout(
+        stream: TcpStream,
+        identity: &Identity,
+        timeout: Duration,
+        known: &[PeerId],
+    ) -> Result<Self> {
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        let channel = guarded_handshake(stream, timeout, |s| {
+            respond_known(s, identity, None, Some(known))
+        })?;
+        channel.set_post_handshake()?;
+        Ok(channel)
+    }
+
     pub fn connect_with_timeout(
         stream: TcpStream,
         identity: &Identity,
@@ -169,16 +184,40 @@ fn initiate<S: Read + Write>(
     Ok(Channel::new(stream, Role::Initiator, peer, keys))
 }
 
+/// An accept that will only spend crypto on a peer already in the known set. Without it
+/// the responder does an ML-KEM keygen and an ML-DSA signature for any stranger that
+/// sends the first message, before anything proves the peer is real.
+pub fn accept_known<S: Read + Write>(
+    stream: S,
+    identity: &Identity,
+    known: &[PeerId],
+) -> Result<Channel<S>> {
+    respond_known(stream, identity, None, Some(known))
+}
+
 fn respond<S: Read + Write>(
+    stream: S,
+    identity: &Identity,
+    expected: Option<&PeerId>,
+) -> Result<Channel<S>> {
+    respond_known(stream, identity, expected, None)
+}
+
+fn respond_known<S: Read + Write>(
     mut stream: S,
     identity: &Identity,
     expected: Option<&PeerId>,
+    known: Option<&[PeerId]>,
 ) -> Result<Channel<S>> {
     let initiator_public: ml_dsa::PublicKey = read_array(&mut stream)?;
     let client_random: [u8; 32] = read_array(&mut stream)?;
 
     let peer = PeerId::from_public(&initiator_public);
     if expected.is_some_and(|pin| &peer != pin) {
+        return Err(Error::UnexpectedPeer);
+    }
+    // Refused before the keygen and the signature below, not after.
+    if known.is_some_and(|set| !set.contains(&peer)) {
         return Err(Error::UnexpectedPeer);
     }
 
