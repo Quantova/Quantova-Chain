@@ -2070,7 +2070,7 @@ impl DevNode {
         self.block_store.head_height().unwrap_or(0)
     }
 
-    pub fn burn_block(&self, height: Height) -> Option<&BurnArchiveEntry> {
+    pub fn burn_block(&self, height: Height) -> Option<BurnArchiveEntry> {
         self.burn_archive.entry(height)
     }
 

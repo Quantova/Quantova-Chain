@@ -239,6 +239,12 @@ impl Log {
         Ok(payload)
     }
 
+    /// Where the next frame's PAYLOAD will start. Lets a caller index a record it is
+    /// about to append without re-reading the file.
+    pub fn next_payload_start(&self) -> io::Result<u64> {
+        Ok(self.file.metadata()?.len() + LENGTH_WIDTH as u64)
+    }
+
     pub fn append(&mut self, payload: &[u8]) -> io::Result<()> {
         let mut encoder = Encoder::new();
         encoder.put_bytes(payload);

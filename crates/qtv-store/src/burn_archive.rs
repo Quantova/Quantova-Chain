@@ -53,36 +53,44 @@ impl BurnArchiveEntry {
     }
 }
 
+/// An offset index, not the entries themselves. Holding every archived burn block in RAM
+/// for the life of the process grows without bound and nothing prunes it, and loading the
+/// whole log to build that map read the file twice at open.
 #[derive(Debug)]
 pub struct BurnArchive {
     log: Log,
-    by_height: BTreeMap<u64, BurnArchiveEntry>,
+    by_height: BTreeMap<u64, (u64, u64)>,
 }
 
 impl BurnArchive {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
-        let (log, frames) = Log::open(path)?;
-        let mut by_height = BTreeMap::new();
-        for frame in &frames {
-            match BurnArchiveEntry::decode(frame) {
+        let mut by_height: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
+        let log = Log::open_scanned_strict(path, |payload, payload_start, _end| {
+            match BurnArchiveEntry::decode(payload) {
                 Ok(entry) => {
-                    by_height.insert(entry.height, entry);
+                    by_height.insert(entry.height, (payload_start, payload.len() as u64));
+                    true
                 }
-                Err(_) => break,
+                Err(_) => false,
             }
-        }
+        })?;
         Ok(BurnArchive { log, by_height })
     }
 
     pub fn append(&mut self, entry: BurnArchiveEntry) -> io::Result<()> {
-        self.log.append(&entry.encode())?;
+        let payload = entry.encode();
+        let start = self.log.next_payload_start()?;
+        self.log.append(&payload)?;
         self.log.sync()?;
-        self.by_height.insert(entry.height, entry);
+        self.by_height
+            .insert(entry.height, (start, payload.len() as u64));
         Ok(())
     }
 
-    pub fn entry(&self, height: u64) -> Option<&BurnArchiveEntry> {
-        self.by_height.get(&height)
+    pub fn entry(&self, height: u64) -> Option<BurnArchiveEntry> {
+        let (start, len) = *self.by_height.get(&height)?;
+        let payload = self.log.read_payload(start, len).ok()?;
+        BurnArchiveEntry::decode(&payload).ok()
     }
 
     pub fn contains(&self, height: u64) -> bool {
@@ -145,7 +153,7 @@ mod tests {
         assert!(archive.is_empty());
         let written = entry(7, 0xAB);
         archive.append(written.clone()).unwrap();
-        assert_eq!(archive.entry(7), Some(&written));
+        assert_eq!(archive.entry(7), Some(written.clone()));
         assert!(archive.entry(6).is_none());
         assert!(archive.contains(7));
         std::fs::remove_file(&path).ok();
@@ -163,8 +171,8 @@ mod tests {
         }
         let archive = BurnArchive::open(&path).unwrap();
         assert_eq!(archive.len(), 2);
-        assert_eq!(archive.entry(3), Some(&first));
-        assert_eq!(archive.entry(9), Some(&second));
+        assert_eq!(archive.entry(3), Some(first.clone()));
+        assert_eq!(archive.entry(9), Some(second.clone()));
         std::fs::remove_file(&path).ok();
     }
 

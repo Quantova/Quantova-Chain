@@ -131,7 +131,7 @@ fn a_stored_burn_block_recomputes_its_event_root_and_an_inclusion_proof_verifies
     let stored = archive
         .entry(1)
         .expect("the burn block survived the reopen");
-    assert_eq!(stored, &entry);
+    assert_eq!(stored, entry);
 
     let decoded_header = header_from_bytes(&stored.header_bytes).expect("the header decodes");
     assert_eq!(
