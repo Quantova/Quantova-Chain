@@ -3,6 +3,7 @@
 
 use qtv_crypto::chacha20poly1305::{KEY_BYTES, NONCE_BYTES};
 use qtv_crypto::sha3;
+use qtv_wipe::Zeroize;
 
 const KEY_SCHEDULE_LABEL: &[u8] = b"qtv-net/key-schedule/v1";
 
@@ -10,6 +11,15 @@ const KEY_SCHEDULE_LABEL: &[u8] = b"qtv-net/key-schedule/v1";
 pub struct DirKey {
     pub key: [u8; KEY_BYTES],
     pub iv: [u8; NONCE_BYTES],
+}
+
+// A session key that outlives its channel in freed memory is a decryption key for anything
+// captured on the wire, so it is wiped on drop like every other secret in the stack.
+impl Drop for DirKey {
+    fn drop(&mut self) {
+        self.key.zeroize();
+        self.iv.zeroize();
+    }
 }
 
 pub struct SessionKeys {
@@ -26,6 +36,7 @@ pub fn derive(shared_secret: &[u8; 32], transcript_hash: &[u8; 32]) -> SessionKe
 
     let mut stream = [0u8; 2 * KEY_BYTES + 2 * NONCE_BYTES + 32];
     sha3::shake256(&input, &mut stream);
+    input.zeroize();
 
     let mut i2r_key = [0u8; KEY_BYTES];
     i2r_key.copy_from_slice(&stream[0..KEY_BYTES]);
@@ -40,6 +51,8 @@ pub fn derive(shared_secret: &[u8; 32], transcript_hash: &[u8; 32]) -> SessionKe
 
     let mut exporter = [0u8; 32];
     exporter.copy_from_slice(&stream[iv_base + 2 * NONCE_BYTES..]);
+    // The stream still holds both directional keys and the exporter.
+    stream.zeroize();
 
     SessionKeys {
         initiator_to_responder: DirKey {

@@ -2800,6 +2800,7 @@ impl Ledger {
                 // got the discount, which is every contract anyone actually writes.
                 self.last_vm_meter_used =
                     self.last_vm_meter_used.saturating_add(outcome.meter_used);
+                self.last_vm_call_cost = Some(outcome.meter_used);
                 let mut native_credits: Vec<(String, u64)> = Vec::new();
                 let mut native_sent: u64 = 0;
                 let mut asset_credits: Vec<([u8; 16], [u8; 32], u128)> = Vec::new();
@@ -9738,6 +9739,8 @@ pub struct Ledger {
     /// charges this rather than the limit a transaction declared, so declaring a
     /// large limit and doing nothing cannot reserve the block against everyone else.
     last_vm_meter_used: u64,
+    last_vm_call_cost: Option<u64>,
+    vm_deploy_armed: bool,
 }
 
 impl Ledger {
@@ -9751,6 +9754,8 @@ impl Ledger {
             execution_time: 0,
             journal: None,
             last_vm_meter_used: 0,
+            last_vm_call_cost: None,
+            vm_deploy_armed: false,
         }
     }
 
@@ -9765,6 +9770,8 @@ impl Ledger {
             execution_time: 0,
             journal: None,
             last_vm_meter_used: 0,
+            last_vm_call_cost: None,
+            vm_deploy_armed: false,
         }
     }
 
@@ -9808,6 +9815,26 @@ impl Ledger {
     /// only ever revised DOWN, by a call that actually completed and reported its cost.
     pub fn arm_vm_meter(&mut self, declared: u64) {
         self.last_vm_meter_used = declared;
+        self.last_vm_call_cost = None;
+        self.vm_deploy_armed = false;
+    }
+
+    /// A deploy pre arms the price of the permanent state it is about to write, then runs
+    /// the constructor through the same path, so there the two costs add.
+    pub fn arm_vm_meter_deploy(&mut self, cost: u64) {
+        self.last_vm_meter_used = cost;
+        self.last_vm_call_cost = None;
+        self.vm_deploy_armed = true;
+    }
+
+    /// What the block budget should be charged. A plain call is charged what it actually
+    /// cost. Charging the declared limit let calls that execute nothing reserve the whole
+    /// block budget and censor every real contract call for a flat fee each.
+    pub fn vm_meter_charge(&self) -> u64 {
+        if self.vm_deploy_armed {
+            return self.last_vm_meter_used;
+        }
+        self.last_vm_call_cost.unwrap_or(self.last_vm_meter_used)
     }
 
     pub(crate) fn apply_atomic<F>(&mut self, f: F) -> bool

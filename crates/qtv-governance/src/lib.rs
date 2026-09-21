@@ -838,6 +838,9 @@ impl Status {
     }
 }
 
+/// How long an approved action stays enactable once its delay has elapsed.
+pub const ENACTMENT_WINDOW_SECONDS: u64 = 30 * 86_400;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Referendum {
     pub id: u64,
@@ -880,9 +883,19 @@ impl Referendum {
     }
 
     pub fn enactable(&self, now: u64) -> bool {
-        now >= self
+        let opens = self
             .decides_at()
-            .saturating_add(self.track.enactment_delay())
+            .saturating_add(self.track.enactment_delay());
+        now >= opens && now <= opens.saturating_add(ENACTMENT_WINDOW_SECONDS)
+    }
+
+    /// An approval that never expires can be enacted by anyone at any later time, long
+    /// after the conditions it was voted under have gone. The window bounds that.
+    pub fn enactment_expired(&self, now: u64) -> bool {
+        let opens = self
+            .decides_at()
+            .saturating_add(self.track.enactment_delay());
+        now > opens.saturating_add(ENACTMENT_WINDOW_SECONDS)
     }
 
     pub fn resolve(&mut self, now: u64, electorate_stake: u128) -> Status {

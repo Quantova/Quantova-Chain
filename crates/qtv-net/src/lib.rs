@@ -65,9 +65,10 @@ impl From<std::io::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// One entropy source for the whole stack. Reading /dev/urandom straight returns
+/// predictable bytes on a boot whose pool is not seeded, and those bytes become a session
+/// key and a decapsulation secret.
 pub(crate) fn fill_random(out: &mut [u8]) -> std::io::Result<()> {
-    use std::fs::File;
-    use std::io::Read;
-    let mut source = File::open("/dev/urandom")?;
-    source.read_exact(out)
+    qtv_crypto::rng::fill_random(out);
+    Ok(())
 }

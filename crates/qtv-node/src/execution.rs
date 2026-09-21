@@ -354,7 +354,11 @@ pub fn execute_contract_call_lazy(
     })
 }
 
-pub fn execute_contract_call(
+/// Test only. The live call path is `execute_contract_call_lazy`, which meters the reads
+/// it actually performs. Kept private so this cannot become a second production path that
+/// drifts from it on metering.
+#[cfg(test)]
+fn execute_contract_call(
     container_bytes: &[u8],
     selector: [u8; qtv_vm::container::SELECTOR_BYTES],
     storage: std::collections::BTreeMap<[u8; 32], u64>,

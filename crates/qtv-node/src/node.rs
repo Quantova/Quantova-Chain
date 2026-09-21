@@ -1298,7 +1298,7 @@ fn dispatch_vm(
             ledger.arm_vm_meter(meter);
             return true;
         }
-        ledger.arm_vm_meter(deploy_cost);
+        ledger.arm_vm_meter_deploy(deploy_cost);
         if let Some(contract) = ledger.deploy_contract(&sender, nonce, container) {
             let genesis = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
             let mut genesis_memory =
@@ -1410,7 +1410,7 @@ fn execute_ordered_across(
                 // the declared limit let a handful of transactions that execute
                 // nothing hold the whole block budget and censor every real contract
                 // call in the block, for a flat fee each.
-                let used = ledger.last_vm_meter_used().min(meter);
+                let used = ledger.vm_meter_charge().min(meter);
                 vm_meter = vm_meter.saturating_add(used);
                 *sender_vm_meter.entry(sender).or_insert(0) = sender_used.saturating_add(used);
                 included.push(wrapper.clone());
@@ -2119,6 +2119,32 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+
+    // A call that executes almost nothing must not reserve its declared limit, or a
+    // handful of them hold the whole block budget and censor every real contract call.
+    #[test]
+    fn a_call_that_executes_nothing_does_not_reserve_the_block_budget() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        ledger.seed_supply(1_000_000_000);
+
+        let declared = VM_BLOCK_METER_BUDGET / 4;
+        ledger.arm_vm_meter(declared);
+        assert_eq!(
+            ledger.vm_meter_charge(),
+            declared,
+            "with no call observed the declared limit stands, so a fault cannot go free"
+        );
+
+        let deploy_cost = 1_000u64;
+        ledger.arm_vm_meter_deploy(deploy_cost);
+        assert_eq!(
+            ledger.vm_meter_charge(),
+            deploy_cost,
+            "a deploy is charged the state it writes even before its constructor runs"
+        );
+        let _ = &fee;
+    }
     use super::*;
     use crate::execution::{transfer_call, TRANSFER_METER};
     use crate::ledger::Account;

@@ -89,6 +89,19 @@ const STATE_COMPACT_CHECK_BLOCKS: u64 = 1000;
 
 const MAX_FUTURE_PROPOSALS: usize = 256;
 
+// What every parked proposal may hold in total, not per entry.
+const MAX_FUTURE_PROPOSAL_BYTES: usize = 16 * 1024 * 1024;
+
+fn proposal_weight(proposal: &Proposal) -> usize {
+    proposal
+        .body
+        .iter()
+        .map(|w| w.body().call().args().len() + 256)
+        .sum::<usize>()
+        + proposal.justification.len() * 512
+        + 1024
+}
+
 const MAX_VIEW_CHANGES_PER_SENDER: usize = 64;
 const MAX_ROUND_VIEW_CHANGES: usize = 8192;
 
@@ -1926,6 +1939,27 @@ impl DevNode {
             self.future_props.remove(index);
         }
         self.future_props.push(proposal);
+        self.trim_future_props();
+    }
+
+    // The count cap alone bounds nothing: one leader of many views can park 256 proposals
+    // of the full reassembly ceiling each and hold gigabytes on every honest node until a
+    // height it is itself preventing. Bound the held bytes, not just the entries.
+    fn trim_future_props(&mut self) {
+        let mut held: usize = self.future_props.iter().map(proposal_weight).sum();
+        while held > MAX_FUTURE_PROPOSAL_BYTES && self.future_props.len() > 1 {
+            let Some((index, _)) = self
+                .future_props
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (i, p.view))
+                .max_by_key(|(_, view)| *view)
+            else {
+                return;
+            };
+            held -= proposal_weight(&self.future_props[index]);
+            self.future_props.remove(index);
+        }
     }
 
     pub fn view(&self) -> View {

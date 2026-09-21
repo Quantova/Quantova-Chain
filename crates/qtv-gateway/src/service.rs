@@ -481,12 +481,19 @@ fn finalized_head(node: &DevNode) -> Json {
 fn burn_block(node: &DevNode, height: u64) -> Result<Json, ClientError> {
     match node.burn_block(height) {
         Some(entry) => {
+            // Capped like every sibling list endpoint, so one block cannot serve an
+            // unbounded array to any caller that asks for it.
+            let total = entry.events.len();
             let events: Vec<Json> = entry
                 .events
                 .iter()
+                .take(MAX_EVENTS_PER_RESPONSE)
                 .map(|leaf| Json::str(crate::json::to_hex(leaf)))
                 .collect();
+            let truncated = total > events.len();
             Ok(object(vec![
+                ("truncated", Json::Bool(truncated)),
+                ("total", Json::Int(total as u64)),
                 ("height", Json::Int(entry.height)),
                 (
                     "header_bytes",

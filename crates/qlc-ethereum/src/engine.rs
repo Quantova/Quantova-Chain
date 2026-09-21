@@ -207,6 +207,26 @@ pub fn bootstrap(
     })
 }
 
+/// The signature has to be made at or after the header it attests, and in the same
+/// committee period. Enforced on the deposit path and on the committee update path alike,
+/// or an update is admitted under rules the deposits it then authorises never allowed.
+fn slots_are_consistent(
+    store: &LightClientStore,
+    signature_slot: u64,
+    attested_slot: u64,
+) -> Result<(), EthError> {
+    if signature_slot < attested_slot
+        || store.config.sync_committee_period(signature_slot)
+            != store.config.sync_committee_period(attested_slot)
+    {
+        return Err(EthError::InconsistentSlots {
+            signature_slot,
+            attested_slot,
+        });
+    }
+    Ok(())
+}
+
 fn select_committee(
     store: &LightClientStore,
     signature_slot: u64,
@@ -308,17 +328,7 @@ fn verify_deposit_core(
     if !store.config.verifies_beacon_sync_committee() {
         return Err(EthError::NotBeaconChain);
     }
-    if update.signature_slot < update.attested_header.slot
-        || store.config.sync_committee_period(update.signature_slot)
-            != store
-                .config
-                .sync_committee_period(update.attested_header.slot)
-    {
-        return Err(EthError::InconsistentSlots {
-            signature_slot: update.signature_slot,
-            attested_slot: update.attested_header.slot,
-        });
-    }
+    slots_are_consistent(store, update.signature_slot, update.attested_header.slot)?;
     verify_sync_aggregate(
         store,
         &update.attested_header,
@@ -440,6 +450,7 @@ pub fn apply_sync_committee_update(
     {
         return Err(EthError::WrongPeriod);
     }
+    slots_are_consistent(store, update.signature_slot, update.attested_header.slot)?;
     verify_sync_aggregate(
         store,
         &update.attested_header,
