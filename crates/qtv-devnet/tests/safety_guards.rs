@@ -50,12 +50,13 @@ fn a_restarted_devnode_refuses_to_re_sign_a_height_it_already_signed() {
     );
     let selection = restarted.select().expect("a committee is selected");
     let _ = restarted.enter_round(&selection, true);
+    // The rebuilt block is the same block, so this is a resumption and not a second
+    // vote. Refusing it is what stranded a validator that restarted before the block
+    // persisted. A conflicting value at a signed height is still refused, which
+    // qtv_node::watermark proves directly where the value can be varied.
     assert!(
-        matches!(
-            restarted.fatal(),
-            Some(Fatal::DoubleSignRefused { height: 1, .. })
-        ),
-        "the persisted watermark did not refuse re signing a height already signed, got {:?}",
+        restarted.fatal().is_none(),
+        "a restart that reproduces the same block was refused, got {:?}",
         restarted.fatal()
     );
 }

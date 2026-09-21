@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub struct SignGuard {
     path: PathBuf,
-    mark: Option<(u64, u64)>,
+    mark: Option<(u64, u64, Option<[u8; 32]>)>,
 }
 
 impl SignGuard {
@@ -32,31 +32,38 @@ impl SignGuard {
     }
 
     pub fn mark(&self) -> Option<(u64, u64)> {
-        self.mark
+        self.mark.map(|(height, view, _)| (height, view))
     }
 
-    pub fn permits(&self, height: u64, view: u64) -> bool {
-        match self.mark {
-            Some(mark) => (height, view) > mark,
+    /// Signing the same value again at the same height is a resumption, not a second
+    /// vote. Without that a restart before the block is persisted is fatal forever.
+    pub fn permits(&self, height: u64, view: u64, value: &[u8; 32]) -> bool {
+        match &self.mark {
+            Some((mh, mv, mval)) => match (height, view).cmp(&(*mh, *mv)) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Equal => mval.as_ref() == Some(value),
+                std::cmp::Ordering::Less => false,
+            },
             None => true,
         }
     }
 
-    pub fn try_sign(&mut self, height: u64, view: u64) -> io::Result<bool> {
-        if !self.permits(height, view) {
+    pub fn try_sign(&mut self, height: u64, view: u64, value: &[u8; 32]) -> io::Result<bool> {
+        if !self.permits(height, view, value) {
             return Ok(false);
         }
-        self.persist(height, view)?;
-        self.mark = Some((height, view));
+        self.persist(height, view, value)?;
+        self.mark = Some((height, view, Some(*value)));
         Ok(true)
     }
 
-    fn persist(&self, height: u64, view: u64) -> io::Result<()> {
-        let mut bytes = [0u8; 20];
+    fn persist(&self, height: u64, view: u64, value: &[u8; 32]) -> io::Result<()> {
+        let mut bytes = [0u8; 52];
         bytes[0..8].copy_from_slice(&height.to_le_bytes());
         bytes[8..16].copy_from_slice(&view.to_le_bytes());
-        let checksum = crc32(&bytes[0..16]);
-        bytes[16..20].copy_from_slice(&checksum.to_le_bytes());
+        bytes[16..48].copy_from_slice(value);
+        let checksum = crc32(&bytes[0..48]);
+        bytes[48..52].copy_from_slice(&checksum.to_le_bytes());
         let temp = self.path.with_extension("tmp");
         let mut file = fs::File::create(&temp)?;
         file.write_all(&bytes)?;
@@ -69,8 +76,18 @@ impl SignGuard {
     }
 }
 
-fn decode_mark(bytes: &[u8]) -> Option<(u64, u64)> {
+fn decode_mark(bytes: &[u8]) -> Option<(u64, u64, Option<[u8; 32]>)> {
     match bytes.len() {
+        52 => {
+            let stored = u32::from_le_bytes(bytes[48..52].try_into().ok()?);
+            if crc32(&bytes[0..48]) != stored {
+                return None;
+            }
+            let height = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
+            let view = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
+            let value: [u8; 32] = bytes[16..48].try_into().ok()?;
+            Some((height, view, Some(value)))
+        }
         20 => {
             let stored = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
             if crc32(&bytes[0..16]) != stored {
@@ -78,12 +95,12 @@ fn decode_mark(bytes: &[u8]) -> Option<(u64, u64)> {
             }
             let height = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
             let view = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
-            Some((height, view))
+            Some((height, view, None))
         }
         16 => {
             let height = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
             let view = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
-            Some((height, view))
+            Some((height, view, None))
         }
         _ => None,
     }
@@ -259,7 +276,32 @@ mod tests {
         let path = temp_path("absent");
         let guard = SignGuard::open(&path).unwrap();
         assert_eq!(guard.mark(), None);
-        assert!(guard.permits(1, 0));
+        assert!(guard.permits(1, 0, &[1u8; 32]));
+        cleanup(&path);
+    }
+
+    #[test]
+    // A node that signs, restarts before the block persists, and reproduces the same
+    // block must resume. Refusing that is what bricked a validator for good.
+    fn a_restart_resumes_the_same_value_but_refuses_a_different_one() {
+        let path = temp_path("sign-resume");
+        let value = [7u8; 32];
+        let other = [9u8; 32];
+        {
+            let mut guard = SignGuard::open(&path).expect("open");
+            assert!(guard.try_sign(4, 0, &value).expect("first sign"));
+        }
+        {
+            let mut guard = SignGuard::open(&path).expect("reopen");
+            assert!(
+                guard.try_sign(4, 0, &value).expect("resume"),
+                "a restart at the same height and the same block refused to resume"
+            );
+            assert!(
+                !guard.try_sign(4, 0, &other).expect("conflict"),
+                "a different block at a signed height was permitted"
+            );
+        }
         cleanup(&path);
     }
 
@@ -268,25 +310,25 @@ mod tests {
         let path = temp_path("restart");
         {
             let mut guard = SignGuard::open(&path).unwrap();
-            assert!(guard.try_sign(5, 2).unwrap());
+            assert!(guard.try_sign(5, 2, &[1u8; 32]).unwrap());
         }
         let mut guard = SignGuard::open(&path).unwrap();
         assert_eq!(guard.mark(), Some((5, 2)));
         assert!(
-            !guard.try_sign(5, 2).unwrap(),
-            "the exact height and view it signed"
+            !guard.try_sign(5, 2, &[2u8; 32]).unwrap(),
+            "a different block at the exact height and view it signed"
         );
         assert!(
-            !guard.try_sign(5, 1).unwrap(),
+            !guard.try_sign(5, 1, &[1u8; 32]).unwrap(),
             "a lower view at the same height"
         );
-        assert!(!guard.try_sign(4, 9).unwrap(), "a lower height");
+        assert!(!guard.try_sign(4, 9, &[1u8; 32]).unwrap(), "a lower height");
         assert!(
-            guard.try_sign(5, 3).unwrap(),
+            guard.try_sign(5, 3, &[1u8; 32]).unwrap(),
             "a higher view advances the watermark"
         );
         assert!(
-            guard.try_sign(6, 0).unwrap(),
+            guard.try_sign(6, 0, &[1u8; 32]).unwrap(),
             "a higher height advances the watermark"
         );
         assert_eq!(guard.mark(), Some((6, 0)));
@@ -336,10 +378,10 @@ mod tests {
         let mut guard = SignGuard::open(&path).unwrap();
         assert_eq!(guard.mark(), Some((7, 3)), "a legacy mark loads");
         assert!(
-            !guard.try_sign(7, 3).unwrap(),
+            !guard.try_sign(7, 3, &[1u8; 32]).unwrap(),
             "and still refuses what it already signed"
         );
-        assert!(guard.try_sign(8, 0).unwrap());
+        assert!(guard.try_sign(8, 0, &[1u8; 32]).unwrap());
 
         let reopened = SignGuard::open(&path).unwrap();
         assert_eq!(
@@ -349,8 +391,8 @@ mod tests {
         );
         assert_eq!(
             std::fs::read(&path).unwrap().len(),
-            20,
-            "the file upgraded to the checksummed format"
+            52,
+            "the file upgraded to the value bound format"
         );
         cleanup(&path);
     }
@@ -359,11 +401,11 @@ mod tests {
     fn the_watermark_advances_monotonically_within_one_run() {
         let path = temp_path("mono");
         let mut guard = SignGuard::open(&path).unwrap();
-        assert!(guard.try_sign(1, 0).unwrap());
-        assert!(guard.try_sign(2, 0).unwrap());
-        assert!(!guard.try_sign(2, 0).unwrap());
-        assert!(!guard.try_sign(1, 5).unwrap());
-        assert!(guard.try_sign(2, 1).unwrap());
+        assert!(guard.try_sign(1, 0, &[1u8; 32]).unwrap());
+        assert!(guard.try_sign(2, 0, &[1u8; 32]).unwrap());
+        assert!(!guard.try_sign(2, 0, &[2u8; 32]).unwrap());
+        assert!(!guard.try_sign(1, 5, &[1u8; 32]).unwrap());
+        assert!(guard.try_sign(2, 1, &[1u8; 32]).unwrap());
         cleanup(&path);
     }
 }

@@ -1891,11 +1891,6 @@ impl Node {
             .consensus
             .select(&self.beacon, slot, &published)
             .ok_or(ProduceError::NoCommittee)?;
-        if let Some(guard) = self.sign_guard.as_mut() {
-            if !guard.try_sign(height, 0).unwrap_or(false) {
-                return Err(ProduceError::DoubleSignRefused);
-            }
-        }
         let proposer = self
             .validator_addresses
             .get(&selection.leader)
@@ -1931,6 +1926,13 @@ impl Node {
         let header_hash = header.hash();
 
         let value = header_value(&header_hash);
+        // Bound to the value, so a restart that reproduces the same block resumes rather
+        // than refusing forever.
+        if let Some(guard) = self.sign_guard.as_mut() {
+            if !guard.try_sign(height, 0, &value).unwrap_or(false) {
+                return Err(ProduceError::DoubleSignRefused);
+            }
+        }
         let block = crate::consensus::Block::new(height, value, self.parent_val);
 
         let chain_id = self.consensus.chain_id();

@@ -1038,14 +1038,14 @@ impl DevNode {
         Ok(())
     }
 
-    fn guard_height(&mut self) -> bool {
+    fn guard_height(&mut self, value: &[u8; 32]) -> bool {
         if self.fatal.is_some() {
             return false;
         }
         if self.guarded_height == Some(self.height) {
             return true;
         }
-        match self.sign_guard.try_sign(self.height, 0) {
+        match self.sign_guard.try_sign(self.height, 0, value) {
             Ok(true) => {
                 self.guarded_height = Some(self.height);
                 true
@@ -1438,7 +1438,11 @@ impl DevNode {
     }
 
     fn precommit_staged(&mut self) -> Vec<Message> {
-        if !self.guard_height() {
+        let Some(staged) = self.staged.as_ref() else {
+            return Vec::new();
+        };
+        let value = header_value(&staged.header.hash());
+        if !self.guard_height(&value) {
             return Vec::new();
         }
         let Ok(attestation) = self.attest() else {
@@ -1471,7 +1475,6 @@ impl DevNode {
     }
 
     pub fn make_view_change(&mut self, target_view: View) -> ViewChange {
-        let _ = self.guard_height();
         let (lock_view, locked_value, has_lock, locked, polka) = match &self.lock {
             Some(lock) => (
                 lock.view,
