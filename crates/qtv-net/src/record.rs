@@ -27,6 +27,11 @@ pub struct Sealer {
     key: [u8; KEY_BYTES],
     iv: [u8; NONCE_BYTES],
     sequence: u64,
+    // A write that failed partway left the stream mid frame. How many bytes reached the
+    // peer is unknowable, so the next record would start inside the previous one and every
+    // record after it is unframeable for the life of the link, while the link still looks
+    // healthy from this side. Fail closed instead and let the caller tear it down.
+    torn: bool,
 }
 
 impl Drop for Sealer {
@@ -42,10 +47,16 @@ impl Sealer {
             key,
             iv,
             sequence: 0,
+            torn: false,
         }
     }
 
     pub fn seal<W: Write>(&mut self, writer: &mut W, plaintext: &[u8]) -> Result<()> {
+        if self.torn {
+            return Err(Error::Handshake(
+                "a previous record was only part written, so this stream can no longer be framed",
+            ));
+        }
         if plaintext.len() > MAX_RECORD_PLAINTEXT {
             return Err(Error::Handshake("record plaintext exceeds the size bound"));
         }
@@ -66,8 +77,14 @@ impl Sealer {
         frame.extend_from_slice(&length.to_be_bytes());
         frame.extend_from_slice(&ciphertext);
         frame.extend_from_slice(&tag);
-        writer.write_all(&frame)?;
-        writer.flush()?;
+        if let Err(e) = writer.write_all(&frame) {
+            self.torn = true;
+            return Err(e.into());
+        }
+        if let Err(e) = writer.flush() {
+            self.torn = true;
+            return Err(e.into());
+        }
         Ok(())
     }
 }

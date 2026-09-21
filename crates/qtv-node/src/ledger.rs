@@ -8792,6 +8792,37 @@ mod stake_state_tests {
     }
 
     #[test]
+    // Nesting is live: dispatch_vm runs apply_atomic inside the outer one. An inner
+    // commit whose undo records were dropped would survive an outer rollback, so a
+    // contract write would persist inside a transaction the block rejected.
+    #[test]
+    fn an_inner_commit_is_still_reversed_by_an_outer_rollback() {
+        let mut l = Ledger::new();
+        let addr = gov_addr(77);
+        fund(&mut l, &addr, 1_000);
+        let root_before = l.q_root();
+
+        let applied = l.apply_atomic(|l| {
+            let inner = l.apply_atomic(|l| {
+                let mut account = l.account(&addr);
+                account.balance = 42;
+                l.set_account(&addr, &account);
+                true
+            });
+            assert!(inner, "the inner transition commits");
+            false
+        });
+
+        assert!(!applied, "the outer transition declined");
+        assert_eq!(
+            l.balance(&addr),
+            1_000,
+            "an inner commit survived an outer rollback"
+        );
+        assert_eq!(l.q_root(), root_before, "the state root did not return");
+    }
+
+    #[test]
     // A rolled back transition must not leave the block charged for leaves that do not
     // exist, or a cheap failing transaction censors every candidate behind it.
     fn a_rolled_back_transition_does_not_leave_the_block_charged_for_its_leaves() {
@@ -9918,7 +9949,17 @@ impl Ledger {
         let unwound = self.journal.take().unwrap_or_default();
         self.journal = restore;
         let committed = matches!(outcome, Ok(true));
-        if !committed {
+        if committed {
+            // Nested calls are live: dispatch_vm runs apply_atomic inside the outer one.
+            // An inner commit that DROPS its undo records leaves the outer rollback unable
+            // to reverse those writes, so an inner contract write would survive a
+            // transaction the outer layer rejected. Fold them into the outer journal.
+            if let Some(outer) = self.journal.as_mut() {
+                outer.extend(unwound);
+            }
+            return true;
+        }
+        {
             let trie = &mut self.trie;
             for (key, prior) in unwound.into_iter().rev() {
                 match prior {

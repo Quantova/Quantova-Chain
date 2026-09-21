@@ -4,8 +4,7 @@
 use qtv_wipe::Zeroize;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -45,22 +44,38 @@ fn guarded_handshake<T>(
     body: impl FnOnce(TcpStream) -> Result<T>,
 ) -> Result<T> {
     let socket = stream.try_clone().map_err(Error::Io)?;
-    let done = Arc::new(AtomicBool::new(false));
-    let done_watchdog = Arc::clone(&done);
+    // Signalled, not polled. A 50 ms poll meant every completed handshake still waited on
+    // the join, holding an inflight slot and a per address slot for up to that long, which
+    // turns the handshake caps into a throughput ceiling under ordinary load.
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let gate_watchdog = Arc::clone(&gate);
     let watchdog = thread::spawn(move || {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if done_watchdog.load(Ordering::Relaxed) {
-                return;
+        let (lock, cv) = &*gate_watchdog;
+        let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut remaining = timeout;
+        while !*done && !remaining.is_zero() {
+            let started = Instant::now();
+            let (next, wait) = cv
+                .wait_timeout(done, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            done = next;
+            if wait.timed_out() {
+                remaining = Duration::ZERO;
+            } else {
+                remaining = remaining.saturating_sub(started.elapsed());
             }
-            thread::sleep(Duration::from_millis(50));
         }
-        if !done_watchdog.load(Ordering::Relaxed) {
+        if !*done {
             let _ = socket.shutdown(Shutdown::Both);
         }
     });
     let outcome = body(stream);
-    done.store(true, Ordering::Relaxed);
+    {
+        let (lock, cv) = &*gate;
+        let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *done = true;
+        cv.notify_all();
+    }
     let _ = watchdog.join();
     outcome
 }
