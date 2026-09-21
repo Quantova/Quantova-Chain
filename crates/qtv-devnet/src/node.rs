@@ -1051,14 +1051,11 @@ impl DevNode {
         Ok(())
     }
 
-    fn guard_height(&mut self, value: &[u8; 32]) -> bool {
+    fn guard_height(&mut self, view: View, value: &[u8; 32]) -> bool {
         if self.fatal.is_some() {
             return false;
         }
-        if self.guarded_height == Some(self.height) {
-            return true;
-        }
-        match self.sign_guard.try_sign(self.height, 0, value) {
+        match self.sign_guard.try_sign(self.height, view, value) {
             Ok(true) => {
                 self.guarded_height = Some(self.height);
                 true
@@ -1455,7 +1452,8 @@ impl DevNode {
             return Vec::new();
         };
         let value = header_value(&staged.header.hash());
-        if !self.guard_height(&value) {
+        let view = staged.view;
+        if !self.guard_height(view, &value) {
             return Vec::new();
         }
         let Ok(attestation) = self.attest() else {
@@ -1795,10 +1793,12 @@ impl DevNode {
         if attestation.height != self.height {
             return false;
         }
-        if attestation.view >= qtv_node::evidence::MAX_HEIGHT_VIEW {
-            return false;
-        }
-        if !self.watch_for_equivocation(&attestation) {
+        // The ceiling bounds the evidence pool key space. Dropping the whole attestation
+        // for it meant a height that needed 256 views could never finalise again, and no
+        // restart recovered it because the prevote watermark refuses to go back down.
+        if attestation.view < qtv_node::evidence::MAX_HEIGHT_VIEW
+            && !self.watch_for_equivocation(&attestation)
+        {
             return false;
         }
         if let Ok(selection) = self.select() {

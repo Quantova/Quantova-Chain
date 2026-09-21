@@ -1,6 +1,7 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use qtv_wipe::Zeroize;
 use std::io::{Read, Write};
 
 use qtv_crypto::chacha20poly1305::{self, KEY_BYTES, NONCE_BYTES, TAG_BYTES};
@@ -26,6 +27,13 @@ pub struct Sealer {
     key: [u8; KEY_BYTES],
     iv: [u8; NONCE_BYTES],
     sequence: u64,
+}
+
+impl Drop for Sealer {
+    fn drop(&mut self) {
+        self.key.zeroize();
+        self.iv.zeroize();
+    }
 }
 
 impl Sealer {
@@ -68,6 +76,13 @@ pub struct Opener {
     key: [u8; KEY_BYTES],
     iv: [u8; NONCE_BYTES],
     sequence: u64,
+}
+
+impl Drop for Opener {
+    fn drop(&mut self) {
+        self.key.zeroize();
+        self.iv.zeroize();
+    }
 }
 
 impl Opener {

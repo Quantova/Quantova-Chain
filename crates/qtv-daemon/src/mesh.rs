@@ -419,6 +419,7 @@ fn spawn_late_acceptor(
             inflight.fetch_add(1, Ordering::Relaxed);
             let identity_w = identity.clone();
             let peer_ids_w = peer_ids.clone();
+            let known_peers_w: Vec<PeerId> = peer_ids.iter().flatten().cloned().collect();
             let up_w = up.clone();
             let out = inbound_tx.clone();
             let inflight_w = Arc::clone(&inflight);
@@ -437,7 +438,15 @@ fn spawn_late_acceptor(
                     let _ip_guard = IpGuard(per_ip_w, ip);
                     let _guard = InflightGuard(inflight_w);
                     let _ = stream.set_nonblocking(false);
-                    Channel::accept_with_timeout(stream, &identity_w, HANDSHAKE_TIMEOUT)
+                    // The same gate the bootstrap acceptor uses. This acceptor runs for
+                    // the life of the node, so without it a stranger buys an ML-KEM
+                    // keygen and an ML-DSA signature here for as long as the node is up.
+                    Channel::accept_known_with_timeout(
+                        stream,
+                        &identity_w,
+                        HANDSHAKE_TIMEOUT,
+                        &known_peers_w,
+                    )
                 };
                 let Ok(channel) = handshake else {
                     return;

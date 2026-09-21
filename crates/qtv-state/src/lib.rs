@@ -212,7 +212,9 @@ impl Decode for Proof {
 
 #[derive(Debug, Clone)]
 struct RootCache {
-    nodes: HashMap<NodeId, Hash>,
+    // Shared too. The node hashes are the bulk of a snapshot, and a snapshot that never
+    // recomputes a root has no reason to pay for copying them.
+    nodes: Arc<HashMap<NodeId, Hash>>,
     root: Hash,
     changed: BTreeSet<Key>,
 }
@@ -254,7 +256,7 @@ impl Trie {
     pub fn new() -> Self {
         let defaults = default_hashes();
         let cache = RootCache {
-            nodes: HashMap::new(),
+            nodes: Arc::new(HashMap::new()),
             root: defaults[0],
             changed: BTreeSet::new(),
         };
@@ -319,7 +321,7 @@ impl Trie {
         let root = recompute(
             &self.leaves,
             &self.defaults,
-            &mut cache.nodes,
+            Arc::make_mut(&mut cache.nodes),
             0,
             [0u8; KEY_LEN],
             &changed,
@@ -556,16 +558,18 @@ mod incremental {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .nodes
+            .as_ref()
             .clone();
         reset_node_hashes();
         trie.insert(target, b"a new account record".to_vec());
         let _ = trie.root();
         let single = node_hashes();
-        let after = trie
+        let after: HashMap<NodeId, Hash> = trie
             .cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .nodes
+            .as_ref()
             .clone();
 
         for (id, hash) in &after {

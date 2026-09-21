@@ -1,6 +1,7 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use qtv_wipe::Zeroize;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -181,6 +182,11 @@ fn initiate<S: Read + Write>(
     stream.flush()?;
 
     let keys = keyschedule::derive(&shared_secret, &final_bound);
+    // Both regenerate the session keys, so leaving them in freed memory defeats the wipe
+    // on the keys themselves.
+    let mut shared_secret = shared_secret;
+    shared_secret.zeroize();
+    kem_random.zeroize();
     Ok(Channel::new(stream, Role::Initiator, peer, keys))
 }
 
@@ -267,6 +273,14 @@ fn respond_known<S: Read + Write>(
 
     let shared_secret = ml_kem::decaps(&decaps_key, &ciphertext);
     let keys = keyschedule::derive(&shared_secret, &final_bound);
+    // The decapsulation key recovers this session from a recorded ciphertext, so it goes
+    // too, along with the secret and the seeds that produced it.
+    let mut shared_secret = shared_secret;
+    shared_secret.zeroize();
+    let mut decaps_key = decaps_key;
+    decaps_key.zeroize();
+    kem_seed.zeroize();
+    kem_z.zeroize();
     Ok(Channel::new(stream, Role::Responder, peer, keys))
 }
 

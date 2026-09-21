@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::Path;
 
 use qtv_crypto::ml_dsa;
@@ -88,9 +88,12 @@ fn open_private(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// The kernel entropy call, which blocks until the pool is seeded. This is the source of
+/// the node's master secret, and that secret is then PERSISTED, so bytes drawn from an
+/// unseeded pool on a first boot stay weak for the life of the validator.
 fn fill_random(buf: &mut [u8]) -> io::Result<()> {
-    let mut file = File::open("/dev/urandom")?;
-    file.read_exact(buf)
+    qtv_crypto::rng::fill_random(buf);
+    Ok(())
 }
 
 pub fn validator_account_seed(secret: &[u8; SECRET_LEN]) -> [u8; SECRET_LEN] {

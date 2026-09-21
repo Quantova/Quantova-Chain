@@ -305,6 +305,31 @@ mod tests {
         cleanup(&path);
     }
 
+    // Precommitting a different value at a HIGHER view is ordinary consensus, not a
+    // double sign. Refusing it killed a validator that restarted during a stalled height.
+    #[test]
+    fn a_higher_view_may_precommit_a_different_value() {
+        let path = temp_path("higher-view");
+        let a = [7u8; 32];
+        let b = [8u8; 32];
+        {
+            let mut guard = SignGuard::open(&path).expect("open");
+            assert!(guard.try_sign(9, 2, &a).expect("first sign"));
+        }
+        {
+            let mut guard = SignGuard::open(&path).expect("reopen");
+            assert!(
+                guard.try_sign(9, 7, &b).expect("higher view"),
+                "a different value at a higher view is a legitimate precommit"
+            );
+            assert!(
+                !guard.try_sign(9, 7, &a).expect("same view conflict"),
+                "a second value at the same view is still refused"
+            );
+        }
+        cleanup(&path);
+    }
+
     #[test]
     fn a_restart_refuses_a_height_and_view_it_already_signed() {
         let path = temp_path("restart");
