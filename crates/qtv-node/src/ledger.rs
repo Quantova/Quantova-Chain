@@ -8792,6 +8792,33 @@ mod stake_state_tests {
     }
 
     #[test]
+    // A rolled back transition must not leave the block charged for leaves that do not
+    // exist, or a cheap failing transaction censors every candidate behind it.
+    fn a_rolled_back_transition_does_not_leave_the_block_charged_for_its_leaves() {
+        let mut l = Ledger::new();
+        l.seed_supply(1_000_000);
+        l.clear_block_fresh_leaves();
+        let before = l.block_fresh_leaves();
+
+        let applied = l.apply_atomic(|l| {
+            for i in 0..16u64 {
+                let addr = gov_addr(100 + i as u8);
+                let mut account = l.account(&addr);
+                account.balance = 5;
+                l.set_account(&addr, &account);
+            }
+            false
+        });
+
+        assert!(!applied, "the transition declined");
+        assert_eq!(
+            l.block_fresh_leaves(),
+            before,
+            "a rolled back transition left the block charged for leaves it did not keep"
+        );
+    }
+
+    #[test]
     fn apply_atomic_rolls_back_every_write_and_event_when_a_transition_faults() {
         let mut l = Ledger::new();
         let addr = gov_addr(70);
@@ -9881,6 +9908,10 @@ impl Ledger {
     {
         let events_mark = self.block_events.len();
         let side_mark = self.side_events.len();
+        // The fresh leaf count is block state, so a transition that writes leaves and then
+        // fails must not leave the block charged for leaves that no longer exist: that
+        // would let a cheap failing transaction truncate the rest of the block.
+        let leaves_mark = self.block_fresh_leaves;
         let restore = self.journal.take();
         self.journal = Some(Vec::new());
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
@@ -9899,6 +9930,7 @@ impl Ledger {
             }
             self.block_events.truncate(events_mark);
             self.side_events.truncate(side_mark);
+            self.block_fresh_leaves = leaves_mark;
         }
         committed
     }

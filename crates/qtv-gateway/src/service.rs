@@ -1267,8 +1267,19 @@ fn block(node: &DevNode, selector: BlockSelector) -> Result<Json, ClientError> {
     })?;
 
     let header = block.header();
-    let tx_ids: Vec<Json> = block.body().iter().map(|w| Json::str(w.id())).collect();
+    // Capped like every sibling list. Each id re-serialises a whole wrapper, the ML-DSA
+    // signature included, and hashes it, and this runs inline on the driver thread, so an
+    // uncapped list over a full block is seconds of block production per request.
+    let total = block.body().len();
+    let tx_ids: Vec<Json> = block
+        .body()
+        .iter()
+        .take(MAX_LIST_ITEMS)
+        .map(|w| Json::str(w.id()))
+        .collect();
     Ok(object(vec![
+        ("truncated", Json::Bool(total > tx_ids.len())),
+        ("total", Json::Int(total as u64)),
         ("height", Json::Int(header.height())),
         ("block", Json::str(block.id())),
         (
