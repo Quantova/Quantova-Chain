@@ -193,7 +193,11 @@ impl StateStore {
         let mut pending: Vec<(Key, Option<Vec<u8>>)> = Vec::new();
         let mut committed_len: u64 = 0;
         let mut total_len: u64 = 0;
-        let log = Log::open_scanned(&path, |frame, _start, end_offset| {
+        // Decided BEFORE the scan, because the scan itself truncates. Cutting the log
+        // under a process that is appending to it leaves that process writing at a stale
+        // offset, and every block it goes on to write is lost with no error anywhere.
+        let contended = another_process_is_live(&path);
+        let visit = |frame: &[u8], _start: u64, end_offset: u64| {
             total_len = end_offset;
             match qtv_codec::from_bytes::<StateRecord>(frame) {
                 Ok(StateRecord::Entry { key, value }) => {
@@ -222,7 +226,12 @@ impl StateStore {
                 }
                 Err(_) => false,
             }
-        })?;
+        };
+        let log = if contended {
+            Log::open_scanned_keeping_tail(&path, visit)?
+        } else {
+            Log::open_scanned(&path, visit)?
+        };
         let mut store = StateStore {
             log,
             path,
@@ -234,7 +243,6 @@ impl StateStore {
         // renaming underneath it leaves its descriptor pointing at an unlinked inode
         // and every block it goes on to write is lost on the next restart, with no
         // error anywhere. Opening still succeeds: this only declines to REWRITE.
-        let contended = another_process_is_live(&store.path);
         if committed_len < total_len && !contended {
             store.log.truncate(committed_len)?;
         }

@@ -1147,6 +1147,13 @@ fn dispatch_bridge_exit(
         Some(request) => request,
         None => return false,
     };
+    // A ceiling the off chain desk will not serve means the burn is dropped there and the
+    // holder's tokens are gone with nothing that can settle or slash. Refuse it here,
+    // while the tokens still exist.
+    let ceiling = ledger.bridge_exit_max_amount();
+    if ceiling > 0 && request.amount > ceiling {
+        return false;
+    }
     let holder = match qtv_idfmt::parse_address(&sender)
         .ok()
         .and_then(|payload| <[u8; 32]>::try_from(payload.as_slice()).ok())
@@ -1177,6 +1184,12 @@ fn dispatch_bridge_exit(
 }
 
 const VM_BLOCK_METER_BUDGET: u64 = 50_000_000;
+
+/// New state trie leaves one block may create. The meter prices a leaf per call, and a
+/// per call allowance multiplies by the call count, so the meter alone does not bound the
+/// block. This does, counted where a leaf actually comes into existence. Derived from the
+/// measured incremental root cost, about 0.9 ms a leaf, against a 200 ms block share.
+const BLOCK_FRESH_LEAF_CEILING: u64 = 220;
 const MAX_TX_METER: u64 = VM_BLOCK_METER_BUDGET / 4;
 
 // A registration note is an id, an epoch, a root and one ML-DSA signature. Anything past
@@ -1366,10 +1379,15 @@ fn execute_ordered_across(
     ledger.guardian_apply_due_enact(now_seconds);
     let mut included = Vec::new();
     let mut vm_meter: u64 = 0;
+    ledger.clear_block_fresh_leaves();
     let mut sender_vm_meter: std::collections::BTreeMap<String, u64> =
         std::collections::BTreeMap::new();
     const PER_SENDER_VM_METER: u64 = VM_BLOCK_METER_BUDGET / 4;
     for (index, wrapper) in candidates.iter().enumerate() {
+        if ledger.block_fresh_leaves() >= BLOCK_FRESH_LEAF_CEILING {
+            break;
+        }
+        // root recompute over them runs synchronously on every validator.
         if wrapper.body().chain_id() != fee_params.chain_id {
             continue;
         }
@@ -2119,6 +2137,37 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+
+    // The meter prices a fresh leaf per call, and the per call allowances multiply by the
+    // call count, so the meter alone does not bound a block. This is the bound that does.
+    #[test]
+    fn a_block_stops_admitting_once_it_has_made_its_share_of_new_leaves() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        ledger.seed_supply(1_000_000_000_000);
+        let sender = derive(&[21u8; 32], 0);
+        fund(&mut ledger, &sender, 500_000_000);
+
+        // Each transfer to a fresh address is a new account leaf.
+        let wanted = (BLOCK_FRESH_LEAF_CEILING + 40) as usize;
+        let mut batch = Vec::with_capacity(wanted);
+        for i in 0..wanted as u64 {
+            let to = derive(&[22u8; 32], i);
+            batch.push(transfer(&sender, &to.address(), 1_000, i, &fee));
+        }
+
+        let included = execute_ordered(&mut ledger, &batch, &fee, 0);
+        assert!(
+            (included.len() as u64) < wanted as u64,
+            "every transfer rode in, so the leaf ceiling did not bind at all"
+        );
+        assert!(
+            ledger.block_fresh_leaves() <= BLOCK_FRESH_LEAF_CEILING + 8,
+            "the block made {} new leaves against a ceiling of {}",
+            ledger.block_fresh_leaves(),
+            BLOCK_FRESH_LEAF_CEILING
+        );
+    }
 
     // A call that executes almost nothing must not reserve its declared limit, or a
     // handful of them hold the whole block budget and censor every real contract call.

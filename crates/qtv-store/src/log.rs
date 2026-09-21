@@ -99,7 +99,28 @@ impl Log {
         Self::scan_open(path, visit, true)
     }
 
-    fn scan_open<F>(path: impl AsRef<Path>, mut visit: F, strict: bool) -> io::Result<Self>
+    /// Scans without truncating. For a store another process may be appending to right
+    /// now: cutting the log under its descriptor loses every block it goes on to write.
+    pub fn open_scanned_keeping_tail<F>(path: impl AsRef<Path>, visit: F) -> io::Result<Self>
+    where
+        F: FnMut(&[u8], u64, u64) -> bool,
+    {
+        Self::scan_open_inner(path, visit, false, false)
+    }
+
+    fn scan_open<F>(path: impl AsRef<Path>, visit: F, strict: bool) -> io::Result<Self>
+    where
+        F: FnMut(&[u8], u64, u64) -> bool,
+    {
+        Self::scan_open_inner(path, visit, strict, true)
+    }
+
+    fn scan_open_inner<F>(
+        path: impl AsRef<Path>,
+        mut visit: F,
+        strict: bool,
+        truncate_tail: bool,
+    ) -> io::Result<Self>
     where
         F: FnMut(&[u8], u64, u64) -> bool,
     {
@@ -163,7 +184,7 @@ impl Log {
             clean = end;
         }
         drop(stream);
-        if clean < total {
+        if truncate_tail && clean < total {
             file.set_len(clean)?;
             file.sync_data()?;
         }

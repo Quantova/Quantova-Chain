@@ -525,6 +525,7 @@ const BRIDGE_LAST_LIFT_TAG: &[u8] = b"qtv/bridge/lastlift";
 const BRIDGE_VAULT_TAG: &[u8] = b"qtv/bridge/vault";
 const BRIDGE_GATEWAY_TAG: &[u8] = b"qtv/bridge/gateway";
 const BRIDGE_EXITS_TAG: &[u8] = b"qtv/bridge/exits";
+const BRIDGE_EXIT_MAX_TAG: &[u8] = b"qtv/bridge/exit-max";
 const BRIDGE_FEDERATED_TAG: &[u8] = b"qtv/bridge/federated";
 const BRIDGE_PAYOUTCAP_TAG: &[u8] = b"qtv/bridge/payoutcap";
 
@@ -1458,6 +1459,24 @@ impl Ledger {
             self.trie.get(&stake_singleton_key(BRIDGE_EXITS_TAG)),
             Some(bytes) if bytes.first() == Some(&1)
         )
+    }
+
+    /// The largest exit the off chain desk will serve. A burn above it is refused here,
+    /// before the tokens are destroyed, rather than being burned on chain and then dropped
+    /// by a desk that will not open it, which is an unrecoverable loss for the holder.
+    pub fn bridge_exit_max_amount(&self) -> u128 {
+        self.trie
+            .get(&stake_singleton_key(BRIDGE_EXIT_MAX_TAG))
+            .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
+            .map(u128::from_be_bytes)
+            .unwrap_or(0)
+    }
+
+    pub fn seed_bridge_exit_max_amount(&mut self, amount: u128) -> (Key, Vec<u8>) {
+        let key = stake_singleton_key(BRIDGE_EXIT_MAX_TAG);
+        let value = amount.to_be_bytes().to_vec();
+        self.write_leaf(key, value.clone());
+        (key, value)
     }
 
     fn set_bridge_exits_enabled(&mut self, enabled: bool) {
@@ -9738,6 +9757,7 @@ pub struct Ledger {
     /// Meter actually consumed by the most recent contract call. The block budget
     /// charges this rather than the limit a transaction declared, so declaring a
     /// large limit and doing nothing cannot reserve the block against everyone else.
+    block_fresh_leaves: u64,
     last_vm_meter_used: u64,
     last_vm_call_cost: Option<u64>,
     vm_deploy_armed: bool,
@@ -9753,6 +9773,7 @@ impl Ledger {
             execution_height: 0,
             execution_time: 0,
             journal: None,
+            block_fresh_leaves: 0,
             last_vm_meter_used: 0,
             last_vm_call_cost: None,
             vm_deploy_armed: false,
@@ -9769,6 +9790,7 @@ impl Ledger {
             execution_height: 0,
             execution_time: 0,
             journal: None,
+            block_fresh_leaves: 0,
             last_vm_meter_used: 0,
             last_vm_call_cost: None,
             vm_deploy_armed: false,
@@ -9776,6 +9798,13 @@ impl Ledger {
     }
 
     fn write_leaf(&mut self, key: Key, value: Vec<u8>) {
+        // A key the trie has never held is a new leaf, and the node recomputes the state
+        // root over every one of them once per block. The meter prices them per call, and
+        // per call allowances multiply by the call count, so the block bound has to be
+        // counted here where a leaf actually comes into existence.
+        if self.trie.get(&key).is_none() {
+            self.block_fresh_leaves = self.block_fresh_leaves.saturating_add(1);
+        }
         if self.journal.is_some() {
             let prior = self.trie.get(&key).map(|bytes| bytes.to_vec());
             self.journal
@@ -9785,6 +9814,15 @@ impl Ledger {
         }
         let trie = &mut self.trie;
         trie.insert(key, value);
+    }
+
+    /// New state trie leaves created since the block began.
+    pub fn block_fresh_leaves(&self) -> u64 {
+        self.block_fresh_leaves
+    }
+
+    pub fn clear_block_fresh_leaves(&mut self) {
+        self.block_fresh_leaves = 0;
     }
 
     fn erase_leaf(&mut self, key: &Key) -> bool {
