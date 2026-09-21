@@ -720,6 +720,26 @@ impl DevNode {
 
     fn reload(&mut self) -> Result<(), RoundError> {
         self.ledger = Ledger::from_trie(self.state_store.load_trie());
+        // The state commit is the durability point, and the block and event stores are
+        // synced just before it. A crash in that window leaves them one height ahead.
+        // Refusing to start there strands the validator, so drop back to the height the
+        // state actually committed and let the node re sync the rest from its peers.
+        if let (Some(head), Some(committed)) = (
+            self.block_store.head_height(),
+            self.state_store.committed_height(),
+        ) {
+            if head > committed {
+                self.block_store
+                    .truncate_to_height(committed)
+                    .map_err(|_| RoundError::Decode)?;
+                self.event_store
+                    .truncate_to_height(committed)
+                    .map_err(|_| RoundError::Decode)?;
+                self.side_event_store
+                    .truncate_to_height(committed)
+                    .map_err(|_| RoundError::Decode)?;
+            }
+        }
         let head = self.block_store.head_height().ok_or(RoundError::Decode)?;
         let bytes = self
             .block_store
