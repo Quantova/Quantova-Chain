@@ -130,9 +130,11 @@ pub fn derive_with_scheme(master_seed: &[u8; MASTER_SEED_LEN], scheme: u8, index
             secret.zeroize();
             public_key.to_vec()
         }
-        #[cfg(feature = "fn-dsa")]
-        SCHEME_FALCON => Vec::new(),
-        _ => Vec::new(),
+        // No key for this scheme. An EMPTY key would hash to an address depending only on
+        // the scheme byte, so every caller would derive the same address and anything sent
+        // there is unspendable by anyone. Stand the seed in its place so the address is at
+        // least unique per account. Signing still fails closed, which is the contract.
+        _ => seed.to_vec(),
     };
     Account {
         scheme,

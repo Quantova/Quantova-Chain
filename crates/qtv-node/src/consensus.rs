@@ -445,10 +445,17 @@ impl Consensus {
             return None;
         }
         let members = committee.ids();
+        // The SAME cap the draw uses. Left raw here, the two thirds finality rule runs on
+        // uncapped stake while the committee total is capped, so one large staker holds a
+        // veto over every block the cap exists to stop it dominating.
         let member_keys: Vec<MemberKey> = members
             .iter()
             .filter_map(|id| self.roster.iter().find(|r| r.id == *id))
-            .map(ValidatorRegistration::member_key)
+            .map(|reg| {
+                let mut key = reg.member_key();
+                key.weight = view.effective_weight(reg.stake);
+                key
+            })
             .collect();
         let weights = view.weights();
         let registered_weight = weights.iter().copied().fold(0u64, u64::saturating_add);

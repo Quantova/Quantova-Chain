@@ -336,7 +336,10 @@ fn verify_deposit_core(
         update.signature_slot,
         verifier,
     )?;
-    let electra = store.config.is_electra_at_slot(update.signature_slot);
+    // Keyed on the attested header, as the committee update path and bootstrap already
+    // are. The signature slot is only ever at or after it, so keying on that selects a
+    // layout the state may not have yet and rejects honest proofs across a fork boundary.
+    let electra = store.config.is_electra_at_slot(update.attested_header.slot);
     verify_finality(update, electra)?;
     verify_execution(update)?;
 
@@ -360,6 +363,14 @@ fn verify_deposit_core(
         });
     }
 
+    // Carried on the wire and otherwise never read, so an unlimited number of byte
+    // distinct proofs verify to one fact. Bind it to the value the verifier derives.
+    if update.execution.block_number != update.finalized_header.slot {
+        return Err(EthError::InconsistentSlots {
+            signature_slot: update.execution.block_number,
+            attested_slot: update.finalized_header.slot,
+        });
+    }
     let anchor = update.finalized_header.hash_tree_root();
     let source_ref = deposit_source_ref(&anchor, &key, raw.log_index);
     Ok(CoreDeposit {
@@ -697,7 +708,7 @@ mod tests {
             signature_slot: SIG_SLOT,
             execution: ExecutionCommit {
                 receipts_root,
-                block_number: 20_000_000,
+                block_number: PERIOD * PERIOD_SLOTS + 40,
                 execution_branch,
             },
         };
