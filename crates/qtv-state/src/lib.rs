@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use qtv_codec::{Decode, Decoder, Encode, Encoder, Error};
 use qtv_crypto::sha3;
@@ -219,7 +219,10 @@ struct RootCache {
 
 #[derive(Debug)]
 pub struct Trie {
-    leaves: BTreeMap<Key, Vec<u8>>,
+    // Shared behind an Arc so a snapshot is O(1). A snapshot that is never written, and
+    // the node takes several per block, then costs nothing instead of a full copy of
+    // every leaf in the state.
+    leaves: Arc<BTreeMap<Key, Vec<u8>>>,
     defaults: Vec<Hash>,
     cache: Mutex<RootCache>,
     persist_dirty: BTreeSet<Key>,
@@ -228,7 +231,7 @@ pub struct Trie {
 impl Clone for Trie {
     fn clone(&self) -> Self {
         Trie {
-            leaves: self.leaves.clone(),
+            leaves: Arc::clone(&self.leaves),
             defaults: self.defaults.clone(),
             cache: Mutex::new(
                 self.cache
@@ -256,7 +259,7 @@ impl Trie {
             changed: BTreeSet::new(),
         };
         Trie {
-            leaves: BTreeMap::new(),
+            leaves: Arc::new(BTreeMap::new()),
             defaults,
             cache: Mutex::new(cache),
             persist_dirty: BTreeSet::new(),
@@ -274,7 +277,7 @@ impl Trie {
     }
 
     pub fn insert(&mut self, key: Key, value: Vec<u8>) {
-        self.leaves.insert(key, value);
+        Arc::make_mut(&mut self.leaves).insert(key, value);
         self.cache
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -284,7 +287,7 @@ impl Trie {
     }
 
     pub fn remove(&mut self, key: &Key) -> bool {
-        let existed = self.leaves.remove(key).is_some();
+        let existed = Arc::make_mut(&mut self.leaves).remove(key).is_some();
         if existed {
             self.cache
                 .get_mut()
