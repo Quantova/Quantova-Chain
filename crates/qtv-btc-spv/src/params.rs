@@ -58,7 +58,7 @@ pub const BITCOIN_CASH_DAA_NOTE: &str =
     "bitcoin cash here retargets on the same legacy two week interval bitcoin used before november 2020 and does not model the real per block asert difficulty algorithm the live network adopted after that upgrade";
 
 pub const BITCOIN_CHECKPOINT_PENDING: &str =
-    "a trustless bitcoin or bitcoin cash corridor anchors every deposit to a pinned recent mainnet block, its height, its block hash, and the cumulative proof of work at that height, so a caller cannot substitute a cheap low difficulty chain of its own, a founder must arm pinned_checkpoint with that real block before the corridor is trusted live and until then a mainnet deposit is refused as not armed rather than trusted";
+    "a trustless bitcoin or bitcoin cash corridor anchors every deposit to a pinned recent mainnet block by its height and its block hash, which is what stops a caller substituting a cheap low difficulty chain of its own, and min_work is a floor on the work of the SUBMITTED header run rather than the chain's cumulative work at that height, so arming it with a cumulative figure would refuse every honest proof, a founder must arm pinned_checkpoint with that real block before the corridor is trusted live and until then a mainnet deposit is refused as not armed rather than trusted";
 
 pub const BITCOIN_CASH_CONFIRMATION_PENDING: &str =
     "the bitcoin cash confirmation depth of fifteen follows the wider industry practice of asking for more confirmations than bitcoin given its far smaller and more volatile hash rate, a founder must confirm the final number before a bitcoin cash corridor is trusted live";

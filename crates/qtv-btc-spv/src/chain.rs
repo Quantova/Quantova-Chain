@@ -19,6 +19,12 @@ pub struct VerifiedChain {
 pub struct Checkpoint {
     pub height: u32,
     pub hash: [u8; 32],
+    /// The work the SUBMITTED HEADER RUN must carry, NOT the chain's cumulative work at
+    /// `height`. `VerifiedChain::work` sums `block_work` over the headers the caller
+    /// handed in and nothing else, so those two readings differ by orders of magnitude:
+    /// armed with a real cumulative figure no honest relayer run could ever reach it and
+    /// the corridor bricks. What stops a cheap substituted chain is `height` and `hash`
+    /// pinning a real block, plus the `BrokenLink` chaining; this is a floor on the run.
     pub min_work: U256,
 }
 
@@ -102,7 +108,15 @@ pub fn verify_chain(
                 return Err(SpvError::BrokenLink { index: i });
             }
             let interval = params.retarget_interval() as usize;
-            if height % params.retarget_interval() == 0 && i >= interval {
+            if height % params.retarget_interval() == 0 {
+                if i < interval {
+                    // The window does not carry the period's first header, so the real
+                    // timespan cannot be checked and the only rule left is the loose four
+                    // times relief. That would let a submitter pick a target four times
+                    // easier than the timestamps dictate and mine the confirmations above
+                    // the deposit at that eased difficulty. Refuse the window instead.
+                    return Err(SpvError::UnverifiableRetarget { index: i });
+                }
                 check_retarget_boundary(&headers[i - interval], prev, h, params)?;
             } else {
                 bits_expectation(height, prev.bits, h.bits, params, i)?;
@@ -171,6 +185,7 @@ impl VerifiedChain {
         if header.block_hash() != checkpoint.hash {
             return Err(SpvError::CheckpointMismatch);
         }
+        // Against the submitted run, which is what `work` measures. See the field doc.
         if self.work < checkpoint.min_work {
             return Err(SpvError::InsufficientWork);
         }
