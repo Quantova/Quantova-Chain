@@ -5,15 +5,43 @@
 use blst::min_pk::{PublicKey, Signature};
 use blst::BLST_ERROR;
 use qlc_ethereum::bls::{BlsAggregateVerifier, BlsPubkey, BlsSignature};
+use std::sync::Mutex;
 
 pub const ETH_SYNC_COMMITTEE_DST: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Bls12381AggregateVerifier;
+/// Decompressing and subgroup checking a whole sync committee is the bulk of a
+/// verification, and the committee only changes once a period, so the validated keys are
+/// memoised against the exact key set they came from. The cache holds validated keys
+/// only: a set that fails validation is never stored, so a bad committee cannot be
+/// smuggled past by a later call.
+#[derive(Debug, Default)]
+pub struct Bls12381AggregateVerifier {
+    cached: Mutex<Option<(Vec<BlsPubkey>, Vec<PublicKey>)>>,
+}
 
 impl Bls12381AggregateVerifier {
     pub fn new() -> Self {
-        Bls12381AggregateVerifier
+        Bls12381AggregateVerifier {
+            cached: Mutex::new(None),
+        }
+    }
+
+    fn validated(&self, pubkeys: &[BlsPubkey]) -> Option<Vec<PublicKey>> {
+        let mut slot = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((seen, keys)) = slot.as_ref() {
+            if seen.as_slice() == pubkeys {
+                return Some(keys.clone());
+            }
+        }
+        let mut keys = Vec::with_capacity(pubkeys.len());
+        for pubkey in pubkeys {
+            match PublicKey::key_validate(&pubkey.0) {
+                Ok(key) => keys.push(key),
+                Err(_) => return None,
+            }
+        }
+        *slot = Some((pubkeys.to_vec(), keys.clone()));
+        Some(keys)
     }
 }
 
@@ -27,13 +55,9 @@ impl BlsAggregateVerifier for Bls12381AggregateVerifier {
         if pubkeys.is_empty() {
             return false;
         }
-        let mut keys = Vec::with_capacity(pubkeys.len());
-        for pubkey in pubkeys {
-            match PublicKey::key_validate(&pubkey.0) {
-                Ok(key) => keys.push(key),
-                Err(_) => return false,
-            }
-        }
+        let Some(keys) = self.validated(pubkeys) else {
+            return false;
+        };
         let signature = match Signature::from_bytes(&signature.0) {
             Ok(signature) => signature,
             Err(_) => return false,

@@ -656,7 +656,10 @@ fn handle_connection(
         );
     }
 
-    match reply_rx.recv() {
+    // Bounded. REQUEST_DEADLINE covers only the head and body reads, so an unbounded wait
+    // here pins this connection and its descriptor for as long as the node is busy, which
+    // is exactly when the pool is most contended.
+    match reply_rx.recv_timeout(REQUEST_DEADLINE) {
         Ok(Ok(value)) => write_response(&mut stream, 200, &value.render()),
         Ok(Err(err)) => write_error(&mut stream, err.http, &err.code, &err.message),
         Err(_) => write_error(
