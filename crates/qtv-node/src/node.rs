@@ -1122,7 +1122,24 @@ pub(crate) fn bridge_exit_admissible(
     if account.balance < charged {
         return None;
     }
-    crate::bridge::ExitRequest::decode(body.call().args())
+    let request = crate::bridge::ExitRequest::decode(body.call().args())?;
+    // Admitting one weaker than dispatch parks it in the pool for ever: the dispatch
+    // rolls back the fee AND the nonce, and nothing after that evicts the entry, so it
+    // is re verified with a post quantum signature check every block from then on.
+    if ledger.bridged_asset(&request.asset_id).is_none() {
+        return None;
+    }
+    let ceiling = ledger.bridge_exit_max_amount();
+    if ceiling > 0 && request.amount > ceiling {
+        return None;
+    }
+    let holder = qtv_idfmt::parse_address(body.sender())
+        .ok()
+        .and_then(|payload| <[u8; 32]>::try_from(payload.as_slice()).ok())?;
+    if ledger.bridged_balance(&request.asset_id, &holder) < request.amount {
+        return None;
+    }
+    Some(request)
 }
 
 fn dispatch_bridge_exit(
