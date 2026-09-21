@@ -298,6 +298,8 @@ pub struct DevNode {
     side_events_by_height: HashMap<Height, Vec<SideEvent>>,
     block_messages: HashMap<u64, Vec<u8>>,
     epoch_roots: HashMap<u64, Root>,
+    next_epoch_roots: HashMap<u64, Root>,
+    next_epoch_notes: HashMap<u64, RegisterNote>,
     epoch_notes: HashMap<u64, RegisterNote>,
     epoch_conflicted: HashSet<u64>,
     epoch_conflict_notes: Vec<RegisterNote>,
@@ -400,6 +402,8 @@ impl DevNode {
             side_events_by_height: HashMap::new(),
             block_messages: HashMap::new(),
             epoch_roots: HashMap::new(),
+            next_epoch_roots: HashMap::new(),
+            next_epoch_notes: HashMap::new(),
             epoch_notes: HashMap::new(),
             epoch_conflicted: HashSet::new(),
             epoch_conflict_notes: Vec::new(),
@@ -532,8 +536,11 @@ impl DevNode {
     fn refresh_committee(&mut self) {
         let epoch = self.consensus.epoch_for(self.height);
         if epoch != self.consensus.epoch() {
-            self.epoch_roots.clear();
-            self.epoch_notes.clear();
+            // Promote what was committed during the epoch just ended. A root registered
+            // inside its own epoch has already seen the beacon it is drawn against, so it
+            // can be ground; one committed an epoch early cannot be.
+            self.epoch_roots = std::mem::take(&mut self.next_epoch_roots);
+            self.epoch_notes = std::mem::take(&mut self.next_epoch_notes);
             self.epoch_conflicted.clear();
             self.epoch_conflict_notes.clear();
         }
@@ -545,10 +552,9 @@ impl DevNode {
     }
 
     pub fn own_registration_note(&self) -> Option<RegisterNote> {
-        let epoch = self.consensus.epoch_for(self.height);
-        if epoch == 0 {
-            return None;
-        }
+        // For the epoch AFTER this one. Committing a root inside the epoch it is drawn in
+        // lets a validator grind it against a beacon it can already see.
+        let epoch = self.consensus.epoch_for(self.height).saturating_add(1);
         let (root, sig) = self.consensus.own_epoch_registration(epoch);
         Some(RegisterNote {
             height: self.height,
@@ -560,8 +566,8 @@ impl DevNode {
     }
 
     pub fn collect_registration(&mut self, note: RegisterNote) -> bool {
-        let epoch = self.consensus.epoch_for(self.height);
-        if note.epoch != epoch || note.id == self.id {
+        let next = self.consensus.epoch_for(self.height).saturating_add(1);
+        if note.epoch != next || note.id == self.id {
             return false;
         }
         let Some(reg) = self.base_roster.iter().find(|r| r.id == note.id) else {
@@ -579,17 +585,17 @@ impl DevNode {
         if self.epoch_conflicted.contains(&note.id) {
             return false;
         }
-        match self.epoch_roots.get(&note.id) {
+        match self.next_epoch_roots.get(&note.id) {
             Some(existing) if *existing == note.root => false,
             Some(_) => {
                 self.epoch_conflicted.insert(note.id);
-                self.epoch_roots.remove(&note.id);
-                self.epoch_notes.remove(&note.id);
+                self.next_epoch_roots.remove(&note.id);
+                self.next_epoch_notes.remove(&note.id);
                 true
             }
             None => {
-                self.epoch_notes.insert(note.id, note.clone());
-                self.epoch_roots.insert(note.id, note.root);
+                self.next_epoch_notes.insert(note.id, note.clone());
+                self.next_epoch_roots.insert(note.id, note.root);
                 true
             }
         }
@@ -656,7 +662,11 @@ impl DevNode {
                 let Ok(note) = decode_register_note(wrapper.body().call().args()) else {
                     continue;
                 };
-                if note.epoch != epoch || note.id == self.id {
+                // The chain carries roots for THIS epoch and pre registrations for the
+                // next. A restart that recovers only the current set promotes an empty map
+                // at the next boundary and diverges from every peer that kept its gossip.
+                let pending = note.epoch == epoch.saturating_add(1);
+                if (note.epoch != epoch && !pending) || note.id == self.id {
                     continue;
                 }
                 let Some(reg) = self.base_roster.iter().find(|r| r.id == note.id) else {
@@ -672,16 +682,21 @@ impl DevNode {
                     if self.epoch_conflicted.contains(&note.id) {
                         continue;
                     }
-                    match self.epoch_roots.get(&note.id) {
+                    let (roots, notes) = if pending {
+                        (&mut self.next_epoch_roots, &mut self.next_epoch_notes)
+                    } else {
+                        (&mut self.epoch_roots, &mut self.epoch_notes)
+                    };
+                    match roots.get(&note.id) {
                         Some(existing) if *existing == note.root => {}
                         Some(_) => {
+                            roots.remove(&note.id);
+                            notes.remove(&note.id);
                             self.epoch_conflicted.insert(note.id);
-                            self.epoch_roots.remove(&note.id);
-                            self.epoch_notes.remove(&note.id);
                         }
                         None => {
-                            self.epoch_notes.insert(note.id, note.clone());
-                            self.epoch_roots.insert(note.id, note.root);
+                            notes.insert(note.id, note.clone());
+                            roots.insert(note.id, note.root);
                         }
                     }
                 }
@@ -867,11 +882,12 @@ impl DevNode {
             .iter()
             .map(|evidence| evidence_transaction(evidence, chain_id))
             .collect();
-        let epoch = self.consensus.epoch_for(height);
-        if epoch != 0 && qtv_sampler::epoch::is_epoch_start(height, self.consensus.epoch_len()) {
-            for note in self.epoch_registration_notes() {
-                candidates.push(registration_transaction(&note, chain_id));
-            }
+        // Every block, not only the epoch start. Recorded once at the boundary, the chain
+        // holds only whatever gossip the proposer happened to have, so two nodes rebuild
+        // two different rosters and a restarted one can never rejoin. Carried every block,
+        // the chain converges on the whole set before the epoch it applies to begins.
+        for note in self.epoch_registration_notes() {
+            candidates.push(registration_transaction(&note, chain_id));
         }
         candidates.extend(self.mempool.candidates());
         let mut ledger = self.ledger.clone();

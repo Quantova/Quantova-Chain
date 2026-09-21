@@ -124,9 +124,6 @@ impl Runtime {
     }
 
     fn disseminate_registrations(&mut self) {
-        if self.node.epoch() == 0 {
-            return;
-        }
         if self.i_am_up() {
             if let Some(note) = self.node.own_registration_note() {
                 let bytes = Message::Register(Box::new(note)).encode();

@@ -103,10 +103,15 @@ fn an_over_bound_block_finalizes_over_the_coded_path() {
             .block;
         let ids: std::collections::HashSet<String> =
             node_block.body().iter().map(Wrapper::id).collect();
-        assert_eq!(
-            node_block.body().len(),
-            submitted.len(),
-            "node {i} finalized a different transaction count than was submitted"
+        // Every block also carries the proposer's own epoch registration record, which
+        // is what keeps the roster a function of the chain rather than of gossip.
+        assert!(
+            node_block.body().len() >= submitted.len(),
+            "node {i} finalized fewer transactions than were submitted"
+        );
+        assert!(
+            node_block.body().len() <= submitted.len() + 1,
+            "node {i} finalized more than the submitted set plus its registration record"
         );
         for id in &submitted {
             assert!(
