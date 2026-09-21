@@ -8,6 +8,9 @@ use std::sync::Mutex;
 
 use qtv_codec::{Encoder, LENGTH_WIDTH};
 
+pub(crate) // How far past a bad frame to look for an intact one before calling it a torn tail.
+const MAX_RESYNC_PROBES: u32 = 1 << 20;
+
 pub(crate) const CHECKSUM_WIDTH: usize = 4;
 
 pub(crate) fn frame_len(payload_len: usize) -> u64 {
@@ -22,6 +25,38 @@ pub struct Log {
 
 // Whether a complete, checksum clean frame starts at `at`. Used to tell a torn tail
 // apart from corruption in the middle of the log.
+// Whether any checksum clean frame starts at or after `from`. The bad frame's own length
+// field cannot be trusted to find the next one: a bit flip in that prefix is one of the
+// commonest single byte corruptions, and following it lands at an arbitrary offset. So
+// step forward a word at a time and look for a frame that stands on its own.
+fn a_well_formed_frame_follows(
+    stream: &mut BufReader<File>,
+    from: u64,
+    total: u64,
+) -> io::Result<bool> {
+    // Byte by byte: frames are variable length and not aligned to anything, so a coarser
+    // step walks straight past the intact frame it is meant to find.
+    let mut at = from;
+    let mut probed = 0u32;
+    while at + LENGTH_WIDTH as u64 <= total && probed < MAX_RESYNC_PROBES {
+        if frame_is_well_formed(stream, at, total)? {
+            return Ok(true);
+        }
+        at += 1;
+        probed += 1;
+    }
+    Ok(false)
+}
+
+fn corrupt_middle() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "a log frame is unreadable with intact frames behind it, so the log is corrupt in \
+         the middle rather than torn at the tail; refusing to open so the records after it \
+         are not discarded",
+    )
+}
+
 fn frame_is_well_formed(stream: &mut BufReader<File>, at: u64, total: u64) -> io::Result<bool> {
     if total.saturating_sub(at) < LENGTH_WIDTH as u64 {
         return Ok(false);
@@ -149,6 +184,9 @@ impl Log {
             let payload_start = pos + LENGTH_WIDTH as u64;
             let available = total - payload_start;
             if length > available || available - length < CHECKSUM_WIDTH as u64 {
+                if strict && a_well_formed_frame_follows(&mut stream, payload_start, total)? {
+                    return Err(corrupt_middle());
+                }
                 break;
             }
             payload.clear();
@@ -165,14 +203,8 @@ impl Log {
                 // A bad frame with a well formed one behind it is corruption in the middle
                 // of the log, and truncating there destroys finalised records that are
                 // still intact. Refuse to open instead of quietly deleting them.
-                let end = payload_start + length + CHECKSUM_WIDTH as u64;
-                if strict && frame_is_well_formed(&mut stream, end, total)? {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "a log frame failed its checksum with intact frames behind it, so the \
-                         log is corrupt in the middle rather than torn at the tail; refusing to \
-                         open so the records after it are not discarded",
-                    ));
+                if strict && a_well_formed_frame_follows(&mut stream, payload_start, total)? {
+                    return Err(corrupt_middle());
                 }
                 break;
             }
@@ -538,6 +570,40 @@ mod tests {
             "the log was truncated despite refusing to open"
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    // The commonest single byte corruption is in a frame's LENGTH prefix, not its
+    // checksum. Following that length lands at an arbitrary offset, so the guard has to
+    // resync independently of it or it silently deletes every intact record behind.
+    #[test]
+    fn a_flipped_length_prefix_is_refused_like_any_other_mid_log_corruption() {
+        for flip in [0usize, 7] {
+            let path = temp_path(&format!("len-flip-{flip}"));
+            {
+                let (mut log, _frames) = Log::open(&path).unwrap();
+                log.append(b"one").unwrap();
+                log.append(b"two").unwrap();
+                log.append(b"three").unwrap();
+                log.sync().unwrap();
+            }
+            let before = std::fs::metadata(&path).unwrap().len();
+            {
+                let mut bytes = std::fs::read(&path).unwrap();
+                let target = frame_len(3) as usize + flip;
+                bytes[target] ^= 0x01;
+                std::fs::write(&path, &bytes).unwrap();
+            }
+            let err = Log::open_scanned_strict(&path, |_, _, _| true).expect_err(
+                "a corrupt length prefix must not silently discard the frames behind it",
+            );
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                before,
+                "the log was truncated despite refusing to open"
+            );
+            std::fs::remove_file(&path).ok();
+        }
     }
 
     // A tail torn by a crash mid append is still dropped, which is the whole point.

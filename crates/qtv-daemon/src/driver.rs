@@ -449,6 +449,9 @@ impl Driver {
     }
 
     fn disseminate_registrations(&mut self, window: Duration) {
+        if self.node.epoch() == 0 {
+            return;
+        }
         if let Some(note) = self.node.own_registration_note() {
             let bytes = Message::Register(Box::new(note)).encode();
             self.broadcast(&bytes);

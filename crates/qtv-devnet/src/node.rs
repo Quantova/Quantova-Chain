@@ -298,8 +298,6 @@ pub struct DevNode {
     side_events_by_height: HashMap<Height, Vec<SideEvent>>,
     block_messages: HashMap<u64, Vec<u8>>,
     epoch_roots: HashMap<u64, Root>,
-    next_epoch_roots: HashMap<u64, Root>,
-    next_epoch_notes: HashMap<u64, RegisterNote>,
     epoch_notes: HashMap<u64, RegisterNote>,
     epoch_conflicted: HashSet<u64>,
     epoch_conflict_notes: Vec<RegisterNote>,
@@ -402,8 +400,6 @@ impl DevNode {
             side_events_by_height: HashMap::new(),
             block_messages: HashMap::new(),
             epoch_roots: HashMap::new(),
-            next_epoch_roots: HashMap::new(),
-            next_epoch_notes: HashMap::new(),
             epoch_notes: HashMap::new(),
             epoch_conflicted: HashSet::new(),
             epoch_conflict_notes: Vec::new(),
@@ -536,11 +532,8 @@ impl DevNode {
     fn refresh_committee(&mut self) {
         let epoch = self.consensus.epoch_for(self.height);
         if epoch != self.consensus.epoch() {
-            // Promote what was committed during the epoch just ended. A root registered
-            // inside its own epoch has already seen the beacon it is drawn against, so it
-            // can be ground; one committed an epoch early cannot be.
-            self.epoch_roots = std::mem::take(&mut self.next_epoch_roots);
-            self.epoch_notes = std::mem::take(&mut self.next_epoch_notes);
+            self.epoch_roots.clear();
+            self.epoch_notes.clear();
             self.epoch_conflicted.clear();
             self.epoch_conflict_notes.clear();
         }
@@ -552,9 +545,10 @@ impl DevNode {
     }
 
     pub fn own_registration_note(&self) -> Option<RegisterNote> {
-        // For the epoch AFTER this one. Committing a root inside the epoch it is drawn in
-        // lets a validator grind it against a beacon it can already see.
-        let epoch = self.consensus.epoch_for(self.height).saturating_add(1);
+        let epoch = self.consensus.epoch_for(self.height);
+        if epoch == 0 {
+            return None;
+        }
         let (root, sig) = self.consensus.own_epoch_registration(epoch);
         Some(RegisterNote {
             height: self.height,
@@ -566,8 +560,8 @@ impl DevNode {
     }
 
     pub fn collect_registration(&mut self, note: RegisterNote) -> bool {
-        let next = self.consensus.epoch_for(self.height).saturating_add(1);
-        if note.epoch != next || note.id == self.id {
+        let epoch = self.consensus.epoch_for(self.height);
+        if note.epoch != epoch || note.id == self.id {
             return false;
         }
         let Some(reg) = self.base_roster.iter().find(|r| r.id == note.id) else {
@@ -585,17 +579,17 @@ impl DevNode {
         if self.epoch_conflicted.contains(&note.id) {
             return false;
         }
-        match self.next_epoch_roots.get(&note.id) {
+        match self.epoch_roots.get(&note.id) {
             Some(existing) if *existing == note.root => false,
             Some(_) => {
                 self.epoch_conflicted.insert(note.id);
-                self.next_epoch_roots.remove(&note.id);
-                self.next_epoch_notes.remove(&note.id);
+                self.epoch_roots.remove(&note.id);
+                self.epoch_notes.remove(&note.id);
                 true
             }
             None => {
-                self.next_epoch_notes.insert(note.id, note.clone());
-                self.next_epoch_roots.insert(note.id, note.root);
+                self.epoch_notes.insert(note.id, note.clone());
+                self.epoch_roots.insert(note.id, note.root);
                 true
             }
         }
@@ -662,11 +656,7 @@ impl DevNode {
                 let Ok(note) = decode_register_note(wrapper.body().call().args()) else {
                     continue;
                 };
-                // The chain carries roots for THIS epoch and pre registrations for the
-                // next. A restart that recovers only the current set promotes an empty map
-                // at the next boundary and diverges from every peer that kept its gossip.
-                let pending = note.epoch == epoch.saturating_add(1);
-                if (note.epoch != epoch && !pending) || note.id == self.id {
+                if note.epoch != epoch || note.id == self.id {
                     continue;
                 }
                 let Some(reg) = self.base_roster.iter().find(|r| r.id == note.id) else {
@@ -682,21 +672,16 @@ impl DevNode {
                     if self.epoch_conflicted.contains(&note.id) {
                         continue;
                     }
-                    let (roots, notes) = if pending {
-                        (&mut self.next_epoch_roots, &mut self.next_epoch_notes)
-                    } else {
-                        (&mut self.epoch_roots, &mut self.epoch_notes)
-                    };
-                    match roots.get(&note.id) {
+                    match self.epoch_roots.get(&note.id) {
                         Some(existing) if *existing == note.root => {}
                         Some(_) => {
-                            roots.remove(&note.id);
-                            notes.remove(&note.id);
                             self.epoch_conflicted.insert(note.id);
+                            self.epoch_roots.remove(&note.id);
+                            self.epoch_notes.remove(&note.id);
                         }
                         None => {
-                            notes.insert(note.id, note.clone());
-                            roots.insert(note.id, note.root);
+                            self.epoch_notes.insert(note.id, note.clone());
+                            self.epoch_roots.insert(note.id, note.root);
                         }
                     }
                 }
@@ -882,12 +867,11 @@ impl DevNode {
             .iter()
             .map(|evidence| evidence_transaction(evidence, chain_id))
             .collect();
-        // Every block, not only the epoch start. Recorded once at the boundary, the chain
-        // holds only whatever gossip the proposer happened to have, so two nodes rebuild
-        // two different rosters and a restarted one can never rejoin. Carried every block,
-        // the chain converges on the whole set before the epoch it applies to begins.
-        for note in self.epoch_registration_notes() {
-            candidates.push(registration_transaction(&note, chain_id));
+        let epoch = self.consensus.epoch_for(height);
+        if epoch != 0 && qtv_sampler::epoch::is_epoch_start(height, self.consensus.epoch_len()) {
+            for note in self.epoch_registration_notes() {
+                candidates.push(registration_transaction(&note, chain_id));
+            }
         }
         candidates.extend(self.mempool.candidates());
         let mut ledger = self.ledger.clone();
@@ -1809,13 +1793,19 @@ impl DevNode {
         if attestation.height != self.height {
             return false;
         }
-        // The ceiling bounds the evidence pool key space. Dropping the whole attestation
-        // for it meant a height that needed 256 views could never finalise again, and no
-        // restart recovered it because the prevote watermark refuses to go back down.
-        if attestation.view < qtv_node::evidence::MAX_HEIGHT_VIEW
-            && !self.watch_for_equivocation(&attestation)
-        {
+        // Authenticate FIRST, for every view. The ceiling below bounds the evidence pool's
+        // key space only; letting it skip the signature check as well left the one
+        // authentication on this path unreachable above view 255, and an unsigned vote
+        // carrying a published credential could then displace a real one and stall
+        // finality for good.
+        if self.signed_offender(&attestation).is_none() {
             return false;
+        }
+        // Dropping the whole attestation for the ceiling meant a height that needed 256
+        // views could never finalise again, and no restart recovered it because the
+        // prevote watermark refuses to go back down.
+        if attestation.view < qtv_node::evidence::MAX_HEIGHT_VIEW {
+            self.watch_for_equivocation(&attestation);
         }
         if let Ok(selection) = self.select() {
             if let Some(member) = selection.commitment.member(attestation.from) {
@@ -1908,15 +1898,22 @@ impl DevNode {
         self.round_atts.push(attestation.clone());
     }
 
-    fn watch_for_equivocation(&mut self, attestation: &Attestation) -> bool {
+    /// The bond address behind a genuinely signed attestation, or None. This is the only
+    /// authentication on the precommit path, so it must run for EVERY attestation
+    /// regardless of view, not only for those the evidence pool can key.
+    fn signed_offender(&self, attestation: &Attestation) -> Option<String> {
         let chain_id = self.consensus.chain_id();
-        let Some(offender) = self.base_roster.iter().find_map(|r| {
+        self.base_roster.iter().find_map(|r| {
             if r.id == attestation.from && attestation.signature_verifies(chain_id, &r.attest_pk) {
                 Some(r.bond_address.clone())
             } else {
                 None
             }
-        }) else {
+        })
+    }
+
+    fn watch_for_equivocation(&mut self, attestation: &Attestation) -> bool {
+        let Some(offender) = self.signed_offender(attestation) else {
             return false;
         };
         self.evidence_pool.observe(

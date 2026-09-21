@@ -80,18 +80,10 @@ fn only_a_leader_signed_proposal_is_prevoted(committee: usize, online: &[bool]) 
     let genuine = nodes[leader_idx].build_proposal(&selection);
     let counterfeit = nodes[stranger_idx].build_proposal(&selection);
 
-    // A block carries the proposer's own epoch registration, so two proposers at one
-    // height build different bodies by design. What has to hold is that both are built
-    // for the same height on the same parent, and that only the leader can sign one.
     assert_eq!(
-        genuine.header.height(),
-        counterfeit.header.height(),
-        "both proposals are for the height under contest"
-    );
-    assert_eq!(
-        genuine.header.parent_hash(),
-        counterfeit.header.parent_hash(),
-        "both proposals extend the same parent"
+        header_value(&genuine.header.hash()),
+        header_value(&counterfeit.header.hash()),
+        "the stranger reproduces the same block, so only the signature separates them"
     );
     assert_eq!(
         genuine.auth.from, leader,
