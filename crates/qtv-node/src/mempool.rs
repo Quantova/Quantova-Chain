@@ -692,24 +692,29 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_evidence(&wrapper) {
+            if !self.charge_feeless_attempt_for(&wrapper) {
+                return Err(Reject::RateLimited);
+            }
             if !feeless_hint.unwrap_or_else(|| {
                 crate::node::evidence_admissible(fee_params.chain_id, &wrapper, ledger)
             }) {
                 return Err(Reject::BadCall);
             }
+        } else if crate::node::is_bridge_guardian(&wrapper) {
             if !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
-        } else if crate::node::is_bridge_guardian(&wrapper) {
             if !feeless_hint.unwrap_or_else(|| {
                 crate::node::guardian_admissible(ledger, &wrapper, fee_params.chain_id)
             }) {
                 return Err(Reject::BadCall);
             }
+        } else if crate::node::is_bridge_mint(&wrapper) {
+            // The verification below is the expensive part, so the attempt is charged
+            // before it runs rather than after, or a failing proof costs no budget.
             if !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
-        } else if crate::node::is_bridge_mint(&wrapper) {
             if !feeless_hint.unwrap_or_else(|| {
                 crate::node::bridge_mint_admissible(
                     ledger,
@@ -720,17 +725,14 @@ impl Mempool {
             }) {
                 return Err(Reject::BadCall);
             }
+        } else if crate::node::is_bridge_settle(&wrapper) {
             if !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
-        } else if crate::node::is_bridge_settle(&wrapper) {
             if !feeless_hint.unwrap_or_else(|| {
                 crate::node::bridge_settle_admissible(ledger, &wrapper, fee_params.chain_id)
             }) {
                 return Err(Reject::BadCall);
-            }
-            if !self.charge_feeless_attempt_for(&wrapper) {
-                return Err(Reject::RateLimited);
             }
         } else if crate::node::is_bridge_exit(&wrapper) {
             if self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce()) {
