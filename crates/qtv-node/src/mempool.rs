@@ -319,6 +319,7 @@ pub fn admission_hint(wrapper: &Wrapper, ledger: &Ledger, fee_params: &FeeParams
             ledger,
             wrapper,
             fee_params.chain_id,
+            ledger.execution_time(),
         ));
     } else if crate::node::is_bridge_settle(wrapper) {
         hint.feeless_ok = Some(crate::node::bridge_settle_admissible(
@@ -710,7 +711,12 @@ impl Mempool {
             }
         } else if crate::node::is_bridge_mint(&wrapper) {
             if !feeless_hint.unwrap_or_else(|| {
-                crate::node::bridge_mint_admissible(ledger, &wrapper, fee_params.chain_id)
+                crate::node::bridge_mint_admissible(
+                    ledger,
+                    &wrapper,
+                    fee_params.chain_id,
+                    ledger.execution_time(),
+                )
             }) {
                 return Err(Reject::BadCall);
             }
@@ -871,7 +877,12 @@ impl Mempool {
             } else if crate::node::is_bridge_guardian(&wrapper) {
                 crate::node::guardian_admissible(ledger, &wrapper, fee_params.chain_id)
             } else if crate::node::is_bridge_mint(&wrapper) {
-                crate::node::bridge_mint_admissible(ledger, &wrapper, fee_params.chain_id)
+                crate::node::bridge_mint_admissible(
+                    ledger,
+                    &wrapper,
+                    fee_params.chain_id,
+                    ledger.execution_time(),
+                )
             } else if crate::node::is_bridge_settle(&wrapper) {
                 crate::node::bridge_settle_admissible(ledger, &wrapper, fee_params.chain_id)
             } else if crate::node::is_bridge_exit(&wrapper) {

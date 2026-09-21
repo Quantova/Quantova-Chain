@@ -808,7 +808,7 @@ pub(crate) fn is_bridge_cosmos_update(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::bridge_cosmos_update_address()
 }
 
-fn dispatch_bridge_cosmos_update(ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
+fn dispatch_bridge_cosmos_update(ledger: &mut Ledger, wrapper: &Wrapper, now_seconds: u64) -> bool {
     if ledger.bridge_is_frozen() {
         return false;
     }
@@ -824,8 +824,9 @@ fn dispatch_bridge_cosmos_update(ledger: &mut Ledger, wrapper: &Wrapper) -> bool
         Some(anchor) => anchor,
         None => return false,
     };
-    let now =
-        crate::bridge_cosmos::chain_now(ledger.chain_genesis_time(), ledger.execution_height());
+    // The block's own timestamp. A clock synthesised from height drifts away from the
+    // foreign chain's real time, which is what the trusting period is measured against.
+    let now = crate::bridge_cosmos::block_now(now_seconds);
     match crate::bridge_cosmos::verify_cosmos_anchor_update(&anchor, &proof, now) {
         Some(next) => {
             ledger.seed_bridge_cosmos_anchor(&next);
@@ -843,6 +844,7 @@ fn bridge_mint_fact(
     ledger: &Ledger,
     wrapper: &Wrapper,
     chain_id: u64,
+    now_seconds: u64,
 ) -> Option<crate::bridge::Fact> {
     if is_bridge_btc_mint(wrapper) {
         let proof = crate::bridge_btc::BitcoinMintProof::decode(wrapper.body().call().args())?;
@@ -860,8 +862,7 @@ fn bridge_mint_fact(
         let proof = crate::bridge_cosmos::CosmosMintProof::decode(wrapper.body().call().args())?;
         let anchor = ledger.bridge_cosmos_anchor(proof.config_selector)?;
         let dest_chain = ledger.bridge_dest_chain()?;
-        let now =
-            crate::bridge_cosmos::chain_now(ledger.chain_genesis_time(), ledger.execution_height());
+        let now = crate::bridge_cosmos::block_now(now_seconds);
         return crate::bridge_cosmos::verify_cosmos_mint(&anchor, &proof, dest_chain, now);
     }
     if !ledger.bridge_federated_enabled() {
@@ -932,7 +933,12 @@ pub(crate) fn bridge_mint_source_key(wrapper: &Wrapper) -> Option<(u32, [u8; 32]
     })
 }
 
-pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_id: u64) -> bool {
+pub(crate) fn bridge_mint_admissible(
+    ledger: &Ledger,
+    wrapper: &Wrapper,
+    chain_id: u64,
+    now_seconds: u64,
+) -> bool {
     if ledger.bridge_is_frozen() {
         return false;
     }
@@ -964,14 +970,19 @@ pub(crate) fn bridge_mint_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_i
     if ledger.bridge_reference_seen(source_chain, &source_ref) {
         return false;
     }
-    let fact = match bridge_mint_fact(ledger, wrapper, chain_id) {
+    let fact = match bridge_mint_fact(ledger, wrapper, chain_id, now_seconds) {
         Some(fact) => fact,
         None => return false,
     };
     ledger.execution_height() <= fact.expiry_height
 }
 
-fn dispatch_bridge_mint(ledger: &mut Ledger, wrapper: &Wrapper, chain_id: u64) -> bool {
+fn dispatch_bridge_mint(
+    ledger: &mut Ledger,
+    wrapper: &Wrapper,
+    chain_id: u64,
+    now_seconds: u64,
+) -> bool {
     if ledger.bridge_is_frozen() {
         return false;
     }
@@ -995,7 +1006,7 @@ fn dispatch_bridge_mint(ledger: &mut Ledger, wrapper: &Wrapper, chain_id: u64) -
         }
         btc_work = Some(work);
     }
-    let fact = match bridge_mint_fact(ledger, wrapper, chain_id) {
+    let fact = match bridge_mint_fact(ledger, wrapper, chain_id, now_seconds) {
         Some(fact) => fact,
         None => return false,
     };
@@ -1435,7 +1446,9 @@ fn execute_ordered_across(
             continue;
         }
         if is_bridge_mint(wrapper) {
-            if ledger.apply_atomic(|l| dispatch_bridge_mint(l, wrapper, fee_params.chain_id)) {
+            if ledger.apply_atomic(|l| {
+                dispatch_bridge_mint(l, wrapper, fee_params.chain_id, now_seconds)
+            }) {
                 included.push(wrapper.clone());
             }
             continue;
@@ -1447,7 +1460,7 @@ fn execute_ordered_across(
             continue;
         }
         if is_bridge_cosmos_update(wrapper) {
-            if ledger.apply_atomic(|l| dispatch_bridge_cosmos_update(l, wrapper)) {
+            if ledger.apply_atomic(|l| dispatch_bridge_cosmos_update(l, wrapper, now_seconds)) {
                 included.push(wrapper.clone());
             }
             continue;
@@ -2033,6 +2046,7 @@ impl Node {
     fn execute_block(&mut self, now_seconds: u64) -> Vec<Wrapper> {
         self.ledger.clear_block_events();
         self.ledger.set_execution_height(self.height);
+        self.ledger.set_execution_time(now_seconds);
         let candidates = self.mempool.candidates();
         let threads = self.exec_cores();
         if threads > 1 {
@@ -5279,7 +5293,7 @@ mod tests {
             TRANSFER_METER,
             &fee,
         );
-        let included = execute_ordered(&mut ledger, &[tx], &fee, 0);
+        let included = execute_ordered(&mut ledger, &[tx], &fee, GENESIS_TIME + 1);
 
         assert_eq!(
             included.len(),
@@ -5698,7 +5712,8 @@ mod tests {
         assert!(!bridge_mint_admissible(
             &unset,
             &mint_tx(&relayer, &artifact, &fee),
-            BRIDGE_CHAIN_ID
+            BRIDGE_CHAIN_ID,
+            0
         ));
         assert!(
             execute_ordered(&mut unset, &[mint_tx(&relayer, &artifact, &fee)], &fee, 0).is_empty()
@@ -5715,7 +5730,8 @@ mod tests {
         assert!(bridge_mint_admissible(
             &bound,
             &mint_tx(&relayer, &artifact, &fee),
-            BRIDGE_CHAIN_ID
+            BRIDGE_CHAIN_ID,
+            0
         ));
         assert_eq!(
             execute_ordered(&mut bound, &[mint_tx(&relayer, &artifact, &fee)], &fee, 0).len(),

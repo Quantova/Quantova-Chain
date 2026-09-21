@@ -1037,6 +1037,20 @@ impl Ledger {
         self.execution_height
     }
 
+    pub fn set_execution_time(&mut self, now_seconds: u64) {
+        self.execution_time = now_seconds;
+    }
+
+    /// The wall clock of the last executed block. What a foreign chain's trusting period
+    /// and drift bound are measured against, unlike a clock synthesised from height.
+    pub fn execution_time(&self) -> u64 {
+        if self.execution_time > 0 {
+            self.execution_time
+        } else {
+            self.chain_genesis_time()
+        }
+    }
+
     fn credit_account(&mut self, address: &str, amount: u64) {
         if amount == 0 {
             return;
@@ -9718,6 +9732,7 @@ pub struct Ledger {
     side_events: Vec<SideEvent>,
     round_proposer: Option<String>,
     execution_height: u64,
+    execution_time: u64,
     journal: Option<Vec<(Key, Option<Vec<u8>>)>>,
     /// Meter actually consumed by the most recent contract call. The block budget
     /// charges this rather than the limit a transaction declared, so declaring a
@@ -9733,6 +9748,7 @@ impl Ledger {
             side_events: Vec::new(),
             round_proposer: None,
             execution_height: 0,
+            execution_time: 0,
             journal: None,
             last_vm_meter_used: 0,
         }
@@ -9746,6 +9762,7 @@ impl Ledger {
             side_events: Vec::new(),
             round_proposer: None,
             execution_height: 0,
+            execution_time: 0,
             journal: None,
             last_vm_meter_used: 0,
         }

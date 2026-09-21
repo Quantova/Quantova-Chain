@@ -20,6 +20,34 @@ pub struct Log {
     reader: Mutex<File>,
 }
 
+// Whether a complete, checksum clean frame starts at `at`. Used to tell a torn tail
+// apart from corruption in the middle of the log.
+fn frame_is_well_formed(stream: &mut BufReader<File>, at: u64, total: u64) -> io::Result<bool> {
+    if total.saturating_sub(at) < LENGTH_WIDTH as u64 {
+        return Ok(false);
+    }
+    stream.seek(SeekFrom::Start(at))?;
+    let mut length_bytes = [0u8; LENGTH_WIDTH];
+    if stream.read_exact(&mut length_bytes).is_err() {
+        return Ok(false);
+    }
+    let length = u64::from_le_bytes(length_bytes);
+    let payload_start = at + LENGTH_WIDTH as u64;
+    let available = total.saturating_sub(payload_start);
+    if length > available || available - length < CHECKSUM_WIDTH as u64 {
+        return Ok(false);
+    }
+    let mut payload = vec![0u8; length as usize];
+    if stream.read_exact(&mut payload).is_err() {
+        return Ok(false);
+    }
+    let mut checksum_bytes = [0u8; CHECKSUM_WIDTH];
+    if stream.read_exact(&mut checksum_bytes).is_err() {
+        return Ok(false);
+    }
+    Ok(u32::from_le_bytes(checksum_bytes) == checksum_parts(&[&length_bytes, &payload]))
+}
+
 impl Log {
     pub fn open(path: impl AsRef<Path>) -> io::Result<(Self, Vec<Vec<u8>>)> {
         let path = path.as_ref();
@@ -53,7 +81,25 @@ impl Log {
         Ok((Log { file, reader }, frames))
     }
 
-    pub fn open_scanned<F>(path: impl AsRef<Path>, mut visit: F) -> io::Result<Self>
+    /// Recovers by dropping everything from the first bad frame. Correct where the log is
+    /// a sequence of commits and rolling back to the last intact one is the design.
+    pub fn open_scanned<F>(path: impl AsRef<Path>, visit: F) -> io::Result<Self>
+    where
+        F: FnMut(&[u8], u64, u64) -> bool,
+    {
+        Self::scan_open(path, visit, false)
+    }
+
+    /// Refuses to open when a bad frame has intact frames behind it. For logs holding
+    /// finalised history, where discarding the tail loses records nothing can rebuild.
+    pub fn open_scanned_strict<F>(path: impl AsRef<Path>, visit: F) -> io::Result<Self>
+    where
+        F: FnMut(&[u8], u64, u64) -> bool,
+    {
+        Self::scan_open(path, visit, true)
+    }
+
+    fn scan_open<F>(path: impl AsRef<Path>, mut visit: F, strict: bool) -> io::Result<Self>
     where
         F: FnMut(&[u8], u64, u64) -> bool,
     {
@@ -94,6 +140,19 @@ impl Log {
                 break;
             }
             if u32::from_le_bytes(checksum_bytes) != checksum_parts(&[&length_bytes, &payload]) {
+                // A torn tail is the last write losing power, and truncating it is right.
+                // A bad frame with a well formed one behind it is corruption in the middle
+                // of the log, and truncating there destroys finalised records that are
+                // still intact. Refuse to open instead of quietly deleting them.
+                let end = payload_start + length + CHECKSUM_WIDTH as u64;
+                if strict && frame_is_well_formed(&mut stream, end, total)? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "a log frame failed its checksum with intact frames behind it, so the \
+                         log is corrupt in the middle rather than torn at the tail; refusing to \
+                         open so the records after it are not discarded",
+                    ));
+                }
                 break;
             }
             let end = payload_start + length + CHECKSUM_WIDTH as u64;
@@ -427,6 +486,61 @@ mod tests {
         }
         let err = Log::open(&path).expect_err("mid-log corruption must not silently truncate");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        std::fs::remove_file(&path).ok();
+    }
+
+    // open_scanned is the path the state and block stores actually reopen through, so it
+    // has to refuse mid log corruption exactly as open does rather than discard the rest.
+    #[test]
+    fn a_scanned_open_refuses_mid_log_corruption_instead_of_truncating() {
+        let path = temp_path("scanned-middle");
+        {
+            let (mut log, _frames) = Log::open(&path).unwrap();
+            log.append(b"one").unwrap();
+            log.append(b"two").unwrap();
+            log.append(b"three").unwrap();
+            log.sync().unwrap();
+        }
+        let before = std::fs::metadata(&path).unwrap().len();
+        {
+            let mut bytes = std::fs::read(&path).unwrap();
+            let target = frame_len(3) as usize + LENGTH_WIDTH;
+            bytes[target] ^= 0xFF;
+            std::fs::write(&path, &bytes).unwrap();
+        }
+        let err = Log::open_scanned_strict(&path, |_, _, _| true)
+            .expect_err("a scanned open must not silently discard the frames behind a bad one");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            before,
+            "the log was truncated despite refusing to open"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    // A tail torn by a crash mid append is still dropped, which is the whole point.
+    #[test]
+    fn a_scanned_open_still_truncates_a_torn_tail() {
+        let path = temp_path("scanned-tail");
+        {
+            let (mut log, _frames) = Log::open(&path).unwrap();
+            log.append(b"one").unwrap();
+            log.append(b"two").unwrap();
+            log.sync().unwrap();
+        }
+        {
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes.truncate(bytes.len() - 2);
+            std::fs::write(&path, &bytes).unwrap();
+        }
+        let mut seen = Vec::new();
+        Log::open_scanned_strict(&path, |payload, _, _| {
+            seen.push(payload.to_vec());
+            true
+        })
+        .expect("a torn tail still opens");
+        assert_eq!(seen, vec![b"one".to_vec()]);
         std::fs::remove_file(&path).ok();
     }
 

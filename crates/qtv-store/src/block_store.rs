@@ -74,7 +74,7 @@ impl BlockStore {
         let mut by_hash: BTreeMap<Hash, usize> = BTreeMap::new();
         let mut head_height: Option<u64> = None;
         let mut len_on_disk = 0u64;
-        let log = Log::open_scanned(path, |payload, payload_start, end| {
+        let log = Log::open_scanned_strict(path, |payload, payload_start, end| {
             let record: BlockRecord = match qtv_codec::from_bytes(payload) {
                 Ok(record) => record,
                 Err(_) => return false,

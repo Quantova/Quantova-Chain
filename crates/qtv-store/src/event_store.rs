@@ -60,7 +60,7 @@ impl EventStore {
         let mut starts: Vec<u64> = Vec::new();
         let mut lens: Vec<u64> = Vec::new();
         let mut len_on_disk = 0u64;
-        let log = Log::open_scanned(path, |payload, payload_start, end| {
+        let log = Log::open_scanned_strict(path, |payload, payload_start, end| {
             let record = match EventRecord::decode(payload) {
                 Ok(record) => record,
                 Err(_) => return false,
