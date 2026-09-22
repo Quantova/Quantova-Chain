@@ -1977,13 +1977,19 @@ impl DevNode {
         let Some(staged) = &self.staged else {
             return false;
         };
-        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        // Counted per view, as the certificate is: precommits for this block cast in two
+        // different views are not a quorum between them.
+        let mut by_view: std::collections::BTreeMap<View, std::collections::HashSet<u64>> =
+            std::collections::BTreeMap::new();
         for attestation in &self.round_atts {
             if attestation.block == staged.block {
-                seen.insert(attestation.from);
+                by_view
+                    .entry(attestation.view)
+                    .or_default()
+                    .insert(attestation.from);
             }
         }
-        seen.len() as u64 >= tau
+        by_view.values().any(|seen| seen.len() as u64 >= tau)
     }
 
     pub fn try_finalize(&mut self, selection: &Selection) -> Result<bool, RoundError> {
