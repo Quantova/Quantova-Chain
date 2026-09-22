@@ -76,7 +76,7 @@ impl EventStore {
             heights,
             starts,
             lens,
-            len_on_disk,
+            len_on_disk: len_on_disk.max(crate::log::HEADER_LEN),
         })
     }
 
@@ -122,7 +122,7 @@ impl EventStore {
         }
         // `starts` is the payload offset, so the frame checksum has to be counted.
         let len = if keep == 0 {
-            0
+            self.log.data_start()
         } else {
             self.starts[keep - 1] + self.lens[keep - 1] + CHECKSUM_WIDTH as u64
         };

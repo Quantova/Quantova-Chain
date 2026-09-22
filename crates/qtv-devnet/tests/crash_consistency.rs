@@ -106,3 +106,46 @@ fn a_committed_state_without_its_head_block_refuses_to_resume() {
         other => panic!("a mismatched resume must be refused, got {other:?}"),
     }
 }
+
+#[test]
+fn a_state_log_rolled_back_past_the_crash_window_refuses_rather_than_cutting_blocks() {
+    let base = unique_base("crash-state-behind");
+    let params = FeeParams::devnet();
+    let alice = user(0);
+    let bob = user(1);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let mut devnet =
+        Devnet::over_duplex(config(&base, &[true, true, true, true], accounts)).expect("devnet");
+    let victim = devnet.len() - 1;
+    let dir = store_dir(&base, victim as u64 + 1);
+    let state_log = dir.join("state.log");
+
+    let mut commit_ends = Vec::new();
+    for nonce in 0..3u64 {
+        devnet
+            .submit(0, transfer(&alice, &bob.address(), 1_000, nonce, &params))
+            .expect("admitted");
+        devnet.step().expect("finalized");
+        commit_ends.push(std::fs::metadata(&state_log).expect("state log").len());
+    }
+    assert_eq!(devnet.node(victim).stored_blocks(), 3);
+    let blocks_before = std::fs::metadata(dir.join("blocks.log")).unwrap().len();
+
+    let mut bytes = std::fs::read(&state_log).unwrap();
+    let target = commit_ends[0] as usize + 9;
+    bytes[target] ^= 0x01;
+    std::fs::write(&state_log, &bytes).unwrap();
+
+    match devnet.restart_node(victim) {
+        Err(RoundError::StateBehindBlocks { head, committed }) => {
+            assert_eq!(head, 3);
+            assert!(committed.is_some_and(|c| c + 1 < head));
+        }
+        other => panic!("a state log two commits behind must be refused, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::metadata(dir.join("blocks.log")).unwrap().len(),
+        blocks_before,
+        "finalized blocks are kept, not cut back to the damaged state"
+    );
+}

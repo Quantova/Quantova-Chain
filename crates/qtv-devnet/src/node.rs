@@ -80,6 +80,22 @@ const MAX_RELAY_BLOCKS_PER_VIEW: usize = 2;
 const MAX_RELAY_BUCKETS: usize = 1 << 16;
 
 const MAX_ATTESTATIONS_PER_SENDER: usize = 64;
+const MAX_SEEN_ATTESTATIONS: usize = 4 * MAX_ROUND_ATTESTATIONS;
+const TX_POSITION_BITS: u32 = 24;
+const TX_POSITION_UNKNOWN: u64 = (1 << TX_POSITION_BITS) - 1;
+const SERVED_BLOCK_CACHE: usize = 8;
+
+pub struct ServedBlock {
+    pub block: ChainBlock,
+    ids: std::sync::OnceLock<Vec<String>>,
+}
+
+impl ServedBlock {
+    pub fn ids(&self) -> &[String] {
+        self.ids
+            .get_or_init(|| self.block.body().iter().map(|w| w.id()).collect())
+    }
+}
 
 const FINALIZED_RETAINED: usize = 512;
 
@@ -167,6 +183,10 @@ pub enum RoundError {
     GenesisOverSupply {
         supply: u64,
         max: u64,
+    },
+    StateBehindBlocks {
+        head: Height,
+        committed: Option<Height>,
     },
 }
 
@@ -301,6 +321,9 @@ pub struct DevNode {
     staged: Option<Staged>,
     lock: Option<Lock>,
     round_atts: Vec<Attestation>,
+    round_atts_seq: u64,
+    finalize_failed_at: Option<(u64, qtv_attest::Block)>,
+    seen_atts: std::collections::HashSet<[u8; 32]>,
     attest_relayed: std::collections::HashMap<(u64, u64), std::collections::HashSet<Vec<u8>>>,
     prevotes: Vec<Attestation>,
     future_props: Vec<Proposal>,
@@ -308,6 +331,7 @@ pub struct DevNode {
     justification_verified: HashSet<[u8; 32]>,
     silent: bool,
     selection_cache: RefCell<Option<Selection>>,
+    served_blocks: RefCell<std::collections::VecDeque<(Height, std::sync::Arc<ServedBlock>)>>,
     chain: Vec<FinalizedBlock>,
     slashed: Vec<u64>,
     tx_index: TxIndex,
@@ -414,6 +438,9 @@ impl DevNode {
             staged: None,
             lock: None,
             round_atts: Vec::new(),
+            round_atts_seq: 0,
+            finalize_failed_at: None,
+            seen_atts: std::collections::HashSet::new(),
             attest_relayed: std::collections::HashMap::new(),
             prevotes: Vec::new(),
             future_props: Vec::new(),
@@ -421,6 +448,7 @@ impl DevNode {
             justification_verified: HashSet::new(),
             silent: false,
             selection_cache: RefCell::new(None),
+            served_blocks: RefCell::new(std::collections::VecDeque::new()),
             chain: Vec::new(),
             slashed: Vec::new(),
             tx_index,
@@ -445,6 +473,7 @@ impl DevNode {
             genesis_supply,
         };
 
+        dev.refuse_state_behind_blocks()?;
         if let Some(committed) = dev.state_store.committed_height() {
             dev.block_store.truncate_to_height(committed)?;
         }
@@ -845,7 +874,19 @@ impl DevNode {
         true
     }
 
+    fn refuse_state_behind_blocks(&self) -> Result<(), RoundError> {
+        let Some(head) = self.block_store.head_height() else {
+            return Ok(());
+        };
+        let committed = self.state_store.committed_height();
+        if committed.is_none_or(|committed| head > committed.saturating_add(1)) {
+            return Err(RoundError::StateBehindBlocks { head, committed });
+        }
+        Ok(())
+    }
+
     fn reload(&mut self) -> Result<(), RoundError> {
+        self.refuse_state_behind_blocks()?;
         self.ledger = Ledger::from_trie(self.state_store.load_trie());
         // The state commit is the durability point, and the block and event stores are
         // synced just before it. A crash in that window leaves them one height ahead.
@@ -1073,7 +1114,7 @@ impl DevNode {
             ledger,
             justification: Vec::new(),
         });
-        let auth = self.sign_proposal(view, &header, &included);
+        let auth = self.sign_proposal(view, &header, &included, &[]);
         Proposal {
             view,
             header,
@@ -1083,13 +1124,24 @@ impl DevNode {
         }
     }
 
-    fn sign_proposal(&self, view: View, header: &Header, body: &[Wrapper]) -> Attestation {
+    fn sign_proposal(
+        &self,
+        view: View,
+        header: &Header,
+        body: &[Wrapper],
+        justification: &[ViewChange],
+    ) -> Attestation {
         let height = header.height();
-        let (root, k, n) = match crate::coded::proposal_commitment(header, body) {
-            Some(c) => (c.root, c.k, c.n),
-            None => ([0u8; 32], 0, 0),
-        };
-        let subject = proposal_subject(height, view, &header.hash(), &root, k, n);
+        let commitment = crate::coded::proposal_commitment(header, body, justification).unwrap_or(
+            qtv_net::erasure::Commitment {
+                root: [0u8; 32],
+                k: 0,
+                n: 0,
+                shard_len: 0,
+                data_len: 0,
+            },
+        );
+        let subject = proposal_subject(height, view, &header.hash(), &commitment);
         self.consensus.own_attestation(
             height,
             self.slot(),
@@ -1101,8 +1153,11 @@ impl DevNode {
     }
 
     fn proposal_auth_ok(&self, selection: &Selection, proposal: &Proposal) -> bool {
-        let Some(commitment) = crate::coded::proposal_commitment(&proposal.header, &proposal.body)
-        else {
+        let Some(commitment) = crate::coded::proposal_commitment(
+            &proposal.header,
+            &proposal.body,
+            &proposal.justification,
+        ) else {
             return false;
         };
         self.header_auth_ok(
@@ -1139,14 +1194,7 @@ impl DevNode {
         if auth.from != leader || auth.height != header.height() || auth.view != view {
             return false;
         }
-        let subject = proposal_subject(
-            header.height(),
-            view,
-            &header.hash(),
-            &commitment.root,
-            commitment.k,
-            commitment.n,
-        );
+        let subject = proposal_subject(header.height(), view, &header.hash(), commitment);
         if auth.block != subject {
             return false;
         }
@@ -1365,6 +1413,8 @@ impl DevNode {
         self.lock = None;
         self.prevoted.clear();
         self.round_atts.clear();
+        self.finalize_failed_at = None;
+        self.seen_atts.clear();
         self.attest_relayed.clear();
         self.prevotes.clear();
         self.future_props.clear();
@@ -1396,7 +1446,7 @@ impl DevNode {
                 let header = staged.header.clone();
                 let body = staged.body.clone();
                 let justification = staged.justification.clone();
-                let auth = self.sign_proposal(view, &header, &body);
+                let auth = self.sign_proposal(view, &header, &body, &justification);
                 Proposal {
                     view,
                     header,
@@ -1457,7 +1507,9 @@ impl DevNode {
             return Vec::new();
         };
         let proposed_value = header_value(&proposal.header.hash());
-        let high = self.justified_lock(selection, &records);
+        let Ok(high) = self.justified_lock(selection, &records) else {
+            return Vec::new();
+        };
         match &high {
             Some((_, locked)) => {
                 if header_value(&locked.header.hash()) != proposed_value {
@@ -1497,20 +1549,38 @@ impl DevNode {
         &self,
         selection: &Selection,
         records: &[ViewChange],
-    ) -> Option<(View, LockedBlock)> {
-        let mut best: Option<(View, LockedBlock)> = None;
+    ) -> Result<Option<(View, LockedBlock)>, ()> {
+        let Some(top) = records
+            .iter()
+            .filter(|record| record.locked.is_some())
+            .map(|record| record.lock_view)
+            .max()
+        else {
+            return Ok(None);
+        };
+        let mut value: Option<[u8; 32]> = None;
+        let mut backed: Option<LockedBlock> = None;
         for record in records {
-            if let (Some(block), Some(polka)) = (&record.locked, &record.polka) {
-                if self.polka_backs(selection, record.lock_view, block, polka)
-                    && best
-                        .as_ref()
-                        .map_or(true, |(view, _)| record.lock_view > *view)
-                {
-                    best = Some((record.lock_view, block.clone()));
+            let Some(block) = &record.locked else {
+                continue;
+            };
+            if record.lock_view != top {
+                continue;
+            }
+            let locked_value = header_value(&block.header.hash());
+            if value.is_some_and(|seen| seen != locked_value) {
+                return Err(());
+            }
+            value = Some(locked_value);
+            if backed.is_none() {
+                if let Some(polka) = &record.polka {
+                    if self.polka_backs(selection, top, block, polka) {
+                        backed = Some(block.clone());
+                    }
                 }
             }
         }
-        best
+        backed.map(|block| Some((top, block))).ok_or(())
     }
 
     fn polka_backs(
@@ -1740,7 +1810,10 @@ impl DevNode {
 
     fn verify_view_change(&self, selection: &Selection, record: &ViewChange) -> bool {
         self.verify_view_change_att(selection, record)
-            && self.verify_view_change_polka(selection, record)
+            && match (&record.locked, &record.polka) {
+                (Some(_), None) => true,
+                _ => self.verify_view_change_polka(selection, record),
+            }
     }
 
     fn verify_view_change_att(&self, selection: &Selection, record: &ViewChange) -> bool {
@@ -1860,6 +1933,17 @@ impl DevNode {
         (valid.is_some(), verifications)
     }
 
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn justification_bound(
+        &self,
+        selection: &Selection,
+        records: &[ViewChange],
+    ) -> Option<Option<View>> {
+        self.justified_lock(selection, records)
+            .ok()
+            .map(|bound| bound.map(|(view, _)| view))
+    }
+
     fn remember_justification(&mut self, digest: [u8; 32]) {
         if self.justification_verified.len() >= MAX_JUSTIFICATION_CACHE {
             self.justification_verified.clear();
@@ -1873,31 +1957,34 @@ impl DevNode {
         view: View,
     ) -> Option<Proposal> {
         let records = self.justified_records(selection, view)?;
-        let bound = self.justified_lock(selection, &records).or_else(|| {
+        let bound = self.justified_lock(selection, &records).ok()?.or_else(|| {
             self.lock
                 .as_ref()
                 .map(|lock| (lock.view, lock.block.clone()))
         });
+        let carried = carried_justification(records);
         let proposal = match bound {
             Some((_, locked)) => {
                 self.stage_from(&locked.header, &locked.body, view).ok()?;
-                let auth = self.sign_proposal(view, &locked.header, &locked.body);
+                let auth = self.sign_proposal(view, &locked.header, &locked.body, &carried);
                 Proposal {
                     view,
                     header: locked.header,
                     body: locked.body,
-                    justification: records.clone(),
+                    justification: carried.clone(),
                     auth,
                 }
             }
             None => {
                 let mut proposal = self.build_proposal_at(selection, view);
-                proposal.justification = records.clone();
+                proposal.auth =
+                    self.sign_proposal(view, &proposal.header, &proposal.body, &carried);
+                proposal.justification = carried.clone();
                 proposal
             }
         };
         if let Some(staged) = self.staged.as_mut() {
-            staged.justification = records;
+            staged.justification = carried;
         }
         Some(proposal)
     }
@@ -1964,21 +2051,20 @@ impl DevNode {
         if attestation.height != self.height {
             return false;
         }
-        // Authenticate FIRST, for every view. The ceiling below bounds the evidence pool's
-        // key space only; letting it skip the signature check as well left the one
-        // authentication on this path unreachable above view 255, and an unsigned vote
-        // carrying a published credential could then displace a real one and stall
-        // finality for good.
-        if self.signed_offender(&attestation).is_none() {
+        let digest = crate::wire::attestation_digest(&attestation);
+        if self.seen_atts.contains(&digest) {
             return false;
         }
-        // Dropping the whole attestation for the ceiling meant a height that needed 256
-        // views could never finalise again, and no restart recovered it because the
-        // prevote watermark refuses to go back down.
+        let Some(offender) = self.signed_offender(&attestation) else {
+            return false;
+        };
         if attestation.view < qtv_node::evidence::MAX_HEIGHT_VIEW {
-            self.watch_for_equivocation(&attestation);
+            self.watch_for_equivocation(&attestation, offender);
         }
         if let Ok(selection) = self.select() {
+            if self.seen_atts.len() < MAX_SEEN_ATTESTATIONS {
+                self.seen_atts.insert(digest);
+            }
             if let Some(member) = selection.commitment.member(attestation.from) {
                 if attestation.slot == self.consensus.slot_for(self.height)
                     && attestation.is_entitled(
@@ -2022,42 +2108,72 @@ impl DevNode {
         Some(self.future_props.remove(pos))
     }
 
-    pub fn has_finality_threshold(&self, tau: u64) -> bool {
+    pub fn has_finality_threshold(&self, selection: &Selection) -> bool {
         let Some(staged) = &self.staged else {
             return false;
         };
-        // Counted per view, as the certificate is: precommits for this block cast in two
-        // different views are not a quorum between them.
-        let mut by_view: std::collections::BTreeMap<View, std::collections::HashSet<u64>> =
+        let commitment = &selection.commitment;
+        let slot = self.consensus.slot_for(self.height);
+        let tau = selection.tau.max(qtv_sampler::params::finality_threshold(
+            commitment.len() as u64
+        ));
+        let committee_weight = u128::from(commitment.committee_weight());
+        let digest = commitment.digest();
+        let mut by_view: std::collections::BTreeMap<View, std::collections::BTreeSet<u64>> =
             std::collections::BTreeMap::new();
         for attestation in &self.round_atts {
-            if attestation.block == staged.block {
+            if attestation.block == staged.block
+                && attestation.height == self.height
+                && attestation.slot == slot
+                && attestation.committee == digest
+                && commitment.contains(attestation.from)
+            {
                 by_view
                     .entry(attestation.view)
                     .or_default()
                     .insert(attestation.from);
             }
         }
-        by_view.values().any(|seen| seen.len() as u64 >= tau)
+        by_view.values().any(|seen| {
+            let weight = seen
+                .iter()
+                .map(|&id| u128::from(commitment.weight_of(id)))
+                .fold(0u128, u128::saturating_add);
+            seen.len() as u64 >= tau
+                && (committee_weight == 0
+                    || weight.saturating_mul(3) >= committee_weight.saturating_mul(2))
+        })
     }
 
     pub fn try_finalize(&mut self, selection: &Selection) -> Result<bool, RoundError> {
-        if self.staged.is_none() {
+        let Some(block) = self.staged.as_ref().map(|staged| staged.block) else {
+            return Ok(false);
+        };
+        let attempt = (self.round_atts_seq, block);
+        if self.finalize_failed_at == Some(attempt) {
             return Ok(false);
         }
         let attestations = self.round_atts.clone();
         match self.finalize(selection, &attestations) {
             Ok(()) => Ok(true),
-            Err(RoundError::NotFinalized) => Ok(false),
+            Err(RoundError::NotFinalized) => {
+                if self.fatal.is_none() {
+                    self.finalize_failed_at = Some(attempt);
+                }
+                Ok(false)
+            }
             Err(error) => Err(error),
         }
     }
 
     fn record_attestation(&mut self, attestation: &Attestation) {
-        let seen = self
-            .round_atts
-            .iter()
-            .any(|a| a.from == attestation.from && a.block == attestation.block);
+        let seen = self.round_atts.iter().any(|a| {
+            a.from == attestation.from
+                && a.block == attestation.block
+                && a.view == attestation.view
+                && a.slot == attestation.slot
+                && a.committee == attestation.committee
+        });
         if seen {
             return;
         }
@@ -2073,6 +2189,7 @@ impl DevNode {
             evict_fairly(&mut self.round_atts, attestation.from, |a| a.from);
         }
         self.round_atts.push(attestation.clone());
+        self.round_atts_seq = self.round_atts_seq.wrapping_add(1);
     }
 
     /// The bond address behind a genuinely signed attestation, or None. This is the only
@@ -2089,10 +2206,7 @@ impl DevNode {
         })
     }
 
-    fn watch_for_equivocation(&mut self, attestation: &Attestation) -> bool {
-        let Some(offender) = self.signed_offender(attestation) else {
-            return false;
-        };
+    fn watch_for_equivocation(&mut self, attestation: &Attestation, offender: String) {
         self.evidence_pool.observe(
             &offender,
             attestation.height,
@@ -2102,7 +2216,6 @@ impl DevNode {
             attestation.block.to_bytes(),
             attestation.sig.to_vec(),
         );
-        true
     }
 
     pub fn pending_evidence(&mut self) -> Vec<Equivocation> {
@@ -2166,8 +2279,12 @@ impl DevNode {
 
     fn persist(&mut self, block: &ChainBlock) -> Result<(), RoundError> {
         let height = block.header().height();
-        for wrapper in block.body() {
-            self.tx_index.insert(&tx_key(&wrapper.id()), height)?;
+        for (position, wrapper) in block.body().iter().enumerate() {
+            let position = (position as u64).min(TX_POSITION_UNKNOWN);
+            self.tx_index.insert(
+                &tx_key(&wrapper.id()),
+                (height << TX_POSITION_BITS) | position,
+            )?;
         }
         for (key, value) in self.ledger.take_dirty_entries() {
             match value {
@@ -2365,7 +2482,60 @@ impl DevNode {
     }
 
     pub fn finalized_height(&self, tx_id: &str) -> Option<Height> {
-        self.tx_index.get(&tx_key(tx_id)).ok().flatten()
+        self.finalized_location(tx_id).map(|(height, _)| height)
+    }
+
+    pub fn finalized_location(&self, tx_id: &str) -> Option<(Height, Option<usize>)> {
+        let packed = self.tx_index.get(&tx_key(tx_id)).ok().flatten()?;
+        let position = packed & TX_POSITION_UNKNOWN;
+        Some((
+            packed >> TX_POSITION_BITS,
+            (position != TX_POSITION_UNKNOWN).then_some(position as usize),
+        ))
+    }
+
+    pub fn served_block(&self, height: Height) -> Option<std::sync::Arc<ServedBlock>> {
+        let hit = self
+            .served_blocks
+            .borrow()
+            .iter()
+            .find(|(h, _)| *h == height)
+            .map(|(_, served)| std::sync::Arc::clone(served));
+        if hit.is_some() {
+            return hit;
+        }
+        let block = self.block_at_height(height)?;
+        Some(self.remember_served(height, block))
+    }
+
+    pub fn served_block_by_id(&self, id: &str) -> Option<std::sync::Arc<ServedBlock>> {
+        let payload = qtv_idfmt::parse_block(id).ok()?;
+        let hash: [u8; 32] = payload.try_into().ok()?;
+        let hit = self
+            .served_blocks
+            .borrow()
+            .iter()
+            .find(|(_, served)| served.block.header_hash() == hash)
+            .map(|(_, served)| std::sync::Arc::clone(served));
+        if hit.is_some() {
+            return hit;
+        }
+        let bytes = self.block_store.block_by_hash(&hash)?;
+        let block = crate::wire::chain_block_from_bytes(&bytes).ok()?;
+        Some(self.remember_served(block.header().height(), block))
+    }
+
+    fn remember_served(&self, height: Height, block: ChainBlock) -> std::sync::Arc<ServedBlock> {
+        let served = std::sync::Arc::new(ServedBlock {
+            block,
+            ids: std::sync::OnceLock::new(),
+        });
+        let mut cache = self.served_blocks.borrow_mut();
+        if cache.len() >= SERVED_BLOCK_CACHE {
+            cache.pop_front();
+        }
+        cache.push_back((height, std::sync::Arc::clone(&served)));
+        served
     }
 
     pub fn is_pending(&self, tx_id: &str) -> bool {
@@ -2567,6 +2737,8 @@ impl DevNode {
         self.lock = None;
         self.prevoted.clear();
         self.round_atts.clear();
+        self.finalize_failed_at = None;
+        self.seen_atts.clear();
         self.attest_relayed.clear();
         self.prevotes.clear();
         self.future_props.clear();
@@ -2610,22 +2782,45 @@ fn view_sync_blocking(expected: u64, members: usize, tau: u64) -> usize {
     (committee.saturating_sub(tau) + 1) as usize
 }
 
+fn carried_justification(records: Vec<ViewChange>) -> Vec<ViewChange> {
+    let top = records
+        .iter()
+        .filter(|record| record.locked.is_some())
+        .map(|record| record.lock_view)
+        .max();
+    let mut backed = false;
+    records
+        .into_iter()
+        .map(|mut record| {
+            if let Some(locked) = record.locked.as_mut() {
+                locked.body = Vec::new();
+                if Some(record.lock_view) == top && !backed && record.polka.is_some() {
+                    backed = true;
+                } else {
+                    record.polka = None;
+                }
+            }
+            record
+        })
+        .collect()
+}
+
 fn proposal_subject(
     height: Height,
     view: View,
     header_hash: &[u8; 32],
-    root: &[u8; 32],
-    k: usize,
-    n: usize,
+    commitment: &qtv_net::erasure::Commitment,
 ) -> ConsensusBlock {
-    let mut buf = Vec::with_capacity(19 + 8 * 2 + 32 + 32 + 8 * 2);
-    buf.extend_from_slice(b"QTV-DEVNET-PROPOSAL");
+    let mut buf = Vec::with_capacity(22 + 8 * 2 + 32 + 32 + 8 * 4);
+    buf.extend_from_slice(b"QTV-DEVNET-PROPOSAL-v2");
     buf.extend_from_slice(&height.to_le_bytes());
     buf.extend_from_slice(&view.to_le_bytes());
     buf.extend_from_slice(header_hash);
-    buf.extend_from_slice(root);
-    buf.extend_from_slice(&(k as u64).to_le_bytes());
-    buf.extend_from_slice(&(n as u64).to_le_bytes());
+    buf.extend_from_slice(&commitment.root);
+    buf.extend_from_slice(&(commitment.k as u64).to_le_bytes());
+    buf.extend_from_slice(&(commitment.n as u64).to_le_bytes());
+    buf.extend_from_slice(&(commitment.shard_len as u64).to_le_bytes());
+    buf.extend_from_slice(&(commitment.data_len as u64).to_le_bytes());
     let commitment = qtv_bft::hash::digest_256(&buf);
     ConsensusBlock::with_cost(
         height,
@@ -3008,5 +3203,149 @@ mod registration_window_tests {
             vec![registration_transaction(&note, chain_id)],
         ));
         assert_eq!(node.next_roots.get(&note.id), Some(&note.root));
+    }
+}
+
+#[cfg(test)]
+mod finality_gate_tests {
+    use super::{leader_for, DevNode};
+    use crate::config::{DevnetConfig, NodeConfig, FULL_FANOUT};
+    use qtv_node::fee::FeeParams;
+
+    fn nodes() -> Vec<DevNode> {
+        let base = std::env::temp_dir().join(format!(
+            "qtv-finality-gate-unit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let nodes: Vec<NodeConfig> = (1..=4u64)
+            .map(|id| NodeConfig {
+                id,
+                stake: 2_000,
+                online: true,
+                store_dir: base.join(format!("node-{id}")),
+                bootstrap: vec![],
+                address: format!("mem://{id}"),
+                secret: qtv_node::keys::fixture_secret(id),
+            })
+            .collect();
+        let config = DevnetConfig {
+            fee_params: FeeParams::devnet(),
+            accounts: vec![],
+            nodes: nodes.clone(),
+            genesis_time: 1_700_000_000_000,
+            fanout: FULL_FANOUT,
+            slots: 8,
+            published_roster: None,
+            bridge_dest_chain: None,
+            guardians: Default::default(),
+            bridge_operators: None,
+            bridged_assets: vec![],
+            bridge_era: None,
+            bridge_exit_max_amount: None,
+        };
+        let mut opened: Vec<DevNode> = nodes
+            .iter()
+            .map(|n| DevNode::open(n, &config).expect("node opens"))
+            .collect();
+        let notes: Vec<_> = opened.iter().filter_map(|n| n.own_reveal_note()).collect();
+        for node in &mut opened {
+            for note in &notes {
+                node.collect_reveal(note.clone());
+            }
+        }
+        opened
+    }
+
+    fn staged_everywhere(nodes: &mut [DevNode]) -> crate::node::Selection {
+        let selection = nodes[0].select().expect("committee");
+        let leader = leader_for(&selection, 0);
+        let li = nodes.iter().position(|n| n.id == leader).expect("leader");
+        let proposal = nodes[li].build_proposal(&selection);
+        for (i, node) in nodes.iter_mut().enumerate() {
+            if i != li {
+                let _ = node.on_proposal(&selection, leader, proposal.clone());
+            }
+        }
+        selection
+    }
+
+    #[test]
+    fn a_shard_with_a_forged_length_cannot_pin_the_proposal_away_from_a_follower() {
+        let mut nodes = nodes();
+        let selection = nodes[0].select().expect("committee");
+        let leader = leader_for(&selection, 0);
+        let li = nodes.iter().position(|n| n.id == leader).expect("leader");
+        let victim = (li + 1) % nodes.len();
+        let proposal = nodes[li].build_proposal(&selection);
+        let shards = crate::coded::code_proposal(&proposal).expect("the proposal codes");
+        let mut assembler = crate::coded::ProposalAssembler::new();
+        assembler.set_round_height(nodes[victim].height());
+        let mut forged = shards[0].clone();
+        forged.commitment.data_len -= 1;
+        let node = &nodes[victim];
+        assert!(assembler
+            .admit(forged, 9, |c| node.coded_auth_ok(&selection, c))
+            .is_none());
+        let mut rebuilt = None;
+        for (source, shard) in shards.into_iter().enumerate() {
+            if let Some(outcome) =
+                assembler.admit(shard, source as u64, |c| node.coded_auth_ok(&selection, c))
+            {
+                rebuilt = Some(outcome);
+                break;
+            }
+        }
+        let rebuilt = rebuilt
+            .expect("the honest shards complete")
+            .expect("they rebuild");
+        assert_eq!(rebuilt.header.hash(), proposal.header.hash());
+    }
+
+    #[test]
+    fn a_precommit_for_the_same_block_in_a_later_view_is_kept() {
+        let mut nodes = nodes();
+        let _ = staged_everywhere(&mut nodes);
+        let at_zero = nodes[1].attest().expect("a staged node attests");
+        let mut at_one = at_zero.clone();
+        at_one.view = 1;
+        nodes[0].record_attestation(&at_zero);
+        nodes[0].record_attestation(&at_one);
+        assert_eq!(
+            nodes[0].round_atts.len(),
+            2,
+            "the later view's precommit is a separate vote, not a duplicate"
+        );
+    }
+
+    #[test]
+    fn precommits_under_a_foreign_committee_digest_do_not_open_the_gate() {
+        let mut nodes = nodes();
+        let selection = staged_everywhere(&mut nodes);
+        let atts: Vec<_> = nodes.iter().filter_map(|n| n.attest().ok()).collect();
+        assert!(atts.len() >= 3);
+        for att in &atts {
+            let mut forged = att.clone();
+            forged.committee = [0xAA; 32];
+            nodes[0].record_attestation(&forged);
+        }
+        assert!(
+            !nodes[0].has_finality_threshold(&selection),
+            "the gate counts only what the certificate would admit"
+        );
+        assert!(matches!(nodes[0].try_finalize(&selection), Ok(false)));
+        assert!(nodes[0].finalize_failed_at.is_some());
+        assert!(matches!(nodes[0].try_finalize(&selection), Ok(false)));
+        for att in &atts {
+            nodes[0].record_attestation(att);
+        }
+        assert!(nodes[0].has_finality_threshold(&selection));
+        assert!(
+            matches!(nodes[0].try_finalize(&selection), Ok(true)),
+            "a failed attempt does not hold back the real quorum that follows it"
+        );
     }
 }

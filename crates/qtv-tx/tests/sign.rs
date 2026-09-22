@@ -339,3 +339,21 @@ fn the_signed_transaction_reproduces_the_qcore_js_payable_vector() {
         "QTX1XSW6UVTL4QVDRUHCWAWFK7WFAXK88Q0YKAPQYKDPVTX0377Q7S3Q86N0NR"
     );
 }
+
+#[test]
+fn a_remembered_id_is_the_hash_of_the_wrapper_and_does_not_change_equality() {
+    let account = derive(&master(), 0);
+    let wrapper = sign(&account, &sample_body());
+    let fresh = Wrapper::new(
+        wrapper.body().clone(),
+        wrapper.scheme(),
+        wrapper.signature().to_vec(),
+    );
+    let first = wrapper.id();
+    assert_eq!(wrapper.id(), first);
+    assert_eq!(wrapper.id_str(), first);
+    assert_eq!(fresh, wrapper, "a cached id is not part of equality");
+    assert_eq!(fresh.id(), first, "the id is the wrapper's hash, not state");
+    let other = sign(&account, &rebuild(&sample_body(), 8, vec![9]));
+    assert_ne!(other.id(), first);
+}

@@ -12,7 +12,7 @@ mod pipe;
 pub mod record;
 mod transcript;
 
-pub use channel::Channel;
+pub use channel::{Channel, MAX_MESSAGE};
 pub use erasure::{Coded, Commitment, Shard, ShardProof};
 pub use identity::{Identity, PeerId};
 pub use keyschedule::{DirKey, SessionKeys};

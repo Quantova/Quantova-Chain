@@ -785,15 +785,22 @@ fn tx_fields(node: &DevNode, wrapper: &Wrapper) -> Vec<(&'static str, Json)> {
 }
 
 fn transaction(node: &DevNode, tx_id: &str) -> Json {
-    if let Some(height) = node.finalized_height(tx_id) {
+    if let Some((height, position)) = node.finalized_location(tx_id) {
         let mut fields = vec![
             ("tx_id", Json::str(tx_id)),
             ("status", Json::str("finalised")),
             ("height", Json::Int(height)),
         ];
-        if let Some(block) = node.block_at_height(height) {
-            fields.push(("block", Json::str(block.id())));
-            if let Some(wrapper) = block.body().iter().find(|w| w.id() == tx_id) {
+        if let Some(served) = node.served_block(height) {
+            fields.push(("block", Json::str(served.block.id())));
+            let at = match position {
+                Some(position) => Some(position),
+                None => served.ids().iter().position(|id| id == tx_id),
+            };
+            let wrapper = at
+                .and_then(|at| served.block.body().get(at))
+                .filter(|wrapper| position.is_none() || wrapper.id() == tx_id);
+            if let Some(wrapper) = wrapper {
                 fields.extend(tx_fields(node, wrapper));
             }
         }
@@ -1261,26 +1268,27 @@ fn reason_code(reject: &Reject) -> &'static str {
 
 fn block(node: &DevNode, selector: BlockSelector) -> Result<Json, ClientError> {
     let found = match &selector {
-        BlockSelector::Height(height) => node.block_at_height(*height),
-        BlockSelector::Id(id) => node.block_by_id(id),
+        BlockSelector::Height(height) => node.served_block(*height),
+        BlockSelector::Id(id) => node.served_block_by_id(id),
     };
-    let block = found.ok_or_else(|| match selector {
+    let served = found.ok_or_else(|| match selector {
         BlockSelector::Height(height) => {
             ClientError::not_found(format!("no finalised block at height {height}"))
         }
         BlockSelector::Id(id) => ClientError::not_found(format!("no finalised block {id}")),
     })?;
 
+    let block = &served.block;
     let header = block.header();
     // Capped like every sibling list. Each id re-serialises a whole wrapper, the ML-DSA
     // signature included, and hashes it, and this runs inline on the driver thread, so an
     // uncapped list over a full block is seconds of block production per request.
     let total = block.body().len();
-    let tx_ids: Vec<Json> = block
-        .body()
+    let tx_ids: Vec<Json> = served
+        .ids()
         .iter()
         .take(MAX_LIST_ITEMS)
-        .map(|w| Json::str(w.id()))
+        .map(|id| Json::str(id))
         .collect();
     Ok(object(vec![
         ("truncated", Json::Bool(total > tx_ids.len())),

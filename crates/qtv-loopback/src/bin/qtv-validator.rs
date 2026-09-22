@@ -145,7 +145,7 @@ impl Runtime {
     }
 
     fn settle(&mut self, selection: &qtv_node::consensus::Selection) -> Result<bool, String> {
-        if !self.node.has_finality_threshold(selection.tau) {
+        if !self.node.has_finality_threshold(selection) {
             return Ok(false);
         }
         self.node

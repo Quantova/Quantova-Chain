@@ -168,3 +168,74 @@ fn a_validator_without_a_lock_prevotes_a_justified_proposal() {
     );
     assert_eq!(nodes[follower].staged_value(), Some(value));
 }
+
+#[test]
+fn a_justified_proposal_carries_one_polka_and_no_locked_bodies_and_is_bound_by_it() {
+    let base = unique_base("carried_lock");
+    let alice = user(0);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let config = config(&base, &[true, true, true, true, true, true, true], accounts);
+    let mut nodes = open_nodes(&config);
+
+    let selection = nodes[0].select().expect("committee");
+    let l0 = leader_for(&selection, 0);
+    let l0_idx = index_of(&config, l0);
+    let l2 = leader_for(&selection, 2);
+    let l2_idx = index_of(&config, l2);
+    let victim = (0..nodes.len())
+        .find(|&i| i != l0_idx && i != l2_idx)
+        .expect("a member leading neither view");
+    let follower = (0..nodes.len())
+        .find(|&i| i != l0_idx && i != l2_idx && i != victim)
+        .expect("a follower");
+
+    let proposal_a = nodes[l0_idx].build_proposal(&selection);
+    let value_a = header_value(&proposal_a.header.hash());
+    lock_victim_on_proposal(&mut nodes, &selection, l0, victim, &proposal_a);
+
+    let records: Vec<_> = (0..nodes.len())
+        .map(|i| nodes[i].make_view_change(2))
+        .collect();
+    for record in &records {
+        nodes[l2_idx].collect_view_change(&selection, record.clone());
+    }
+    let justified = nodes[l2_idx]
+        .build_justified_proposal(&selection, 2)
+        .expect("a quorum justifies a proposal");
+    assert_eq!(header_value(&justified.header.hash()), value_a);
+    assert!(justified
+        .justification
+        .iter()
+        .filter_map(|r| r.locked.as_ref())
+        .all(|locked| locked.body.is_empty()));
+    assert_eq!(
+        justified
+            .justification
+            .iter()
+            .filter(|r| r.polka.is_some())
+            .count(),
+        1,
+        "the binding lock's polka is carried once"
+    );
+    assert_eq!(
+        nodes[follower].justification_bound(&selection, &justified.justification),
+        Some(Some(0))
+    );
+
+    let mut stripped = justified.justification.clone();
+    for record in &mut stripped {
+        record.polka = None;
+    }
+    assert_eq!(
+        nodes[follower].justification_bound(&selection, &stripped),
+        None,
+        "a leader cannot drop the polka of the highest lock and propose free of it"
+    );
+
+    let out = nodes[follower].on_proposal(&selection, l2, justified);
+    assert!(
+        prevote_of(out).is_some(),
+        "the carried justification is accepted"
+    );
+    assert_eq!(nodes[follower].staged_value(), Some(value_a));
+}

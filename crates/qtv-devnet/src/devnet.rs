@@ -501,7 +501,7 @@ impl<S: Read + Write> Devnet<S> {
         let Some(selection) = self.ready_selection(i)? else {
             return Ok(());
         };
-        if !self.nodes[i].has_finality_threshold(selection.tau) {
+        if !self.nodes[i].has_finality_threshold(&selection) {
             return Ok(());
         }
         if self.nodes[i].try_finalize(&selection)? && self.nodes[i].height() < ceiling {

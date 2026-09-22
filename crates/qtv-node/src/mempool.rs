@@ -1007,7 +1007,7 @@ impl Mempool {
         if !self.ids.contains(id) {
             return None;
         }
-        self.pending.iter().find(|w| w.id() == id).cloned()
+        self.pending.iter().find(|w| w.id_str() == id).cloned()
     }
 
     pub fn top_candidates(&self, limit: usize) -> Vec<Wrapper> {

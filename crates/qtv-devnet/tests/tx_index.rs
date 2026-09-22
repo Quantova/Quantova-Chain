@@ -39,3 +39,38 @@ fn the_transaction_index_answers_after_finality_and_survives_a_restart() {
         "the transaction index did not survive a restart"
     );
 }
+
+#[test]
+fn the_index_names_where_in_its_block_a_transaction_sits() {
+    let base = unique_base("tx-position");
+    let params = FeeParams::devnet();
+    let senders: Vec<_> = (0..3).map(user).collect();
+    let bob = user(9);
+    let accounts = senders
+        .iter()
+        .map(|s| GenesisAccount::from_account(s, 1_000_000))
+        .collect();
+    let mut devnet =
+        Devnet::over_duplex(config(&base, &[true, true, true, true], accounts)).expect("devnet");
+    let ids: Vec<String> = senders
+        .iter()
+        .map(|sender| {
+            let tx = transfer(sender, &bob.address(), 1_000, 0, &params);
+            let id = tx.id();
+            devnet.submit(0, tx).expect("admitted");
+            id
+        })
+        .collect();
+    devnet.step().expect("finalized");
+
+    for id in &ids {
+        let (height, position) = devnet.node(0).finalized_location(id).expect("indexed");
+        let position = position.expect("the position is recorded");
+        let served = devnet
+            .node(0)
+            .served_block(height)
+            .expect("the block is served");
+        assert_eq!(&served.block.body()[position].id(), id);
+        assert_eq!(&served.ids()[position], id);
+    }
+}

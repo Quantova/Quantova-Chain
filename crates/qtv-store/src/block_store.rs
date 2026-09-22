@@ -99,7 +99,7 @@ impl BlockStore {
             lens,
             by_hash,
             head_height,
-            len_on_disk,
+            len_on_disk: len_on_disk.max(crate::log::HEADER_LEN),
         })
     }
 
@@ -136,7 +136,7 @@ impl BlockStore {
             return Ok(());
         }
         let new_len = if keep == 0 {
-            0
+            self.log.data_start()
         } else {
             self.starts[keep - 1] + self.lens[keep - 1] + CHECKSUM_WIDTH as u64
         };

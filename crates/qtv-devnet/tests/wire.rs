@@ -105,7 +105,6 @@ fn a_coded_proposal_shard_round_trips_and_still_verifies() {
             assert_eq!(decoded.commitment, shard.commitment);
             assert_eq!(decoded.shard, shard.shard);
             assert_eq!(decoded.proof, shard.proof);
-            assert!(decoded.justification.is_empty());
             assert!(decoded
                 .commitment
                 .verify_shard(&decoded.shard, &decoded.proof));

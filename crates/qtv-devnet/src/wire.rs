@@ -69,7 +69,6 @@ pub struct CodedProposal {
     pub view: u64,
     pub header: Header,
     pub commitment: Commitment,
-    pub justification: Vec<ViewChange>,
     pub shard: Shard,
     pub proof: ShardProof,
     pub auth: Attestation,
@@ -108,6 +107,7 @@ pub struct RegisterNote {
 }
 
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Message {
     Tx(Wrapper),
     Proposal(Box<Proposal>),
@@ -529,18 +529,46 @@ fn encode_view_change(encoder: &mut Encoder, record: &ViewChange) {
 pub(crate) fn coded_overhead(
     header: &Header,
     commitment: &Commitment,
-    justification: &[ViewChange],
     auth: &Attestation,
 ) -> usize {
     let mut encoder = Encoder::new();
     header.encode(&mut encoder);
     encode_commitment(&mut encoder, commitment);
-    encoder.put_u64(justification.len() as u64);
-    for record in justification {
-        encode_view_change(&mut encoder, record);
-    }
     encode_attestation(&mut encoder, auth);
     encoder.into_bytes().len()
+}
+
+pub fn justification_to_bytes(records: &[ViewChange]) -> Vec<u8> {
+    if records.is_empty() {
+        return Vec::new();
+    }
+    let mut encoder = Encoder::new();
+    encoder.put_u64(records.len() as u64);
+    for record in records {
+        encode_view_change(&mut encoder, record);
+    }
+    encoder.into_bytes()
+}
+
+pub fn justification_from_bytes(bytes: &[u8]) -> Result<Vec<ViewChange>, DecodeError> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut decoder = Decoder::new(bytes);
+    let count = decoder.get_u64()?;
+    if count == 0 {
+        return Err(DecodeError::BadLength);
+    }
+    let mut records = Vec::with_capacity(bounded_capacity(
+        decoder.remaining(),
+        count,
+        MIN_VIEW_CHANGE,
+    )?);
+    for _ in 0..count {
+        records.push(decode_view_change(&mut decoder)?);
+    }
+    decoder.finish()?;
+    Ok(records)
 }
 
 pub(crate) fn view_change_digest(record: &ViewChange) -> [u8; 32] {
@@ -617,10 +645,6 @@ fn encode_coded_proposal(encoder: &mut Encoder, coded: &CodedProposal) {
     encoder.put_u64(coded.view);
     coded.header.encode(encoder);
     encode_commitment(encoder, &coded.commitment);
-    encoder.put_u64(coded.justification.len() as u64);
-    for record in &coded.justification {
-        encode_view_change(encoder, record);
-    }
     encoder.put_u64(coded.shard.index as u64);
     encoder.put_bytes(&coded.shard.bytes);
     encoder.put_u64(coded.proof.siblings.len() as u64);
@@ -634,15 +658,6 @@ fn decode_coded_proposal(decoder: &mut Decoder<'_>) -> Result<CodedProposal, Dec
     let view = decoder.get_u64()?;
     let header = Header::decode(decoder)?;
     let commitment = decode_commitment(decoder)?;
-    let just_count = decoder.get_u64()?;
-    let mut justification = Vec::with_capacity(bounded_capacity(
-        decoder.remaining(),
-        just_count,
-        MIN_VIEW_CHANGE,
-    )?);
-    for _ in 0..just_count {
-        justification.push(decode_view_change(decoder)?);
-    }
     let index = decoder.get_u64()? as usize;
     let bytes = decoder.get_bytes()?.to_vec();
     let sibling_count = decoder.get_u64()?;
@@ -660,7 +675,6 @@ fn decode_coded_proposal(decoder: &mut Decoder<'_>) -> Result<CodedProposal, Dec
         view,
         header,
         commitment,
-        justification,
         shard: Shard { index, bytes },
         proof: ShardProof { siblings },
         auth,

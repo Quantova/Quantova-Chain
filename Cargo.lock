@@ -348,6 +348,7 @@ version = "0.1.0"
 dependencies = [
  "qtv-block",
  "qtv-codec",
+ "qtv-crypto",
  "qtv-state",
  "qtv-tx",
 ]

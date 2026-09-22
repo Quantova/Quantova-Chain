@@ -309,7 +309,7 @@ impl Runtime {
     }
 
     fn settle(&mut self, selection: &Selection) -> bool {
-        if !self.node.has_finality_threshold(selection.tau) {
+        if !self.node.has_finality_threshold(selection) {
             return false;
         }
         let finalise_start = Instant::now();

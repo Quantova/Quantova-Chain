@@ -13,6 +13,38 @@ const MAX_RESYNC_PROBES: u32 = 1 << 20;
 
 pub(crate) const CHECKSUM_WIDTH: usize = 4;
 
+const MAGIC: &[u8; 8] = b"QTVLOG02";
+const SALT_LEN: usize = 16;
+pub(crate) const HEADER_LEN: u64 = (MAGIC.len() + SALT_LEN) as u64;
+
+type Salt = [u8; SALT_LEN];
+
+fn prepare_header(file: &mut File) -> io::Result<Salt> {
+    let len = file.metadata()?.len();
+    if len < HEADER_LEN {
+        let mut salt = [0u8; SALT_LEN];
+        qtv_crypto::rng::fill_random(&mut salt);
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(MAGIC)?;
+        file.write_all(&salt)?;
+        file.sync_data()?;
+        return Ok(salt);
+    }
+    let mut header = [0u8; HEADER_LEN as usize];
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut header)?;
+    if &header[..MAGIC.len()] != MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a log of this format",
+        ));
+    }
+    let mut salt = [0u8; SALT_LEN];
+    salt.copy_from_slice(&header[MAGIC.len()..]);
+    Ok(salt)
+}
+
 pub(crate) fn frame_len(payload_len: usize) -> u64 {
     (LENGTH_WIDTH + payload_len + CHECKSUM_WIDTH) as u64
 }
@@ -21,6 +53,7 @@ pub(crate) fn frame_len(payload_len: usize) -> u64 {
 pub struct Log {
     file: File,
     reader: Mutex<File>,
+    salt: Salt,
 }
 
 // Whether a complete, checksum clean frame starts at `at`. Used to tell a torn tail
@@ -31,6 +64,7 @@ pub struct Log {
 // step forward a word at a time and look for a frame that stands on its own.
 fn a_well_formed_frame_follows(
     stream: &mut BufReader<File>,
+    salt: &Salt,
     from: u64,
     total: u64,
 ) -> io::Result<bool> {
@@ -39,7 +73,7 @@ fn a_well_formed_frame_follows(
     let mut at = from;
     let mut probed = 0u32;
     while at + LENGTH_WIDTH as u64 <= total && probed < MAX_RESYNC_PROBES {
-        if frame_is_well_formed(stream, at, total)? {
+        if frame_is_well_formed(stream, salt, at, total)? {
             return Ok(true);
         }
         at += 1;
@@ -57,7 +91,12 @@ fn corrupt_middle() -> io::Error {
     )
 }
 
-fn frame_is_well_formed(stream: &mut BufReader<File>, at: u64, total: u64) -> io::Result<bool> {
+fn frame_is_well_formed(
+    stream: &mut BufReader<File>,
+    salt: &Salt,
+    at: u64,
+    total: u64,
+) -> io::Result<bool> {
     if total.saturating_sub(at) < LENGTH_WIDTH as u64 {
         return Ok(false);
     }
@@ -80,7 +119,7 @@ fn frame_is_well_formed(stream: &mut BufReader<File>, at: u64, total: u64) -> io
     if stream.read_exact(&mut checksum_bytes).is_err() {
         return Ok(false);
     }
-    Ok(u32::from_le_bytes(checksum_bytes) == checksum_parts(&[&length_bytes, &payload]))
+    Ok(u32::from_le_bytes(checksum_bytes) == checksum_parts(&[salt, &length_bytes, &payload]))
 }
 
 impl Log {
@@ -93,10 +132,13 @@ impl Log {
             .create(true)
             .truncate(false)
             .open(path)?;
+        let salt = prepare_header(&mut file)?;
+        file.seek(SeekFrom::Start(HEADER_LEN))?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
-        let (frames, clean, stop) = scan(&bytes);
-        if clean < bytes.len() as u64 {
+        let (frames, clean, stop) = scan(&salt, &bytes);
+        let clean = clean + HEADER_LEN;
+        if clean < HEADER_LEN + bytes.len() as u64 {
             if stop == ScanStop::Corrupt {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -113,7 +155,7 @@ impl Log {
             sync_parent_dir(path);
         }
         let reader = Mutex::new(OpenOptions::new().read(true).open(path)?);
-        Ok((Log { file, reader }, frames))
+        Ok((Log { file, reader, salt }, frames))
     }
 
     /// Recovers by dropping everything from the first bad frame. Correct where the log is
@@ -167,10 +209,12 @@ impl Log {
             .create(true)
             .truncate(false)
             .open(path)?;
+        let salt = prepare_header(&mut file)?;
         let total = file.metadata()?.len();
         let mut stream = BufReader::new(file.try_clone()?);
-        let mut pos = 0u64;
-        let mut clean = 0u64;
+        stream.seek(SeekFrom::Start(HEADER_LEN))?;
+        let mut pos = HEADER_LEN;
+        let mut clean = HEADER_LEN;
         let mut payload: Vec<u8> = Vec::new();
         loop {
             if total.saturating_sub(pos) < LENGTH_WIDTH as u64 {
@@ -184,7 +228,8 @@ impl Log {
             let payload_start = pos + LENGTH_WIDTH as u64;
             let available = total - payload_start;
             if length > available || available - length < CHECKSUM_WIDTH as u64 {
-                if strict && a_well_formed_frame_follows(&mut stream, payload_start, total)? {
+                if strict && a_well_formed_frame_follows(&mut stream, &salt, payload_start, total)?
+                {
                     return Err(corrupt_middle());
                 }
                 break;
@@ -198,12 +243,15 @@ impl Log {
             if stream.read_exact(&mut checksum_bytes).is_err() {
                 break;
             }
-            if u32::from_le_bytes(checksum_bytes) != checksum_parts(&[&length_bytes, &payload]) {
+            if u32::from_le_bytes(checksum_bytes)
+                != checksum_parts(&[&salt, &length_bytes, &payload])
+            {
                 // A torn tail is the last write losing power, and truncating it is right.
                 // A bad frame with a well formed one behind it is corruption in the middle
                 // of the log, and truncating there destroys finalised records that are
                 // still intact. Refuse to open instead of quietly deleting them.
-                if strict && a_well_formed_frame_follows(&mut stream, payload_start, total)? {
+                if strict && a_well_formed_frame_follows(&mut stream, &salt, payload_start, total)?
+                {
                     return Err(corrupt_middle());
                 }
                 break;
@@ -225,7 +273,7 @@ impl Log {
             sync_parent_dir(path);
         }
         let reader = Mutex::new(OpenOptions::new().read(true).open(path)?);
-        Ok(Log { file, reader })
+        Ok(Log { file, reader, salt })
     }
 
     pub fn read_payload(&self, payload_start: u64, payload_len: u64) -> io::Result<Vec<u8>> {
@@ -249,7 +297,7 @@ impl Log {
         let mut encoder = Encoder::new();
         encoder.put_bytes(payload);
         let mut framed = encoder.into_bytes();
-        let checksum = checksum(&framed);
+        let checksum = checksum_parts(&[&self.salt, &framed]);
         framed.extend_from_slice(&checksum.to_le_bytes());
         self.file.write_all(&framed)?;
         Ok(())
@@ -259,8 +307,12 @@ impl Log {
         self.file.sync_data()
     }
 
+    pub fn data_start(&self) -> u64 {
+        HEADER_LEN
+    }
+
     pub fn truncate(&mut self, len: u64) -> io::Result<()> {
-        self.file.set_len(len)?;
+        self.file.set_len(len.max(HEADER_LEN))?;
         self.file.seek(SeekFrom::End(0))?;
         self.file.sync_data()?;
         Ok(())
@@ -313,12 +365,8 @@ fn checksum_parts(parts: &[&[u8]]) -> u32 {
     crc ^ 0xFFFF_FFFF
 }
 
-fn checksum(bytes: &[u8]) -> u32 {
-    checksum_parts(&[bytes])
-}
-
 /// Whether a single well-formed, checksum-valid frame begins exactly at `pos`.
-fn valid_frame_at(bytes: &[u8], pos: usize) -> bool {
+fn valid_frame_at(salt: &Salt, bytes: &[u8], pos: usize) -> bool {
     if bytes.len().saturating_sub(pos) < LENGTH_WIDTH {
         return false;
     }
@@ -337,7 +385,7 @@ fn valid_frame_at(bytes: &[u8], pos: usize) -> bool {
             .try_into()
             .expect("checksum slice is four bytes"),
     );
-    stored == checksum(&bytes[pos..payload_end])
+    stored == checksum_parts(&[salt, &bytes[pos..payload_end]])
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -350,7 +398,7 @@ enum ScanStop {
     Corrupt,
 }
 
-fn scan(bytes: &[u8]) -> (Vec<Vec<u8>>, u64, ScanStop) {
+fn scan(salt: &Salt, bytes: &[u8]) -> (Vec<Vec<u8>>, u64, ScanStop) {
     let mut frames = Vec::new();
     let mut pos = 0usize;
     let mut clean = 0u64;
@@ -377,13 +425,13 @@ fn scan(bytes: &[u8]) -> (Vec<Vec<u8>>, u64, ScanStop) {
                 .try_into()
                 .expect("checksum slice is four bytes"),
         );
-        if stored != checksum(&bytes[pos..payload_end]) {
+        if stored != checksum_parts(&[salt, &bytes[pos..payload_end]]) {
             // A complete frame failed its checksum. If a valid frame follows it, this
             // is mid-log corruption and dropping the rest would lose finalized records.
             // If nothing valid follows, the corrupt frame is at the tail and is safe
             // to drop. A torn write never leaves a complete-but-wrong frame, only an
             // incomplete one (handled above), so a bad checksum is real corruption.
-            if valid_frame_at(bytes, frame_end) {
+            if valid_frame_at(salt, bytes, frame_end) {
                 break ScanStop::Corrupt;
             }
             break ScanStop::TornTail;
@@ -499,7 +547,7 @@ mod tests {
         }
         {
             let mut bytes = std::fs::read(&path).unwrap();
-            let target = frame_len(5) as usize + LENGTH_WIDTH;
+            let target = HEADER_LEN as usize + frame_len(5) as usize + LENGTH_WIDTH;
             bytes[target] ^= 0x01;
             std::fs::write(&path, &bytes).unwrap();
         }
@@ -539,7 +587,7 @@ mod tests {
         }
         {
             let mut bytes = std::fs::read(&path).unwrap();
-            let target = frame_len(3) as usize + LENGTH_WIDTH;
+            let target = HEADER_LEN as usize + frame_len(3) as usize + LENGTH_WIDTH;
             bytes[target] ^= 0xFF;
             std::fs::write(&path, &bytes).unwrap();
         }
@@ -563,7 +611,7 @@ mod tests {
         let before = std::fs::metadata(&path).unwrap().len();
         {
             let mut bytes = std::fs::read(&path).unwrap();
-            let target = frame_len(3) as usize + LENGTH_WIDTH;
+            let target = HEADER_LEN as usize + frame_len(3) as usize + LENGTH_WIDTH;
             bytes[target] ^= 0xFF;
             std::fs::write(&path, &bytes).unwrap();
         }
@@ -595,7 +643,7 @@ mod tests {
             let before = std::fs::metadata(&path).unwrap().len();
             {
                 let mut bytes = std::fs::read(&path).unwrap();
-                let target = frame_len(3) as usize + flip;
+                let target = HEADER_LEN as usize + frame_len(3) as usize + flip;
                 bytes[target] ^= 0x01;
                 std::fs::write(&path, &bytes).unwrap();
             }
@@ -635,6 +683,56 @@ mod tests {
         .expect("a torn tail still opens");
         assert_eq!(seen, vec![b"one".to_vec()]);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_frame_planted_inside_a_torn_tail_does_not_read_as_mid_log_corruption() {
+        let path = temp_path("planted-tail");
+        {
+            let (mut log, _frames) = Log::open(&path).unwrap();
+            log.append(b"kept").unwrap();
+            log.sync().unwrap();
+        }
+        {
+            use std::io::Write;
+            let mut planted = Encoder::new();
+            planted.put_bytes(b"evil!");
+            let mut planted = planted.into_bytes();
+            let crc = checksum_parts(&[&planted]);
+            planted.extend_from_slice(&crc.to_le_bytes());
+            let mut torn = Encoder::new();
+            torn.put_u64(4_096);
+            let mut torn = torn.into_bytes();
+            torn.extend_from_slice(&[0u8; 7]);
+            torn.extend_from_slice(&planted);
+            torn.extend_from_slice(&[1u8; 9]);
+            let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(&torn).unwrap();
+        }
+        let mut seen = Vec::new();
+        Log::open_scanned_strict(&path, |payload, _, _| {
+            seen.push(payload.to_vec());
+            true
+        })
+        .expect("a torn tail opens whatever its partial payload holds");
+        assert_eq!(seen, vec![b"kept".to_vec()]);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn every_log_carries_its_own_salt() {
+        let one = temp_path("salt-one");
+        let two = temp_path("salt-two");
+        let (a, _) = Log::open(&one).unwrap();
+        let (b, _) = Log::open(&two).unwrap();
+        assert_ne!(a.salt, b.salt);
+        drop(a);
+        let (again, _) = Log::open(&one).unwrap();
+        let first = std::fs::read(&one).unwrap();
+        assert_eq!(&first[..MAGIC.len()], MAGIC);
+        assert_eq!(&first[MAGIC.len()..HEADER_LEN as usize], &again.salt);
+        std::fs::remove_file(&one).ok();
+        std::fs::remove_file(&two).ok();
     }
 
     #[test]

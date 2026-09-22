@@ -17,8 +17,16 @@ pub const PREPIN_TOKENS_PER_TICK: u32 = 8;
 
 pub const GLOBAL_SOURCE: u64 = u64::MAX;
 
-pub fn proposal_commitment(header: &Header, body: &[Wrapper]) -> Option<Commitment> {
-    let block = ChainBlock::new(header.clone(), Vec::new(), body.to_vec());
+pub fn proposal_commitment(
+    header: &Header,
+    body: &[Wrapper],
+    justification: &[ViewChange],
+) -> Option<Commitment> {
+    let block = ChainBlock::new(
+        header.clone(),
+        crate::wire::justification_to_bytes(justification),
+        body.to_vec(),
+    );
     let (k, n) = coding_params(to_bytes(&block).len());
     code_block(&block, k, n)
         .ok()
@@ -114,7 +122,7 @@ pub fn code_block(block: &ChainBlock, k: usize, n: usize) -> Result<CodedBlock, 
 /// payload never exceeds one max block. Without these a Byzantine leader could pick
 /// oversized shard_len/k and force every node to spend seconds of CPU and ~128 MB
 /// per led view reconstructing before any header check runs.
-pub const MAX_CODED_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_CODED_BYTES: usize = 12 * 1024 * 1024;
 
 pub fn commitment_in_bounds(commitment: &Commitment) -> bool {
     commitment.k >= 1
@@ -176,7 +184,11 @@ pub fn coding_params(payload_len: usize) -> (usize, usize) {
 }
 
 pub fn code_proposal(proposal: &Proposal) -> Result<Vec<CodedProposal>, CodedError> {
-    let block = ChainBlock::new(proposal.header.clone(), Vec::new(), proposal.body.clone());
+    let block = ChainBlock::new(
+        proposal.header.clone(),
+        crate::wire::justification_to_bytes(&proposal.justification),
+        proposal.body.clone(),
+    );
     let (k, n) = coding_params(to_bytes(&block).len());
     let coded = code_block(&block, k, n)?;
     let commitment = coded.commitment().clone();
@@ -187,7 +199,6 @@ pub fn code_proposal(proposal: &Proposal) -> Result<Vec<CodedProposal>, CodedErr
             view: proposal.view,
             header: proposal.header.clone(),
             commitment: commitment.clone(),
-            justification: proposal.justification.clone(),
             shard,
             proof,
             auth: proposal.auth.clone(),
@@ -221,7 +232,7 @@ fn entry_weight(pending: &Pending) -> usize {
 pub struct ProposalAssembler {
     pending: HashMap<ProposalKey, Pending>,
     done: HashMap<ProposalKey, u64>,
-    pinned: HashMap<(u64, u64), [u8; DIGEST_LEN]>,
+    pinned: HashMap<(u64, u64), Commitment>,
     prepin_tokens: HashMap<u64, u32>,
     horizon: u64,
     round_height: u64,
@@ -241,7 +252,6 @@ struct Pending {
     view: u64,
     header: Header,
     commitment: Commitment,
-    justification: Vec<ViewChange>,
     pieces: Vec<(Shard, ShardProof)>,
     overhead: usize,
     auth: Attestation,
@@ -315,9 +325,9 @@ impl ProposalAssembler {
         self.prune(prune_floor);
 
         let slot = (height, coded.view);
-        match self.pinned.get(&slot).copied() {
-            Some(pinned_root) => {
-                if pinned_root != coded.commitment.root {
+        match self.pinned.get(&slot) {
+            Some(pinned) => {
+                if *pinned != coded.commitment {
                     return None;
                 }
             }
@@ -333,7 +343,7 @@ impl ProposalAssembler {
                 if !verify_auth(&coded) {
                     return None;
                 }
-                self.pinned.insert(slot, coded.commitment.root);
+                self.pinned.insert(slot, coded.commitment.clone());
             }
         }
 
@@ -341,7 +351,6 @@ impl ProposalAssembler {
             view,
             header,
             commitment,
-            justification,
             shard,
             proof,
             auth,
@@ -353,14 +362,12 @@ impl ProposalAssembler {
         }
         {
             let entry = self.pending.entry(key).or_insert_with(|| {
-                let overhead =
-                    crate::wire::coded_overhead(&header, &commitment, &justification, &auth);
+                let overhead = crate::wire::coded_overhead(&header, &commitment, &auth);
                 Pending {
                     height,
                     view,
                     header: header.clone(),
                     commitment: commitment.clone(),
-                    justification,
                     pieces: Vec::new(),
                     overhead,
                     auth,
@@ -421,12 +428,16 @@ impl ProposalAssembler {
             &pending.commitment,
             &pending.pieces,
         );
-        Some(rebuilt.map(|block| Proposal {
-            view: pending.view,
-            header: pending.header,
-            body: block.body().to_vec(),
-            justification: pending.justification,
-            auth: pending.auth,
+        Some(rebuilt.and_then(|block| {
+            let justification = crate::wire::justification_from_bytes(block.certificate())
+                .map_err(|_| CodedError::Decode)?;
+            Ok(Proposal {
+                view: pending.view,
+                header: pending.header,
+                body: block.body().to_vec(),
+                justification,
+                auth: pending.auth,
+            })
         }))
     }
 
@@ -1033,27 +1044,52 @@ mod tests {
     }
 
     #[test]
-    fn the_byte_ceiling_charges_the_stored_justification_not_just_the_shard() {
+    fn a_justification_rides_in_the_coded_payload_not_in_every_shard() {
+        let mut proposal = sample_proposal(48, 1);
+        proposal.justification = heavy_justification();
+        let carried = crate::wire::justification_to_bytes(&proposal.justification);
+        let shards = code_proposal(&proposal).expect("code the proposal");
+        let largest = shards
+            .iter()
+            .map(|shard| {
+                crate::wire::Message::CodedProposal(Box::new(shard.clone()))
+                    .encode()
+                    .len()
+            })
+            .max()
+            .expect("shards");
+        assert!(
+            largest < carried.len(),
+            "a shard carries its share of the justification, not a whole copy"
+        );
+        let mut assembler = ProposalAssembler::new();
+        let mut rebuilt = None;
+        for shard in shards {
+            if let Some(outcome) = assembler.admit(shard, GLOBAL_SOURCE, |_| true) {
+                rebuilt = Some(outcome.expect("the proposal rebuilds"));
+                break;
+            }
+        }
+        let rebuilt = rebuilt.expect("k shards complete the proposal");
+        assert_eq!(
+            crate::wire::justification_to_bytes(&rebuilt.justification),
+            carried
+        );
+    }
+
+    #[test]
+    fn the_byte_ceiling_charges_each_pending_entry_its_overhead() {
         let proposal = sample_proposal(48, 0);
         let shards = code_proposal(&proposal).expect("code the proposal");
         let base = shards[0].clone();
         let piece = super::piece_weight(&base.shard, &base.proof);
         assert!(base.commitment.k > 1, "a lone shard must not complete");
-
-        let heavy = heavy_justification();
-        let jbytes =
-            crate::wire::coded_overhead(&base.header, &base.commitment, &heavy, &base.auth);
-        assert!(
-            jbytes > piece * 8,
-            "the justification must dominate a shard piece"
-        );
-
-        let budget = jbytes + piece * 4;
+        let overhead = crate::wire::coded_overhead(&base.header, &base.commitment, &base.auth);
+        let budget = overhead + piece * 4;
         let mut assembler = ProposalAssembler::with_byte_budget(budget);
         for view in 0..48u64 {
             let mut coded = base.clone();
             coded.view = view;
-            coded.justification = heavy.clone();
             assembler.tick();
             let _ = assembler.admit(coded, GLOBAL_SOURCE, |_| true);
         }
@@ -1061,7 +1097,7 @@ mod tests {
             .pending
             .values()
             .map(|p| {
-                crate::wire::coded_overhead(&p.header, &p.commitment, &p.justification, &p.auth)
+                crate::wire::coded_overhead(&p.header, &p.commitment, &p.auth)
                     + p.pieces
                         .iter()
                         .map(|(s, pr)| super::piece_weight(s, pr))

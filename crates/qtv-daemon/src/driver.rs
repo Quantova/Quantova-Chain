@@ -4,7 +4,9 @@
 use std::collections::VecDeque;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::mpsc::{
+    channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError,
+};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -47,6 +49,15 @@ struct VerifyDone {
 // with the returned verdict, so a burst of submissions cannot delay block production.
 // Block execution re-verifies every bridge operation, so the snapshot verdict is only a
 // spam filter and can never move value on a stale read.
+fn queue_verify(jobs: &SyncSender<VerifyJob>, job: VerifyJob) {
+    if let Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) = jobs.try_send(job) {
+        let _ = job.reply.send(Ok(qtv_gateway::submit_reply(
+            Err(qtv_node::mempool::Reject::RateLimited),
+            &job.tx_id,
+        )));
+    }
+}
+
 fn start_verify_pool() -> (SyncSender<VerifyJob>, Receiver<VerifyDone>) {
     let (job_tx, job_rx) = sync_channel::<VerifyJob>(4096);
     let (done_tx, done_rx) = channel::<VerifyDone>();
@@ -178,7 +189,7 @@ pub struct Driver {
     n: usize,
     send: Vec<Option<Channel<TcpStream>>>,
     inbound: Receiver<(usize, Vec<u8>)>,
-    queued_bytes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    queued_bytes: std::sync::Arc<crate::mesh::InboundBudget>,
     up: Vec<bool>,
     rejoined: Receiver<(usize, Channel<TcpStream>)>,
     down: SyncSender<usize>,
@@ -194,13 +205,16 @@ pub struct Driver {
 
 impl Driver {
     /// Hand queued bytes back to the mesh budget as soon as a frame leaves the queue.
-    fn release_queued(&self, len: usize) {
-        self.queued_bytes
-            .fetch_sub(len, std::sync::atomic::Ordering::Relaxed);
+    fn release_queued(&self, from: usize, len: usize) {
+        self.queued_bytes.release(from, len);
     }
 
-    fn decode_queued(&self, bytes: &[u8]) -> Result<Message, qtv_devnet::wire::DecodeError> {
-        self.release_queued(bytes.len());
+    fn decode_queued(
+        &self,
+        from: usize,
+        bytes: &[u8],
+    ) -> Result<Message, qtv_devnet::wire::DecodeError> {
+        self.release_queued(from, bytes.len());
         Message::decode(bytes)
     }
 
@@ -301,9 +315,8 @@ impl Driver {
                             fee_params,
                             reply: call.reply.clone(),
                         };
-                        if jobs.try_send(job).is_ok() {
-                            continue;
-                        }
+                        queue_verify(jobs, job);
+                        continue;
                     }
                 }
             }
@@ -428,7 +441,7 @@ impl Driver {
 
             match self.inbound.recv_timeout(TICK) {
                 Ok((source, bytes)) => {
-                    self.release_queued(bytes.len());
+                    self.release_queued(source, bytes.len());
                     self.handle_incoming(bytes, start_height, &selection, source as u64)
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -470,7 +483,7 @@ impl Driver {
                 break;
             }
             match self.inbound.recv_timeout(TICK) {
-                Ok((source, bytes)) => match self.decode_queued(&bytes) {
+                Ok((source, bytes)) => match self.decode_queued(source, &bytes) {
                     Ok(Message::Register(note)) => {
                         if self.node.collect_registration((*note).clone()) {
                             self.broadcast(&Message::Register(note).encode());
@@ -502,7 +515,7 @@ impl Driver {
                 break;
             }
             match self.inbound.recv_timeout(TICK) {
-                Ok((source, bytes)) => match self.decode_queued(&bytes) {
+                Ok((source, bytes)) => match self.decode_queued(source, &bytes) {
                     Ok(Message::Reveal(note)) => {
                         if self.node.collect_reveal((*note).clone()) {
                             self.broadcast(&Message::Reveal(note).encode());
@@ -579,13 +592,7 @@ impl Driver {
                     }
                 }
             }
-            Message::Proposal(proposal) => {
-                let proposer = leader_for(selection, proposal.view);
-                let out = self.node.on_proposal(selection, proposer, *proposal);
-                for message in out {
-                    self.emit(message);
-                }
-            }
+            Message::Proposal(_) => {}
             Message::Prevote(prevote) => {
                 let out = self.node.on_prevote(selection, *prevote);
                 for message in out {
@@ -637,7 +644,7 @@ impl Driver {
     }
 
     fn settle(&mut self, selection: &Selection) {
-        if !self.node.has_finality_threshold(selection.tau) {
+        if !self.node.has_finality_threshold(selection) {
             return;
         }
         let _ = self.node.try_finalize(selection);
@@ -789,8 +796,39 @@ fn message_height(message: &Message) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{message_height, FrameBuffer, MAX_BUFFERED_BYTES, MAX_BUFFERED_FRAMES};
+    use super::{
+        message_height, queue_verify, FrameBuffer, VerifyJob, MAX_BUFFERED_BYTES,
+        MAX_BUFFERED_FRAMES,
+    };
     use qtv_devnet::wire::Message;
+
+    #[test]
+    fn a_full_verify_pool_refuses_rather_than_verifying_on_the_consensus_thread() {
+        let account = qtv_account::derive(&[7u8; qtv_account::MASTER_SEED_LEN], 0);
+        let body = qtv_tx::Body::new(
+            account.address(),
+            0,
+            1_000,
+            1,
+            qtv_tx::Call::new(account.address(), Vec::new()),
+        );
+        let wrapper = qtv_tx::sign(&account, &body);
+        let job = |reply| VerifyJob {
+            tx_id: wrapper.id(),
+            wrapper: wrapper.clone(),
+            ledger: std::sync::Arc::new(qtv_node::ledger::Ledger::new()),
+            fee_params: qtv_node::fee::FeeParams::devnet(),
+            reply,
+        };
+        let (jobs, _held) = std::sync::mpsc::sync_channel::<VerifyJob>(1);
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        queue_verify(&jobs, job(first_tx));
+        assert!(first_rx.try_recv().is_err(), "a free slot takes the job");
+        let (second_tx, second_rx) = std::sync::mpsc::channel();
+        queue_verify(&jobs, job(second_tx));
+        let reply = second_rx.try_recv().expect("the refusal is immediate");
+        assert!(reply.is_ok(), "a busy reply, not a transport error");
+    }
 
     // A node that has fallen behind only ever sees sync traffic if it is exempt from the
     // height gate. Gating it would park the reply for a height the node cannot reach.

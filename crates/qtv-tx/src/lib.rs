@@ -172,12 +172,31 @@ impl Encode for Body {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Wrapper {
     body: Body,
     scheme: u8,
     signature: Vec<u8>,
+    id: std::sync::OnceLock<Box<str>>,
 }
+
+impl std::fmt::Debug for Wrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Wrapper")
+            .field("body", &self.body)
+            .field("scheme", &self.scheme)
+            .field("signature", &self.signature)
+            .finish()
+    }
+}
+
+impl PartialEq for Wrapper {
+    fn eq(&self, other: &Self) -> bool {
+        self.body == other.body && self.scheme == other.scheme && self.signature == other.signature
+    }
+}
+
+impl Eq for Wrapper {}
 
 impl Wrapper {
     pub fn new(body: Body, scheme: u8, signature: Vec<u8>) -> Self {
@@ -185,6 +204,7 @@ impl Wrapper {
             body,
             scheme,
             signature,
+            id: std::sync::OnceLock::new(),
         }
     }
 
@@ -201,8 +221,16 @@ impl Wrapper {
     }
 
     pub fn id(&self) -> String {
-        let hash = sha3::sha3_256(&to_bytes(self));
-        qtv_idfmt::render_tx(&hash).expect("a sha3 256 hash is the fixed digest length")
+        self.id_str().to_string()
+    }
+
+    pub fn id_str(&self) -> &str {
+        self.id.get_or_init(|| {
+            let hash = sha3::sha3_256(&to_bytes(self));
+            qtv_idfmt::render_tx(&hash)
+                .expect("a sha3 256 hash is the fixed digest length")
+                .into_boxed_str()
+        })
     }
 }
 
@@ -246,11 +274,7 @@ pub fn sign(account: &Account, body: &Body) -> Wrapper {
         SCHEME_FALCON => Vec::new(),
         _ => Vec::new(),
     };
-    Wrapper {
-        body: body.clone(),
-        scheme,
-        signature,
-    }
+    Wrapper::new(body.clone(), scheme, signature)
 }
 
 pub fn scheme_supported(scheme: u8) -> bool {

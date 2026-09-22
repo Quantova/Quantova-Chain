@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv6Addr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -53,6 +53,55 @@ const REJOIN_QUEUE: usize = 64;
 /// hold every slot and lock a returning validator out.
 const LATE_PER_IP: usize = 2;
 const LATE_PER_IP_KNOWN: usize = 4;
+const FAILED_HANDSHAKE_BAR: Duration = Duration::from_secs(30);
+const MAX_BARRED: usize = 65_536;
+
+fn address_bucket(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let s = v6.segments();
+                IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+            }
+        },
+    }
+}
+
+#[derive(Clone, Default)]
+struct HandshakeBar(Arc<Mutex<HashMap<IpAddr, Instant>>>);
+
+impl HandshakeBar {
+    fn barred(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let key = address_bucket(ip);
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match map.get(&key) {
+            Some(&until) if now < until => true,
+            Some(_) => {
+                map.remove(&key);
+                false
+            }
+            None if map.len() >= MAX_BARRED => {
+                map.retain(|_, until| now < *until);
+                map.len() >= MAX_BARRED
+            }
+            None => false,
+        }
+    }
+
+    fn bar(&self, ip: IpAddr, window: Duration) {
+        let now = Instant::now();
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() >= MAX_BARRED {
+            map.retain(|_, until| now < *until);
+        }
+        if map.len() < MAX_BARRED {
+            map.insert(address_bucket(ip), now + window);
+        }
+    }
+}
 
 struct InflightGuard(Arc<AtomicUsize>);
 
@@ -125,6 +174,55 @@ const INBOUND_CAP: usize = 4096;
 /// peers pin gigabytes here. The driver already budgets its own buffer in bytes; this is
 /// the same bound one stage earlier, where the frames actually arrive.
 const INBOUND_BYTES_CAP: usize = 64 * 1024 * 1024;
+const MIN_PEER_FRAMES: usize = 64;
+
+pub struct InboundBudget {
+    total: AtomicUsize,
+    peer_bytes: Vec<AtomicUsize>,
+    peer_frames: Vec<AtomicUsize>,
+    peer_bytes_cap: usize,
+    peer_frames_cap: usize,
+}
+
+impl InboundBudget {
+    pub fn new(n: usize) -> InboundBudget {
+        let peers = n.saturating_sub(1).max(1);
+        InboundBudget {
+            total: AtomicUsize::new(0),
+            peer_bytes: (0..n.max(1)).map(|_| AtomicUsize::new(0)).collect(),
+            peer_frames: (0..n.max(1)).map(|_| AtomicUsize::new(0)).collect(),
+            peer_bytes_cap: (INBOUND_BYTES_CAP / peers).max(qtv_net::MAX_MESSAGE),
+            peer_frames_cap: (INBOUND_CAP / peers).max(MIN_PEER_FRAMES),
+        }
+    }
+
+    fn reserve(&self, from: usize, len: usize) -> bool {
+        let (Some(bytes), Some(frames)) = (self.peer_bytes.get(from), self.peer_frames.get(from))
+        else {
+            return false;
+        };
+        if self.total.load(Ordering::Relaxed).saturating_add(len) > INBOUND_BYTES_CAP
+            || bytes.load(Ordering::Relaxed).saturating_add(len) > self.peer_bytes_cap
+            || frames.load(Ordering::Relaxed) >= self.peer_frames_cap
+        {
+            return false;
+        }
+        self.total.fetch_add(len, Ordering::Relaxed);
+        bytes.fetch_add(len, Ordering::Relaxed);
+        frames.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    pub fn release(&self, from: usize, len: usize) {
+        let (Some(bytes), Some(frames)) = (self.peer_bytes.get(from), self.peer_frames.get(from))
+        else {
+            return;
+        };
+        self.total.fetch_sub(len, Ordering::Relaxed);
+        bytes.fetch_sub(len, Ordering::Relaxed);
+        frames.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 const PEER_MSG_PER_SEC: f64 = 5_000.0;
 
@@ -137,7 +235,7 @@ pub struct Mesh {
     pub send: Vec<Option<Channel<TcpStream>>>,
     pub inbound: Receiver<(usize, Vec<u8>)>,
     /// Bytes currently parked in `inbound`. The consumer subtracts what it takes.
-    pub queued_bytes: Arc<AtomicUsize>,
+    pub queued_bytes: Arc<InboundBudget>,
     pub up: Vec<bool>,
     /// Links re-established after bootstrap. A validator that restarts dials its
     /// peers again, and without this the peers never answer, so the returning node
@@ -174,13 +272,15 @@ pub fn build_mesh(
         .count();
 
     let (inbound_tx, inbound_rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_CAP);
-    let queued_bytes = Arc::new(AtomicUsize::new(0));
+    let queued_bytes = Arc::new(InboundBudget::new(n));
     let (accepted_tx, accepted_rx) = mpsc::channel::<(usize, Channel<TcpStream>)>();
 
     let identity_acc = identity.clone();
     let up_acc = up.clone();
     let peer_ids_acc: Vec<Option<PeerId>> = peer_ids.to_vec();
     let known_ips = known_peer_ips(peer_addrs);
+    let bar = HandshakeBar::default();
+    let late_bar = bar.clone();
     let (worker_tx, worker_rx) = mpsc::channel::<(usize, Channel<TcpStream>)>();
     let late_listener = listener.try_clone().expect("the listener clones");
     let acceptor = thread::spawn(move || {
@@ -188,6 +288,7 @@ pub fn build_mesh(
         let mut seen = vec![false; n];
         let mut registered = 0usize;
         let inflight = Arc::new(AtomicUsize::new(0));
+        let per_ip: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
         let deadline = Instant::now() + bootstrap_deadline();
         while registered < up_peers && Instant::now() < deadline {
             while let Ok((from, channel)) = worker_rx.try_recv() {
@@ -208,6 +309,9 @@ pub fn build_mesh(
                 }
             };
             let known = known_ips.contains(&addr.ip());
+            if !known && bar.barred(addr.ip()) {
+                continue;
+            }
             let cap = if known {
                 MAX_HANDSHAKE_INFLIGHT + KNOWN_HANDSHAKE_RESERVE
             } else {
@@ -215,6 +319,24 @@ pub fn build_mesh(
             };
             if inflight.load(Ordering::Relaxed) >= cap {
                 continue;
+            }
+            let slot_key = if known {
+                addr.ip()
+            } else {
+                address_bucket(addr.ip())
+            };
+            {
+                let mut map = per_ip.lock().unwrap_or_else(|e| e.into_inner());
+                let slot = map.entry(slot_key).or_insert(0);
+                let ip_cap = if known {
+                    LATE_PER_IP_KNOWN
+                } else {
+                    LATE_PER_IP
+                };
+                if *slot >= ip_cap {
+                    continue;
+                }
+                *slot += 1;
             }
             inflight.fetch_add(1, Ordering::Relaxed);
             let identity_w = identity_acc.clone();
@@ -225,15 +347,23 @@ pub fn build_mesh(
             let known_peers: Vec<PeerId> = peer_ids_acc.iter().flatten().cloned().collect();
             let worker_tx_w = worker_tx.clone();
             let inflight_w = Arc::clone(&inflight);
+            let bar_w = bar.clone();
+            let ip = addr.ip();
+            let per_ip_w = Arc::clone(&per_ip);
             thread::spawn(move || {
                 let _guard = InflightGuard(inflight_w);
+                let _ip_guard = IpGuard(per_ip_w, slot_key);
                 let _ = stream.set_nonblocking(false);
-                if let Ok(channel) = Channel::accept_known_with_timeout(
+                let handshake = Channel::accept_known_with_timeout(
                     stream,
                     &identity_w,
                     HANDSHAKE_TIMEOUT,
                     &known_peers,
-                ) {
+                );
+                if handshake.is_err() && !known {
+                    bar_w.bar(ip, FAILED_HANDSHAKE_BAR);
+                }
+                if let Ok(channel) = handshake {
                     let peer = channel.peer_id().clone();
                     let from = (0..n).find(|&q| {
                         q != idx
@@ -308,6 +438,7 @@ pub fn build_mesh(
         genesis_hash,
         inbound_tx,
         Arc::clone(&queued_bytes),
+        late_bar,
     );
     spawn_redialer(
         peer_addrs.to_vec(),
@@ -376,7 +507,8 @@ fn spawn_late_acceptor(
     up: Vec<bool>,
     genesis_hash: [u8; 32],
     inbound_tx: SyncSender<(usize, Vec<u8>)>,
-    queued: Arc<AtomicUsize>,
+    queued: Arc<InboundBudget>,
+    bar: HandshakeBar,
 ) {
     thread::spawn(move || {
         let _ = listener.set_nonblocking(false);
@@ -395,6 +527,10 @@ fn spawn_late_acceptor(
             };
             let ip = addr.ip();
             let is_known = known.contains(&ip);
+            if !is_known && bar.barred(ip) {
+                continue;
+            }
+            let slot_key = if is_known { ip } else { address_bucket(ip) };
             let cap = if is_known {
                 MAX_HANDSHAKE_INFLIGHT + KNOWN_HANDSHAKE_RESERVE
             } else {
@@ -405,7 +541,7 @@ fn spawn_late_acceptor(
             }
             {
                 let mut map = per_ip.lock().expect("the per ip map is not poisoned");
-                let slot = map.entry(ip).or_insert(0);
+                let slot = map.entry(slot_key).or_insert(0);
                 let ip_cap = if is_known {
                     LATE_PER_IP_KNOWN
                 } else {
@@ -426,6 +562,7 @@ fn spawn_late_acceptor(
             let per_ip_w = Arc::clone(&per_ip);
             let live_w = Arc::clone(&live);
             let queued_w = Arc::clone(&queued);
+            let bar_w = bar.clone();
             thread::spawn(move || {
                 let handshake = {
                     // Both slots cover the handshake only. Holding either for the life
@@ -435,7 +572,7 @@ fn spawn_late_acceptor(
                     // address is refused for as long as the process runs. What the caps
                     // are for is bounding concurrent handshake cost. Once a link is up
                     // the authenticated one live link per peer rule governs it.
-                    let _ip_guard = IpGuard(per_ip_w, ip);
+                    let _ip_guard = IpGuard(per_ip_w, slot_key);
                     let _guard = InflightGuard(inflight_w);
                     let _ = stream.set_nonblocking(false);
                     // The same gate the bootstrap acceptor uses. This acceptor runs for
@@ -449,6 +586,9 @@ fn spawn_late_acceptor(
                     )
                 };
                 let Ok(channel) = handshake else {
+                    if !is_known {
+                        bar_w.bar(ip, FAILED_HANDSHAKE_BAR);
+                    }
                     return;
                 };
                 let peer = channel.peer_id().clone();
@@ -506,7 +646,7 @@ fn read_peer_until_superseded(
     from: usize,
     channel: Channel<TcpStream>,
     out: SyncSender<(usize, Vec<u8>)>,
-    queued: Arc<AtomicUsize>,
+    queued: Arc<InboundBudget>,
     genesis_hash: [u8; 32],
     live: Arc<Mutex<Vec<u64>>>,
     generation: u64,
@@ -601,25 +741,24 @@ fn hello_ok(frame: &[u8], genesis_hash: &[u8; 32]) -> bool {
 
 fn forward_frame(
     out: &SyncSender<(usize, Vec<u8>)>,
-    queued: &AtomicUsize,
+    queued: &InboundBudget,
     from: usize,
     bytes: Vec<u8>,
 ) -> bool {
     // Dropped the same way a full queue drops, so a byte flood costs the sender its
     // frames rather than costing this node its memory.
     let len = bytes.len();
-    if queued.load(Ordering::Relaxed).saturating_add(len) > INBOUND_BYTES_CAP {
+    if !queued.reserve(from, len) {
         return true;
     }
-    queued.fetch_add(len, Ordering::Relaxed);
     match out.try_send((from, bytes)) {
         Ok(()) => true,
         Err(TrySendError::Full(_)) => {
-            queued.fetch_sub(len, Ordering::Relaxed);
+            queued.release(from, len);
             true
         }
         Err(TrySendError::Disconnected(_)) => {
-            queued.fetch_sub(len, Ordering::Relaxed);
+            queued.release(from, len);
             false
         }
     }
@@ -629,7 +768,7 @@ fn read_peer_with_stop(
     from: usize,
     mut channel: Channel<TcpStream>,
     out: SyncSender<(usize, Vec<u8>)>,
-    queued: Arc<AtomicUsize>,
+    queued: Arc<InboundBudget>,
     genesis_hash: [u8; 32],
     stop: &dyn Fn() -> bool,
 ) {
@@ -708,7 +847,7 @@ fn read_peer(
     from: usize,
     channel: Channel<TcpStream>,
     out: SyncSender<(usize, Vec<u8>)>,
-    queued: Arc<AtomicUsize>,
+    queued: Arc<InboundBudget>,
     genesis_hash: [u8; 32],
 ) {
     read_peer_with_stop(from, channel, out, queued, genesis_hash, &|| false);
@@ -718,7 +857,7 @@ fn spawn_readers(
     accepted_rx: &Receiver<(usize, Channel<TcpStream>)>,
     up_peers: usize,
     inbound_tx: SyncSender<(usize, Vec<u8>)>,
-    queued: Arc<AtomicUsize>,
+    queued: Arc<InboundBudget>,
     genesis_hash: [u8; 32],
 ) {
     for _ in 0..up_peers {
@@ -733,15 +872,14 @@ fn spawn_readers(
 
 #[cfg(test)]
 mod tests {
-    use super::{forward_frame, INBOUND_CAP, PEER_MSG_BURST, PEER_MSG_PER_SEC};
-    use std::sync::atomic::AtomicUsize;
+    use super::{forward_frame, InboundBudget, INBOUND_CAP, PEER_MSG_BURST, PEER_MSG_PER_SEC};
 
     #[test]
     fn the_inbound_queue_is_bounded_by_bytes_not_only_by_frame_count() {
         // A count only bound let peers park INBOUND_CAP megabyte frames, gigabytes of
         // resident memory, because the record layer admits a frame that large.
         let (tx, _rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_CAP);
-        let queued = AtomicUsize::new(0);
+        let queued = InboundBudget::new(2);
         let big = super::INBOUND_BYTES_CAP / 4;
 
         for _ in 0..4 {
@@ -750,7 +888,7 @@ mod tests {
                 "a frame inside the budget is accepted"
             );
         }
-        let at_cap = queued.load(super::Ordering::Relaxed);
+        let at_cap = queued.total.load(super::Ordering::Relaxed);
         assert!(
             at_cap <= super::INBOUND_BYTES_CAP,
             "the queue must never hold more than its byte budget, held {at_cap}"
@@ -760,7 +898,7 @@ mod tests {
             "past the budget the reader keeps running"
         );
         assert_eq!(
-            queued.load(super::Ordering::Relaxed),
+            queued.total.load(super::Ordering::Relaxed),
             at_cap,
             "but the frame past the budget is dropped rather than parked"
         );
@@ -773,7 +911,7 @@ mod tests {
         let flood = INBOUND_CAP * 4;
         for _ in 0..flood {
             assert!(
-                forward_frame(&tx, &AtomicUsize::new(0), 1, vec![0u8; 64]),
+                forward_frame(&tx, &InboundBudget::new(2), 1, vec![0u8; 64]),
                 "a full inbound channel must drop the frame, not stop the reader"
             );
         }
@@ -792,16 +930,43 @@ mod tests {
     }
 
     #[test]
+    fn one_peer_cannot_take_another_peers_share_of_the_inbound_queue() {
+        let (tx, rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_CAP);
+        let budget = InboundBudget::new(5);
+        for _ in 0..INBOUND_CAP {
+            assert!(forward_frame(&tx, &budget, 1, vec![0u8; 64]));
+        }
+        assert!(forward_frame(&tx, &budget, 2, vec![0u8; 64]));
+        let mut from_flooder = 0usize;
+        let mut from_honest = 0usize;
+        while let Ok((from, bytes)) = rx.try_recv() {
+            budget.release(from, bytes.len());
+            match from {
+                1 => from_flooder += 1,
+                2 => from_honest += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            from_flooder,
+            INBOUND_CAP / 4,
+            "the flooder is held to its share"
+        );
+        assert_eq!(from_honest, 1, "the honest peer's frame still gets in");
+        assert_eq!(budget.total.load(super::Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn a_drained_channel_keeps_accepting_after_a_full_burst() {
         let (tx, rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_CAP);
         for _ in 0..INBOUND_CAP {
-            assert!(forward_frame(&tx, &AtomicUsize::new(0), 0, vec![1u8; 8]));
+            assert!(forward_frame(&tx, &InboundBudget::new(2), 0, vec![1u8; 8]));
         }
         for _ in 0..INBOUND_CAP {
             assert!(rx.try_recv().is_ok());
         }
         assert!(
-            forward_frame(&tx, &AtomicUsize::new(0), 0, vec![2u8; 8]),
+            forward_frame(&tx, &InboundBudget::new(2), 0, vec![2u8; 8]),
             "a drained channel accepts fresh frames again"
         );
     }
@@ -811,7 +976,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_CAP);
         drop(rx);
         assert!(
-            !forward_frame(&tx, &AtomicUsize::new(0), 0, vec![9u8; 8]),
+            !forward_frame(&tx, &InboundBudget::new(2), 0, vec![9u8; 8]),
             "a disconnected receiver must stop the reader loop"
         );
     }
@@ -982,5 +1147,101 @@ mod bootstrap_wiring {
             mesh.redialing.is_empty(),
             "there is nothing to redial, so the redialer must not be woken"
         );
+    }
+}
+
+#[cfg(test)]
+mod handshake_bar {
+    use super::{spawn_late_acceptor, HandshakeBar, FAILED_HANDSHAKE_BAR, MAX_BARRED};
+    use qtv_net::Identity;
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, TcpListener, TcpStream};
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    fn claim(addr: std::net::SocketAddr, claimed: &Identity) -> Option<TcpStream> {
+        let mut stream = TcpStream::connect(addr).ok()?;
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+        stream.write_all(claimed.public()).ok()?;
+        stream.write_all(&[0u8; 32]).ok()?;
+        let mut first = [0u8; 1];
+        match stream.read(&mut first) {
+            Ok(1) => Some(stream),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_stranger_claiming_a_validator_key_gets_one_handshake_then_is_refused() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let validator = Identity::from_seed(&[61u8; 32]);
+        let (inbound_tx, _inbound_rx) = mpsc::sync_channel(16);
+        let bar = HandshakeBar::default();
+        spawn_late_acceptor(
+            listener,
+            0,
+            2,
+            Identity::from_seed(&[60u8; 32]),
+            vec![None, Some(validator.peer_id())],
+            vec![None, Some("127.0.0.2:9".to_string())],
+            vec![true, true],
+            [0u8; 32],
+            inbound_tx,
+            Arc::new(super::InboundBudget::new(2)),
+            bar.clone(),
+        );
+        let mut first = claim(addr, &validator).expect("the claimed key is answered once");
+        let _ = first.write_all(&[0u8; 8192]);
+        drop(first);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !bar.barred("127.0.0.1".parse().unwrap()) {
+            assert!(
+                Instant::now() < deadline,
+                "the failed handshake bars its address"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            claim(addr, &validator).is_none(),
+            "a barred address gets no keygen and no signature"
+        );
+    }
+
+    #[test]
+    fn a_failed_handshake_bars_its_address_and_the_bar_lapses() {
+        let bar = HandshakeBar::default();
+        let ip: IpAddr = "203.0.113.7".parse().unwrap();
+        let other: IpAddr = "203.0.113.8".parse().unwrap();
+        assert!(!bar.barred(ip));
+        bar.bar(ip, Duration::from_millis(50));
+        assert!(bar.barred(ip));
+        assert!(!bar.barred(other), "one address does not bar its neighbour");
+        thread::sleep(Duration::from_millis(80));
+        assert!(!bar.barred(ip), "the bar lapses");
+    }
+
+    #[test]
+    fn a_v6_bar_covers_the_whole_64_and_a_mapped_v4_is_its_v4() {
+        let bar = HandshakeBar::default();
+        bar.bar("2001:db8:1:2::5".parse().unwrap(), FAILED_HANDSHAKE_BAR);
+        assert!(bar.barred("2001:db8:1:2:ffff::9".parse().unwrap()));
+        assert!(!bar.barred("2001:db8:1:3::5".parse().unwrap()));
+        bar.bar("198.51.100.4".parse().unwrap(), FAILED_HANDSHAKE_BAR);
+        assert!(bar.barred("::ffff:198.51.100.4".parse().unwrap()));
+    }
+
+    #[test]
+    fn a_full_bar_table_refuses_new_strangers() {
+        let bar = HandshakeBar::default();
+        {
+            let mut map = bar.0.lock().unwrap();
+            let until = Instant::now() + FAILED_HANDSHAKE_BAR;
+            for i in 0..MAX_BARRED as u32 {
+                map.insert(IpAddr::V4(std::net::Ipv4Addr::from(i)), until);
+            }
+        }
+        assert!(bar.barred("192.0.2.200".parse().unwrap()));
     }
 }
