@@ -215,7 +215,7 @@ mod tests {
 
     fn proof_statement() -> StarkStatement {
         StarkStatement {
-            corridor_id: 0,
+            corridor_id: 43,
             dest_chain_id: 4801,
             nonce: 990_001,
             kind: StatementKind::BitcoinSpv,
@@ -295,7 +295,7 @@ mod tests {
         // Each kind is presented under a corridor whose tier matches: Bitcoin (Spv), Ethereum and
         // Cosmos Hub (LightClient). A mismatched or unregistered corridor id is rejected below.
         for (kind, corridor_id) in [
-            (StatementKind::BitcoinSpv, 0u32),
+            (StatementKind::BitcoinSpv, 43u32),
             (StatementKind::EvmLightClient, 2u32),
             (StatementKind::CosmosTendermint, 16u32),
         ] {
@@ -325,6 +325,19 @@ mod tests {
         assert_eq!(
             parse_ingress(&bytes),
             Err(IngressError::CorridorKindMismatch { corridor_id: 38 })
+        );
+
+        let retired = StarkStatement {
+            corridor_id: 0,
+            dest_chain_id: 4801,
+            nonce: 990_001,
+            kind: StatementKind::BitcoinSpv,
+            public_input_digest: [9u8; 32],
+        };
+        let bytes = encode_ingress(&ml_dsa_attestation(), &retired, &[0x02u8; 8]);
+        assert_eq!(
+            parse_ingress(&bytes),
+            Err(IngressError::UnknownCorridor { corridor_id: 0 })
         );
 
         // An unregistered corridor id past the registry.

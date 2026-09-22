@@ -25,7 +25,7 @@ pub struct Asset {
 pub fn seed_assets() -> Vec<Asset> {
     vec![
         Asset {
-            origin_chain: 0,
+            origin_chain: 43,
             symbol: "BTC",
             tag: "qBTC.btc",
         },

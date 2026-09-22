@@ -244,6 +244,36 @@ pub fn corridor(id: NetworkId) -> Corridor {
             tier: VerificationTier::Federated,
             finality: FinalityConfig::probabilistic(24, 24),
         },
+        NetworkId::VeChain => Corridor {
+            id,
+            name: "VeChain",
+            tier: VerificationTier::Federated,
+            finality: FinalityConfig::probabilistic(12, 12),
+        },
+        NetworkId::Filecoin => Corridor {
+            id,
+            name: "Filecoin",
+            tier: VerificationTier::Federated,
+            finality: FinalityConfig::probabilistic(900, 900),
+        },
+        NetworkId::Cronos => Corridor {
+            id,
+            name: "Cronos",
+            tier: VerificationTier::Federated,
+            finality: FinalityConfig::deterministic(1),
+        },
+        NetworkId::Hyperliquid => Corridor {
+            id,
+            name: "Hyperliquid",
+            tier: VerificationTier::Federated,
+            finality: FinalityConfig::deterministic(1),
+        },
+        NetworkId::Bittensor => Corridor {
+            id,
+            name: "Bittensor",
+            tier: VerificationTier::Federated,
+            finality: FinalityConfig::deterministic(2),
+        },
         NetworkId::Cctp => Corridor {
             id,
             name: "Circle CCTP",
@@ -284,7 +314,7 @@ mod tests {
 
     #[test]
     fn every_network_id_resolves_a_tier_and_a_finality_config() {
-        for raw in 0..NETWORK_COUNT {
+        for raw in 1..=NETWORK_COUNT {
             let c = corridor_for_id(raw).unwrap_or_else(|_| panic!("id {} did not resolve", raw));
             assert!(
                 c.finality.confirmation_depth > 0,
@@ -295,16 +325,17 @@ mod tests {
     }
 
     #[test]
-    fn the_full_set_of_thirty_nine_corridors_is_present() {
+    fn the_full_set_of_corridors_is_present() {
         let corridors: Vec<Corridor> = all_network_ids().iter().map(|id| corridor(*id)).collect();
         assert_eq!(corridors.len(), NETWORK_COUNT as usize);
     }
 
     #[test]
     fn an_unknown_network_id_is_rejected() {
+        assert_eq!(corridor_for_id(0), Err(RegistryError::UnknownNetwork(0)));
         assert_eq!(
-            corridor_for_id(NETWORK_COUNT),
-            Err(RegistryError::UnknownNetwork(NETWORK_COUNT))
+            corridor_for_id(NETWORK_COUNT + 1),
+            Err(RegistryError::UnknownNetwork(NETWORK_COUNT + 1))
         );
         assert_eq!(
             corridor_for_id(u32::MAX),

@@ -4,7 +4,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum NetworkId {
-    Bitcoin = 0,
+    Bitcoin = 43,
     BitcoinCash = 1,
     Ethereum = 2,
     BnbChain = 3,
@@ -14,11 +14,11 @@ pub enum NetworkId {
     Optimism = 7,
     Base = 8,
     Fantom = 9,
-    Gnosis = 10,
-    Linea = 11,
-    Scroll = 12,
+    Linea = 10,
+    Scroll = 11,
+    Mantle = 12,
     ZkSyncEra = 13,
-    Mantle = 14,
+    VeChain = 14,
     Celo = 15,
     CosmosHub = 16,
     Osmosis = 17,
@@ -43,9 +43,14 @@ pub enum NetworkId {
     Dogecoin = 36,
     Zcash = 37,
     Cctp = 38,
+    Filecoin = 39,
+    Cronos = 40,
+    Hyperliquid = 41,
+    Bittensor = 42,
+    Gnosis = 44,
 }
 
-pub const NETWORK_COUNT: u32 = 39;
+pub const NETWORK_COUNT: u32 = 44;
 
 /// The consensus/proof family a network belongs to. The airlock requires a proof of a given kind to be
 /// presented under a corridor of the matching family, so an EVM light-client proof cannot cross under a
@@ -64,12 +69,12 @@ impl NetworkId {
         match self {
             Bitcoin | BitcoinCash | Litecoin | Dogecoin | Zcash | Monero => ChainFamily::Bitcoin,
             Ethereum | BnbChain | Polygon | Avalanche | Arbitrum | Optimism | Base | Fantom
-            | Gnosis | Linea | Scroll | ZkSyncEra | Mantle | Celo | RobinhoodChain => {
+            | Gnosis | Linea | Scroll | ZkSyncEra | Mantle | Celo | RobinhoodChain | Cronos => {
                 ChainFamily::Evm
             }
             CosmosHub | Osmosis | Celestia | Injective | Sei | Kava => ChainFamily::Cosmos,
             Solana | Tron | XrpLedger | Cardano | Near | Sui | Aptos | Hedera | Algorand | Ton
-            | Stellar | Cctp => ChainFamily::Other,
+            | Stellar | Cctp | VeChain | Filecoin | Hyperliquid | Bittensor => ChainFamily::Other,
         }
     }
 }
@@ -82,7 +87,6 @@ impl TryFrom<u32> for NetworkId {
 
     fn try_from(raw: u32) -> Result<Self, Self::Error> {
         match raw {
-            0 => Ok(NetworkId::Bitcoin),
             1 => Ok(NetworkId::BitcoinCash),
             2 => Ok(NetworkId::Ethereum),
             3 => Ok(NetworkId::BnbChain),
@@ -92,11 +96,11 @@ impl TryFrom<u32> for NetworkId {
             7 => Ok(NetworkId::Optimism),
             8 => Ok(NetworkId::Base),
             9 => Ok(NetworkId::Fantom),
-            10 => Ok(NetworkId::Gnosis),
-            11 => Ok(NetworkId::Linea),
-            12 => Ok(NetworkId::Scroll),
+            10 => Ok(NetworkId::Linea),
+            11 => Ok(NetworkId::Scroll),
+            12 => Ok(NetworkId::Mantle),
             13 => Ok(NetworkId::ZkSyncEra),
-            14 => Ok(NetworkId::Mantle),
+            14 => Ok(NetworkId::VeChain),
             15 => Ok(NetworkId::Celo),
             16 => Ok(NetworkId::CosmosHub),
             17 => Ok(NetworkId::Osmosis),
@@ -121,6 +125,12 @@ impl TryFrom<u32> for NetworkId {
             36 => Ok(NetworkId::Dogecoin),
             37 => Ok(NetworkId::Zcash),
             38 => Ok(NetworkId::Cctp),
+            39 => Ok(NetworkId::Filecoin),
+            40 => Ok(NetworkId::Cronos),
+            41 => Ok(NetworkId::Hyperliquid),
+            42 => Ok(NetworkId::Bittensor),
+            43 => Ok(NetworkId::Bitcoin),
+            44 => Ok(NetworkId::Gnosis),
             other => Err(UnknownNetworkId(other)),
         }
     }
@@ -134,7 +144,6 @@ impl From<NetworkId> for u32 {
 
 pub fn all_network_ids() -> [NetworkId; NETWORK_COUNT as usize] {
     [
-        NetworkId::Bitcoin,
         NetworkId::BitcoinCash,
         NetworkId::Ethereum,
         NetworkId::BnbChain,
@@ -144,11 +153,11 @@ pub fn all_network_ids() -> [NetworkId; NETWORK_COUNT as usize] {
         NetworkId::Optimism,
         NetworkId::Base,
         NetworkId::Fantom,
-        NetworkId::Gnosis,
         NetworkId::Linea,
         NetworkId::Scroll,
-        NetworkId::ZkSyncEra,
         NetworkId::Mantle,
+        NetworkId::ZkSyncEra,
+        NetworkId::VeChain,
         NetworkId::Celo,
         NetworkId::CosmosHub,
         NetworkId::Osmosis,
@@ -173,6 +182,12 @@ pub fn all_network_ids() -> [NetworkId; NETWORK_COUNT as usize] {
         NetworkId::Dogecoin,
         NetworkId::Zcash,
         NetworkId::Cctp,
+        NetworkId::Filecoin,
+        NetworkId::Cronos,
+        NetworkId::Hyperliquid,
+        NetworkId::Bittensor,
+        NetworkId::Bitcoin,
+        NetworkId::Gnosis,
     ]
 }
 
@@ -182,8 +197,9 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn every_id_from_zero_to_thirty_eight_decodes() {
-        for raw in 0..NETWORK_COUNT {
+    fn every_id_from_one_to_the_count_decodes() {
+        assert!(NetworkId::try_from(0).is_err());
+        for raw in 1..=NETWORK_COUNT {
             assert!(
                 NetworkId::try_from(raw).is_ok(),
                 "id {} did not decode",
@@ -195,15 +211,15 @@ mod tests {
     #[test]
     fn the_full_id_range_is_contiguous_and_unique() {
         let ids: BTreeSet<u32> = all_network_ids().iter().map(|id| u32::from(*id)).collect();
-        let expected: BTreeSet<u32> = (0..NETWORK_COUNT).collect();
+        let expected: BTreeSet<u32> = (1..=NETWORK_COUNT).collect();
         assert_eq!(ids, expected);
     }
 
     #[test]
     fn an_id_past_the_range_is_rejected() {
         assert_eq!(
-            NetworkId::try_from(NETWORK_COUNT),
-            Err(UnknownNetworkId(NETWORK_COUNT))
+            NetworkId::try_from(NETWORK_COUNT + 1),
+            Err(UnknownNetworkId(NETWORK_COUNT + 1))
         );
         assert_eq!(
             NetworkId::try_from(u32::MAX),
