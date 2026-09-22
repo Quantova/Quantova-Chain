@@ -88,6 +88,27 @@ const FINALIZED_RETAINED: usize = 512;
 const STATE_COMPACT_CHECK_BLOCKS: u64 = 1000;
 
 const MAX_FUTURE_PROPOSALS: usize = 256;
+// Transactions waiting to be passed to peers. A driver that never drains it must not turn
+// every admitted transaction into memory held until the process dies; past the bound a
+// transaction still sits in the mempool, it is only not forwarded.
+const MAX_OUTBOX: usize = 4096;
+// How far ahead of this node's clock a proposal's time may sit. Wide enough for honest
+// skew between validators, narrow enough that a leader stamping a block in the future
+// cannot hold every honest proposal below its parent's time for minutes on end.
+const MAX_BLOCK_TIME_AHEAD_SECS: u64 = 15;
+// A block body no receiver will refuse. Peers rebuild a proposal from shards and refuse
+// one whose coded form is past MAX_CODED_BYTES; a leader filling its block from a deep
+// mempool would otherwise build a proposal nobody can reassemble, every view it leads.
+const MAX_BLOCK_BODY_BYTES: usize = 6 * 1024 * 1024;
+// A sync reply's block bytes, kept under the channel's message limit with room for the
+// framing around them.
+const MAX_SERVE_BYTES: usize = 12 * 1024 * 1024;
+
+fn body_bytes(body: &[Wrapper]) -> usize {
+    body.iter()
+        .map(|wrapper| to_bytes(wrapper).len())
+        .fold(0usize, usize::saturating_add)
+}
 
 // What every parked proposal may hold in total, not per entry.
 const MAX_FUTURE_PROPOSAL_BYTES: usize = 16 * 1024 * 1024;
@@ -897,6 +918,13 @@ impl DevNode {
             .beacon
             .advance_from_reveals(self.consensus.slot_for(head), &reveals);
         self.height = head + 1;
+        // Resume from the view this node last signed at for this height, so a restart does
+        // not walk back through views it has already moved past.
+        if let Some((height, view)) = self.sign_guard.mark() {
+            if height == self.height {
+                self.view = view;
+            }
+        }
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();
         Ok(())
@@ -917,7 +945,7 @@ impl DevNode {
             &self.fee_params,
             hint.as_ref(),
         )?;
-        if admitted == Admitted::Fresh {
+        if admitted == Admitted::Fresh && self.outbox.len() < MAX_OUTBOX {
             self.outbox.push(transaction);
         }
         Ok(admitted)
@@ -935,7 +963,8 @@ impl DevNode {
         let admitted = self
             .mempool
             .admit_batch(batch, &self.ledger, &self.fee_params);
-        self.outbox.extend(admitted);
+        let room = MAX_OUTBOX.saturating_sub(self.outbox.len());
+        self.outbox.extend(admitted.into_iter().take(room));
     }
 
     pub fn take_outbox(&mut self) -> Vec<Wrapper> {
@@ -996,11 +1025,23 @@ impl DevNode {
             }
         }
         candidates.extend(self.mempool.candidates());
+        let mut room = MAX_BLOCK_BODY_BYTES;
+        candidates.retain(|wrapper| {
+            let size = to_bytes(wrapper).len();
+            if size > room {
+                room = 0;
+                return false;
+            }
+            room -= size;
+            true
+        });
         let mut ledger = self.ledger.clone();
         ledger.clear_block_events();
         ledger.set_round_proposer(&proposer);
         ledger.set_execution_height(height);
-        let block_time = qtv_node::node::wall_clock_seconds();
+        // Never below the parent, so a parent stamped ahead of this clock does not make this
+        // node's own proposal one that every peer must refuse.
+        let block_time = qtv_node::node::wall_clock_seconds().max(self.parent_time);
         let included = execute_ordered(&mut ledger, &candidates, &self.fee_params, block_time);
         let event_leaves: Vec<Vec<u8>> = ledger
             .block_events()
@@ -1137,8 +1178,10 @@ impl DevNode {
         if header.height() != self.height
             || *header.parent_hash() != self.parent_header_hash
             || header.beacon_seed() != self.beacon.seed()
-            || header.time() > qtv_node::node::wall_clock_seconds().saturating_add(120)
+            || header.time()
+                > qtv_node::node::wall_clock_seconds().saturating_add(MAX_BLOCK_TIME_AHEAD_SECS)
             || header.time() < self.parent_time
+            || body_bytes(body) > MAX_BLOCK_BODY_BYTES
         {
             return Err(RoundError::ProposalRejected);
         }
@@ -1182,7 +1225,12 @@ impl DevNode {
                 self.guarded_height = Some(self.height);
                 true
             }
-            Ok(false) | Err(_) => {
+            // The guard refused a signature at or below one already made. Not signing is
+            // the safe outcome; stopping the node would let any peer that replays an old
+            // view's polka shut it down.
+            Ok(false) => false,
+            // The mark could not be written, so a restart could sign twice. Stop.
+            Err(_) => {
                 self.fatal = Some(Fatal::DoubleSignRefused {
                     height: self.height,
                     view: self.view,
@@ -2393,14 +2441,21 @@ impl DevNode {
         let ceiling = serve_ceiling(from, to);
         let mut blocks = Vec::new();
         let mut height = from;
+        let mut served = 0usize;
         while height <= ceiling {
             let Some(bytes) = self.block_store.block_by_height(height) else {
                 break;
             };
+            // Always at least one block, then stop before the reply outgrows what a channel
+            // carries. A reply that cannot be sent strands the node asking for it.
+            if !blocks.is_empty() && served.saturating_add(bytes.len()) > MAX_SERVE_BYTES {
+                break;
+            }
             match crate::wire::chain_block_from_bytes(&bytes) {
                 Ok(block) => blocks.push(block),
                 Err(_) => break,
             }
+            served = served.saturating_add(bytes.len());
             height += 1;
         }
         blocks
@@ -2873,6 +2928,62 @@ mod registration_window_tests {
             node.next_roots.get(&note.id),
             Some(&note.root),
             "the same note inside the window is recorded"
+        );
+    }
+
+    #[test]
+    fn a_parent_stamped_ahead_does_not_put_this_nodes_own_proposal_behind_it() {
+        let mut node = node();
+        node.parent_time = qtv_node::node::wall_clock_seconds() + 10;
+        let selection = node.select().expect("a committee of its own reveal");
+        let proposal = node.build_proposal(&selection);
+        assert!(
+            proposal.header.time() >= node.parent_time,
+            "built below its parent, every peer would refuse the proposal"
+        );
+    }
+
+    #[test]
+    fn a_proposal_stamped_far_ahead_of_this_clock_is_refused() {
+        let mut node = node();
+        let selection = node.select().expect("a committee of its own reveal");
+        let proposal = node.build_proposal(&selection);
+        let built = &proposal.header;
+        let ahead = Header::new(
+            built.height(),
+            *built.parent_hash(),
+            *built.q_root(),
+            *built.transaction_root(),
+            *built.event_root(),
+            *built.beacon_seed(),
+            built.proposer().to_string(),
+            qtv_node::node::wall_clock_seconds() + 100,
+        );
+        assert!(node.stage_from(&ahead, &proposal.body, 0).is_err());
+        assert!(
+            node.stage_from(built, &proposal.body, 0).is_ok(),
+            "the same block at an honest time stages"
+        );
+    }
+
+    #[test]
+    fn a_replayed_lower_view_is_refused_without_stopping_the_node() {
+        let mut node = node();
+        assert!(
+            node.guard_height(3, &[7u8; 32]),
+            "the first signature at view three"
+        );
+        assert!(
+            !node.guard_height(0, &[9u8; 32]),
+            "a lower view is never signed after a higher one"
+        );
+        assert!(
+            node.fatal.is_none(),
+            "refusing is the safe outcome, so a peer replaying an old polka cannot stop it"
+        );
+        assert!(
+            node.guard_height(4, &[9u8; 32]),
+            "and it signs again at a later view"
         );
     }
 

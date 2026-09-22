@@ -474,8 +474,13 @@ fn genesis_accounts(node: &DevNode) -> Json {
     ])
 }
 
+// The bridge epoch rides with the head so the oracle's epoch caps roll when the chain's
+// do, rather than holding for the life of the process.
 fn finalized_head(node: &DevNode) -> Json {
-    object(vec![("head", Json::Int(node.finalized_head()))])
+    object(vec![
+        ("head", Json::Int(node.finalized_head())),
+        ("bridge_epoch", Json::Int(node.ledger().bridge_epoch())),
+    ])
 }
 
 fn burn_block(node: &DevNode, height: u64) -> Result<Json, ClientError> {

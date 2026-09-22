@@ -27,6 +27,8 @@ pub enum Error {
     Authentication,
     UnexpectedPeer,
     Record,
+    MessageTooLarge,
+    BadFragment,
 }
 
 impl fmt::Display for Error {
@@ -37,6 +39,8 @@ impl fmt::Display for Error {
             Error::Authentication => write!(f, "identity signature did not verify"),
             Error::UnexpectedPeer => write!(f, "authenticated peer did not match the pin"),
             Error::Record => write!(f, "record failed to open"),
+            Error::MessageTooLarge => write!(f, "message exceeds the channel limit"),
+            Error::BadFragment => write!(f, "malformed message fragment"),
         }
     }
 }

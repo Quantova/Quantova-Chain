@@ -8,7 +8,7 @@ use qtv_crypto::chacha20poly1305::{self, KEY_BYTES, NONCE_BYTES, TAG_BYTES};
 
 use crate::{Error, Result};
 
-const MAX_RECORD_PLAINTEXT: usize = 1 << 20;
+pub(crate) const MAX_RECORD_PLAINTEXT: usize = 1 << 20;
 
 const LENGTH_PREFIX: usize = 4;
 

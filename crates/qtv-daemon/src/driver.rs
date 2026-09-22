@@ -98,6 +98,9 @@ use crate::mesh::Mesh;
 use crate::util::{hex, log};
 
 const TICK: Duration = Duration::from_millis(20);
+// New transactions forwarded to peers per pass of the round loop. The rest stay in this
+// node's mempool and go into its own blocks.
+const MAX_GOSSIP_PER_TICK: usize = 256;
 
 const MAX_BUFFERED_FRAMES: usize = 8192;
 
@@ -401,6 +404,7 @@ impl Driver {
             }
             self.halt_if_fatal()?;
             self.serve_rpc();
+            self.gossip_outbox();
             if self.node.height() > start_height {
                 self.log_finalized();
                 return Ok(());
@@ -712,13 +716,32 @@ impl Driver {
         self.send_one(source as usize, &request);
     }
 
+    // Pass what this node admitted to its peers, so a transaction does not wait for the
+    // node it was sent to to lead. One hop: a peer admits it and does not forward it again.
+    fn gossip_outbox(&mut self) {
+        for transaction in self
+            .node
+            .take_outbox()
+            .into_iter()
+            .take(MAX_GOSSIP_PER_TICK)
+        {
+            let bytes = Message::Tx(transaction).encode();
+            self.broadcast(&bytes);
+        }
+    }
+
     fn broadcast(&mut self, bytes: &[u8]) {
         for q in 0..self.n {
             if q == self.idx {
                 continue;
             }
+            // A message too large to carry is this node's to drop, not a sign the link is
+            // dead. Tearing every link down for it would cut the node off from its peers.
             let failed = match self.send[q].as_mut() {
-                Some(channel) => channel.send(bytes).is_err(),
+                Some(channel) => match channel.send(bytes) {
+                    Ok(()) | Err(qtv_net::Error::MessageTooLarge) => false,
+                    Err(_) => true,
+                },
                 None => false,
             };
             if failed {
