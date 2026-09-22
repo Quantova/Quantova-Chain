@@ -64,7 +64,19 @@ fn run() -> Result<(), String> {
         .and_then(|v| v.parse::<u128>().ok())
         .unwrap_or(1_000);
 
-    let relay = Relay::new(gateway, seed, index, RELAY_METER, max_fee);
+    let chain = std::env::var("QTV_RELAY_CHAIN")
+        .map_err(|_| "set QTV_RELAY_CHAIN to the chain name the relay signs for".to_string())?;
+    let acknowledge_mainnet = std::env::var("QTV_RELAY_ACK_MAINNET").as_deref() == Ok("1");
+
+    let relay = Relay::new(
+        gateway,
+        chain,
+        acknowledge_mainnet,
+        seed,
+        index,
+        RELAY_METER,
+        max_fee,
+    )?;
     let (signed, outcome) = relay.submit(corridor, proof_bytes)?;
     println!("submitted {} outcome {outcome:?}", signed.tx_id);
     Ok(())

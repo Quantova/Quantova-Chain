@@ -240,6 +240,10 @@ fn encode_deposit(out: &mut Vec<u8>, deposit: &DepositProof) {
     for header in &deposit.ancestry {
         encode_header(out, header);
     }
+    put_u32(out, deposit.historical_branch.len());
+    for node in &deposit.historical_branch {
+        out.extend_from_slice(node);
+    }
 }
 
 fn decode_deposit(cursor: &mut Cursor) -> Option<DepositProof> {
@@ -265,11 +269,20 @@ fn decode_deposit(cursor: &mut Cursor) -> Option<DepositProof> {
     for _ in 0..links {
         ancestry.push(decode_header(cursor)?);
     }
+    let depth = cursor.u32()? as usize;
+    if depth > MAX_HISTORICAL_BRANCH {
+        return None;
+    }
+    let mut historical_branch = Vec::with_capacity(depth);
+    for _ in 0..depth {
+        historical_branch.push(cursor.take(32)?.try_into().ok()?);
+    }
     Some(DepositProof {
         receipt_index,
         log_index,
         receipt_proof,
         ancestry,
+        historical_branch,
     })
 }
 
@@ -363,6 +376,8 @@ impl EthMintProof {
 }
 
 pub const MAX_ETH_UPDATE_BYTES: usize = 1 << 18;
+
+const MAX_HISTORICAL_BRANCH: usize = 32;
 
 fn encode_committee_update(out: &mut Vec<u8>, update: &SyncCommitteeUpdate) {
     encode_header(out, &update.attested_header);
@@ -566,6 +581,7 @@ mod tests {
             },
             deposit: DepositProof {
                 ancestry: vec![dummy_header(0x31), dummy_header(0x32)],
+                historical_branch: vec![[0x61; 32], [0x62; 32]],
                 receipt_index: 3,
                 log_index: 0,
                 receipt_proof: vec![vec![0xa1, 0xa2], vec![], vec![0xb1; 40]],

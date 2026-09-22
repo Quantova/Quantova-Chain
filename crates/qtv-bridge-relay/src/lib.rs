@@ -2,8 +2,8 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use qcore::Client;
-use qcore::{sign_call, SignedTransfer, Submit};
+use qcore::{chain_id_from_name, sign_call, SignedTransfer, Submit, MAINNET_CHAIN_ID};
+use qcore::{Client, Network};
 use qtv_node::bridge_btc::BitcoinMintProof;
 use qtv_node::bridge_cosmos::CosmosMintProof;
 use qtv_node::bridge_eth::EthMintProof;
@@ -80,18 +80,34 @@ pub struct Relay {
 impl Relay {
     pub fn new(
         base_url: impl Into<String>,
+        chain: impl Into<String>,
+        acknowledge_mainnet: bool,
         seed: [u8; SEED_LEN],
         index: u64,
         meter_limit: u64,
         max_fee: u128,
-    ) -> Relay {
-        Relay {
-            client: Client::new(base_url),
+    ) -> Result<Relay, String> {
+        let base = base_url.into();
+        let chain = chain.into();
+        if chain.is_empty() {
+            return Err("the relay needs the chain name it signs for".to_string());
+        }
+        let is_mainnet = chain_id_from_name(&chain) == MAINNET_CHAIN_ID;
+        if is_mainnet && !acknowledge_mainnet {
+            return Err(format!(
+                "refusing to relay for the mainnet chain {chain} without acknowledging mainnet"
+            ));
+        }
+        let mut network = Network::for_url(base.clone());
+        network.chain_id = Some(chain);
+        network.is_mainnet = is_mainnet;
+        Ok(Relay {
+            client: Client::with_network(base, network, acknowledge_mainnet),
             seed,
             index,
             meter_limit,
             max_fee,
-        }
+        })
     }
 
     pub fn submit(
@@ -183,6 +199,41 @@ mod tests {
     #[test]
     fn a_cosmos_submission_is_a_well_formed_bridge_mint() {
         submission_targets(Corridor::Cosmos);
+    }
+
+    #[test]
+    fn a_relay_needs_a_chain_and_an_acknowledged_mainnet() {
+        assert!(Relay::new("http://127.0.0.1:1", "", false, seed(), 0, RELAY_METER, 1).is_err());
+        assert!(Relay::new(
+            "http://127.0.0.1:1",
+            qcore::MAINNET_CHAIN_NAME,
+            false,
+            seed(),
+            0,
+            RELAY_METER,
+            1
+        )
+        .is_err());
+        assert!(Relay::new(
+            "http://127.0.0.1:1",
+            qcore::MAINNET_CHAIN_NAME,
+            true,
+            seed(),
+            0,
+            RELAY_METER,
+            1
+        )
+        .is_ok());
+        assert!(Relay::new(
+            "http://127.0.0.1:1",
+            "Q-test-net-3",
+            false,
+            seed(),
+            0,
+            RELAY_METER,
+            1
+        )
+        .is_ok());
     }
 
     #[test]

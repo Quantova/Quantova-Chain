@@ -28,6 +28,19 @@ pub const NEXT_SYNC_COMMITTEE_DEPTH_ELECTRA: usize = 6;
 pub const CURRENT_SYNC_COMMITTEE_GINDEX_ELECTRA: u64 = 86;
 pub const CURRENT_SYNC_COMMITTEE_DEPTH_ELECTRA: usize = 6;
 
+pub const SLOTS_PER_HISTORICAL_ROOT: u64 = 8192;
+pub const BLOCK_ROOTS_FIELD: u64 = 5;
+const BLOCK_ROOTS_DEPTH: usize = 13;
+
+pub fn block_root_layout(electra: bool, slot: u64) -> (u64, usize) {
+    let state_depth = if electra { 6 } else { 5 };
+    let field = (1u64 << state_depth) + BLOCK_ROOTS_FIELD;
+    (
+        field * SLOTS_PER_HISTORICAL_ROOT + slot % SLOTS_PER_HISTORICAL_ROOT,
+        state_depth + BLOCK_ROOTS_DEPTH,
+    )
+}
+
 pub fn finalized_root_layout(electra: bool) -> (u64, usize) {
     if electra {
         (FINALIZED_ROOT_GINDEX_ELECTRA, FINALIZED_ROOT_DEPTH_ELECTRA)
@@ -313,6 +326,12 @@ mod tests {
             CURRENT_SYNC_COMMITTEE_DEPTH_ELECTRA,
             CURRENT_SYNC_COMMITTEE_DEPTH + 1
         );
+    }
+
+    #[test]
+    fn a_block_root_sits_in_the_state_block_roots_vector() {
+        assert_eq!(block_root_layout(true, 0), (69 * 8192, 19));
+        assert_eq!(block_root_layout(false, 8197), (37 * 8192 + 5, 18));
     }
 
     #[test]

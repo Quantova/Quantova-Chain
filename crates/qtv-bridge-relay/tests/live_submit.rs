@@ -85,8 +85,6 @@ fn spawn_gateway(captured: Arc<Mutex<Option<String>>>) -> u16 {
                      \"head_height\":10,\"denomination\":\"Quon\",\
                      \"fee\":{\"transfer_quon\":\"100\"},\"version\":\"test\"}"
                     .to_string(),
-                // Answer for the account that was asked about. A real gateway echoes the
-                // address back, and the client refuses an answer that names another account.
                 "/v1/get_account" => {
                     let address = extract_address(&request).unwrap_or_default();
                     format!(
@@ -121,7 +119,16 @@ fn the_relay_submits_a_bitcoin_mint_over_the_gateway_wire_targeting_the_mint_add
     let port = spawn_gateway(captured.clone());
     let base = format!("http://127.0.0.1:{port}");
 
-    let relay = Relay::new(base, [0x2a; 32], 0, RELAY_METER, 1_000);
+    let relay = Relay::new(
+        base,
+        "Q-test-net-1",
+        false,
+        [0x2a; 32],
+        0,
+        RELAY_METER,
+        1_000,
+    )
+    .expect("a testnet relay opens");
     let proof = vec![0xde, 0xad, 0xbe, 0xef];
     let (signed, outcome) = relay
         .submit(Corridor::Bitcoin, proof.clone())
@@ -155,4 +162,33 @@ fn the_relay_submits_a_bitcoin_mint_over_the_gateway_wire_targeting_the_mint_add
         "the relay used the gateway reported nonce"
     );
     assert_eq!(signed.from, qcore::account_address(&[0x2a; 32], 0));
+}
+
+#[test]
+fn the_relay_refuses_a_gateway_that_reports_another_chain() {
+    let captured = Arc::new(Mutex::new(None));
+    let port = spawn_gateway(captured.clone());
+    let base = format!("http://127.0.0.1:{port}");
+
+    let relay = Relay::new(
+        base,
+        "Q-test-net-3",
+        false,
+        [0x2a; 32],
+        0,
+        RELAY_METER,
+        1_000,
+    )
+    .expect("a testnet relay opens");
+    let refused = relay
+        .submit(Corridor::Bitcoin, vec![0xde, 0xad])
+        .expect_err("a relay opened for one chain never signs for another");
+    assert!(
+        refused.contains("configured for Q-test-net-3"),
+        "the refusal names the configured chain: {refused}"
+    );
+    assert!(
+        captured.lock().unwrap().is_none(),
+        "nothing reached the gateway submit endpoint"
+    );
 }

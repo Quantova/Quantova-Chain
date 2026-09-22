@@ -83,6 +83,7 @@ pub struct DepositProof {
     pub log_index: u32,
     pub receipt_proof: Vec<Vec<u8>>,
     pub ancestry: Vec<BeaconBlockHeader>,
+    pub historical_branch: Vec<[u8; 32]>,
 }
 
 pub const MAX_DEPOSIT_ANCESTRY: usize = 64;
@@ -328,6 +329,34 @@ fn verify_ancestry<'a>(
     Ok(child)
 }
 
+fn verify_historical<'a>(
+    store: &LightClientStore,
+    finalized: &BeaconBlockHeader,
+    ancestry: &'a [BeaconBlockHeader],
+    branch: &[[u8; 32]],
+) -> Result<&'a BeaconBlockHeader, EthError> {
+    let [block] = ancestry else {
+        return Err(EthError::BadAncestry);
+    };
+    if block.slot >= finalized.slot
+        || finalized.slot - block.slot > crate::beacon::SLOTS_PER_HISTORICAL_ROOT
+    {
+        return Err(EthError::BadAncestry);
+    }
+    let electra = store.config.is_electra_at_slot(finalized.slot);
+    let (index, depth) = crate::beacon::block_root_layout(electra, block.slot);
+    if !ssz::is_valid_merkle_branch(
+        &block.hash_tree_root(),
+        branch,
+        depth,
+        index,
+        &finalized.state_root,
+    ) {
+        return Err(EthError::BadAncestry);
+    }
+    Ok(block)
+}
+
 fn verify_execution(
     execution: &ExecutionCommit,
     block: &BeaconBlockHeader,
@@ -374,7 +403,16 @@ fn verify_deposit_core(
     // layout the state may not have yet and rejects honest proofs across a fork boundary.
     let electra = store.config.is_electra_at_slot(update.attested_header.slot);
     verify_finality(update, electra)?;
-    let block = verify_ancestry(&update.finalized_header, &deposit.ancestry)?;
+    let block = if deposit.historical_branch.is_empty() {
+        verify_ancestry(&update.finalized_header, &deposit.ancestry)?
+    } else {
+        verify_historical(
+            store,
+            &update.finalized_header,
+            &deposit.ancestry,
+            &deposit.historical_branch,
+        )?
+    };
     verify_execution(&update.execution, block)?;
 
     let key = rlp::encode_uint(deposit.receipt_index);
@@ -767,6 +805,7 @@ mod tests {
 
         let deposit = DepositProof {
             ancestry: Vec::new(),
+            historical_branch: Vec::new(),
             receipt_index: 3,
             log_index: 0,
             receipt_proof,
@@ -1078,6 +1117,51 @@ mod tests {
             },
             signature_slot: SIG_SLOT,
         }
+    }
+
+    #[test]
+    fn a_deposit_block_is_proven_through_the_finalized_state_block_roots() {
+        let (current, _) = committee(0x21);
+        let store = committee_store(current);
+        let block = BeaconBlockHeader {
+            slot: 1_000,
+            proposer_index: 7,
+            parent_root: [0x11; 32],
+            state_root: [0x12; 32],
+            body_root: [0x13; 32],
+        };
+        let finalized_slot = 1_000 + 5_000;
+        let electra = store.config.is_electra_at_slot(finalized_slot);
+        let (index, depth) = crate::beacon::block_root_layout(electra, block.slot);
+        let branch: Vec<[u8; 32]> = (0..depth as u8).map(|i| [i; 32]).collect();
+        let mut root = block.hash_tree_root();
+        for (i, sibling) in branch.iter().enumerate() {
+            root = if (index >> i) & 1 == 1 {
+                ssz::hash_pair(sibling, &root)
+            } else {
+                ssz::hash_pair(&root, sibling)
+            };
+        }
+        let finalized = BeaconBlockHeader {
+            slot: finalized_slot,
+            proposer_index: 8,
+            parent_root: [0x21; 32],
+            state_root: root,
+            body_root: [0x23; 32],
+        };
+        let ancestry = vec![block];
+        assert_eq!(
+            verify_historical(&store, &finalized, &ancestry, &branch).map(|b| b.slot),
+            Ok(1_000)
+        );
+        let mut shifted = block;
+        shifted.slot += 1;
+        assert!(verify_historical(&store, &finalized, &[shifted], &branch).is_err());
+        let far = BeaconBlockHeader {
+            slot: 1_000 + 8_193,
+            ..finalized
+        };
+        assert!(verify_historical(&store, &far, &ancestry, &branch).is_err());
     }
 
     fn committee_store(current: SyncCommittee) -> LightClientStore {
