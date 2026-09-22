@@ -54,6 +54,7 @@ pub fn build_submission(
     meter_limit: u64,
     fee: u128,
     chain_id: u64,
+    valid_until: u64,
 ) -> Result<SignedTransfer, String> {
     sign_call(
         seed,
@@ -64,6 +65,7 @@ pub fn build_submission(
         meter_limit,
         fee,
         chain_id,
+        valid_until,
     )
 }
 
@@ -148,6 +150,7 @@ mod tests {
             RELAY_METER,
             500,
             42,
+            900,
         )
         .expect("a corridor submission signs");
         let wrapper = wrapper_from_bytes(&signed.tx_bytes)
@@ -164,6 +167,7 @@ mod tests {
         );
         assert_eq!(wrapper.body().nonce(), 7);
         assert_eq!(wrapper.body().chain_id(), 42);
+        assert_eq!(wrapper.body().valid_until_height(), 900);
     }
 
     #[test]
