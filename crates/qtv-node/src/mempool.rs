@@ -179,6 +179,13 @@ fn plan_from_account_checks(
     })
 }
 
+fn sender_barred(ledger: &Ledger, wrapper: &Wrapper) -> bool {
+    let sender = wrapper.body().sender();
+    ledger.is_blacklisted(sender)
+        || (ledger.is_frozen(sender)
+            && wrapper.body().call().target() != crate::ledger::gov_system_address())
+}
+
 fn sender_prevalidated(wrapper: &Wrapper, account: &Account, fee_params: &FeeParams) -> bool {
     let body = wrapper.body();
     if body.nonce() != account.nonce {
@@ -659,6 +666,9 @@ impl Mempool {
         if !canonical_address(wrapper.body().sender()) {
             return Err(Reject::UnknownSender);
         }
+        if sender_barred(ledger, &wrapper) {
+            return Err(Reject::BadCall);
+        }
         if crate::node::is_bridge_mint(&wrapper) {
             if self.duplicate_mint(&wrapper) && self.held_mint_survives(&wrapper, ledger) {
                 return Ok(Admitted::Known);
@@ -883,7 +893,7 @@ impl Mempool {
             if self.ids.contains(&id) {
                 continue;
             }
-            if !canonical_address(wrapper.body().sender()) {
+            if !canonical_address(wrapper.body().sender()) || sender_barred(ledger, &wrapper) {
                 continue;
             }
             if crate::node::is_bridge_mint(&wrapper) {
@@ -1050,7 +1060,7 @@ impl Mempool {
             let sender = wrapper.body().sender();
             let account = ledger.account(sender);
             let stale = wrapper.body().nonce() < account.nonce;
-            let barred = ledger.is_blacklisted(sender) || ledger.is_frozen(sender);
+            let barred = sender_barred(ledger, &wrapper);
             let valid_until = wrapper.body().valid_until_height();
             let expired = valid_until != 0 && height > valid_until;
             let refused = is_plain_transfer(ledger, &wrapper)
@@ -1166,6 +1176,67 @@ mod tests {
         let call = transfer_call(to, amount);
         let body = Body::new(from.address(), nonce, TRANSFER_METER, fee, call);
         sign(from, &body)
+    }
+
+    #[test]
+    fn a_frozen_sender_is_refused_at_admission_but_keeps_its_governance_lane() {
+        let params = FeeParams::devnet();
+        let ceiling = u128::from(params.ceiling_fee());
+        let mut ledger = Ledger::new();
+        let mut pool = Mempool::with_limits(8, 100, 0);
+
+        let alice = keypair(1);
+        fund(&mut ledger, &alice, 1_000_000_000);
+        let alice_id: [u8; 32] = qtv_idfmt::parse_address(&alice.address())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        ledger.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![[201u8; 32], [202u8; 32], [203u8; 32]],
+            2,
+        ));
+        assert!(ledger.guardian_freeze(0, &[alice_id], &[[201u8; 32], [202u8; 32]], 0));
+        assert!(ledger.is_frozen(&alice.address()));
+
+        let transfer = signed_transfer(&alice, &keypair(9).address(), 100, 0, ceiling);
+        assert_eq!(
+            pool.admit(transfer.clone(), &ledger, &params, None),
+            Err(Reject::BadCall),
+            "execution skips a frozen sender, so admission refuses it"
+        );
+        assert!(pool
+            .admit_batch(vec![transfer], &ledger, &params)
+            .is_empty());
+
+        let mut qtov = params;
+        qtov.native_asset = crate::fee::QTOV_ASSET_TAG;
+        let bob = keypair(2);
+        fund(&mut ledger, &bob, 1_000_000_000);
+        let call = qtv_tx::Call::new(crate::ledger::gov_system_address(), vec![5u8]);
+        let body = Body::with_context(
+            bob.address(),
+            0,
+            TRANSFER_METER,
+            ceiling,
+            call,
+            0,
+            qtov.chain_id,
+        );
+        assert!(matches!(
+            pool.admit(sign(&bob, &body), &ledger, &qtov, None),
+            Ok(Admitted::Fresh)
+        ));
+        let bob_id: [u8; 32] = qtv_idfmt::parse_address(&bob.address())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert!(ledger.guardian_freeze(1, &[bob_id], &[[201u8; 32], [202u8; 32]], 0));
+        pool.revalidate(&ledger);
+        assert_eq!(
+            pool.pending_len(),
+            1,
+            "execution lets a frozen sender reach governance, so revalidation keeps it"
+        );
     }
 
     #[test]

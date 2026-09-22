@@ -127,6 +127,25 @@ const MAX_LINK_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 
 const MAX_LINK_QUEUE_FRAMES: usize = 4096;
 
+const SOLICIT_WINDOW: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+struct Solicited {
+    asked: std::collections::HashMap<u64, Instant>,
+}
+
+impl Solicited {
+    fn ask(&mut self, source: u64) {
+        self.asked.insert(source, Instant::now());
+    }
+
+    fn answered(&mut self, source: u64) -> bool {
+        self.asked
+            .remove(&source)
+            .is_some_and(|at| at.elapsed() <= SOLICIT_WINDOW)
+    }
+}
+
 struct Link {
     queue: SyncSender<Arc<Vec<u8>>>,
     queued: Arc<std::sync::atomic::AtomicUsize>,
@@ -247,6 +266,7 @@ pub struct Driver {
     buffered: FrameBuffer,
     ahead: std::collections::BTreeSet<u64>,
     catch_up_turn: usize,
+    solicited: Solicited,
     relayed: std::collections::HashSet<(u64, [u8; 32], usize)>,
     budget: u64,
     rpc_context: Option<NodeContext>,
@@ -291,6 +311,7 @@ impl Driver {
             buffered: FrameBuffer::default(),
             ahead: std::collections::BTreeSet::new(),
             catch_up_turn: 0,
+            solicited: Solicited::default(),
             relayed: std::collections::HashSet::new(),
             budget: u64::MAX,
             rpc_context: None,
@@ -798,6 +819,9 @@ impl Driver {
                 }
             }
             Message::Blocks(blocks) => {
+                if !self.solicited.answered(source) {
+                    return;
+                }
                 for block in blocks {
                     if self.node.apply_synced_block(block).is_err() {
                         break;
@@ -910,6 +934,7 @@ impl Driver {
             to: from + CATCH_UP_SPAN,
         }
         .encode();
+        self.solicited.ask(source);
         self.send_one(source as usize, &request);
     }
 
@@ -969,7 +994,7 @@ fn message_height(message: &Message) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        message_height, queue_verify, FrameBuffer, VerifyJob, MAX_BUFFERED_BYTES,
+        message_height, queue_verify, FrameBuffer, Solicited, VerifyJob, MAX_BUFFERED_BYTES,
         MAX_BUFFERED_FRAMES,
     };
     use qtv_devnet::wire::Message;
@@ -1004,6 +1029,19 @@ mod tests {
 
     // A node that has fallen behind only ever sees sync traffic if it is exempt from the
     // height gate. Gating it would park the reply for a height the node cannot reach.
+    #[test]
+    fn only_a_peer_asked_for_blocks_is_heard_and_only_once() {
+        let mut solicited = Solicited::default();
+        assert!(!solicited.answered(3), "an unsolicited reply is refused");
+        solicited.ask(3);
+        assert!(
+            !solicited.answered(4),
+            "a reply from a peer never asked is refused"
+        );
+        assert!(solicited.answered(3), "the asked peer is heard");
+        assert!(!solicited.answered(3), "one request earns one reply");
+    }
+
     #[test]
     fn sync_messages_are_never_height_gated() {
         assert_eq!(

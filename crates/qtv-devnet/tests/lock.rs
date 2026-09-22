@@ -304,3 +304,64 @@ fn a_view_change_whose_locked_body_misses_its_header_is_not_collected() {
     nodes[observer].collect_view_change(&selection, genuine);
     assert_eq!(nodes[observer].view_changes_len(), before + 1);
 }
+
+#[test]
+fn a_restarted_locked_validator_refuses_an_unjustified_conflict_at_a_later_view() {
+    let base = unique_base("lock_restart_conflict");
+    let alice = user(0);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let config = config(&base, &[true, true, true, true, true, true, true], accounts);
+    let mut nodes = open_nodes(&config);
+
+    let selection = nodes[0].select().expect("committee");
+    let l0 = leader_for(&selection, 0);
+    let l0_idx = index_of(&config, l0);
+    let l1 = leader_for(&selection, 1);
+    let l1_idx = index_of(&config, l1);
+    let victim = (0..nodes.len())
+        .find(|&i| i != l0_idx && i != l1_idx)
+        .expect("a member leading neither view");
+
+    let proposal_a = nodes[l0_idx].build_proposal(&selection);
+    let value_a = header_value(&proposal_a.header.hash());
+    lock_victim_on_proposal(&mut nodes, &selection, l0, victim, &proposal_a);
+
+    let notes: Vec<_> = nodes
+        .iter()
+        .filter_map(|node| node.own_reveal_note())
+        .collect();
+    nodes[victim] = DevNode::open(&config.nodes[victim], &config).expect("reopen");
+    for note in &notes {
+        nodes[victim].collect_reveal(note.clone());
+    }
+    assert_eq!(
+        nodes[victim].staged_value(),
+        Some(value_a),
+        "the restart restores the stage behind the lock"
+    );
+    let view = nodes[victim].view();
+    assert!(
+        !nodes[victim].on_timeout(view),
+        "a locked stage holds its view across a restart"
+    );
+    nodes[victim].jump_to(1);
+
+    let mut rival_config = config.nodes[l1_idx].clone();
+    rival_config.store_dir = unique_base("lock_restart_conflict_rival");
+    let mut rival = DevNode::open(&rival_config, &config).expect("the view one leader opens");
+    for note in &notes {
+        rival.collect_reveal(note.clone());
+    }
+    assert!(rival.on_timeout(0), "the unstaged leader moves to view one");
+    let proposal_b = rival.build_proposal(&selection);
+    assert_eq!(proposal_b.view, 1);
+    assert!(proposal_b.justification.is_empty());
+    assert_ne!(header_value(&proposal_b.header.hash()), value_a);
+
+    let out = nodes[victim].on_proposal(&selection, l1, proposal_b);
+    assert!(
+        prevote_of(out).is_none(),
+        "a restarted validator locked on A never prevotes an unjustified B at a later view"
+    );
+    assert_eq!(nodes[victim].staged_value(), Some(value_a));
+}

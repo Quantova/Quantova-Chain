@@ -531,6 +531,7 @@ impl DevNode {
         if header_value(&block.header.hash()) != value {
             return Err(RoundError::Decode);
         }
+        let _ = self.stage_from(&block.header, &block.body, view);
         self.lock = Some(Lock {
             view,
             value,
@@ -1303,6 +1304,13 @@ impl DevNode {
         let header = &proposal.header;
         if proposal.view != self.view
             || *header.proposer() != self.validator_address(leader_for(selection, proposal.view))
+        {
+            return Err(RoundError::ProposalRejected);
+        }
+        if self
+            .lock
+            .as_ref()
+            .is_some_and(|lock| lock.value != header_value(&header.hash()))
         {
             return Err(RoundError::ProposalRejected);
         }
