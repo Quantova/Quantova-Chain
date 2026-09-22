@@ -302,6 +302,13 @@ fn enforce_no_capture(
     for v in validators {
         let attest_pk: &[u8] = &v.attest_pk;
         let p2p_public: &[u8] = &v.p2p_public;
+        if v.id < 1 || v.id > validators.len() as u64 {
+            return Err(format!(
+                "genesis validator id {} falls outside 1..={}, the ids must number the validators from one",
+                v.id,
+                validators.len()
+            ));
+        }
         if !ids.insert(v.id) {
             return Err(format!(
                 "genesis validator id {} appears on more than one line",
@@ -902,6 +909,27 @@ mod tests {
         assert!(parse_account(&field("account", unknown)).is_err());
         let short = format!("1 {} 500", crate::util::hex(&key.public_key()[..32]));
         assert!(parse_account(&field("account", short)).is_err());
+    }
+
+    #[test]
+    fn a_validator_id_outside_one_to_n_is_refused() {
+        let a = validator(1, 2_000);
+        let b = validator(5, 2_000);
+        let c = validator(3, 2_000);
+        let text = format!(
+            "chain_id = Q-test-net-9\ngenesis_time = 1\nfee_transfer_micro_usd = 500\n\
+             fee_rate_micro_usd_per_qtov = 1000000\nfee_native_unit = 1000000\n\
+             fee_max_native = 1000\nvalidator = {}\nvalidator = {}\nvalidator = {}\n",
+            validator_line(&a, &a.bond_address),
+            validator_line(&b, &b.bond_address),
+            validator_line(&c, &c.bond_address),
+        );
+        let path = std::env::temp_dir().join(format!("qtv-genesis-gap-{}.q", std::process::id()));
+        std::fs::write(&path, text).expect("write the fixture");
+        let result = GenesisFile::load(&path);
+        let _ = std::fs::remove_file(&path);
+        let err = result.err().expect("a gap in the validator ids is refused");
+        assert!(err.contains("falls outside"), "{err}");
     }
 
     #[test]
