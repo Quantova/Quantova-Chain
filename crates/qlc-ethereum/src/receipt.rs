@@ -43,6 +43,29 @@ pub fn extract_deposit(
     receipt_bytes: &[u8],
     deposit_contract: &[u8; 20],
 ) -> Result<RawDeposit, ReceiptError> {
+    let found = deposit_logs(receipt_bytes, deposit_contract)?;
+    match found.as_slice() {
+        [] => Err(ReceiptError::NoDeposit),
+        [only] => Ok(only.clone()),
+        _ => Err(ReceiptError::MultipleDeposits),
+    }
+}
+
+pub fn extract_deposit_at(
+    receipt_bytes: &[u8],
+    deposit_contract: &[u8; 20],
+    log_index: u32,
+) -> Result<RawDeposit, ReceiptError> {
+    deposit_logs(receipt_bytes, deposit_contract)?
+        .into_iter()
+        .find(|deposit| deposit.log_index == log_index)
+        .ok_or(ReceiptError::NoDeposit)
+}
+
+fn deposit_logs(
+    receipt_bytes: &[u8],
+    deposit_contract: &[u8; 20],
+) -> Result<Vec<RawDeposit>, ReceiptError> {
     let body = strip_type_prefix(receipt_bytes);
     let decoded = rlp::decode(body).map_err(|_| ReceiptError::Malformed)?;
     let fields = decoded.as_list().ok_or(ReceiptError::Malformed)?;
@@ -55,7 +78,7 @@ pub fn extract_deposit(
     let logs = fields[3].as_list().ok_or(ReceiptError::Malformed)?;
     let topic0 = deposit_topic();
 
-    let mut found: Option<RawDeposit> = None;
+    let mut found: Vec<RawDeposit> = Vec::new();
     for (index, log) in logs.iter().enumerate() {
         let parts = match log.as_list() {
             Some(p) if p.len() == 3 => p,
@@ -93,10 +116,7 @@ pub fn extract_deposit(
         recipient.copy_from_slice(recipient_bytes);
         let mut asset_id = [0u8; 16];
         asset_id.copy_from_slice(&data[32..48]);
-        if found.is_some() {
-            return Err(ReceiptError::MultipleDeposits);
-        }
-        found = Some(RawDeposit {
+        found.push(RawDeposit {
             recipient,
             amount,
             asset_id,
@@ -104,7 +124,7 @@ pub fn extract_deposit(
         });
     }
 
-    found.ok_or(ReceiptError::NoDeposit)
+    Ok(found)
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -196,6 +216,18 @@ mod tests {
             extract_deposit(&bytes, &contract()),
             Err(ReceiptError::MultipleDeposits),
             "a receipt must not silently drop a second deposit log"
+        );
+        assert_eq!(
+            extract_deposit_at(&bytes, &contract(), 0).unwrap().amount,
+            10
+        );
+        assert_eq!(
+            extract_deposit_at(&bytes, &contract(), 1).unwrap().amount,
+            20
+        );
+        assert_eq!(
+            extract_deposit_at(&bytes, &contract(), 2),
+            Err(ReceiptError::NoDeposit)
         );
     }
 

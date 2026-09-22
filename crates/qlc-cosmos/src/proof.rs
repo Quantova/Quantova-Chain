@@ -77,7 +77,7 @@ pub fn wrap_store_layer(mut iavl: ExistenceProof, store_name: &[u8]) -> ([u8; 32
         key: store_name.to_vec(),
         value: iavl_root.to_vec(),
         leaf: LeafOp {
-            prefix: vec![LEAF_MARKER, 0x02, 0x02],
+            prefix: vec![LEAF_MARKER],
         },
         path: Vec::new(),
         store: None,
@@ -166,6 +166,24 @@ fn canonical_ops(proof: &ExistenceProof) -> Result<(), ProofError> {
     Ok(())
 }
 
+const INNER_MARKER: u8 = 0x01;
+const STORE_CHILD_LEN: usize = 32;
+const MAX_STORE_PATH_LEN: usize = 32;
+
+fn canonical_store_ops(proof: &ExistenceProof) -> Result<(), ProofError> {
+    if proof.path.len() > MAX_STORE_PATH_LEN || proof.leaf.prefix != [LEAF_MARKER] {
+        return Err(ProofError::MalformedProofOp);
+    }
+    for op in &proof.path {
+        let left_sibling = op.prefix.len() == 1 + STORE_CHILD_LEN && op.suffix.is_empty();
+        let right_sibling = op.prefix.len() == 1 && op.suffix.len() == STORE_CHILD_LEN;
+        if op.prefix.first() != Some(&INNER_MARKER) || !(left_sibling || right_sibling) {
+            return Err(ProofError::MalformedProofOp);
+        }
+    }
+    Ok(())
+}
+
 const DEPOSIT_REF_DOMAIN: &[u8] = b"QUANTOVA/COSMOS/DEPOSIT-REF/v2";
 
 pub fn deposit_source_ref(store_name: &[u8], proof: &ExistenceProof) -> [u8; 32] {
@@ -197,7 +215,7 @@ pub fn extract_deposit(
         .store
         .as_deref()
         .ok_or(ProofError::MissingStoreProof)?;
-    canonical_ops(store)?;
+    canonical_store_ops(store)?;
     if store_name.is_empty() || store.key != store_name {
         return Err(ProofError::ForeignStore);
     }
@@ -314,6 +332,66 @@ mod tests {
         assert!(
             !canonical_leaf_prefix(&[0x00, 0x02, 0x02, 0x62]),
             "trailing bytes could lend the key a byte"
+        );
+    }
+
+    fn store_leaf(name: &[u8], root: &[u8; 32]) -> [u8; 32] {
+        LeafOp {
+            prefix: vec![LEAF_MARKER],
+        }
+        .apply(name, root)
+    }
+
+    fn inner(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+        let mut buf = vec![INNER_MARKER];
+        buf.extend_from_slice(left);
+        buf.extend_from_slice(right);
+        sha256(&buf)
+    }
+
+    #[test]
+    fn a_multistore_proof_shaped_like_the_sdk_extracts_the_deposit() {
+        let (mut iavl, expected) = sample_proof();
+        let iavl_root = iavl.calculate_root();
+        let acc = store_leaf(b"acc", &[0x0au8; 32]);
+        let bank = store_leaf(b"bank", &[0x0bu8; 32]);
+        let bridge = store_leaf(STORE_NAME, &iavl_root);
+        let left = inner(&acc, &bank);
+        let app_hash = inner(&left, &bridge);
+        let mut left_prefix = vec![INNER_MARKER];
+        left_prefix.extend_from_slice(&left);
+        iavl.store = Some(Box::new(ExistenceProof {
+            key: STORE_NAME.to_vec(),
+            value: iavl_root.to_vec(),
+            leaf: LeafOp {
+                prefix: vec![LEAF_MARKER],
+            },
+            path: vec![InnerOp {
+                prefix: left_prefix,
+                suffix: Vec::new(),
+            }],
+            store: None,
+        }));
+        assert_eq!(
+            extract_deposit(&app_hash, STORE_NAME, STORE_PREFIX, &iavl),
+            Ok(expected)
+        );
+
+        let mut stretched = iavl.clone();
+        if let Some(store) = stretched.store.as_mut() {
+            store.leaf.prefix = vec![LEAF_MARKER, 0x02, 0x02];
+        }
+        assert_eq!(
+            extract_deposit(&app_hash, STORE_NAME, STORE_PREFIX, &stretched),
+            Err(ProofError::MalformedProofOp)
+        );
+        let mut padded = iavl;
+        if let Some(store) = padded.store.as_mut() {
+            store.path[0].suffix = vec![0u8; 1];
+        }
+        assert_eq!(
+            extract_deposit(&app_hash, STORE_NAME, STORE_PREFIX, &padded),
+            Err(ProofError::MalformedProofOp)
         );
     }
 

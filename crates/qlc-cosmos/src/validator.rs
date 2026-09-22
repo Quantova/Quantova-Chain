@@ -35,7 +35,7 @@ impl ValidatorInfo {
     }
 }
 
-pub const MAX_VALIDATORS: usize = 1 << 13;
+pub const MAX_VALIDATORS: usize = 1 << 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatorSet {

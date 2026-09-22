@@ -118,6 +118,7 @@ pub enum CommitError {
     HeaderMismatch,
     NotEnoughVotingPower { signed: u128, total: u128 },
     SetTooLarge,
+    DuplicateSigner,
 }
 
 pub fn tally_signed_power(
@@ -146,8 +147,8 @@ pub fn tally_signed_power(
         if sig.flag != BlockIdFlag::Commit {
             continue;
         }
-        if counted.contains(&sig.validator_address) {
-            continue;
+        if !counted.insert(sig.validator_address) {
+            return Err(CommitError::DuplicateSigner);
         }
         let validator = match by_address.get(&sig.validator_address) {
             Some(v) => *v,
@@ -156,7 +157,6 @@ pub fn tally_signed_power(
         if sig.signature.len() != 64 {
             continue;
         }
-        counted.insert(sig.validator_address);
         let vote = CanonicalVote {
             vote_type: PRECOMMIT_TYPE,
             height: commit.height,

@@ -182,6 +182,10 @@ fn touch_holder(path: &Path) {
 
 impl StateStore {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        Self::open_with_floor(path, None)
+    }
+
+    pub fn open_with_floor(path: impl AsRef<Path>, floor: Option<u64>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         // Stream the log rather than materialising every frame first. Holding the
         // whole log in a Vec and then building the live set from it meant a log too
@@ -192,46 +196,41 @@ impl StateStore {
         let mut committed_height: Option<u64> = None;
         let mut pending: Vec<(Key, Option<Vec<u8>>)> = Vec::new();
         let mut committed_len: u64 = 0;
-        let mut total_len: u64 = 0;
         // Decided BEFORE the scan, because the scan itself truncates. Cutting the log
         // under a process that is appending to it leaves that process writing at a stale
         // offset, and every block it goes on to write is lost with no error anywhere.
         let contended = another_process_is_live(&path);
-        let visit = |frame: &[u8], _start: u64, end_offset: u64| {
-            total_len = end_offset;
-            match qtv_codec::from_bytes::<StateRecord>(frame) {
-                Ok(StateRecord::Entry { key, value }) => {
-                    pending.push((key, Some(value)));
-                    true
-                }
-                Ok(StateRecord::Delete { key }) => {
-                    pending.push((key, None));
-                    true
-                }
-                Ok(StateRecord::Commit { height, root }) => {
-                    for (key, value) in pending.drain(..) {
-                        match value {
-                            Some(value) => {
-                                entries.insert(key, value);
-                            }
-                            None => {
-                                entries.remove(&key);
-                            }
+        let visit = |frame: &[u8], _start: u64, end_offset: u64| match qtv_codec::from_bytes::<
+            StateRecord,
+        >(frame)
+        {
+            Ok(StateRecord::Entry { key, value }) => {
+                pending.push((key, Some(value)));
+                true
+            }
+            Ok(StateRecord::Delete { key }) => {
+                pending.push((key, None));
+                true
+            }
+            Ok(StateRecord::Commit { height, root }) => {
+                for (key, value) in pending.drain(..) {
+                    match value {
+                        Some(value) => {
+                            entries.insert(key, value);
+                        }
+                        None => {
+                            entries.remove(&key);
                         }
                     }
-                    head = Some(root);
-                    committed_height = Some(height);
-                    committed_len = end_offset;
-                    true
                 }
-                Err(_) => false,
+                head = Some(root);
+                committed_height = Some(height);
+                committed_len = end_offset;
+                true
             }
+            Err(_) => false,
         };
-        let log = if contended {
-            Log::open_scanned_keeping_tail(&path, visit)?
-        } else {
-            Log::open_scanned(&path, visit)?
-        };
+        let log = Log::open_scanned_keeping_tail(&path, visit)?;
         let mut store = StateStore {
             log,
             path,
@@ -243,10 +242,14 @@ impl StateStore {
         // renaming underneath it leaves its descriptor pointing at an unlinked inode
         // and every block it goes on to write is lost on the next restart, with no
         // error anywhere. Opening still succeeds: this only declines to REWRITE.
-        if committed_len < total_len && !contended {
+        let behind = floor.is_some_and(|floor| committed_height.is_none_or(|c| c < floor));
+        if contended || behind {
+            return Ok(store);
+        }
+        if committed_len.max(crate::log::HEADER_LEN) < store.log.len()? {
             store.log.truncate(committed_len)?;
         }
-        if !contended && store.should_compact(committed_len) {
+        if store.should_compact(committed_len) {
             // Compaction is an optimisation, never a correctness requirement. A store
             // that cannot be rewritten, for want of disk or a read only mount, still
             // holds every committed byte, so refusing to boot over it would turn a
@@ -651,6 +654,30 @@ mod tests {
         assert_eq!(store.head(), Some(root_two));
         assert_eq!(store.load_trie().root(), root_two);
         assert_eq!(store.account(&key(3)), None);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_state_log_below_the_floor_is_left_untouched_for_recovery() {
+        let path = temp_path("below-floor");
+        {
+            let mut store = StateStore::open(&path).unwrap();
+            for height in 1..=3u64 {
+                store
+                    .put_account(key(height as u8), account(0, height))
+                    .unwrap();
+                let root = store.load_trie().root();
+                store.commit(height, root).unwrap();
+            }
+        }
+        let mut bytes = std::fs::read(&path).unwrap();
+        let target = bytes.len() / 3;
+        bytes[target] ^= 0xFF;
+        std::fs::write(&path, &bytes).unwrap();
+        let store = StateStore::open_with_floor(&path, Some(3)).unwrap();
+        assert!(store.committed_height().is_none_or(|c| c < 3));
+        drop(store);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
         std::fs::remove_file(&path).ok();
     }
 

@@ -65,6 +65,7 @@ pub enum SpvError {
         index: usize,
     },
     CheckpointNotArmed,
+    DepositTooLarge,
     MalformedTransaction,
     TransactionMismatch,
     MerkleBranchTooLong,

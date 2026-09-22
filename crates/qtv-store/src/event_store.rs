@@ -85,6 +85,12 @@ impl EventStore {
         if events.is_empty() {
             return Ok(());
         }
+        if self.heights.last().is_some_and(|&last| height < last) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "events are appended in height order",
+            ));
+        }
         let record = EventRecord {
             height,
             events: events.to_vec(),
@@ -100,8 +106,11 @@ impl EventStore {
     }
 
     pub fn events_at(&self, height: u64) -> Option<Vec<Vec<u8>>> {
-        // Later record wins, so a reorg that appended a height twice still reads right.
-        let index = self.heights.iter().rposition(|&h| h == height)?;
+        let end = self.heights.partition_point(|&h| h <= height);
+        let index = end.checked_sub(1)?;
+        if self.heights[index] != height {
+            return None;
+        }
         let payload = self
             .log
             .read_payload(self.starts[index], self.lens[index])

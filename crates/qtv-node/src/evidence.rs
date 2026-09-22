@@ -213,6 +213,14 @@ impl EvidencePool {
         std::mem::take(&mut self.pending)
     }
 
+    pub fn pending(&self) -> &[Equivocation] {
+        &self.pending
+    }
+
+    pub fn retain<F: FnMut(&Equivocation) -> bool>(&mut self, keep: F) {
+        self.pending.retain(keep);
+    }
+
     pub fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }

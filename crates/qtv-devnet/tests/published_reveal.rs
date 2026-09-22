@@ -156,3 +156,33 @@ fn a_fresh_reveal_forwards_once_and_a_duplicate_or_forgery_does_not() {
         "a reveal that does not authenticate is refused, so it is never forwarded"
     );
 }
+
+#[test]
+fn a_reveal_arriving_after_the_committee_is_frozen_does_not_move_its_digest() {
+    let base = unique_base("frozen-committee");
+    let alice = user(0);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let cfg = config(&base, &[true, true, true, true], accounts);
+    let nodes = open_nodes(&cfg);
+    let notes: Vec<RevealNote> = nodes
+        .iter()
+        .map(|node| {
+            node.own_reveal_note()
+                .expect("a selected validator publishes")
+        })
+        .collect();
+
+    let mut node1 = open_nodes(&cfg).into_iter().next().expect("node one");
+    for note in notes.iter().filter(|n| n.id != 4) {
+        node1.collect_reveal(note.clone());
+    }
+    let frozen = node1.freeze_committee().expect("committee");
+    let late = notes.iter().find(|n| n.id == 4).unwrap().clone();
+    assert!(
+        !node1.collect_reveal(late),
+        "a late reveal is not collected"
+    );
+    let after = node1.select().expect("committee");
+    assert_eq!(after.commitment.digest(), frozen.commitment.digest());
+    assert_eq!(after.members, frozen.members);
+}

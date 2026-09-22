@@ -25,71 +25,102 @@ fn split_record(buf: &[u8; RECORD]) -> ([u8; 32], u64) {
     (id, height)
 }
 
-/// Which height finalized a transaction, answered from disk.
-///
-/// The index used to be a `HashMap<String, Height>` held entirely in memory and rebuilt
-/// on every start by decoding every block from genesis. That cost hundreds of megabytes
-/// on a busy chain and made a restart proportional to the whole history. Records live in
-/// a sorted run that is binary searched by seeking, plus a short unsorted tail that is
-/// merged in once it grows, so memory is constant and a start reads nothing.
 #[derive(Debug)]
 pub struct TxIndex {
-    sorted_path: PathBuf,
+    dir: PathBuf,
     tail_path: PathBuf,
-    sorted: File,
+    runs: Vec<Run>,
+    next_seq: u64,
     tail: File,
     sorted_len: usize,
     tail_len: usize,
-    /// The tail, mirrored in memory. It is bounded by TAIL_MERGE_AT, so this is at most
-    /// a few hundred kilobytes, and it keeps a lookup off the syscall path entirely.
-    /// `get_transaction` is a public RPC method, so a per record seek would let any
-    /// caller force thousands of syscalls per request on the node's own thread.
     tail_mem: Vec<([u8; 32], u64)>,
+}
+
+#[derive(Debug)]
+struct Run {
+    path: PathBuf,
+    file: File,
+    len: usize,
+}
+
+const RUN_PREFIX: &str = "txindex.run.";
+const RUN_FANOUT: usize = 4;
+
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    File::open(dir)?.sync_all()
+}
+
+fn open_run(path: PathBuf) -> io::Result<Run> {
+    let file = OpenOptions::new().read(true).open(&path)?;
+    let len = file.metadata()?.len() as usize / RECORD;
+    Ok(Run { path, file, len })
+}
+
+fn next_record(reader: &mut std::io::BufReader<File>) -> Option<([u8; 32], u64)> {
+    let mut buf = [0u8; RECORD];
+    reader.read_exact(&mut buf).ok()?;
+    Some(split_record(&buf))
 }
 
 impl TxIndex {
     pub fn open(dir: impl AsRef<Path>) -> io::Result<Self> {
-        let dir = dir.as_ref();
-        std::fs::create_dir_all(dir)?;
-        let sorted_path = dir.join("txindex.sorted");
+        let dir = dir.as_ref().to_path_buf();
+        std::fs::create_dir_all(&dir)?;
         let tail_path = dir.join("txindex.tail");
-        let sorted = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&sorted_path)?;
+        let mut found: Vec<(u64, PathBuf)> = Vec::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.ends_with(".rebuilding") {
+                std::fs::remove_file(&path)?;
+                continue;
+            }
+            if let Some(seq) = name.strip_prefix(RUN_PREFIX) {
+                if let Ok(seq) = seq.parse::<u64>() {
+                    found.push((seq, path));
+                }
+            }
+        }
+        found.sort_by_key(|(seq, _)| *seq);
+        let next_seq = found.last().map_or(0, |(seq, _)| seq + 1);
+        let mut runs = Vec::with_capacity(found.len());
+        for (_, path) in found {
+            runs.push(open_run(path)?);
+        }
+        let sorted_len = runs.iter().map(|run| run.len).sum();
         let tail = OpenOptions::new()
             .read(true)
             .append(true)
             .create(true)
             .open(&tail_path)?;
-        // A torn write leaves a partial record; ignore the remainder rather than
-        // reading half an id as a whole one.
-        let sorted_len = sorted.metadata()?.len() as usize / RECORD;
         let tail_bytes = tail.metadata()?.len() as usize;
         let tail_len = tail_bytes / RECORD;
         if tail_bytes % RECORD != 0 {
-            // Physically drop the torn partial record. Without this the next append
-            // lands after the partial bytes and every later record misaligns, baking
-            // garbage into the sorted index at the next merge.
             tail.set_len((tail_len * RECORD) as u64)?;
         }
         let mut tail_mem = Vec::with_capacity(tail_len);
         {
             let mut r = std::io::BufReader::new(File::open(&tail_path)?);
-            let mut b = [0u8; RECORD];
             for _ in 0..tail_len {
-                if r.read_exact(&mut b).is_err() {
-                    break;
+                match next_record(&mut r) {
+                    Some(record) => tail_mem.push(record),
+                    None => break,
                 }
-                tail_mem.push(split_record(&b));
             }
         }
         Ok(TxIndex {
-            sorted_path,
+            dir,
             tail_path,
-            sorted,
+            runs,
+            next_seq,
             tail,
             sorted_len,
             tail_len,
@@ -108,15 +139,18 @@ impl TxIndex {
     }
 
     pub fn get(&self, id: &[u8; 32]) -> io::Result<Option<u64>> {
-        // The tail is newest, so it wins over an older sorted entry for the same id.
         if let Some(height) = self.scan_tail(id)? {
             return Ok(Some(height));
         }
-        self.search_sorted(id)
+        for run in self.runs.iter().rev() {
+            if let Some(height) = search_run(run, id)? {
+                return Ok(Some(height));
+            }
+        }
+        Ok(None)
     }
 
     fn scan_tail(&self, id: &[u8; 32]) -> io::Result<Option<u64>> {
-        // Last match wins, so a rewrite in the same tail reads back as the later height.
         Ok(self
             .tail_mem
             .iter()
@@ -125,49 +159,33 @@ impl TxIndex {
             .map(|(_, height)| *height))
     }
 
-    fn search_sorted(&self, id: &[u8; 32]) -> io::Result<Option<u64>> {
-        let mut lo = 0usize;
-        let mut hi = self.sorted_len;
-        let mut file = &self.sorted;
-        let mut buf = [0u8; RECORD];
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            file.seek(SeekFrom::Start((mid * RECORD) as u64))?;
-            file.read_exact(&mut buf)?;
-            let (got, height) = split_record(&buf);
-            match got.cmp(id) {
-                std::cmp::Ordering::Less => lo = mid + 1,
-                std::cmp::Ordering::Greater => hi = mid,
-                std::cmp::Ordering::Equal => return Ok(Some(height)),
+    fn write_run<I>(&mut self, records: I) -> io::Result<Run>
+    where
+        I: Iterator<Item = ([u8; 32], u64)>,
+    {
+        let path = self.dir.join(format!("{RUN_PREFIX}{:020}", self.next_seq));
+        self.next_seq += 1;
+        let tmp = path.with_extension("rebuilding");
+        {
+            let mut out = std::io::BufWriter::new(File::create(&tmp)?);
+            for (id, height) in records {
+                out.write_all(&record_bytes(&id, height))?;
             }
+            out.flush()?;
+            out.into_inner()
+                .map_err(|e| io::Error::other(e.to_string()))?
+                .sync_all()?;
         }
-        Ok(None)
+        std::fs::rename(&tmp, &path)?;
+        sync_dir(&self.dir)?;
+        open_run(path)
     }
 
-    /// Fold the tail into the sorted run by streaming, so memory is proportional to the
-    /// TAIL and never to the index.
-    ///
-    /// This runs inside the block persist path. Reading the whole index into a vector to
-    /// sort it would allocate forty bytes per transaction the chain has ever seen and
-    /// stall consensus for as long as that takes. The sorted run is already ordered and
-    /// the tail is small, so sorting only the tail and walking the two in step gives the
-    /// same result at a bounded cost.
     pub fn merge(&mut self) -> io::Result<()> {
         if self.tail_len == 0 {
             return Ok(());
         }
-        let mut buf = [0u8; RECORD];
-
-        // Only the tail is held. Later wins, so a stable sort keeps arrival order within
-        // one id and the last of a run is the live height.
-        let mut tail: Vec<([u8; 32], u64)> = Vec::with_capacity(self.tail_len);
-        let mut tail_read = File::open(&self.tail_path)?;
-        for _ in 0..self.tail_len {
-            if tail_read.read_exact(&mut buf).is_err() {
-                break;
-            }
-            tail.push(split_record(&buf));
-        }
+        let mut tail = std::mem::take(&mut self.tail_mem);
         tail.sort_by_key(|r| r.0);
         tail.dedup_by(|a, b| {
             if a.0 == b.0 {
@@ -177,92 +195,70 @@ impl TxIndex {
                 false
             }
         });
-
-        let tmp = self.sorted_path.with_extension("rebuilding");
-        let mut written = 0usize;
-        {
-            let mut out = std::io::BufWriter::new(File::create(&tmp)?);
-            let mut reader = std::io::BufReader::new(File::open(&self.sorted_path)?);
-            let mut ti = 0usize;
-            let mut have_left = reader.read_exact(&mut buf).is_ok();
-            let mut left = if have_left {
-                Some(split_record(&buf))
-            } else {
-                None
-            };
-
-            loop {
-                match (left, tail.get(ti).copied()) {
-                    (None, None) => break,
-                    // The tail is newer, so on an equal id the tail entry wins and the
-                    // sorted one is skipped.
-                    (Some(l), Some(r)) if l.0 == r.0 => {
-                        out.write_all(&record_bytes(&r.0, r.1))?;
-                        written += 1;
-                        ti += 1;
-                        have_left = reader.read_exact(&mut buf).is_ok();
-                        left = if have_left {
-                            Some(split_record(&buf))
-                        } else {
-                            None
-                        };
-                    }
-                    (Some(l), Some(r)) if l.0 < r.0 => {
-                        out.write_all(&record_bytes(&l.0, l.1))?;
-                        written += 1;
-                        have_left = reader.read_exact(&mut buf).is_ok();
-                        left = if have_left {
-                            Some(split_record(&buf))
-                        } else {
-                            None
-                        };
-                    }
-                    (Some(_), Some(r)) => {
-                        out.write_all(&record_bytes(&r.0, r.1))?;
-                        written += 1;
-                        ti += 1;
-                    }
-                    (Some(l), None) => {
-                        out.write_all(&record_bytes(&l.0, l.1))?;
-                        written += 1;
-                        have_left = reader.read_exact(&mut buf).is_ok();
-                        left = if have_left {
-                            Some(split_record(&buf))
-                        } else {
-                            None
-                        };
-                    }
-                    (None, Some(r)) => {
-                        out.write_all(&record_bytes(&r.0, r.1))?;
-                        written += 1;
-                        ti += 1;
-                    }
-                }
-            }
-            out.flush()?;
-            out.into_inner()
-                .map_err(|e| io::Error::other(e.to_string()))?
-                .sync_all()?;
-        }
-        std::fs::rename(&tmp, &self.sorted_path)?;
-
-        self.sorted = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&self.sorted_path)?;
-        self.sorted_len = written;
+        let run = self.write_run(tail.into_iter())?;
+        self.sorted_len += run.len;
+        self.runs.push(run);
 
         self.tail = OpenOptions::new()
             .write(true)
             .truncate(true)
             .create(true)
             .open(&self.tail_path)?;
+        self.tail.sync_all()?;
         self.tail = OpenOptions::new()
             .read(true)
             .append(true)
             .open(&self.tail_path)?;
         self.tail_len = 0;
-        self.tail_mem.clear();
+
+        while self.runs.len() >= 2 {
+            let newer = &self.runs[self.runs.len() - 1];
+            let older = &self.runs[self.runs.len() - 2];
+            if newer.len.saturating_mul(RUN_FANOUT) < older.len {
+                break;
+            }
+            self.fold_newest()?;
+        }
+        Ok(())
+    }
+
+    fn fold_newest(&mut self) -> io::Result<()> {
+        let newer = self.runs.pop().expect("two runs");
+        let older = self.runs.pop().expect("two runs");
+        let mut left = std::io::BufReader::new(File::open(&older.path)?);
+        let mut right = std::io::BufReader::new(File::open(&newer.path)?);
+        let mut l = next_record(&mut left);
+        let mut r = next_record(&mut right);
+        let merged = std::iter::from_fn(move || match (l, r) {
+            (None, None) => None,
+            (Some(a), Some(b)) if a.0 == b.0 => {
+                l = next_record(&mut left);
+                r = next_record(&mut right);
+                Some(b)
+            }
+            (Some(a), Some(b)) if a.0 < b.0 => {
+                l = next_record(&mut left);
+                Some(a)
+            }
+            (Some(_), Some(b)) => {
+                r = next_record(&mut right);
+                Some(b)
+            }
+            (Some(a), None) => {
+                l = next_record(&mut left);
+                Some(a)
+            }
+            (None, Some(b)) => {
+                r = next_record(&mut right);
+                Some(b)
+            }
+        });
+        let run = self.write_run(merged)?;
+        std::fs::remove_file(&older.path)?;
+        std::fs::remove_file(&newer.path)?;
+        sync_dir(&self.dir)?;
+        self.sorted_len = self.sorted_len - older.len - newer.len + run.len;
+        self.runs.push(run);
         Ok(())
     }
 
@@ -278,6 +274,30 @@ impl TxIndex {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    #[cfg(test)]
+    fn run_count(&self) -> usize {
+        self.runs.len()
+    }
+}
+
+fn search_run(run: &Run, id: &[u8; 32]) -> io::Result<Option<u64>> {
+    let mut lo = 0usize;
+    let mut hi = run.len;
+    let mut file = &run.file;
+    let mut buf = [0u8; RECORD];
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        file.seek(SeekFrom::Start((mid * RECORD) as u64))?;
+        file.read_exact(&mut buf)?;
+        let (got, height) = split_record(&buf);
+        match got.cmp(id) {
+            std::cmp::Ordering::Less => lo = mid + 1,
+            std::cmp::Ordering::Greater => hi = mid,
+            std::cmp::Ordering::Equal => return Ok(Some(height)),
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -375,6 +395,34 @@ mod tests {
             "and survives a merge"
         );
         assert_eq!(ix.len(), 1, "the duplicate is folded, not doubled");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn many_flushes_keep_a_logarithmic_run_count_and_every_answer() {
+        let d = dir("leveled");
+        let mut ix = TxIndex::open(&d).expect("opens");
+        let key = |n: u32| {
+            let mut a = [0u8; 32];
+            a[..4].copy_from_slice(&n.to_be_bytes());
+            a[31] = (n % 251) as u8;
+            a
+        };
+        let total = 40 * TAIL_MERGE_AT as u32;
+        for n in 0..total {
+            ix.insert(&key(n.wrapping_mul(2_654_435_761)), n as u64)
+                .expect("insert");
+        }
+        assert!(ix.run_count() <= 8, "held {} runs", ix.run_count());
+        ix.sync().expect("sync");
+        drop(ix);
+        let ix = TxIndex::open(&d).expect("reopens");
+        for n in (0..total).step_by(97) {
+            assert_eq!(
+                ix.get(&key(n.wrapping_mul(2_654_435_761))).expect("read"),
+                Some(n as u64)
+            );
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 }

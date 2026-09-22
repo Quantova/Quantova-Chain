@@ -107,6 +107,8 @@ impl<S: Read + Write> Channel<S> {
 /// superseded link can hold a thread.
 pub const POST_HANDSHAKE_READ: std::time::Duration = std::time::Duration::from_secs(20);
 
+pub const POST_HANDSHAKE_WRITE: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl Channel<std::net::TcpStream> {
     pub(crate) fn set_deadline(&self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
         self.stream.set_read_timeout(timeout)?;
@@ -118,8 +120,7 @@ impl Channel<std::net::TcpStream> {
     /// thread and a socket until the process dies.
     pub(crate) fn set_post_handshake(&self) -> std::io::Result<()> {
         self.stream.set_read_timeout(Some(POST_HANDSHAKE_READ))?;
-        self.stream
-            .set_write_timeout(Some(std::time::Duration::from_millis(250)))
+        self.stream.set_write_timeout(Some(POST_HANDSHAKE_WRITE))
     }
 }
 

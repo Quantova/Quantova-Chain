@@ -200,8 +200,13 @@ impl Limiter {
         true
     }
 
+    #[cfg(test)]
     fn admit_forwarded(&self, ip: IpAddr, per_ip_cap: usize, now: Instant) -> Admit {
-        if ip.is_loopback() {
+        self.admit_client(ip, true, per_ip_cap, now)
+    }
+
+    fn admit_client(&self, ip: IpAddr, direct: bool, per_ip_cap: usize, now: Instant) -> Admit {
+        if direct && ip.is_loopback() {
             return Admit::Ok;
         }
         let mut inner = self
@@ -513,8 +518,10 @@ fn handle_connection(
 
     let mut _forwarded_guard: Option<ForwardedGuard> = None;
     if loopback_only {
-        let client = limiter_key(forwarded_client_ip(&forwarded_for).unwrap_or(peer));
-        match limiter.admit_forwarded(client, MAX_CONNECTIONS_PER_IP, Instant::now()) {
+        let forwarded = forwarded_client_ip(&forwarded_for);
+        let direct = forwarded_for.is_none();
+        let client = limiter_key(forwarded.unwrap_or(peer));
+        match limiter.admit_client(client, direct, MAX_CONNECTIONS_PER_IP, Instant::now()) {
             Admit::Ok => {
                 _forwarded_guard = Some(ForwardedGuard {
                     limiter: limiter.clone(),
@@ -820,6 +827,23 @@ mod tests {
                 Admit::Ok
             ),
             "ipv6 loopback is exempt too"
+        );
+    }
+
+    #[test]
+    fn a_forwarded_loopback_address_gets_no_exemption() {
+        let limiter = Limiter::default();
+        let local = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let t = Instant::now();
+        let refused = (0..(RATE_BURST as usize + BAN_STRIKES as usize + 500)).any(|_| {
+            !matches!(
+                limiter.admit_client(local, false, MAX_CONNECTIONS_PER_IP, t),
+                Admit::Ok
+            )
+        });
+        assert!(
+            refused,
+            "a client naming loopback in the header is limited like any other"
         );
     }
 

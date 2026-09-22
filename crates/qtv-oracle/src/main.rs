@@ -99,8 +99,8 @@ fn keygen(a: &[String]) {
 }
 
 fn mint(a: &[String]) {
-    if a.len() != 16 {
-        fail("mint <secrets> <chain_id> <source_chain> <dest_chain> <route_id> <nonce> <source_ref_hex> <asset_hex> <amount> <recipient_hex> <expiry> <observed> <relayer_seed_hex> <relayer_index> <fee> <era_hex>");
+    if a.len() != 18 {
+        fail("mint <secrets> <chain_id> <source_chain> <dest_chain> <route_id> <nonce> <source_ref_hex> <asset_hex> <amount> <recipient_hex> <expiry> <observed> <relayer_seed_hex> <relayer_index> <fee> <era_hex> <tx_nonce> <valid_until>");
     }
     let secrets = fs::read_to_string(&a[0]).expect("read secrets");
     let chain_id: u64 = a[1].parse().expect("chain_id");
@@ -118,6 +118,8 @@ fn mint(a: &[String]) {
     let relayer_index: u64 = a[13].parse().expect("relayer_index");
     let fee: u128 = a[14].parse().expect("fee");
     let era: [u8; 32] = unhex(&a[15]).try_into().expect("era 32 bytes");
+    let tx_nonce: u64 = a[16].parse().expect("tx_nonce");
+    let valid_until: u64 = a[17].parse().expect("valid_until");
 
     let fact = Fact {
         version: FACT_VERSION,
@@ -162,7 +164,16 @@ fn mint(a: &[String]) {
     eprintln!("ARTIFACT {}", hexs(&artifact_bytes));
     let relayer = derive(&relayer_seed, relayer_index);
     let call = Call::new(bridge_mint_address(), artifact_bytes);
-    let body = Body::with_context(relayer.address(), nonce, MINT_METER, fee, call, 0, chain_id);
+    let body = Body::with_context(
+        relayer.address(),
+        tx_nonce,
+        MINT_METER,
+        fee,
+        call,
+        0,
+        chain_id,
+    )
+    .valid_until(valid_until);
     let wrapper = sign(&relayer, &body);
     println!("{}", hexs(&to_bytes(&wrapper)));
 }

@@ -130,11 +130,14 @@ pub fn derive_with_scheme(master_seed: &[u8; MASTER_SEED_LEN], scheme: u8, index
             secret.zeroize();
             public_key.to_vec()
         }
-        // No key for this scheme. An EMPTY key would hash to an address depending only on
-        // the scheme byte, so every caller would derive the same address and anything sent
-        // there is unspendable by anyone. Stand the seed in its place so the address is at
-        // least unique per account. Signing still fails closed, which is the contract.
-        _ => seed.to_vec(),
+        _ => {
+            let mut input = Vec::with_capacity(22 + SEED_LEN);
+            input.extend_from_slice(b"qtv-account/keyless/v1");
+            input.extend_from_slice(&seed);
+            let placeholder = sha3::sha3_256(&input).to_vec();
+            input.zeroize();
+            placeholder
+        }
     };
     Account {
         scheme,
@@ -201,5 +204,13 @@ mod redaction_tests {
             !shown.contains("seed: ["),
             "seed must never print as bytes: {shown}"
         );
+    }
+
+    #[test]
+    fn a_keyless_scheme_never_publishes_its_seed() {
+        let first = derive_with_scheme(&[7u8; MASTER_SEED_LEN], 9, 0);
+        let second = derive_with_scheme(&[7u8; MASTER_SEED_LEN], 9, 1);
+        assert_ne!(first.public_key(), first.seed().as_slice());
+        assert_ne!(first.address(), second.address());
     }
 }

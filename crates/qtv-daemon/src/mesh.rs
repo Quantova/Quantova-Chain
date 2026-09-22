@@ -69,37 +69,67 @@ fn address_bucket(ip: IpAddr) -> IpAddr {
     }
 }
 
+fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        v4 => v4,
+    }
+}
+
+#[derive(Default)]
+struct Bars {
+    by_ip: HashMap<IpAddr, Instant>,
+    by_time: std::collections::BTreeSet<(Instant, IpAddr)>,
+}
+
+impl Bars {
+    fn expire(&mut self, now: Instant) {
+        while let Some(&(until, ip)) = self.by_time.first() {
+            if until > now {
+                break;
+            }
+            self.by_time.remove(&(until, ip));
+            self.by_ip.remove(&ip);
+        }
+    }
+
+    fn remove(&mut self, ip: IpAddr) {
+        if let Some(until) = self.by_ip.remove(&ip) {
+            self.by_time.remove(&(until, ip));
+        }
+    }
+}
+
 #[derive(Clone, Default)]
-struct HandshakeBar(Arc<Mutex<HashMap<IpAddr, Instant>>>);
+struct HandshakeBar(Arc<Mutex<Bars>>);
 
 impl HandshakeBar {
     fn barred(&self, ip: IpAddr) -> bool {
         let now = Instant::now();
         let key = address_bucket(ip);
-        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        match map.get(&key) {
-            Some(&until) if now < until => true,
-            Some(_) => {
-                map.remove(&key);
-                false
-            }
-            None if map.len() >= MAX_BARRED => {
-                map.retain(|_, until| now < *until);
-                map.len() >= MAX_BARRED
-            }
-            None => false,
-        }
+        let mut bars = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        bars.expire(now);
+        bars.by_ip.contains_key(&key)
     }
 
     fn bar(&self, ip: IpAddr, window: Duration) {
         let now = Instant::now();
-        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if map.len() >= MAX_BARRED {
-            map.retain(|_, until| now < *until);
+        let key = address_bucket(ip);
+        let mut bars = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        bars.expire(now);
+        bars.remove(key);
+        while bars.by_ip.len() >= MAX_BARRED {
+            let Some(&(_, oldest)) = bars.by_time.first() else {
+                break;
+            };
+            bars.remove(oldest);
         }
-        if map.len() < MAX_BARRED {
-            map.insert(address_bucket(ip), now + window);
-        }
+        let until = now + window;
+        bars.by_ip.insert(key, until);
+        bars.by_time.insert((until, key));
     }
 }
 
@@ -116,7 +146,7 @@ fn known_peer_ips(peer_addrs: &[Option<String>]) -> HashSet<IpAddr> {
     for addr in peer_addrs.iter().flatten() {
         if let Ok(resolved) = addr.to_socket_addrs() {
             for socket in resolved {
-                ips.insert(socket.ip());
+                ips.insert(canonical_ip(socket.ip()));
             }
         }
     }
@@ -308,7 +338,7 @@ pub fn build_mesh(
                     continue;
                 }
             };
-            let known = known_ips.contains(&addr.ip());
+            let known = known_ips.contains(&canonical_ip(addr.ip()));
             if !known && bar.barred(addr.ip()) {
                 continue;
             }
@@ -525,7 +555,7 @@ fn spawn_late_acceptor(
                 thread::sleep(Duration::from_millis(50));
                 continue;
             };
-            let ip = addr.ip();
+            let ip = canonical_ip(addr.ip());
             let is_known = known.contains(&ip);
             if !is_known && bar.barred(ip) {
                 continue;
@@ -1152,7 +1182,9 @@ mod bootstrap_wiring {
 
 #[cfg(test)]
 mod handshake_bar {
-    use super::{spawn_late_acceptor, HandshakeBar, FAILED_HANDSHAKE_BAR, MAX_BARRED};
+    use super::{
+        canonical_ip, spawn_late_acceptor, HandshakeBar, FAILED_HANDSHAKE_BAR, MAX_BARRED,
+    };
     use qtv_net::Identity;
     use std::io::{Read, Write};
     use std::net::{IpAddr, TcpListener, TcpStream};
@@ -1233,15 +1265,29 @@ mod handshake_bar {
     }
 
     #[test]
-    fn a_full_bar_table_refuses_new_strangers() {
+    fn a_full_bar_table_evicts_the_soonest_to_lapse_and_refuses_no_stranger() {
         let bar = HandshakeBar::default();
-        {
-            let mut map = bar.0.lock().unwrap();
-            let until = Instant::now() + FAILED_HANDSHAKE_BAR;
-            for i in 0..MAX_BARRED as u32 {
-                map.insert(IpAddr::V4(std::net::Ipv4Addr::from(i)), until);
-            }
+        let first: IpAddr = IpAddr::V4(std::net::Ipv4Addr::from(0u32));
+        bar.bar(first, Duration::from_secs(1));
+        for i in 1..MAX_BARRED as u32 {
+            bar.bar(
+                IpAddr::V4(std::net::Ipv4Addr::from(i)),
+                FAILED_HANDSHAKE_BAR,
+            );
         }
-        assert!(bar.barred("192.0.2.200".parse().unwrap()));
+        assert!(bar.barred(first));
+        assert!(!bar.barred("192.0.2.200".parse().unwrap()));
+        bar.bar("192.0.2.201".parse().unwrap(), FAILED_HANDSHAKE_BAR);
+        assert!(bar.barred("192.0.2.201".parse().unwrap()));
+        assert!(!bar.barred(first), "the entry closest to lapsing made room");
+    }
+
+    #[test]
+    fn a_known_peer_is_recognised_through_a_mapped_address() {
+        let mapped: IpAddr = "::ffff:198.51.100.4".parse().unwrap();
+        let plain: IpAddr = "198.51.100.4".parse().unwrap();
+        assert_eq!(canonical_ip(mapped), plain);
+        let known = super::known_peer_ips(&[Some("198.51.100.4:9".to_string())]);
+        assert!(known.contains(&canonical_ip(mapped)));
     }
 }

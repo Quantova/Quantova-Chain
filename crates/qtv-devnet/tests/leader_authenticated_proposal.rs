@@ -238,13 +238,18 @@ fn a_replayed_justification_flood_verifies_within_the_committee_bound() {
 
     let (valid, first) = nodes[observer].measure_justification(&selection, &flood, 2);
     assert!(valid, "the genuine higher polka is still accepted");
+    let genuine_cost: u64 = genuine
+        .iter()
+        .map(|record| {
+            1 + record
+                .polka
+                .as_ref()
+                .map_or(0, |polka| polka.attestations.len() as u64)
+        })
+        .sum();
     assert_eq!(
-        first, distinct as u64,
-        "each distinct signer is verified once, the replayed copies add no verifications"
-    );
-    assert!(
-        first < flood.len() as u64,
-        "verification does not scale with the size of the flood"
+        first, genuine_cost,
+        "each distinct record is verified once with its polka, the replayed copies add nothing"
     );
     assert!(
         first <= 4 * qtv_sampler::params::COMMITTEE_BUDGET,

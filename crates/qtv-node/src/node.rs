@@ -162,7 +162,47 @@ pub fn execute_ordered(
     let cores = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    execute_ordered_across(ledger, candidates, fee_params, cores, now_seconds)
+    execute_ordered_across(
+        ledger,
+        candidates,
+        fee_params,
+        cores,
+        now_seconds,
+        usize::MAX,
+    )
+    .0
+}
+
+pub struct OrderedOutcome {
+    pub included: Vec<Wrapper>,
+    pub refused_feeless: Vec<String>,
+}
+
+pub fn execute_ordered_within(
+    ledger: &mut Ledger,
+    candidates: &[Wrapper],
+    fee_params: &FeeParams,
+    now_seconds: u64,
+    max_bytes: usize,
+) -> OrderedOutcome {
+    let cores = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let (included, refused) = execute_ordered_across(
+        ledger,
+        candidates,
+        fee_params,
+        cores,
+        now_seconds,
+        max_bytes,
+    );
+    OrderedOutcome {
+        included,
+        refused_feeless: refused
+            .into_iter()
+            .map(|index| candidates[index].id())
+            .collect(),
+    }
 }
 
 pub fn min_validator_cores() -> usize {
@@ -832,9 +872,6 @@ pub(crate) fn feeless_decodes(wrapper: &Wrapper) -> bool {
 }
 
 pub(crate) fn bridge_eth_update_admissible(ledger: &Ledger, wrapper: &Wrapper) -> bool {
-    if ledger.bridge_is_frozen() {
-        return false;
-    }
     let args = wrapper.body().call().args();
     if args.len() > crate::bridge_eth::MAX_ETH_UPDATE_BYTES {
         return false;
@@ -854,9 +891,6 @@ pub(crate) fn bridge_cosmos_update_admissible(
     wrapper: &Wrapper,
     now_seconds: u64,
 ) -> bool {
-    if ledger.bridge_is_frozen() {
-        return false;
-    }
     let args = wrapper.body().call().args();
     if args.len() > crate::bridge_cosmos::MAX_COSMOS_UPDATE_BYTES {
         return false;
@@ -873,9 +907,6 @@ pub(crate) fn bridge_cosmos_update_admissible(
 }
 
 fn dispatch_bridge_eth_update(ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
-    if ledger.bridge_is_frozen() {
-        return false;
-    }
     if wrapper.body().call().args().len() > crate::bridge_eth::MAX_ETH_UPDATE_BYTES {
         return false;
     }
@@ -901,9 +932,6 @@ pub(crate) fn is_bridge_cosmos_update(wrapper: &Wrapper) -> bool {
 }
 
 fn dispatch_bridge_cosmos_update(ledger: &mut Ledger, wrapper: &Wrapper, now_seconds: u64) -> bool {
-    if ledger.bridge_is_frozen() {
-        return false;
-    }
     if wrapper.body().call().args().len() > crate::bridge_cosmos::MAX_COSMOS_UPDATE_BYTES {
         return false;
     }
@@ -973,6 +1001,9 @@ fn bridge_mint_fact(
         return None;
     }
     let fact = artifact.attestation.fact;
+    if ledger.asset_is_trustlessly_anchored(&fact.asset_id) {
+        return None;
+    }
     if let Some(asset) = ledger.bridged_asset(&fact.asset_id) {
         if asset.requires_stark {
             let prover = operators.operators.first().map(|(id, _)| *id)?;
@@ -1025,15 +1056,7 @@ pub(crate) fn bridge_mint_source_key(wrapper: &Wrapper) -> Option<(u32, [u8; 32]
     })
 }
 
-pub(crate) fn bridge_mint_admissible(
-    ledger: &Ledger,
-    wrapper: &Wrapper,
-    chain_id: u64,
-    now_seconds: u64,
-) -> bool {
-    if ledger.bridge_is_frozen() {
-        return false;
-    }
+fn mint_fits(ledger: &Ledger, wrapper: &Wrapper) -> bool {
     let max_bytes = if is_bridge_btc_mint(wrapper) {
         MAX_BTC_MINT_BYTES
     } else if is_bridge_eth_mint(wrapper) {
@@ -1052,7 +1075,41 @@ pub(crate) fn bridge_mint_admissible(
             base.saturating_sub(MAX_BRIDGE_STARK_BYTES)
         }
     };
-    if wrapper.body().call().args().len() > max_bytes {
+    wrapper.body().call().args().len() <= max_bytes
+}
+
+pub(crate) fn bridge_mint_still_live(ledger: &Ledger, wrapper: &Wrapper) -> bool {
+    if let Some((source_chain, source_ref)) = bridge_mint_source_key(wrapper) {
+        if ledger.bridge_reference_seen(source_chain, &source_ref) {
+            return false;
+        }
+    }
+    if is_bridge_btc_mint(wrapper) {
+        let work = crate::bridge_btc::BitcoinMintProof::decode(wrapper.body().call().args())
+            .zip(ledger.bridge_bitcoin_anchor())
+            .and_then(|(proof, anchor)| crate::bridge_btc::bitcoin_mint_work(&anchor, &proof));
+        return work.is_some_and(|work| work >= ledger.bridge_btc_best_work());
+    }
+    if is_bridge_eth_mint(wrapper) || is_bridge_cosmos_mint(wrapper) {
+        return true;
+    }
+    crate::bridge::MintArtifact::decode(wrapper.body().call().args()).is_some_and(|artifact| {
+        let fact = artifact.attestation.fact;
+        !ledger.asset_is_trustlessly_anchored(&fact.asset_id)
+            && ledger.bridge_mint_would_apply(&fact)
+    })
+}
+
+pub(crate) fn bridge_mint_admissible(
+    ledger: &Ledger,
+    wrapper: &Wrapper,
+    chain_id: u64,
+    now_seconds: u64,
+) -> bool {
+    if ledger.bridge_is_frozen() {
+        return false;
+    }
+    if !mint_fits(ledger, wrapper) {
         return false;
     }
     let (source_chain, source_ref) = match bridge_mint_source_key(wrapper) {
@@ -1062,11 +1119,19 @@ pub(crate) fn bridge_mint_admissible(
     if ledger.bridge_reference_seen(source_chain, &source_ref) {
         return false;
     }
+    if is_bridge_btc_mint(wrapper) {
+        let work = crate::bridge_btc::BitcoinMintProof::decode(wrapper.body().call().args())
+            .zip(ledger.bridge_bitcoin_anchor())
+            .and_then(|(proof, anchor)| crate::bridge_btc::bitcoin_mint_work(&anchor, &proof));
+        if work.is_none_or(|work| work < ledger.bridge_btc_best_work()) {
+            return false;
+        }
+    }
     let fact = match bridge_mint_fact(ledger, wrapper, chain_id, now_seconds) {
         Some(fact) => fact,
         None => return false,
     };
-    ledger.execution_height() <= fact.expiry_height
+    ledger.bridge_mint_would_apply(&fact)
 }
 
 fn dispatch_bridge_mint(
@@ -1075,7 +1140,7 @@ fn dispatch_bridge_mint(
     chain_id: u64,
     now_seconds: u64,
 ) -> bool {
-    if ledger.bridge_is_frozen() {
+    if ledger.bridge_is_frozen() || !mint_fits(ledger, wrapper) {
         return false;
     }
     let mut btc_work: Option<[u8; 32]> = None;
@@ -1168,6 +1233,9 @@ pub(crate) fn bridge_settle_admissible(ledger: &Ledger, wrapper: &Wrapper, chain
 
 fn dispatch_bridge_settle(ledger: &mut Ledger, wrapper: &Wrapper, chain_id: u64) -> bool {
     if !ledger.bridge_exits_enabled() {
+        return false;
+    }
+    if wrapper.body().call().args().len() > max_settle_artifact_bytes(ledger) {
         return false;
     }
     if ledger.bridge_is_frozen() {
@@ -1454,6 +1522,7 @@ fn dispatch_vm(
                 .unwrap_or(false);
             if declares_genesis && !genesis_ok {
                 ledger.clear_contract_code(&contract);
+                ledger.arm_vm_meter(meter);
             }
         }
     } else if args.len() >= 4 {
@@ -1477,13 +1546,36 @@ fn dispatch_vm(
     true
 }
 
+struct Attempt {
+    before: usize,
+    size: usize,
+    feeless: bool,
+    index: usize,
+}
+
+fn settle_attempt(
+    attempt: Option<Attempt>,
+    now: usize,
+    room: &mut usize,
+    refused: &mut Vec<usize>,
+) {
+    if let Some(attempt) = attempt {
+        if now > attempt.before {
+            *room = room.saturating_sub(attempt.size);
+        } else if attempt.feeless {
+            refused.push(attempt.index);
+        }
+    }
+}
+
 fn execute_ordered_across(
     ledger: &mut Ledger,
     candidates: &[Wrapper],
     fee_params: &FeeParams,
     verify_cores: usize,
     now_seconds: u64,
-) -> Vec<Wrapper> {
+    max_bytes: usize,
+) -> (Vec<Wrapper>, Vec<usize>) {
     let day = now_seconds / 86_400;
     let verified = verify_signatures(ledger, candidates, verify_cores);
     let stake_address = crate::ledger::stake_system_address();
@@ -1504,10 +1596,26 @@ fn execute_ordered_across(
     const PER_SENDER_VM_METER: u64 = VM_BLOCK_METER_BUDGET / 4;
     let registration_cap = ledger.validator_ids().len().max(1).saturating_mul(2);
     let mut registrations = 0usize;
+    ledger.set_fresh_leaf_ceiling(Some(BLOCK_FRESH_LEAF_CEILING));
+    let mut room = max_bytes;
+    let mut refused = Vec::new();
+    let mut attempt: Option<Attempt> = None;
     for (index, wrapper) in candidates.iter().enumerate() {
-        if ledger.block_fresh_leaves() >= BLOCK_FRESH_LEAF_CEILING {
-            break;
+        settle_attempt(attempt.take(), included.len(), &mut room, &mut refused);
+        let size = if max_bytes == usize::MAX {
+            0
+        } else {
+            qtv_codec::to_bytes(wrapper).len()
+        };
+        if size > room {
+            continue;
         }
+        attempt = Some(Attempt {
+            before: included.len(),
+            size,
+            feeless: crate::mempool::is_feeless(wrapper),
+            index,
+        });
         // root recompute over them runs synchronously on every validator.
         if wrapper.body().chain_id() != fee_params.chain_id {
             continue;
@@ -1690,6 +1798,9 @@ fn execute_ordered_across(
             continue;
         }
         let applied = ledger.apply_atomic(|l| {
+            if plan.amount == 0 && !l.account_exists(&plan.recipient) {
+                return false;
+            }
             let mut sender = l.account(&plan.sender);
             let mut recipient = l.account(&plan.recipient);
             let transferred = match execute_transfer(
@@ -1715,8 +1826,10 @@ fn execute_ordered_across(
             included.push(wrapper.clone());
         }
     }
+    settle_attempt(attempt.take(), included.len(), &mut room, &mut refused);
+    ledger.set_fresh_leaf_ceiling(None);
     ledger.settle_session(day, included.len() as u64);
-    included
+    (included, refused)
 }
 
 const PARALLEL_VERIFY_THRESHOLD: usize = 4;
@@ -1882,9 +1995,10 @@ impl Node {
             .collect();
         let mut validator_ids: Vec<[u8; 32]> = Vec::new();
         for v in &genesis.validators {
-            ledger.seed_validator_bond(
+            ledger.seed_validator_bond_at(
                 &v.bond_address,
                 v.stake.saturating_mul(qtv_staking::NATIVE_UNIT as u64),
+                genesis.genesis_time / 86_400,
             );
             ledger.set_validator_attest_key(&v.bond_address, &v.attest_pk);
             if let Ok(payload) = qtv_idfmt::parse_address(&v.bond_address) {
@@ -2733,6 +2847,41 @@ mod tests {
             Some(&deployer_word),
             "the genesis constructor stored the deployer at deploy"
         );
+    }
+
+    #[test]
+    fn a_deploy_whose_constructor_faults_is_charged_its_declared_meter() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let deployer = keypair(141);
+        fund(&mut ledger, &deployer, 10_000 * 1_000_000);
+        let code = qtv_vm::asm::assemble("spin:\nJMP spin").expect("the program assembles");
+        let genesis_selector = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector: genesis_selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
+            }],
+        );
+        let meter = 200_000u64;
+        let deploy = system_tx(
+            &deployer,
+            &crate::ledger::vm_deploy_address(),
+            container.canonical_bytes(),
+            0,
+            meter,
+            &fee,
+        );
+        let _ = execute_ordered(&mut ledger, &[deploy], &fee, 0);
+        assert_eq!(ledger.vm_meter_charge(), meter);
     }
 
     #[test]
@@ -4137,7 +4286,8 @@ mod tests {
 
         for cores in [1usize, 2, 3, 4, 8, 16, 24] {
             let mut ledger = base.clone();
-            let included = execute_ordered_across(&mut ledger, &block, &fee, cores, 0);
+            let (included, _) =
+                execute_ordered_across(&mut ledger, &block, &fee, cores, 0, usize::MAX);
             assert_eq!(
                 ids(&included),
                 ids(&reference_included),
@@ -5429,6 +5579,7 @@ mod tests {
         let deposit = DepositProof {
             ancestry: Vec::new(),
             receipt_index: 3,
+            log_index: 0,
             receipt_proof,
         };
 

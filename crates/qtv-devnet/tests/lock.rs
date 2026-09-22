@@ -11,7 +11,7 @@ use qtv_devnet::config::DevnetConfig;
 use qtv_devnet::node::{leader_for, DevNode};
 use qtv_devnet::wire::Message;
 
-use support::{config, unique_base, user};
+use support::{config, transfer, unique_base, user};
 
 fn open_nodes(config: &DevnetConfig) -> Vec<DevNode> {
     let mut nodes: Vec<DevNode> = config
@@ -238,4 +238,69 @@ fn a_justified_proposal_carries_one_polka_and_no_locked_bodies_and_is_bound_by_i
         "the carried justification is accepted"
     );
     assert_eq!(nodes[follower].staged_value(), Some(value_a));
+}
+
+#[test]
+fn a_locked_validator_keeps_its_lock_across_a_restart() {
+    let base = unique_base("lock_restart");
+    let alice = user(0);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let config = config(&base, &[true, true, true, true, true, true, true], accounts);
+    let mut nodes = open_nodes(&config);
+
+    let selection = nodes[0].select().expect("committee");
+    let l0 = leader_for(&selection, 0);
+    let l0_idx = index_of(&config, l0);
+    let victim = (0..nodes.len())
+        .find(|&i| i != l0_idx)
+        .expect("a member not leading view zero");
+
+    let proposal_a = nodes[l0_idx].build_proposal(&selection);
+    let value_a = header_value(&proposal_a.header.hash());
+    lock_victim_on_proposal(&mut nodes, &selection, l0, victim, &proposal_a);
+
+    nodes[victim] = DevNode::open(&config.nodes[victim], &config).expect("reopen");
+    let record = nodes[victim].make_view_change(2);
+    let locked = record
+        .locked
+        .expect("the restarted node still reports its lock");
+    assert_eq!(header_value(&locked.header.hash()), value_a);
+    assert!(record.polka.is_some(), "the polka behind the lock survives");
+}
+
+#[test]
+fn a_view_change_whose_locked_body_misses_its_header_is_not_collected() {
+    let base = unique_base("junk_locked_body");
+    let alice = user(0);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let config = config(&base, &[true, true, true, true, true, true, true], accounts);
+    let mut nodes = open_nodes(&config);
+
+    let selection = nodes[0].select().expect("committee");
+    let l0 = leader_for(&selection, 0);
+    let l0_idx = index_of(&config, l0);
+    let victim = (0..nodes.len())
+        .find(|&i| i != l0_idx)
+        .expect("a member not leading view zero");
+    let observer = (0..nodes.len())
+        .find(|&i| i != l0_idx && i != victim)
+        .expect("an observer");
+
+    let proposal_a = nodes[l0_idx].build_proposal(&selection);
+    lock_victim_on_proposal(&mut nodes, &selection, l0, victim, &proposal_a);
+
+    let mut junk = nodes[victim].make_view_change(2);
+    let params = qtv_node::fee::FeeParams::devnet();
+    junk.locked
+        .as_mut()
+        .expect("the victim is locked")
+        .body
+        .push(transfer(&alice, &user(1).address(), 5, 0, &params));
+    let before = nodes[observer].view_changes_len();
+    nodes[observer].collect_view_change(&selection, junk);
+    assert_eq!(nodes[observer].view_changes_len(), before);
+
+    let genuine = nodes[victim].make_view_change(2);
+    nodes[observer].collect_view_change(&selection, genuine);
+    assert_eq!(nodes[observer].view_changes_len(), before + 1);
 }

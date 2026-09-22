@@ -103,6 +103,7 @@ impl ValidatorRegistration {
         MemberKey {
             id: self.id,
             weight: self.stake,
+            stake: self.stake,
             root: self.root,
             attest_pk: self.attest_pk,
         }
@@ -352,7 +353,7 @@ impl Consensus {
     }
 
     pub fn own_epoch_registration(&self, epoch: u64) -> (Root, qtv_crypto::ml_dsa::Signature) {
-        self.own.epoch_registration(epoch)
+        self.own.epoch_registration(self.chain_id, epoch)
     }
 
     pub fn epoch_for(&self, height: u64) -> u64 {
@@ -445,9 +446,6 @@ impl Consensus {
             return None;
         }
         let members = committee.ids();
-        // The SAME cap the draw uses. Left raw here, the two thirds finality rule runs on
-        // uncapped stake while the committee total is capped, so one large staker holds a
-        // veto over every block the cap exists to stop it dominating.
         let member_keys: Vec<MemberKey> = members
             .iter()
             .filter_map(|id| self.roster.iter().find(|r| r.id == *id))

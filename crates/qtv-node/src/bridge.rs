@@ -734,19 +734,21 @@ pub fn exit_quorum_attests(
     if fact.dest_chain != dest_chain {
         return false;
     }
+    if attestation.signatures.len() > set.operators.len() {
+        return false;
+    }
     let message = fact.ack_preimage(chain_id);
-    let mut attempted: Vec<u32> = Vec::new();
-    let mut counted_keys: Vec<&[u8]> = Vec::new();
+    let mut attempted: HashSet<u32> = HashSet::new();
+    let mut counted_keys: HashSet<&[u8]> = HashSet::new();
     for signer in &attestation.signatures {
-        if attempted.contains(&signer.operator_id) {
+        if !attempted.insert(signer.operator_id) {
             continue;
         }
-        attempted.push(signer.operator_id);
         let public_key = match set.public_key(signer.operator_id) {
             Some(key) => key,
             None => continue,
         };
-        if counted_keys.contains(&public_key) {
+        if counted_keys.contains(public_key) {
             continue;
         }
         let pk: &[u8; PUBLIC_KEY_BYTES] = match public_key.try_into() {
@@ -758,7 +760,7 @@ pub fn exit_quorum_attests(
             Err(_) => continue,
         };
         if verify_exit_signature(pk, &message, sig, era) {
-            counted_keys.push(public_key);
+            counted_keys.insert(public_key);
         }
     }
     counted_keys.len() as u32 >= set.threshold

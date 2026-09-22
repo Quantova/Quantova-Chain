@@ -134,6 +134,12 @@ pub fn commitment_in_bounds(commitment: &Commitment) -> bool {
         && commitment.data_len <= commitment.k.saturating_mul(commitment.shard_len)
 }
 
+pub fn commitment_canonical(commitment: &Commitment) -> bool {
+    commitment_in_bounds(commitment)
+        && (commitment.k, commitment.n) == coding_params(commitment.data_len)
+        && commitment.shard_len == commitment.data_len.div_ceil(commitment.k).max(1)
+}
+
 pub fn reconstruct_block(
     header: &Header,
     header_hash: &[u8; DIGEST_LEN],
@@ -305,7 +311,7 @@ impl ProposalAssembler {
         if self.done.contains_key(&key) {
             return None;
         }
-        if !commitment_in_bounds(&coded.commitment) {
+        if !commitment_canonical(&coded.commitment) {
             return None;
         }
         if !coded.commitment.verify_shard(&coded.shard, &coded.proof) {
@@ -968,6 +974,16 @@ mod tests {
         assert!(
             commitment_in_bounds(honest),
             "the honest commitment stays in bounds"
+        );
+
+        let mut widened = honest.clone();
+        widened.k = honest.k * 4;
+        widened.n = honest.k * 8;
+        widened.shard_len = honest.data_len.div_ceil(widened.k);
+        assert!(commitment_canonical(honest));
+        assert!(
+            !commitment_canonical(&widened),
+            "a leader cannot pick coding parameters other than the canonical ones"
         );
 
         let mut hostile = shards[0].clone();

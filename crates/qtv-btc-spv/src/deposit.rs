@@ -21,17 +21,11 @@ pub struct CoinbaseProof<'a> {
 
 const SATS_PER_BTC: u128 = 100_000_000;
 
+pub const MAX_TRUSTLESS_DEPOSIT_SATS: u128 = 100 * SATS_PER_BTC;
+
 pub fn confirmations_for(amount: u128, base: u32) -> u32 {
-    let scale = if amount <= SATS_PER_BTC {
-        1
-    } else if amount <= 10 * SATS_PER_BTC {
-        2
-    } else if amount <= 100 * SATS_PER_BTC {
-        6
-    } else {
-        24
-    };
-    base.saturating_mul(scale)
+    let scaled = amount.div_ceil(SATS_PER_BTC / 2);
+    base.max(u32::try_from(scaled).unwrap_or(u32::MAX))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -75,6 +69,9 @@ pub fn verify_trustless_deposit(
     let (amount, recipient) = tx
         .deposit_to(deposit_script)
         .ok_or(SpvError::TransactionMismatch)?;
+    if amount > MAX_TRUSTLESS_DEPOSIT_SATS {
+        return Err(SpvError::DepositTooLarge);
+    }
     let confirmed = chain.verify_deposit(
         deposit_height,
         txid,
@@ -515,11 +512,10 @@ mod tests {
                 &block.coinbase(),
                 &bridge
             ),
-            Err(SpvError::InsufficientConfirmations { have: 1, need: 2 })
+            Err(SpvError::InsufficientConfirmations { have: 1, need: 10 })
         );
         assert_eq!(confirmations_for(100_000_000, 6), 6);
-        assert_eq!(confirmations_for(10 * 100_000_000, 6), 12);
-        assert_eq!(confirmations_for(100 * 100_000_000, 6), 36);
-        assert_eq!(confirmations_for(21_000_000 * 100_000_000, 6), 144);
+        assert_eq!(confirmations_for(10 * 100_000_000, 6), 20);
+        assert_eq!(confirmations_for(100 * 100_000_000, 6), 200);
     }
 }

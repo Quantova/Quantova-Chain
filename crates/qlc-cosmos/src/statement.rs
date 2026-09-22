@@ -125,9 +125,9 @@ fn verify_deposit_core(
         return Err(CorridorError::ChainMismatch);
     }
     check_anchor(cfg, trusted, header, set, now).map_err(CorridorError::Unanchored)?;
+    check_trusting_commit(cfg, trusted, header, commit).map_err(CorridorError::Unanchored)?;
     let signed_power =
         verify_commit(cfg.chain_id, header, commit, set).map_err(CorridorError::Commit)?;
-    check_trusting_commit(cfg, trusted, header, commit).map_err(CorridorError::Unanchored)?;
 
     if header.app_hash.len() != 32 {
         return Err(CorridorError::MalformedAppHash);
@@ -524,8 +524,8 @@ mod tests {
                 &proof,
                 wnow()
             ),
-            Err(CorridorError::Commit(
-                CommitError::NotEnoughVotingPower { .. }
+            Err(CorridorError::Unanchored(
+                crate::light::LightError::InsufficientTrustedSignatures { .. }
             ))
         ));
     }
@@ -717,8 +717,8 @@ mod tests {
                 &proof,
                 wnow()
             ),
-            Err(CorridorError::Commit(
-                CommitError::NotEnoughVotingPower { .. }
+            Err(CorridorError::Unanchored(
+                crate::light::LightError::InsufficientTrustedSignatures { .. }
             ))
         ));
     }

@@ -76,10 +76,7 @@ impl EvmChainConfig {
 
 pub const MAINNET_ELECTRA_EPOCH: u64 = 364_032;
 
-// MUST be confirmed against the live Ethereum mainnet config before the ETH corridor is
-// armed. The corridor cannot verify a post-Fulu sync-committee signature without this
-// fork present, so it is added here; the exact activation epoch is an operational value.
-pub const MAINNET_FULU_EPOCH: u64 = 411_072;
+pub const MAINNET_FULU_EPOCH: u64 = 411_392;
 
 fn beacon_forks() -> Vec<Fork> {
     vec![

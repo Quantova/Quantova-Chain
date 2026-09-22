@@ -80,6 +80,7 @@ pub struct SyncCommitteeUpdate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DepositProof {
     pub receipt_index: u64,
+    pub log_index: u32,
     pub receipt_proof: Vec<Vec<u8>>,
     pub ancestry: Vec<BeaconBlockHeader>,
 }
@@ -388,7 +389,8 @@ fn verify_deposit_core(
     if deposit_contract.iter().all(|&b| b == deposit_contract[0]) {
         return Err(EthError::UnconfiguredDepositContract);
     }
-    let raw = receipt::extract_deposit(&value, deposit_contract).map_err(EthError::Receipt)?;
+    let raw = receipt::extract_deposit_at(&value, deposit_contract, deposit.log_index)
+        .map_err(EthError::Receipt)?;
     if raw.amount > store.config.max_deposit_base_units {
         return Err(EthError::CapExceeded {
             amount: raw.amount,
@@ -766,6 +768,7 @@ mod tests {
         let deposit = DepositProof {
             ancestry: Vec::new(),
             receipt_index: 3,
+            log_index: 0,
             receipt_proof,
         };
 

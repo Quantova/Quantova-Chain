@@ -256,7 +256,7 @@ fn is_plain_transfer(ledger: &Ledger, wrapper: &Wrapper) -> bool {
         && wrapper.body().call().target() != crate::ledger::gov_system_address()
 }
 
-fn is_feeless(wrapper: &Wrapper) -> bool {
+pub(crate) fn is_feeless(wrapper: &Wrapper) -> bool {
     crate::node::is_bridge_mint(wrapper)
         || crate::node::is_bridge_settle(wrapper)
         || crate::node::is_evidence(wrapper)
@@ -377,6 +377,7 @@ pub struct Mempool {
     evidence_attempts: usize,
     mint_attempts: usize,
     update_attempts: usize,
+    cosmos_update_attempts: usize,
     settle_attempts: usize,
     guardian_attempts: usize,
     mint_sources: std::collections::HashSet<(u32, [u8; 32])>,
@@ -414,6 +415,7 @@ impl Mempool {
             evidence_attempts: 0,
             mint_attempts: 0,
             update_attempts: 0,
+            cosmos_update_attempts: 0,
             settle_attempts: 0,
             guardian_attempts: 0,
             mint_sources: std::collections::HashSet::new(),
@@ -512,6 +514,23 @@ impl Mempool {
         self.mint_sources.contains(&source_key)
     }
 
+    fn held_mint_survives(&mut self, incoming: &Wrapper, ledger: &Ledger) -> bool {
+        let Some(source_key) = crate::node::bridge_mint_source_key(incoming) else {
+            return true;
+        };
+        let Some(index) = self.pending.iter().position(|held| {
+            crate::node::is_bridge_mint(held)
+                && crate::node::bridge_mint_source_key(held) == Some(source_key)
+        }) else {
+            return true;
+        };
+        if crate::node::bridge_mint_still_live(ledger, &self.pending[index]) {
+            return true;
+        }
+        self.remove_at(index);
+        false
+    }
+
     fn duplicate_settle(&self, incoming: &Wrapper) -> bool {
         let burn_ref = match crate::node::bridge_settle_burn_ref(incoming) {
             Some(burn_ref) => burn_ref,
@@ -556,10 +575,10 @@ impl Mempool {
             &mut self.evidence_attempts
         } else if crate::node::is_bridge_mint(wrapper) {
             &mut self.mint_attempts
-        } else if crate::node::is_bridge_eth_update(wrapper)
-            || crate::node::is_bridge_cosmos_update(wrapper)
-        {
+        } else if crate::node::is_bridge_eth_update(wrapper) {
             &mut self.update_attempts
+        } else if crate::node::is_bridge_cosmos_update(wrapper) {
+            &mut self.cosmos_update_attempts
         } else if crate::node::is_bridge_settle(wrapper) {
             &mut self.settle_attempts
         } else {
@@ -641,7 +660,7 @@ impl Mempool {
             return Err(Reject::UnknownSender);
         }
         if crate::node::is_bridge_mint(&wrapper) {
-            if self.duplicate_mint(&wrapper) {
+            if self.duplicate_mint(&wrapper) && self.held_mint_survives(&wrapper, ledger) {
                 return Ok(Admitted::Known);
             }
             let fresh = crate::node::bridge_mint_source_key(&wrapper).is_some_and(
@@ -721,7 +740,7 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_evidence(&wrapper) {
-            if !self.charge_feeless_attempt_for(&wrapper) {
+            if feeless_hint.is_none() && !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
             if !feeless_hint.unwrap_or_else(|| {
@@ -730,7 +749,7 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_bridge_guardian(&wrapper) {
-            if !self.charge_feeless_attempt_for(&wrapper) {
+            if feeless_hint.is_none() && !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
             if !feeless_hint.unwrap_or_else(|| {
@@ -741,7 +760,7 @@ impl Mempool {
         } else if crate::node::is_bridge_mint(&wrapper) {
             // The verification below is the expensive part, so the attempt is charged
             // before it runs rather than after, or a failing proof costs no budget.
-            if !self.charge_feeless_attempt_for(&wrapper) {
+            if feeless_hint.is_none() && !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
             if !feeless_hint.unwrap_or_else(|| {
@@ -755,7 +774,7 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_bridge_settle(&wrapper) {
-            if !self.charge_feeless_attempt_for(&wrapper) {
+            if feeless_hint.is_none() && !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
             if !feeless_hint.unwrap_or_else(|| {
@@ -764,7 +783,7 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_bridge_eth_update(&wrapper) {
-            if !self.charge_feeless_attempt_for(&wrapper) {
+            if feeless_hint.is_none() && !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
             if !feeless_hint
@@ -773,7 +792,7 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_bridge_cosmos_update(&wrapper) {
-            if !self.charge_feeless_attempt_for(&wrapper) {
+            if feeless_hint.is_none() && !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
             if !feeless_hint.unwrap_or_else(|| {
@@ -868,7 +887,7 @@ impl Mempool {
                 continue;
             }
             if crate::node::is_bridge_mint(&wrapper) {
-                if self.duplicate_mint(&wrapper) {
+                if self.duplicate_mint(&wrapper) && self.held_mint_survives(&wrapper, ledger) {
                     continue;
                 }
                 let fresh = crate::node::bridge_mint_source_key(&wrapper).is_some_and(
@@ -1050,7 +1069,47 @@ impl Mempool {
             let refused = refused
                 || (crate::node::is_vm_op(ledger, &wrapper)
                     && !crate::node::vm_target_dispatchable(ledger, &wrapper));
-            if stale || barred || expired || refused {
+            let settled = if crate::node::is_bridge_mint(&wrapper) {
+                crate::node::bridge_mint_source_key(&wrapper).is_none_or(
+                    |(source_chain, source_ref)| {
+                        ledger.bridge_reference_seen(source_chain, &source_ref)
+                    },
+                )
+            } else if crate::node::is_bridge_settle(&wrapper) {
+                crate::node::bridge_settle_burn_ref(&wrapper)
+                    .is_none_or(|burn_ref| ledger.bridge_exit_settled(&burn_ref))
+            } else {
+                false
+            };
+            let exit_closed =
+                crate::node::is_bridge_exit(&wrapper) && !ledger.bridge_exits_enabled();
+            let unfunded = is_signed_lane(&wrapper) && wrapper.body().nonce() == account.nonce && {
+                let fee = u64::try_from(wrapper.body().fee().min(self.ceiling)).unwrap_or(u64::MAX);
+                let amount = if is_plain_transfer(ledger, &wrapper) {
+                    crate::execution::transfer_amount(wrapper.body().call()).unwrap_or(0)
+                } else {
+                    0
+                };
+                account.balance < fee.saturating_add(amount)
+            };
+            if stale || barred || expired || refused || settled || exit_closed || unfunded {
+                self.ids.remove(wrapper.id().as_str());
+                self.untrack(&wrapper);
+            } else {
+                kept.push(wrapper);
+            }
+        }
+        self.pending = kept;
+    }
+
+    pub fn evict(&mut self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        let evicted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut kept = Vec::with_capacity(self.pending.len());
+        for wrapper in std::mem::take(&mut self.pending) {
+            if evicted.contains(wrapper.id().as_str()) {
                 self.ids.remove(wrapper.id().as_str());
                 self.untrack(&wrapper);
             } else {
@@ -1078,6 +1137,7 @@ impl Mempool {
         self.evidence_attempts = 0;
         self.mint_attempts = 0;
         self.update_attempts = 0;
+        self.cosmos_update_attempts = 0;
         self.settle_attempts = 0;
         self.guardian_attempts = 0;
     }

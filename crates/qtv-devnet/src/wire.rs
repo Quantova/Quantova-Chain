@@ -754,6 +754,41 @@ fn decode_block(decoder: &mut Decoder<'_>) -> Result<Block, DecodeError> {
     })
 }
 
+pub fn lock_to_bytes(
+    view: u64,
+    value: &[u8; 32],
+    block: &LockedBlock,
+    polka: &Certificate,
+) -> Vec<u8> {
+    let mut encoder = Encoder::new();
+    encoder.put_u64(view);
+    put_value(&mut encoder, value);
+    block.header.encode(&mut encoder);
+    encoder.put_u64(block.body.len() as u64);
+    for wrapper in &block.body {
+        wrapper.encode(&mut encoder);
+    }
+    encode_certificate(&mut encoder, polka);
+    encoder.into_bytes()
+}
+
+pub fn lock_from_bytes(
+    bytes: &[u8],
+) -> Result<(u64, [u8; 32], LockedBlock, Certificate), DecodeError> {
+    let mut decoder = Decoder::new(bytes);
+    let view = decoder.get_u64()?;
+    let value = get_value(&mut decoder)?;
+    let header = Header::decode(&mut decoder)?;
+    let count = decoder.get_u64()?;
+    let mut body = Vec::with_capacity(bounded_capacity(decoder.remaining(), count, MIN_WRAPPER)?);
+    for _ in 0..count {
+        body.push(decode_wrapper(&mut decoder)?);
+    }
+    let polka = decode_certificate(&mut decoder)?;
+    decoder.finish()?;
+    Ok((view, value, LockedBlock { header, body }, polka))
+}
+
 pub fn certificate_to_bytes(certificate: &Certificate) -> Vec<u8> {
     let mut encoder = Encoder::new();
     encode_envelope(&mut encoder, &certificate.envelope);

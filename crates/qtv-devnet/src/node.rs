@@ -22,15 +22,15 @@ use qtv_node::ledger::{
 };
 use qtv_node::mempool::{Admitted, Mempool, Reject};
 use qtv_node::node::{execute_ordered, reweigh_roster, Genesis, GenesisAccount};
-use qtv_node::watermark::{PrevoteGuard, SignGuard};
+use qtv_node::watermark::{LockFile, PrevoteGuard, SignGuard};
 use qtv_sampler::committee::PublishedReveal;
 use qtv_store::{BlockStore, BurnArchive, BurnArchiveEntry, EventStore, StateStore, TxIndex};
 use qtv_tx::{Body, Call, Wrapper};
 
 use crate::config::{DevnetConfig, NodeConfig};
 use crate::wire::{
-    decode_register_note, encode_register_note, CodedProposal, LockedBlock, Message, Proposal,
-    RegisterNote, RevealNote, ViewChange,
+    decode_register_note, encode_register_note, lock_from_bytes, lock_to_bytes, CodedProposal,
+    LockedBlock, Message, Proposal, RegisterNote, RevealNote, ViewChange,
 };
 use qtv_sampler::onetime::Root;
 
@@ -83,7 +83,8 @@ const MAX_ATTESTATIONS_PER_SENDER: usize = 64;
 const MAX_SEEN_ATTESTATIONS: usize = 4 * MAX_ROUND_ATTESTATIONS;
 const TX_POSITION_BITS: u32 = 24;
 const TX_POSITION_UNKNOWN: u64 = (1 << TX_POSITION_BITS) - 1;
-const SERVED_BLOCK_CACHE: usize = 8;
+const SERVED_BLOCK_CACHE: usize = 32;
+const SERVED_DECODE_BYTES_PER_SEC: usize = 16 * 1024 * 1024;
 
 pub struct ServedBlock {
     pub block: ChainBlock,
@@ -94,6 +95,19 @@ impl ServedBlock {
     pub fn ids(&self) -> &[String] {
         self.ids
             .get_or_init(|| self.block.body().iter().map(|w| w.id()).collect())
+    }
+
+    pub fn ids_prefix(&self, limit: usize) -> Vec<String> {
+        match self.ids.get() {
+            Some(ids) => ids.iter().take(limit).cloned().collect(),
+            None => self
+                .block
+                .body()
+                .iter()
+                .take(limit)
+                .map(|w| w.id())
+                .collect(),
+        }
     }
 }
 
@@ -119,6 +133,12 @@ const MAX_BLOCK_BODY_BYTES: usize = 6 * 1024 * 1024;
 // A sync reply's block bytes, kept under the channel's message limit with room for the
 // framing around them.
 const MAX_SERVE_BYTES: usize = 12 * 1024 * 1024;
+
+fn locked_body_fits(block: &LockedBlock) -> bool {
+    block.body.is_empty()
+        || (body_bytes(&block.body) <= MAX_BLOCK_BODY_BYTES
+            && transaction_root(&block.body) == *block.header.transaction_root())
+}
 
 fn body_bytes(body: &[Wrapper]) -> usize {
     body.iter()
@@ -162,6 +182,8 @@ fn evict_fairly<T>(buffer: &mut Vec<T>, incoming: u64, sender_of: impl Fn(&T) ->
 }
 
 const MAX_JUSTIFICATION_CACHE: usize = 4096;
+
+const EVIDENCE_WINDOW: Height = 256;
 
 const MAX_SERVE_BLOCKS: u64 = 256;
 
@@ -331,7 +353,10 @@ pub struct DevNode {
     justification_verified: HashSet<[u8; 32]>,
     silent: bool,
     selection_cache: RefCell<Option<Selection>>,
+    frozen_for: Option<Height>,
     served_blocks: RefCell<std::collections::VecDeque<(Height, std::sync::Arc<ServedBlock>)>>,
+    served_budget: std::cell::Cell<(std::time::Instant, usize)>,
+    served_saturated: std::cell::Cell<bool>,
     chain: Vec<FinalizedBlock>,
     slashed: Vec<u64>,
     tx_index: TxIndex,
@@ -355,6 +380,7 @@ pub struct DevNode {
     pending_notes: Vec<RegisterNote>,
     sign_guard: SignGuard,
     prevote_guard: PrevoteGuard,
+    lock_file: LockFile,
     finality: FinalityLedger,
     guarded_height: Option<Height>,
     fatal: Option<Fatal>,
@@ -384,10 +410,12 @@ impl DevNode {
         let event_store = EventStore::open(node.store_dir.join("events.log"))?;
         let tx_index = TxIndex::open(node.store_dir.join("txindex"))?;
         let side_event_store = EventStore::open(node.store_dir.join("side_events.log"))?;
-        let state_store = StateStore::open(node.store_dir.join("state.log"))?;
+        let floor = block_store.head_height().map(|head| head.saturating_sub(1));
+        let state_store = StateStore::open_with_floor(node.store_dir.join("state.log"), floor)?;
         let burn_archive = BurnArchive::open(node.store_dir.join("burns.log"))?;
         let sign_guard = SignGuard::open(node.store_dir.join("sign.watermark"))?;
         let prevote_guard = PrevoteGuard::open(node.store_dir.join("prevote.watermark"))?;
+        let lock_file = LockFile::open(node.store_dir.join("lock.state"));
 
         let roster: Vec<ValidatorRegistration> = devnet.roster();
 
@@ -448,7 +476,10 @@ impl DevNode {
             justification_verified: HashSet::new(),
             silent: false,
             selection_cache: RefCell::new(None),
+            frozen_for: None,
             served_blocks: RefCell::new(std::collections::VecDeque::new()),
+            served_budget: std::cell::Cell::new((std::time::Instant::now(), 0)),
+            served_saturated: std::cell::Cell::new(false),
             chain: Vec::new(),
             slashed: Vec::new(),
             tx_index,
@@ -464,6 +495,7 @@ impl DevNode {
             pending_notes: Vec::new(),
             sign_guard,
             prevote_guard,
+            lock_file,
             finality: FinalityLedger::new(),
             guarded_height: None,
             fatal: None,
@@ -483,7 +515,29 @@ impl DevNode {
         } else {
             dev.reload()?;
         }
+        dev.restore_lock()?;
         Ok(dev)
+    }
+
+    fn restore_lock(&mut self) -> Result<(), RoundError> {
+        let Some((height, payload)) = self.lock_file.load()? else {
+            return Ok(());
+        };
+        if height != self.height {
+            return Ok(());
+        }
+        let (view, value, block, polka) =
+            lock_from_bytes(&payload).map_err(|_| RoundError::Decode)?;
+        if header_value(&block.header.hash()) != value {
+            return Err(RoundError::Decode);
+        }
+        self.lock = Some(Lock {
+            view,
+            value,
+            block,
+            polka,
+        });
+        Ok(())
     }
 
     fn init_genesis(&mut self, genesis: &Genesis) -> Result<(), RoundError> {
@@ -506,7 +560,10 @@ impl DevNode {
         for v in &self.base_roster {
             let address = &v.bond_address;
             let bond = v.stake.saturating_mul(qtv_staking::NATIVE_UNIT as u64);
-            if let Some((bond_key, bond_value)) = self.ledger.seed_validator_bond(address, bond) {
+            if let Some((bond_key, bond_value)) =
+                self.ledger
+                    .seed_validator_bond_at(address, bond, self.genesis_time / 86_400)
+            {
                 self.state_store.put_account(bond_key, bond_value)?;
                 supply = supply.saturating_add(bond);
             }
@@ -636,6 +693,7 @@ impl DevNode {
             };
             if !qtv_attest::epoch_registration_verifies(
                 &reg.attest_pk,
+                self.consensus.chain_id(),
                 note.id,
                 note.epoch,
                 &note.root,
@@ -714,6 +772,7 @@ impl DevNode {
         };
         if !qtv_attest::epoch_registration_verifies(
             &reg.attest_pk,
+            self.consensus.chain_id(),
             note.id,
             note.epoch,
             &note.root,
@@ -744,6 +803,9 @@ impl DevNode {
     }
 
     pub fn apply_registrations(&mut self) {
+        if self.committee_frozen() {
+            return;
+        }
         let epoch = self.consensus.epoch_for(self.height);
         let roster = self.epoch_roster();
         self.consensus.rotate_to_epoch(epoch, roster);
@@ -856,7 +918,7 @@ impl DevNode {
     }
 
     pub fn collect_reveal(&mut self, note: RevealNote) -> bool {
-        if note.height != self.height {
+        if note.height != self.height || self.committee_frozen() {
             return false;
         }
         let reveal = PublishedReveal::new(note.id, note.credential);
@@ -1019,10 +1081,30 @@ impl DevNode {
             .admit(transaction, &self.ledger, &self.fee_params, None);
     }
 
+    pub fn admit_gossiped_hinted(
+        &mut self,
+        transaction: Wrapper,
+        hint: qtv_node::mempool::AdmitHint,
+    ) {
+        let _ = self
+            .mempool
+            .admit(transaction, &self.ledger, &self.fee_params, Some(&hint));
+    }
+
     pub fn admit_gossiped_batch(&mut self, batch: Vec<Wrapper>) {
         let _ = self
             .mempool
             .admit_batch(batch, &self.ledger, &self.fee_params);
+    }
+
+    fn committee_frozen(&self) -> bool {
+        self.frozen_for == Some(self.height)
+    }
+
+    pub fn freeze_committee(&mut self) -> Result<Selection, RoundError> {
+        let selection = self.select()?;
+        self.frozen_for = Some(self.height);
+        Ok(selection)
     }
 
     pub fn select(&self) -> Result<Selection, RoundError> {
@@ -1057,7 +1139,8 @@ impl DevNode {
         let proposer = self.validator_address(leader_for(selection, view));
         let chain_id = self.fee_params.chain_id;
         let mut candidates: Vec<Wrapper> = self
-            .pending_evidence()
+            .evidence_pool
+            .pending()
             .iter()
             .map(|evidence| evidence_transaction(evidence, chain_id))
             .collect();
@@ -1067,7 +1150,7 @@ impl DevNode {
             }
         }
         candidates.extend(self.mempool.candidates());
-        let mut room = MAX_BLOCK_BODY_BYTES;
+        let mut room = 2 * MAX_BLOCK_BODY_BYTES;
         candidates.retain(|wrapper| {
             let size = to_bytes(wrapper).len();
             if size > room {
@@ -1084,7 +1167,15 @@ impl DevNode {
         // Never below the parent, so a parent stamped ahead of this clock does not make this
         // node's own proposal one that every peer must refuse.
         let block_time = qtv_node::node::wall_clock_seconds().max(self.parent_time);
-        let included = execute_ordered(&mut ledger, &candidates, &self.fee_params, block_time);
+        let outcome = qtv_node::node::execute_ordered_within(
+            &mut ledger,
+            &candidates,
+            &self.fee_params,
+            block_time,
+            MAX_BLOCK_BODY_BYTES,
+        );
+        self.mempool.evict(&outcome.refused_feeless);
+        let included = outcome.included;
         let event_leaves: Vec<Vec<u8>> = ledger
             .block_events()
             .iter()
@@ -1393,7 +1484,6 @@ impl DevNode {
             });
             return Err(err);
         }
-        self.archive_burn_block(&chain_block);
 
         self.beacon = self
             .beacon
@@ -1423,6 +1513,7 @@ impl DevNode {
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();
         self.mempool.remove_included(&staged.included_ids);
+        self.settle_evidence(&staged.included_ids);
         self.mempool.revalidate(&self.ledger);
         self.push_finalized(FinalizedBlock {
             block: chain_block,
@@ -1572,7 +1663,11 @@ impl DevNode {
                 return Err(());
             }
             value = Some(locked_value);
-            if backed.is_none() {
+            let improves = match &backed {
+                None => true,
+                Some(held) => held.body.is_empty() && !block.body.is_empty(),
+            };
+            if improves && locked_body_fits(block) {
                 if let Some(polka) = &record.polka {
                     if self.polka_backs(selection, top, block, polka) {
                         backed = Some(block.clone());
@@ -1679,6 +1774,16 @@ impl DevNode {
         ) else {
             return Vec::new();
         };
+        if self
+            .lock_file
+            .store(self.height, &lock_to_bytes(view, &value, &block, &polka))
+            .is_err()
+        {
+            self.fatal = Some(Fatal::PersistFailed {
+                height: self.height,
+            });
+            return Vec::new();
+        }
         self.lock = Some(Lock {
             view,
             value,
@@ -1705,6 +1810,9 @@ impl DevNode {
     }
 
     fn record_prevote(&mut self, prevote: &Attestation) {
+        if prevote.block.cost != qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST {
+            return;
+        }
         let seen = self
             .prevotes
             .iter()
@@ -1718,7 +1826,19 @@ impl DevNode {
             .filter(|p| p.from == prevote.from)
             .count();
         if from_count >= MAX_ATTESTATIONS_PER_SENDER {
-            return;
+            let oldest = self
+                .prevotes
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.from == prevote.from)
+                .min_by_key(|(_, p)| p.view)
+                .map(|(at, p)| (at, p.view));
+            match oldest {
+                Some((at, view)) if view < prevote.view => {
+                    self.prevotes.remove(at);
+                }
+                _ => return,
+            }
         }
         if self.prevotes.len() >= MAX_ROUND_ATTESTATIONS {
             evict_fairly(&mut self.prevotes, prevote.from, |p| p.from);
@@ -1777,11 +1897,31 @@ impl DevNode {
         if from_count >= MAX_VIEW_CHANGES_PER_SENDER {
             return;
         }
+        if record
+            .locked
+            .as_ref()
+            .is_some_and(|block| !locked_body_fits(block))
+        {
+            return;
+        }
         if !self.verify_view_change_att(selection, &record) {
             return;
         }
         if !self.verify_view_change_polka(selection, &record) {
             return;
+        }
+        let mut record = record;
+        if let Some(block) = record.locked.as_mut() {
+            let hash = block.header.hash();
+            let held = self.view_changes.iter().any(|r| {
+                r.att.from == record.att.from
+                    && r.locked
+                        .as_ref()
+                        .is_some_and(|held| !held.body.is_empty() && held.header.hash() == hash)
+            });
+            if held {
+                block.body = Vec::new();
+            }
         }
         if self.view_changes.len() >= MAX_ROUND_VIEW_CHANGES {
             evict_fairly(&mut self.view_changes, record.att.from, |r| r.att.from);
@@ -1903,10 +2043,14 @@ impl DevNode {
                 valid.push(record.clone());
                 continue;
             }
-            if verifications >= cap {
+            let cost = 1 + record
+                .polka
+                .as_ref()
+                .map_or(0, |polka| polka.attestations.len() as u64);
+            if verifications.saturating_add(cost) > cap {
                 break;
             }
-            verifications += 1;
+            verifications += cost;
             if !self.verify_view_change(selection, record) {
                 continue;
             }
@@ -2066,7 +2210,8 @@ impl DevNode {
                 self.seen_atts.insert(digest);
             }
             if let Some(member) = selection.commitment.member(attestation.from) {
-                if attestation.slot == self.consensus.slot_for(self.height)
+                if attestation.block.cost != qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST
+                    && attestation.slot == self.consensus.slot_for(self.height)
                     && attestation.is_entitled(
                         &member.root,
                         &self.beacon,
@@ -2117,7 +2262,7 @@ impl DevNode {
         let tau = selection.tau.max(qtv_sampler::params::finality_threshold(
             commitment.len() as u64
         ));
-        let committee_weight = u128::from(commitment.committee_weight());
+        let committee_stake = u128::from(commitment.committee_stake());
         let digest = commitment.digest();
         let mut by_view: std::collections::BTreeMap<View, std::collections::BTreeSet<u64>> =
             std::collections::BTreeMap::new();
@@ -2135,13 +2280,13 @@ impl DevNode {
             }
         }
         by_view.values().any(|seen| {
-            let weight = seen
+            let stake = seen
                 .iter()
-                .map(|&id| u128::from(commitment.weight_of(id)))
+                .map(|&id| u128::from(commitment.stake_of(id)))
                 .fold(0u128, u128::saturating_add);
             seen.len() as u64 >= tau
-                && (committee_weight == 0
-                    || weight.saturating_mul(3) >= committee_weight.saturating_mul(2))
+                && (committee_stake == 0
+                    || stake.saturating_mul(3) >= committee_stake.saturating_mul(2))
         })
     }
 
@@ -2220,6 +2365,15 @@ impl DevNode {
 
     pub fn pending_evidence(&mut self) -> Vec<Equivocation> {
         self.evidence_pool.drain()
+    }
+
+    fn settle_evidence(&mut self, included: &[String]) {
+        let chain_id = self.fee_params.chain_id;
+        let height = self.height;
+        self.evidence_pool.retain(|evidence| {
+            evidence.height.saturating_add(EVIDENCE_WINDOW) > height
+                && !included.contains(&evidence_transaction(evidence, chain_id).id())
+        });
     }
 
     fn buffer_proposal(&mut self, proposal: Proposal) {
@@ -2312,6 +2466,7 @@ impl DevNode {
         // Synced with the block, so a crash cannot leave the block store holding a
         // transaction the index has never heard of.
         self.tx_index.sync()?;
+        self.archive_burn_block(block)?;
         self.state_store.commit(height, self.ledger.q_root())?;
         // After the commit, so the registrations counted are exactly those of blocks a
         // restart finds on disk, and rebuild_epoch_registrations reaches the same map.
@@ -2325,13 +2480,13 @@ impl DevNode {
         Ok(())
     }
 
-    fn archive_burn_block(&mut self, block: &ChainBlock) {
+    fn archive_burn_block(&mut self, block: &ChainBlock) -> io::Result<()> {
         let events = self.ledger.block_events();
         let carries_burn = events.iter().any(|event| {
             event.selector == EVENT_BRIDGE_BURN && event.contract == NATIVE_EVENT_SOURCE
         });
         if !carries_burn {
-            return;
+            return Ok(());
         }
         let leaves: Vec<Vec<u8>> = events.iter().map(BlockEvent::encode).collect();
         let entry = BurnArchiveEntry {
@@ -2340,7 +2495,7 @@ impl DevNode {
             certificate: block.certificate().to_vec(),
             events: leaves,
         };
-        let _ = self.burn_archive.append(entry);
+        self.burn_archive.append(entry)
     }
 
     pub fn finalized_head(&self) -> Height {
@@ -2504,8 +2659,31 @@ impl DevNode {
         if hit.is_some() {
             return hit;
         }
-        let block = self.block_at_height(height)?;
+        let bytes = self.block_store.block_by_height(height)?;
+        if !self.charge_served(bytes.len()) {
+            return None;
+        }
+        let block = crate::wire::chain_block_from_bytes(&bytes).ok()?;
         Some(self.remember_served(height, block))
+    }
+
+    fn charge_served(&self, bytes: usize) -> bool {
+        let now = std::time::Instant::now();
+        let (mut since, mut spent) = self.served_budget.get();
+        if now.duration_since(since) >= std::time::Duration::from_secs(1) {
+            since = now;
+            spent = 0;
+        }
+        if spent > 0 && spent.saturating_add(bytes) > SERVED_DECODE_BYTES_PER_SEC {
+            self.served_saturated.set(true);
+            return false;
+        }
+        self.served_budget.set((since, spent.saturating_add(bytes)));
+        true
+    }
+
+    pub fn take_serve_saturated(&self) -> bool {
+        self.served_saturated.replace(false)
     }
 
     pub fn served_block_by_id(&self, id: &str) -> Option<std::sync::Arc<ServedBlock>> {
@@ -2521,6 +2699,9 @@ impl DevNode {
             return hit;
         }
         let bytes = self.block_store.block_by_hash(&hash)?;
+        if !self.charge_served(bytes.len()) {
+            return None;
+        }
         let block = crate::wire::chain_block_from_bytes(&bytes).ok()?;
         Some(self.remember_served(block.header().height(), block))
     }
@@ -2716,7 +2897,6 @@ impl DevNode {
             });
             return Err(SyncError::Io);
         }
-        self.archive_burn_block(&block);
         let leader = selection
             .members
             .iter()
@@ -2747,6 +2927,7 @@ impl DevNode {
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();
         self.mempool.remove_included(&included_ids);
+        self.settle_evidence(&included_ids);
         self.mempool.revalidate(&self.ledger);
         self.push_finalized(FinalizedBlock {
             block,

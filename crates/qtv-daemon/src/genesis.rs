@@ -430,7 +430,7 @@ fn parse_account(field: &Field) -> Result<GenesisAccount, String> {
 
 fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) -> [u8; 32] {
     let mut buf: Vec<u8> = Vec::new();
-    buf.extend_from_slice(b"QTV-GENESIS-V6");
+    buf.extend_from_slice(b"QTV-GENESIS-V7");
     put_bytes(&mut buf, chain_id.as_bytes());
     put_bytes(&mut buf, message.as_bytes());
     buf.extend_from_slice(&genesis.genesis_time.to_le_bytes());
@@ -440,13 +440,19 @@ fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) ->
     buf.extend_from_slice(&genesis.fee_params.native_unit.to_le_bytes());
     buf.extend_from_slice(&genesis.fee_params.max_fee_native.to_le_bytes());
     buf.extend_from_slice(&genesis.fee_params.native_asset);
-    if let Some(dest_chain) = genesis.bridge_dest_chain {
-        buf.extend_from_slice(&dest_chain.to_le_bytes());
+    match genesis.bridge_dest_chain {
+        Some(dest_chain) => {
+            buf.push(1);
+            buf.extend_from_slice(&dest_chain.to_le_bytes());
+        }
+        None => buf.push(0),
     }
-    // Folded in only when the operator declared it, so every genesis file written before
-    // the ceiling existed hashes to exactly what it hashed to before.
-    if let Some(ceiling) = genesis.bridge_exit_max_amount {
-        buf.extend_from_slice(&ceiling.to_le_bytes());
+    match genesis.bridge_exit_max_amount {
+        Some(ceiling) => {
+            buf.push(1);
+            buf.extend_from_slice(&ceiling.to_le_bytes());
+        }
+        None => buf.push(0),
     }
 
     let mut validators = genesis.validators.clone();
@@ -633,6 +639,20 @@ mod tests {
             produced, legacy,
             "committing the native asset into the preimage is a genesis format change, so it \
              must never silently reproduce the frozen V4 hash a node already trusts"
+        );
+    }
+
+    #[test]
+    fn the_optional_bridge_fields_cannot_stand_in_for_each_other() {
+        let mut dest = sample_genesis(None);
+        dest.bridge_dest_chain = Some(7);
+        dest.bridge_exit_max_amount = None;
+        let mut ceiling = sample_genesis(None);
+        ceiling.bridge_dest_chain = None;
+        ceiling.bridge_exit_max_amount = Some(7);
+        assert_ne!(
+            genesis_hash("Q-test-net-1", "genesis", 64, &dest),
+            genesis_hash("Q-test-net-1", "genesis", 64, &ceiling)
         );
     }
 

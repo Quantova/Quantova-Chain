@@ -12,7 +12,7 @@ pub const MAX_BTC_HEADERS: usize = 4096;
 pub const MAX_BTC_RAW_TX: usize = 1 << 16;
 pub const BITCOIN_MINT_SOURCE_CHAIN: u32 = 0xFFFF_FF01;
 
-pub const MAX_BTC_DEPOSIT_SATS: u128 = 21_000_000 * 100_000_000;
+pub const MAX_BTC_DEPOSIT_SATS: u128 = qtv_btc_spv::deposit::MAX_TRUSTLESS_DEPOSIT_SATS;
 
 struct Cursor<'a> {
     bytes: &'a [u8],
@@ -213,8 +213,9 @@ pub fn bitcoin_mint_work(anchor: &BitcoinAnchor, proof: &BitcoinMintProof) -> Op
         headers.push(BlockHeader::parse(raw).ok()?);
     }
     let chain = verify_chain(&headers, proof.start_height, &params).ok()?;
-    chain.anchored_to(&anchor.checkpoint()).ok()?;
-    Some(chain.work.to_be_bytes())
+    let checkpoint = anchor.checkpoint();
+    chain.anchored_to(&checkpoint).ok()?;
+    Some(chain.work_above(checkpoint.height).to_be_bytes())
 }
 
 pub fn verify_bitcoin_mint(

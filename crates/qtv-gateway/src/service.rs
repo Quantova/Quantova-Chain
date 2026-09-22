@@ -82,6 +82,14 @@ impl ClientError {
         }
     }
 
+    fn busy() -> ClientError {
+        ClientError {
+            code: "busy".to_string(),
+            message: "block reads are saturated, retry shortly".to_string(),
+            http: 503,
+        }
+    }
+
     fn not_found(message: impl Into<String>) -> ClientError {
         ClientError {
             code: "not_found".to_string(),
@@ -312,7 +320,7 @@ pub fn handle(
         Request::NodeInfo => Ok(node_info(ctx, node)),
         Request::Head => Ok(head(node)),
         Request::Account(address) => account(node, &address),
-        Request::Transaction(tx_id) => Ok(transaction(node, &tx_id)),
+        Request::Transaction(tx_id) => transaction(node, &tx_id),
         Request::Submit(bytes) => Ok(submit(node, bytes)),
         Request::Block(selector) => block(node, selector),
         Request::Validators => Ok(validators(node)),
@@ -784,7 +792,16 @@ fn tx_fields(node: &DevNode, wrapper: &Wrapper) -> Vec<(&'static str, Json)> {
     fields
 }
 
-fn transaction(node: &DevNode, tx_id: &str) -> Json {
+fn transaction(node: &DevNode, tx_id: &str) -> Result<Json, ClientError> {
+    node.take_serve_saturated();
+    let found = transaction_found(node, tx_id);
+    if node.take_serve_saturated() {
+        return Err(ClientError::busy());
+    }
+    Ok(found)
+}
+
+fn transaction_found(node: &DevNode, tx_id: &str) -> Json {
     if let Some((height, position)) = node.finalized_location(tx_id) {
         let mut fields = vec![
             ("tx_id", Json::str(tx_id)),
@@ -1267,10 +1284,14 @@ fn reason_code(reject: &Reject) -> &'static str {
 }
 
 fn block(node: &DevNode, selector: BlockSelector) -> Result<Json, ClientError> {
+    node.take_serve_saturated();
     let found = match &selector {
         BlockSelector::Height(height) => node.served_block(*height),
         BlockSelector::Id(id) => node.served_block_by_id(id),
     };
+    if found.is_none() && node.take_serve_saturated() {
+        return Err(ClientError::busy());
+    }
     let served = found.ok_or_else(|| match selector {
         BlockSelector::Height(height) => {
             ClientError::not_found(format!("no finalised block at height {height}"))
@@ -1285,9 +1306,8 @@ fn block(node: &DevNode, selector: BlockSelector) -> Result<Json, ClientError> {
     // uncapped list over a full block is seconds of block production per request.
     let total = block.body().len();
     let tx_ids: Vec<Json> = served
-        .ids()
+        .ids_prefix(MAX_LIST_ITEMS)
         .iter()
-        .take(MAX_LIST_ITEMS)
         .map(|id| Json::str(id))
         .collect();
     Ok(object(vec![

@@ -197,6 +197,60 @@ fn decode_prevote(bytes: &[u8]) -> Option<(u64, u64, [u8; 32])> {
     Some((height, view, value))
 }
 
+#[derive(Debug)]
+pub struct LockFile {
+    path: PathBuf,
+}
+
+impl LockFile {
+    pub fn open(path: impl AsRef<Path>) -> Self {
+        LockFile {
+            path: path.as_ref().to_path_buf(),
+        }
+    }
+
+    pub fn load(&self) -> io::Result<Option<(u64, Vec<u8>)>> {
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let corrupt = || {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the lock file is present but unreadable; refusing to start unlocked",
+            )
+        };
+        if bytes.len() < 12 {
+            return Err(corrupt());
+        }
+        let split = bytes.len() - 4;
+        let stored = u32::from_le_bytes(bytes[split..].try_into().map_err(|_| corrupt())?);
+        if crc32(&bytes[..split]) != stored {
+            return Err(corrupt());
+        }
+        let height = u64::from_le_bytes(bytes[0..8].try_into().map_err(|_| corrupt())?);
+        Ok(Some((height, bytes[8..split].to_vec())))
+    }
+
+    pub fn store(&self, height: u64, payload: &[u8]) -> io::Result<()> {
+        let mut bytes = Vec::with_capacity(12 + payload.len());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend_from_slice(payload);
+        let checksum = crc32(&bytes);
+        bytes.extend_from_slice(&checksum.to_le_bytes());
+        let temp = self.path.with_extension("tmp");
+        let mut file = fs::File::create(&temp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, &self.path)?;
+        if let Some(dir) = self.path.parent() {
+            fs::File::open(dir)?.sync_all()?;
+        }
+        Ok(())
+    }
+}
+
 fn crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {

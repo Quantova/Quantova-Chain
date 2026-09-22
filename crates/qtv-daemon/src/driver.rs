@@ -30,7 +30,7 @@ struct VerifyJob {
     ledger: Arc<Ledger>,
     fee_params: FeeParams,
     tx_id: String,
-    reply: Sender<Result<Json, ClientError>>,
+    reply: Option<Sender<Result<Json, ClientError>>>,
 }
 
 struct VerifyDone {
@@ -39,7 +39,7 @@ struct VerifyDone {
     // then rejects it outright rather than re-running the same panic inline.
     hint: Option<AdmitHint>,
     tx_id: String,
-    reply: Sender<Result<Json, ClientError>>,
+    reply: Option<Sender<Result<Json, ClientError>>>,
 }
 
 // A pool of worker threads that run every submitted transaction's heavy verification
@@ -51,10 +51,12 @@ struct VerifyDone {
 // spam filter and can never move value on a stale read.
 fn queue_verify(jobs: &SyncSender<VerifyJob>, job: VerifyJob) {
     if let Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) = jobs.try_send(job) {
-        let _ = job.reply.send(Ok(qtv_gateway::submit_reply(
-            Err(qtv_node::mempool::Reject::RateLimited),
-            &job.tx_id,
-        )));
+        if let Some(reply) = &job.reply {
+            let _ = reply.send(Ok(qtv_gateway::submit_reply(
+                Err(qtv_node::mempool::Reject::RateLimited),
+                &job.tx_id,
+            )));
+        }
     }
 }
 
@@ -118,6 +120,54 @@ const MAX_BUFFERED_FRAMES: usize = 8192;
 const MAX_BUFFERED_BYTES: usize = 32 * 1024 * 1024;
 
 const CATCH_UP_SPAN: u64 = 64;
+
+const FUTURE_WINDOW: u64 = 4;
+
+const MAX_LINK_QUEUE_BYTES: usize = 64 * 1024 * 1024;
+
+const MAX_LINK_QUEUE_FRAMES: usize = 4096;
+
+struct Link {
+    queue: SyncSender<Arc<Vec<u8>>>,
+    queued: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Link {
+    fn spawn(q: usize, mut channel: Channel<TcpStream>, down: SyncSender<usize>) -> Link {
+        let (queue, frames) = sync_channel::<Arc<Vec<u8>>>(MAX_LINK_QUEUE_FRAMES);
+        let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let held = Arc::clone(&queued);
+        thread::spawn(move || {
+            while let Ok(bytes) = frames.recv() {
+                let sent = channel.send(&bytes);
+                held.fetch_sub(bytes.len(), Ordering::Relaxed);
+                match sent {
+                    Ok(()) | Err(qtv_net::Error::MessageTooLarge) => {}
+                    Err(_) => {
+                        let _ = down.try_send(q);
+                        return;
+                    }
+                }
+            }
+        });
+        Link { queue, queued }
+    }
+
+    fn offer(&self, bytes: &Arc<Vec<u8>>) -> bool {
+        if self.queued.load(Ordering::Relaxed) + bytes.len() > MAX_LINK_QUEUE_BYTES {
+            return true;
+        }
+        self.queued.fetch_add(bytes.len(), Ordering::Relaxed);
+        match self.queue.try_send(Arc::clone(bytes)) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                self.queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+                true
+            }
+            Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
+}
 
 #[derive(Default)]
 struct FrameBuffer {
@@ -187,7 +237,7 @@ pub struct Driver {
     node: DevNode,
     idx: usize,
     n: usize,
-    send: Vec<Option<Channel<TcpStream>>>,
+    send: Vec<Option<Link>>,
     inbound: Receiver<(usize, Vec<u8>)>,
     queued_bytes: std::sync::Arc<crate::mesh::InboundBudget>,
     up: Vec<bool>,
@@ -195,6 +245,9 @@ pub struct Driver {
     down: SyncSender<usize>,
     assembler: ProposalAssembler,
     buffered: FrameBuffer,
+    ahead: std::collections::BTreeSet<u64>,
+    catch_up_turn: usize,
+    relayed: std::collections::HashSet<(u64, [u8; 32], usize)>,
     budget: u64,
     rpc_context: Option<NodeContext>,
     rpc_requests: Option<Receiver<GatewayCall>>,
@@ -223,7 +276,12 @@ impl Driver {
             node,
             idx,
             n: mesh.up.len(),
-            send: mesh.send,
+            send: mesh
+                .send
+                .into_iter()
+                .enumerate()
+                .map(|(q, channel)| channel.map(|c| Link::spawn(q, c, mesh.down.clone())))
+                .collect(),
             inbound: mesh.inbound,
             queued_bytes: mesh.queued_bytes,
             up: mesh.up,
@@ -231,6 +289,9 @@ impl Driver {
             down: mesh.down,
             assembler: ProposalAssembler::new(),
             buffered: FrameBuffer::default(),
+            ahead: std::collections::BTreeSet::new(),
+            catch_up_turn: 0,
+            relayed: std::collections::HashSet::new(),
             budget: u64::MAX,
             rpc_context: None,
             rpc_requests: None,
@@ -245,13 +306,46 @@ impl Driver {
         self.rpc_requests = Some(requests);
     }
 
-    fn serve_rpc(&mut self) {
-        const RPC_CALLS_PER_TICK: usize = 128;
+    fn ensure_verify_pool(&mut self) {
         if self.verify_jobs.is_none() {
             let (jobs, done) = start_verify_pool();
             self.verify_jobs = Some(jobs);
             self.verify_done = Some(done);
         }
+    }
+
+    fn fresh_snapshot(&mut self) -> Arc<Ledger> {
+        let height = self.node.height();
+        match &self.verify_snapshot {
+            Some((h, ledger)) if *h == height => Arc::clone(ledger),
+            _ => {
+                let ledger = Arc::new(self.node.ledger_snapshot());
+                self.verify_snapshot = Some((height, Arc::clone(&ledger)));
+                ledger
+            }
+        }
+    }
+
+    fn verify_gossiped(&mut self, wrapper: Wrapper) {
+        self.ensure_verify_pool();
+        let ledger = self.fresh_snapshot();
+        if let Some(jobs) = self.verify_jobs.as_ref() {
+            queue_verify(
+                jobs,
+                VerifyJob {
+                    tx_id: String::new(),
+                    wrapper,
+                    ledger,
+                    fee_params: self.node.fee_params(),
+                    reply: None,
+                },
+            );
+        }
+    }
+
+    fn serve_rpc(&mut self) {
+        const RPC_CALLS_PER_TICK: usize = 128;
+        self.ensure_verify_pool();
         // Finalise any submissions the verify pool has now checked. Admission is cheap
         // here because the post quantum verify already ran on a worker thread; the
         // verdict is carried back as a hint and reused unless the sender key changed.
@@ -265,15 +359,19 @@ impl Driver {
             })
             .unwrap_or_default();
         for done in completed {
+            let Some(reply) = done.reply else {
+                if let Some(hint) = done.hint {
+                    self.node.admit_gossiped_hinted(done.wrapper, hint);
+                }
+                continue;
+            };
             let result = match done.hint {
                 Some(hint) => self.node.submit_hinted(done.wrapper, Some(hint)),
                 // Verification panicked on this submission. Reject it outright rather
                 // than re-running the same panic on the consensus thread.
                 None => Err(qtv_node::mempool::Reject::BadCall),
             };
-            let _ = done
-                .reply
-                .send(Ok(qtv_gateway::submit_reply(result, &done.tx_id)));
+            let _ = reply.send(Ok(qtv_gateway::submit_reply(result, &done.tx_id)));
         }
 
         let calls: Vec<GatewayCall> = match self.rpc_requests.as_ref() {
@@ -290,16 +388,14 @@ impl Driver {
         // once per block and only when there is a submission to serve. The snapshot is
         // shared by reference count, so each job clone is cheap.
         let fee_params = self.node.fee_params();
-        if calls
+        let snapshot = if calls
             .iter()
             .any(|call| matches!(call.request, Request::Submit(_)))
         {
-            let height = self.node.height();
-            if self.verify_snapshot.as_ref().map(|(h, _)| *h) != Some(height) {
-                self.verify_snapshot = Some((height, Arc::new(self.node.ledger_snapshot())));
-            }
-        }
-        let snapshot = self.verify_snapshot.as_ref().map(|(_, l)| Arc::clone(l));
+            Some(self.fresh_snapshot())
+        } else {
+            None
+        };
 
         for call in calls {
             // A submission has its heavy verification run on the pool against a ledger
@@ -313,7 +409,7 @@ impl Driver {
                             wrapper,
                             ledger: Arc::clone(ledger),
                             fee_params,
-                            reply: call.reply.clone(),
+                            reply: Some(call.reply.clone()),
                         };
                         queue_verify(jobs, job);
                         continue;
@@ -373,9 +469,14 @@ impl Driver {
         stopped: &AtomicBool,
     ) -> Result<(), String> {
         let start_height = self.node.height();
+        self.ahead.clear();
+        self.relayed.clear();
         self.disseminate_registrations(view_timeout);
         self.disseminate_reveals(view_timeout);
-        let selection = match self.node.select() {
+        if self.node.height() != start_height {
+            return Ok(());
+        }
+        let selection = match self.node.freeze_committee() {
             Ok(selection) => selection,
             Err(e) => {
                 // A transient partition or a too-thin reveal set must not terminate the
@@ -460,7 +561,7 @@ impl Driver {
                 // the membership of the reveal barrier that decides which set every
                 // node calls select() on, so moving it from one node's view of a
                 // socket would let two nodes form different committees.
-                self.send[q] = Some(channel);
+                self.send[q] = Some(Link::spawn(q, channel, self.down.clone()));
             }
         }
     }
@@ -489,7 +590,7 @@ impl Driver {
                             self.broadcast(&Message::Register(note).encode());
                         }
                     }
-                    Ok(_) => self.buffered.push(source as u64, bytes),
+                    Ok(other) => self.hold(source as u64, bytes, other),
                     Err(_) => {}
                 },
                 Err(RecvTimeoutError::Timeout) => {}
@@ -504,6 +605,18 @@ impl Driver {
             let bytes = Message::Reveal(Box::new(note)).encode();
             self.broadcast(&bytes);
         }
+        let height = self.node.height();
+        for (source, bytes) in self.buffered.take() {
+            match Message::decode(&bytes) {
+                Ok(Message::Reveal(note)) if note.height == height => {
+                    if self.node.collect_reveal((*note).clone()) {
+                        self.broadcast(&Message::Reveal(note).encode());
+                    }
+                }
+                Ok(_) => self.buffered.push(source, bytes),
+                Err(_) => {}
+            }
+        }
         let expected: Vec<u64> = (0..self.n)
             .filter(|&q| self.up.get(q).copied().unwrap_or(false))
             .map(|q| q as u64 + 1)
@@ -516,12 +629,12 @@ impl Driver {
             }
             match self.inbound.recv_timeout(TICK) {
                 Ok((source, bytes)) => match self.decode_queued(source, &bytes) {
-                    Ok(Message::Reveal(note)) => {
+                    Ok(Message::Reveal(note)) if note.height == height => {
                         if self.node.collect_reveal((*note).clone()) {
                             self.broadcast(&Message::Reveal(note).encode());
                         }
                     }
-                    Ok(_) => self.buffered.push(source as u64, bytes),
+                    Ok(other) => self.hold(source as u64, bytes, other),
                     Err(_) => {}
                 },
                 Err(RecvTimeoutError::Timeout) => {}
@@ -576,8 +689,8 @@ impl Driver {
 
     fn dispatch(&mut self, message: Message, selection: &Selection, source: u64) {
         match message {
-            Message::Tx(transaction) => self.node.admit_gossiped(transaction),
             Message::CodedProposal(coded) => {
+                self.relay_shard(&coded, selection, source);
                 self.assembler.set_round_height(self.node.height());
                 let outcome = {
                     let node = &self.node;
@@ -624,19 +737,8 @@ impl Driver {
                     self.node.apply_registrations();
                 }
             }
-            Message::GetBlocks { from, to } => {
-                let blocks = self.node.serve_blocks(from, to);
-                if !blocks.is_empty() {
-                    let reply = Message::Blocks(blocks).encode();
-                    self.send_one(source as usize, &reply);
-                }
-            }
-            Message::Blocks(blocks) => {
-                for block in blocks {
-                    if self.node.apply_synced_block(block).is_err() {
-                        break;
-                    }
-                }
+            other @ (Message::Tx(_) | Message::GetBlocks { .. } | Message::Blocks(_)) => {
+                self.dispatch_heightless(other, source)
             }
             Message::Peers(_) | Message::Status(_) => {}
         }
@@ -662,9 +764,47 @@ impl Driver {
             Err(_) => return,
         };
         match message_height(&message) {
-            Some(h) if h > start_height => self.buffered.push(source, bytes),
+            Some(h) if h > start_height => self.park(source, bytes, h, start_height),
             Some(h) if h < start_height => {}
             _ => self.dispatch(message, selection, source),
+        }
+    }
+
+    fn park(&mut self, source: u64, bytes: Vec<u8>, height: u64, current: u64) {
+        self.ahead.insert(source);
+        if height <= current.saturating_add(FUTURE_WINDOW) {
+            self.buffered.push(source, bytes);
+        }
+    }
+
+    fn hold(&mut self, source: u64, bytes: Vec<u8>, message: Message) {
+        let current = self.node.height();
+        match message_height(&message) {
+            Some(h) if h > current => self.park(source, bytes, h, current),
+            Some(h) if h < current => {}
+            Some(_) => self.buffered.push(source, bytes),
+            None => self.dispatch_heightless(message, source),
+        }
+    }
+
+    fn dispatch_heightless(&mut self, message: Message, source: u64) {
+        match message {
+            Message::Tx(transaction) => self.verify_gossiped(transaction),
+            Message::GetBlocks { from, to } => {
+                let blocks = self.node.serve_blocks(from, to);
+                if !blocks.is_empty() {
+                    let reply = Message::Blocks(blocks).encode();
+                    self.send_one(source as usize, &reply);
+                }
+            }
+            Message::Blocks(blocks) => {
+                for block in blocks {
+                    if self.node.apply_synced_block(block).is_err() {
+                        break;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -675,9 +815,30 @@ impl Driver {
                 continue;
             };
             match message_height(&message) {
-                Some(h) if h == start_height => self.dispatch(message, selection, source),
-                Some(h) if h > start_height => self.buffered.push(source, bytes),
-                _ => {}
+                Some(h) if h > start_height => self.park(source, bytes, h, start_height),
+                Some(h) if h < start_height => {}
+                _ => self.dispatch(message, selection, source),
+            }
+        }
+    }
+
+    fn relay_shard(
+        &mut self,
+        coded: &qtv_devnet::wire::CodedProposal,
+        selection: &Selection,
+        source: u64,
+    ) {
+        if leader_for(selection, coded.view) != source + 1 {
+            return;
+        }
+        let key = (coded.view, coded.commitment.root, coded.shard.index);
+        if self.relayed.len() >= MAX_BUFFERED_FRAMES || !self.relayed.insert(key) {
+            return;
+        }
+        let bytes = Arc::new(Message::CodedProposal(Box::new(coded.clone())).encode());
+        for q in 0..self.n {
+            if q != self.idx && q as u64 != source {
+                self.offer(q, &bytes);
             }
         }
     }
@@ -686,9 +847,25 @@ impl Driver {
         match message {
             Message::Proposal(proposal) => {
                 if let Ok(shards) = code_proposal(&proposal) {
-                    for shard in shards {
-                        let bytes = Message::CodedProposal(Box::new(shard)).encode();
-                        self.broadcast(&bytes);
+                    let peers: Vec<usize> = (0..self.n).filter(|&q| q != self.idx).collect();
+                    let encoded: Vec<Arc<Vec<u8>>> = shards
+                        .into_iter()
+                        .map(|shard| Arc::new(Message::CodedProposal(Box::new(shard)).encode()))
+                        .collect();
+                    if peers.is_empty() || encoded.is_empty() {
+                        return;
+                    }
+                    for (j, &q) in peers.iter().enumerate() {
+                        let mut any = false;
+                        for (i, bytes) in encoded.iter().enumerate() {
+                            if i % peers.len() == j {
+                                self.offer(q, bytes);
+                                any = true;
+                            }
+                        }
+                        if !any {
+                            self.offer(q, &encoded[j % encoded.len()]);
+                        }
                     }
                 }
             }
@@ -699,19 +876,32 @@ impl Driver {
         }
     }
 
-    fn send_one(&mut self, q: usize, bytes: &[u8]) {
+    fn offer(&mut self, q: usize, bytes: &Arc<Vec<u8>>) {
         if q == self.idx || q >= self.send.len() {
             return;
         }
-        if let Some(channel) = self.send[q].as_mut() {
-            let _ = channel.send(bytes);
+        let alive = match self.send[q].as_ref() {
+            Some(link) => link.offer(bytes),
+            None => return,
+        };
+        if !alive {
+            self.send[q] = None;
         }
+    }
+
+    fn send_one(&mut self, q: usize, bytes: &[u8]) {
+        self.offer(q, &Arc::new(bytes.to_vec()));
     }
 
     // Frames parked for a height above ours mean peers have moved on without us. Without
     // this the node waits on a round the rest of the set already finalised, forever.
     fn request_catch_up(&mut self) {
-        let Some(source) = self.buffered.heaviest_source() else {
+        if self.ahead.is_empty() {
+            return;
+        }
+        let turn = self.catch_up_turn % self.ahead.len();
+        self.catch_up_turn = self.catch_up_turn.wrapping_add(1);
+        let Some(source) = self.ahead.iter().nth(turn).copied() else {
             return;
         };
         let from = self.node.height();
@@ -738,27 +928,9 @@ impl Driver {
     }
 
     fn broadcast(&mut self, bytes: &[u8]) {
+        let bytes = Arc::new(bytes.to_vec());
         for q in 0..self.n {
-            if q == self.idx {
-                continue;
-            }
-            // A message too large to carry is this node's to drop, not a sign the link is
-            // dead. Tearing every link down for it would cut the node off from its peers.
-            let failed = match self.send[q].as_mut() {
-                Some(channel) => match channel.send(bytes) {
-                    Ok(()) | Err(qtv_net::Error::MessageTooLarge) => false,
-                    Err(_) => true,
-                },
-                None => false,
-            };
-            if failed {
-                // Drop the transport and ask for it to be redialled. `up` is left
-                // alone on purpose: it is the reveal barrier's membership, shared
-                // across nodes, and shrinking it from one node's failed write is a
-                // consensus divergence, not a bookkeeping tidy up.
-                self.send[q] = None;
-                let _ = self.down.try_send(q);
-            }
+            self.offer(q, &bytes);
         }
     }
 
@@ -822,10 +994,10 @@ mod tests {
         };
         let (jobs, _held) = std::sync::mpsc::sync_channel::<VerifyJob>(1);
         let (first_tx, first_rx) = std::sync::mpsc::channel();
-        queue_verify(&jobs, job(first_tx));
+        queue_verify(&jobs, job(Some(first_tx)));
         assert!(first_rx.try_recv().is_err(), "a free slot takes the job");
         let (second_tx, second_rx) = std::sync::mpsc::channel();
-        queue_verify(&jobs, job(second_tx));
+        queue_verify(&jobs, job(Some(second_tx)));
         let reply = second_rx.try_recv().expect("the refusal is immediate");
         assert!(reply.is_ok(), "a busy reply, not a transport error");
     }

@@ -13,6 +13,8 @@ const MAX_RESYNC_PROBES: u32 = 1 << 20;
 
 pub(crate) const CHECKSUM_WIDTH: usize = 4;
 
+const MAX_PROBE_BYTES: u64 = 64 * 1024 * 1024;
+
 const MAGIC: &[u8; 8] = b"QTVLOG02";
 const SALT_LEN: usize = 16;
 pub(crate) const HEADER_LEN: u64 = (MAGIC.len() + SALT_LEN) as u64;
@@ -72,14 +74,23 @@ fn a_well_formed_frame_follows(
     // step walks straight past the intact frame it is meant to find.
     let mut at = from;
     let mut probed = 0u32;
+    let mut budget = MAX_PROBE_BYTES;
     while at + LENGTH_WIDTH as u64 <= total && probed < MAX_RESYNC_PROBES {
-        if frame_is_well_formed(stream, salt, at, total)? {
-            return Ok(true);
+        match frame_is_well_formed(stream, salt, at, total, budget)? {
+            Probe::Found => return Ok(true),
+            Probe::Missed(spent) => budget -= spent,
+            Probe::OverBudget => return Err(corrupt_middle()),
         }
         at += 1;
         probed += 1;
     }
     Ok(false)
+}
+
+enum Probe {
+    Found,
+    Missed(u64),
+    OverBudget,
 }
 
 fn corrupt_middle() -> io::Error {
@@ -96,30 +107,38 @@ fn frame_is_well_formed(
     salt: &Salt,
     at: u64,
     total: u64,
-) -> io::Result<bool> {
+    budget: u64,
+) -> io::Result<Probe> {
     if total.saturating_sub(at) < LENGTH_WIDTH as u64 {
-        return Ok(false);
+        return Ok(Probe::Missed(0));
     }
     stream.seek(SeekFrom::Start(at))?;
     let mut length_bytes = [0u8; LENGTH_WIDTH];
     if stream.read_exact(&mut length_bytes).is_err() {
-        return Ok(false);
+        return Ok(Probe::Missed(0));
     }
     let length = u64::from_le_bytes(length_bytes);
     let payload_start = at + LENGTH_WIDTH as u64;
     let available = total.saturating_sub(payload_start);
     if length > available || available - length < CHECKSUM_WIDTH as u64 {
-        return Ok(false);
+        return Ok(Probe::Missed(0));
+    }
+    if length > budget {
+        return Ok(Probe::OverBudget);
     }
     let mut payload = vec![0u8; length as usize];
     if stream.read_exact(&mut payload).is_err() {
-        return Ok(false);
+        return Ok(Probe::Missed(length));
     }
     let mut checksum_bytes = [0u8; CHECKSUM_WIDTH];
     if stream.read_exact(&mut checksum_bytes).is_err() {
-        return Ok(false);
+        return Ok(Probe::Missed(length));
     }
-    Ok(u32::from_le_bytes(checksum_bytes) == checksum_parts(&[salt, &length_bytes, &payload]))
+    if u32::from_le_bytes(checksum_bytes) == checksum_parts(&[salt, &length_bytes, &payload]) {
+        Ok(Probe::Found)
+    } else {
+        Ok(Probe::Missed(length))
+    }
 }
 
 impl Log {
@@ -258,6 +277,13 @@ impl Log {
             }
             let end = payload_start + length + CHECKSUM_WIDTH as u64;
             if !visit(&payload, payload_start, end) {
+                if strict {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "a checksum clean log frame does not decode; refusing to open so the \
+                         records after it are not discarded",
+                    ));
+                }
                 break;
             }
             pos = end;
@@ -299,12 +325,20 @@ impl Log {
         let mut framed = encoder.into_bytes();
         let checksum = checksum_parts(&[&self.salt, &framed]);
         framed.extend_from_slice(&checksum.to_le_bytes());
-        self.file.write_all(&framed)?;
+        let before = self.file.metadata()?.len();
+        if let Err(err) = self.file.write_all(&framed) {
+            let _ = self.truncate(before);
+            return Err(err);
+        }
         Ok(())
     }
 
     pub fn sync(&mut self) -> io::Result<()> {
         self.file.sync_data()
+    }
+
+    pub fn len(&self) -> io::Result<u64> {
+        Ok(self.file.metadata()?.len())
     }
 
     pub fn data_start(&self) -> u64 {

@@ -27,12 +27,20 @@ pub fn eth_source_chain(config_selector: u8) -> u32 {
     0xFFFF_FE00u32 | config_selector as u32
 }
 
-fn eth_source_ref(finalized_root: &[u8; 32], receipt_index: u64) -> [u8; 32] {
-    let mut buf = Vec::with_capacity(32 + 8 + 16);
-    buf.extend_from_slice(b"qtv/bridge/eth/ref");
+fn eth_source_ref(finalized_root: &[u8; 32], receipt_index: u64, log_index: u32) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(32 + 8 + 4 + 21);
+    buf.extend_from_slice(b"qtv/bridge/eth/ref/v2");
     buf.extend_from_slice(finalized_root);
     buf.extend_from_slice(&receipt_index.to_le_bytes());
+    buf.extend_from_slice(&log_index.to_le_bytes());
     sha3::sha3_256(&buf)
+}
+
+pub const ETH_SELECTORS: u8 = 8;
+
+fn shared_verifier() -> &'static Bls12381AggregateVerifier {
+    static VERIFIER: std::sync::OnceLock<Bls12381AggregateVerifier> = std::sync::OnceLock::new();
+    VERIFIER.get_or_init(Bls12381AggregateVerifier::new)
 }
 
 fn config_for_selector(selector: u8) -> Option<EvmChainConfig> {
@@ -222,6 +230,7 @@ fn decode_update(cursor: &mut Cursor) -> Option<LightClientUpdate> {
 
 fn encode_deposit(out: &mut Vec<u8>, deposit: &DepositProof) {
     out.extend_from_slice(&deposit.receipt_index.to_le_bytes());
+    put_u32(out, deposit.log_index as usize);
     put_u32(out, deposit.receipt_proof.len());
     for node in &deposit.receipt_proof {
         put_u32(out, node.len());
@@ -235,6 +244,7 @@ fn encode_deposit(out: &mut Vec<u8>, deposit: &DepositProof) {
 
 fn decode_deposit(cursor: &mut Cursor) -> Option<DepositProof> {
     let receipt_index = cursor.u64()?;
+    let log_index = cursor.u32()?;
     let count = cursor.u32()? as usize;
     if count > MAX_ETH_RECEIPT_NODES {
         return None;
@@ -257,6 +267,7 @@ fn decode_deposit(cursor: &mut Cursor) -> Option<DepositProof> {
     }
     Some(DepositProof {
         receipt_index,
+        log_index,
         receipt_proof,
         ancestry,
     })
@@ -342,7 +353,11 @@ impl EthMintProof {
             .hash_tree_root();
         (
             eth_source_chain(self.config_selector),
-            eth_source_ref(&block_root, self.deposit.receipt_index),
+            eth_source_ref(
+                &block_root,
+                self.deposit.receipt_index,
+                self.deposit.log_index,
+            ),
         )
     }
 }
@@ -434,8 +449,8 @@ pub fn verify_eth_committee_update(
         proof.current_sync_committee.clone(),
         proof.update.attested_header,
     );
-    let verifier = Bls12381AggregateVerifier::new();
-    apply_sync_committee_update(&mut store, &proof.update, &verifier).ok()?;
+    let verifier = shared_verifier();
+    apply_sync_committee_update(&mut store, &proof.update, verifier).ok()?;
     let learned = store.next_sync_committee()?.hash_tree_root();
     Some(EthAnchor {
         config_selector: anchor.config_selector,
@@ -480,9 +495,8 @@ pub fn verify_eth_mint(anchor: &EthAnchor, proof: &EthMintProof, dest_chain: u32
         proof.sync_committee.clone(),
         proof.update.finalized_header,
     );
-    let verifier = Bls12381AggregateVerifier::new();
-    let deposit =
-        verify_trustless_deposit(&store, &proof.update, &proof.deposit, &verifier).ok()?;
+    let verifier = shared_verifier();
+    let deposit = verify_trustless_deposit(&store, &proof.update, &proof.deposit, verifier).ok()?;
     if deposit.amount() == 0 {
         return None;
     }
@@ -496,7 +510,11 @@ pub fn verify_eth_mint(anchor: &EthAnchor, proof: &EthMintProof, dest_chain: u32
         route_id: 0,
         direction: Direction::Deposit,
         nonce: 0,
-        source_ref: eth_source_ref(&block_root, proof.deposit.receipt_index),
+        source_ref: eth_source_ref(
+            &block_root,
+            proof.deposit.receipt_index,
+            proof.deposit.log_index,
+        ),
         asset_id: anchor.asset_id,
         amount: deposit.amount(),
         recipient: deposit.recipient(),
@@ -549,6 +567,7 @@ mod tests {
             deposit: DepositProof {
                 ancestry: vec![dummy_header(0x31), dummy_header(0x32)],
                 receipt_index: 3,
+                log_index: 0,
                 receipt_proof: vec![vec![0xa1, 0xa2], vec![], vec![0xb1; 40]],
             },
         }
@@ -663,21 +682,36 @@ mod tests {
             .hash_tree_root();
         assert_eq!(
             reference,
-            eth_source_ref(&block_root, proof.deposit.receipt_index)
+            eth_source_ref(
+                &block_root,
+                proof.deposit.receipt_index,
+                proof.deposit.log_index
+            )
         );
         let finalized_root = proof.update.finalized_header.hash_tree_root();
         assert_ne!(
             reference,
-            eth_source_ref(&finalized_root, proof.deposit.receipt_index),
+            eth_source_ref(
+                &finalized_root,
+                proof.deposit.receipt_index,
+                proof.deposit.log_index
+            ),
             "a deposit is keyed by its own block, not by whichever finalized block proved it"
         );
         assert_ne!(eth_source_chain(0), eth_source_chain(1));
     }
 
     #[test]
-    fn a_different_receipt_index_yields_a_different_reference() {
+    fn the_selector_count_covers_every_configured_corridor() {
+        assert!(config_for_selector(ETH_SELECTORS - 1).is_some());
+        assert!(config_for_selector(ETH_SELECTORS).is_none());
+    }
+
+    #[test]
+    fn a_different_receipt_or_log_index_yields_a_different_reference() {
         let root = [0x5e; 32];
-        assert_ne!(eth_source_ref(&root, 3), eth_source_ref(&root, 4));
+        assert_ne!(eth_source_ref(&root, 3, 0), eth_source_ref(&root, 4, 0));
+        assert_ne!(eth_source_ref(&root, 3, 0), eth_source_ref(&root, 3, 1));
     }
 
     impl EthMintProof {

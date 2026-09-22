@@ -927,10 +927,19 @@ impl Ledger {
     }
 
     pub fn seed_validator_bond(&mut self, address: &str, amount: u64) -> Option<(Key, Vec<u8>)> {
+        self.seed_validator_bond_at(address, amount, 0)
+    }
+
+    pub fn seed_validator_bond_at(
+        &mut self,
+        address: &str,
+        amount: u64,
+        bonded_at_day: u64,
+    ) -> Option<(Key, Vec<u8>)> {
         let id = address_id(address)?;
         let bond = Bond {
             amount,
-            bonded_at_day: 0,
+            bonded_at_day,
             exit_requested_at: None,
         };
         let existing = self.stake_bond(&id).map(|b| b.amount).unwrap_or(0);
@@ -2033,6 +2042,52 @@ impl Ledger {
 
     fn set_bridge_epoch_minted(&mut self, asset_id: &[u8; 16], epoch: u64, amount: u128) {
         self.write_leaf(bridge_epochmint_key(asset_id, epoch), to_bytes(&amount));
+    }
+
+    pub fn asset_is_trustlessly_anchored(&self, asset_id: &[u8; 16]) -> bool {
+        self.bridge_bitcoin_anchor()
+            .is_some_and(|anchor| anchor.asset_id == *asset_id)
+            || (0..crate::bridge_eth::ETH_SELECTORS).any(|selector| {
+                self.bridge_eth_anchor(selector)
+                    .is_some_and(|anchor| anchor.asset_id == *asset_id)
+            })
+            || (0..qlc_cosmos::chain::FAMILY.len() as u8).any(|selector| {
+                self.bridge_cosmos_anchor(selector)
+                    .is_some_and(|anchor| anchor.asset_id == *asset_id)
+            })
+    }
+
+    pub fn bridge_mint_would_apply(&self, fact: &crate::bridge::Fact) -> bool {
+        if fact.amount == 0 || self.execution_height() > fact.expiry_height {
+            return false;
+        }
+        let Some(vault) = self.bridge_pool_vault() else {
+            return false;
+        };
+        let Some(asset) = self.bridged_asset(&fact.asset_id) else {
+            return false;
+        };
+        if self.bridge_reference_seen(fact.source_chain, &fact.source_ref) {
+            return false;
+        }
+        let supply_ok = asset
+            .supply
+            .checked_add(fact.amount)
+            .is_some_and(|supply| supply <= asset.cap);
+        let epoch_ok = self
+            .bridge_epoch_minted(&fact.asset_id, self.bridge_epoch())
+            .checked_add(fact.amount)
+            .is_some_and(|minted| minted <= asset.epoch_cap);
+        supply_ok
+            && epoch_ok
+            && self
+                .bridged_balance(&fact.asset_id, &fact.recipient)
+                .checked_add(fact.amount)
+                .is_some()
+            && self
+                .bridge_vault_custody(&vault, &fact.asset_id)
+                .checked_add(fact.amount)
+                .is_some()
     }
 
     pub fn bridge_mint(&mut self, fact: &crate::bridge::Fact) -> bool {
@@ -3262,7 +3317,7 @@ impl Ledger {
         }
         self.set_gov_lock(&voter_id, &lock);
         self.set_gov_total_locked(self.gov_total_locked() + stake as u128);
-        referendum.tally.record(aye, conviction.weight(stake));
+        referendum.tally.record_ballot(aye, conviction, stake);
         self.set_gov_referendum(referendum_id, &referendum);
         self.set_gov_ballot(
             referendum_id,
@@ -9999,6 +10054,7 @@ pub struct Ledger {
     /// charges this rather than the limit a transaction declared, so declaring a
     /// large limit and doing nothing cannot reserve the block against everyone else.
     block_fresh_leaves: u64,
+    fresh_leaf_ceiling: Option<u64>,
     last_vm_meter_used: u64,
     last_vm_call_cost: Option<u64>,
     vm_deploy_armed: bool,
@@ -10015,6 +10071,7 @@ impl Ledger {
             execution_time: 0,
             journal: None,
             block_fresh_leaves: 0,
+            fresh_leaf_ceiling: None,
             last_vm_meter_used: 0,
             last_vm_call_cost: None,
             vm_deploy_armed: false,
@@ -10032,6 +10089,7 @@ impl Ledger {
             execution_time: 0,
             journal: None,
             block_fresh_leaves: 0,
+            fresh_leaf_ceiling: None,
             last_vm_meter_used: 0,
             last_vm_call_cost: None,
             vm_deploy_armed: false,
@@ -10064,6 +10122,14 @@ impl Ledger {
 
     pub fn clear_block_fresh_leaves(&mut self) {
         self.block_fresh_leaves = 0;
+    }
+
+    pub(crate) fn set_fresh_leaf_ceiling(&mut self, ceiling: Option<u64>) {
+        self.fresh_leaf_ceiling = ceiling;
+    }
+
+    pub fn account_exists(&self, address: &str) -> bool {
+        self.trie.get(&state_key(address)).is_some()
     }
 
     fn erase_leaf(&mut self, key: &Key) -> bool {
@@ -10127,11 +10193,16 @@ impl Ledger {
         // would let a cheap failing transaction truncate the rest of the block.
         let leaves_mark = self.block_fresh_leaves;
         let restore = self.journal.take();
+        let outermost = restore.is_none();
         self.journal = Some(Vec::new());
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
         let unwound = self.journal.take().unwrap_or_default();
         self.journal = restore;
-        let committed = matches!(outcome, Ok(true));
+        let over_ceiling = outermost
+            && self
+                .fresh_leaf_ceiling
+                .is_some_and(|ceiling| self.block_fresh_leaves > ceiling);
+        let committed = matches!(outcome, Ok(true)) && !over_ceiling;
         if committed {
             // Nested calls are live: dispatch_vm runs apply_atomic inside the outer one.
             // An inner commit that DROPS its undo records leaves the outer rollback unable

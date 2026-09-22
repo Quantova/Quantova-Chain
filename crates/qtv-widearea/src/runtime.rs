@@ -167,6 +167,18 @@ impl Runtime {
                 self.broadcast(&bytes);
             }
         }
+        let height = self.node.height();
+        for (src, bytes) in std::mem::take(&mut self.buffered) {
+            match Message::decode(&bytes) {
+                Ok(Message::Reveal(note)) if note.height == height => {
+                    if self.node.collect_reveal((*note).clone()) {
+                        self.broadcast(&Message::Reveal(note).encode());
+                    }
+                }
+                Ok(_) => buffer_bounded(&mut self.buffered, src, bytes),
+                Err(_) => {}
+            }
+        }
         let expected = self.expected_reveal_ids();
         let deadline = Instant::now() + self.view_timeout;
         while Instant::now() < deadline {
@@ -341,7 +353,10 @@ impl Runtime {
         let start_height = self.node.height();
         self.disseminate_registrations();
         self.disseminate_reveals();
-        let selection = self.node.select().map_err(|e| format!("select: {e:?}"))?;
+        let selection = self
+            .node
+            .freeze_committee()
+            .map_err(|e| format!("select: {e:?}"))?;
 
         let fill_start = Instant::now();
 

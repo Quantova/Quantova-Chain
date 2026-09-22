@@ -189,6 +189,16 @@ impl Runtime {
             let bytes = Message::Reveal(Box::new(note)).encode();
             self.broadcast(&bytes, None);
         }
+        let height = self.node.height();
+        for (from, bytes) in std::mem::take(&mut self.buffered) {
+            match Message::decode(&bytes) {
+                Ok(Message::Reveal(note)) if note.height == height => {
+                    self.node.collect_reveal(*note);
+                }
+                Ok(_) => buffer_bounded(&mut self.buffered, from, bytes),
+                Err(_) => {}
+            }
+        }
         let expected: Vec<u64> = (1..=self.n as u64).collect();
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
@@ -217,7 +227,10 @@ impl Runtime {
         let start_height = self.node.height();
         self.disseminate_registrations();
         self.disseminate_reveals();
-        let selection = self.node.select().map_err(|e| format!("select: {e:?}"))?;
+        let selection = self
+            .node
+            .freeze_committee()
+            .map_err(|e| format!("select: {e:?}"))?;
         let i_lead = leader_for(&selection, self.node.view()) == self.node.id();
 
         let start = Instant::now();
