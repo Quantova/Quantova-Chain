@@ -27,9 +27,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 const BOOTSTRAP_DEADLINE: Duration = Duration::from_secs(60);
 
-/// How long bootstrap waits for peers. Reads `QTV_BOOTSTRAP_DEADLINE_MS` so a test
-/// can exercise the real path in milliseconds instead of a minute. Unset in
-/// production, where the constant above is what applies.
 fn bootstrap_deadline() -> Duration {
     match std::env::var("QTV_BOOTSTRAP_DEADLINE_MS")
         .ok()
@@ -39,18 +36,11 @@ fn bootstrap_deadline() -> Duration {
         None => BOOTSTRAP_DEADLINE,
     }
 }
-/// How often a lost link is retried, and how many times before it is left to the
-/// next failure to re-arm. A node is never permanently written off.
 const RECONNECT_MIN: Duration = Duration::from_millis(250);
 const RECONNECT_MAX: Duration = Duration::from_secs(10);
 
-// The shortest gap between two successful reconnects to one peer. The per dial backoff
-// resets every time a dial succeeds, so a peer that completes the handshake and then
-// stops reading can otherwise drive an unbounded post quantum re-handshake loop.
 const RECONNECT_FLOOR: Duration = Duration::from_secs(2);
 const REJOIN_QUEUE: usize = 64;
-/// Concurrent handshakes allowed from one source address, so a single host cannot
-/// hold every slot and lock a returning validator out.
 const LATE_PER_IP: usize = 2;
 const LATE_PER_IP_KNOWN: usize = 4;
 const FAILED_HANDSHAKE_BAR: Duration = Duration::from_secs(30);
@@ -198,11 +188,6 @@ fn connect_peer(
 
 const INBOUND_CAP: usize = 4096;
 
-/// A ceiling on the BYTES parked in the inbound queue, not just the frame count.
-///
-/// The record layer admits a frame up to a megabyte, so a count-only bound of 4096 lets
-/// peers pin gigabytes here. The driver already budgets its own buffer in bytes; this is
-/// the same bound one stage earlier, where the frames actually arrive.
 const INBOUND_BYTES_CAP: usize = 64 * 1024 * 1024;
 const MIN_PEER_FRAMES: usize = 64;
 
@@ -256,7 +241,6 @@ impl InboundBudget {
 
 const PEER_MSG_PER_SEC: f64 = 5_000.0;
 
-// A peer that finishes the handshake and then sends no hello must not hold the socket.
 const HELLO_DEADLINE: Duration = Duration::from_secs(30);
 
 const PEER_MSG_BURST: f64 = 10_000.0;
@@ -264,18 +248,10 @@ const PEER_MSG_BURST: f64 = 10_000.0;
 pub struct Mesh {
     pub send: Vec<Option<Channel<TcpStream>>>,
     pub inbound: Receiver<(usize, Vec<u8>)>,
-    /// Bytes currently parked in `inbound`. The consumer subtracts what it takes.
     pub queued_bytes: Arc<InboundBudget>,
     pub up: Vec<bool>,
-    /// Links re-established after bootstrap. A validator that restarts dials its
-    /// peers again, and without this the peers never answer, so the returning node
-    /// runs on alone against a set that has moved past it.
     pub rejoined: Receiver<(usize, Channel<TcpStream>)>,
-    /// The driver reports a peer whose link has failed so it is dialled again.
     pub down: SyncSender<usize>,
-    /// Peers that ended bootstrap with no link and were handed to the redialer.
-    /// Recorded so the handover can be asserted, not just the rule that computes it:
-    /// without this the whole wiring could be deleted and every test stayed green.
     pub redialing: Vec<usize>,
 }
 
@@ -372,8 +348,6 @@ pub fn build_mesh(
             let identity_w = identity_acc.clone();
             let up_w = up_acc.clone();
             let peer_ids_w = peer_ids_acc.clone();
-            // The configured validators. A stranger is refused before the responder
-            // spends an ML-KEM keygen and an ML-DSA signature on it.
             let known_peers: Vec<PeerId> = peer_ids_acc.iter().flatten().cloned().collect();
             let worker_tx_w = worker_tx.clone();
             let inflight_w = Arc::clone(&inflight);
@@ -452,8 +426,6 @@ pub fn build_mesh(
         genesis_hash,
     );
 
-    // The listener stays open for the life of the node. Bootstrap only decides when
-    // the round may start, it is not the end of the node's willingness to be reached.
     let (rejoined_tx, rejoined_rx) =
         mpsc::sync_channel::<(usize, Channel<TcpStream>)>(REJOIN_QUEUE);
     let (down_tx, down_rx) = mpsc::sync_channel::<usize>(REJOIN_QUEUE);
@@ -479,11 +451,6 @@ pub fn build_mesh(
         rejoined_tx,
     );
 
-    // A peer that never answered at bootstrap has no live link, and a down report is
-    // only ever produced when a link that WAS alive fails to write. Without this the
-    // redialer never hears about it and a validator that happened to be restarting
-    // during bootstrap is written off for the life of the process, which is exactly
-    // what the unbounded redial was added to prevent.
     let redialing = bootstrap_misses(peer_addrs, &send, idx);
     for &q in &redialing {
         let _ = down_tx.try_send(q);
@@ -500,12 +467,6 @@ pub fn build_mesh(
     }
 }
 
-/// Peers that are configured, are not this node, and ended bootstrap with no link.
-///
-/// A down report is otherwise only ever produced when a link that WAS alive fails to
-/// write, so a validator that happened to be restarting while this node booted is
-/// never redialled and is written off for the life of the process. Kept separate from
-/// `build_mesh` so the rule can be tested without a network.
 fn bootstrap_misses<T>(
     peer_addrs: &[Option<String>],
     send: &[Option<T>],
@@ -521,12 +482,6 @@ fn bootstrap_misses<T>(
         .collect()
 }
 
-/// Accept peers for as long as the node runs, so a returning validator is answered.
-///
-/// Bootstrap decides when the round may start, it is not the end of the node's
-/// willingness to be reached. Everything the bootstrap acceptor does to stay safe is
-/// done here too, because this listener is exposed for the life of the process rather
-/// than for one minute.
 fn spawn_late_acceptor(
     listener: TcpListener,
     idx: usize,
@@ -544,11 +499,7 @@ fn spawn_late_acceptor(
         let _ = listener.set_nonblocking(false);
         let known = known_peer_ips(&peer_addrs);
         let inflight = Arc::new(AtomicUsize::new(0));
-        // Concurrent handshakes already running per source address. Without this one
-        // host can hold every handshake slot and no validator can ever reconnect.
         let per_ip: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
-        // Generation per peer. A newer link supersedes an older one, so a peer that
-        // opens many connections cannot multiply its share of the inbound queue.
         let live: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(vec![0; n]));
         loop {
             let Ok((stream, addr)) = listener.accept() else {
@@ -595,19 +546,9 @@ fn spawn_late_acceptor(
             let bar_w = bar.clone();
             thread::spawn(move || {
                 let handshake = {
-                    // Both slots cover the handshake only. Holding either for the life
-                    // of the link would make the cap a permanent ceiling on how many
-                    // peers may ever return: two unclean disconnects from one address
-                    // leave two threads parked in read, and the third attempt from that
-                    // address is refused for as long as the process runs. What the caps
-                    // are for is bounding concurrent handshake cost. Once a link is up
-                    // the authenticated one live link per peer rule governs it.
                     let _ip_guard = IpGuard(per_ip_w, slot_key);
                     let _guard = InflightGuard(inflight_w);
                     let _ = stream.set_nonblocking(false);
-                    // The same gate the bootstrap acceptor uses. This acceptor runs for
-                    // the life of the node, so without it a stranger buys an ML-KEM
-                    // keygen and an ML-DSA signature here for as long as the node is up.
                     Channel::accept_known_with_timeout(
                         stream,
                         &identity_w,
@@ -622,8 +563,6 @@ fn spawn_late_acceptor(
                     return;
                 };
                 let peer = channel.peer_id().clone();
-                // Same predicate the bootstrap acceptor applies, so a peer this node
-                // was never configured to talk to cannot be adopted late.
                 let Some(from) = (0..n).find(|&q| {
                     q != idx
                         && up_w.get(q).copied().unwrap_or(false)
@@ -654,7 +593,6 @@ fn spawn_late_acceptor(
     });
 }
 
-/// Release a per address handshake slot however the thread leaves.
 struct IpGuard(Arc<Mutex<HashMap<IpAddr, usize>>>, IpAddr);
 
 impl Drop for IpGuard {
@@ -670,8 +608,6 @@ impl Drop for IpGuard {
     }
 }
 
-/// Read a peer until a newer link from the same peer supersedes this one, so a peer
-/// that opens many connections does not get many shares of the inbound queue.
 fn read_peer_until_superseded(
     from: usize,
     channel: Channel<TcpStream>,
@@ -691,10 +627,6 @@ fn read_peer_until_superseded(
     read_peer_with_stop(from, channel, out, queued, genesis_hash, &stop);
 }
 
-/// Dial a peer the driver has reported as down until it answers again.
-///
-/// A validator is never permanently written off. The delay grows to a ceiling and then
-/// stays there, so a machine that is away for hours still rejoins when it returns.
 fn spawn_redialer(
     peer_addrs: Vec<Option<String>>,
     peer_ids: Vec<Option<PeerId>>,
@@ -715,7 +647,6 @@ fn spawn_redialer(
             ) else {
                 continue;
             };
-            // One dialler per peer. Repeated down reports must not stack threads.
             if !dialling.lock().map(|mut d| d.insert(q)).unwrap_or(false) {
                 continue;
             }
@@ -725,8 +656,6 @@ fn spawn_redialer(
             let dialling_w = Arc::clone(&dialling);
             let last_connect_w = Arc::clone(&last_connect);
             thread::spawn(move || {
-                // Carried across dials, so a peer that drops the link straight after every
-                // handshake cannot spend a fresh handshake on us as fast as it likes.
                 if let Ok(seen) = last_connect_w.lock() {
                     if let Some(at) = seen.get(&q) {
                         let since = at.elapsed();
@@ -737,8 +666,6 @@ fn spawn_redialer(
                 }
                 let mut wait = RECONNECT_MIN;
                 loop {
-                    // Try immediately, a link lost to one write timeout is usually back
-                    // straight away and should not cost a full backoff.
                     if let Some(channel) = connect_peer(&addr, &identity, &peer, &hello, q) {
                         log(&format!("re-established the link to peer {}", q + 1));
                         if let Ok(mut seen) = last_connect_w.lock() {
@@ -775,8 +702,6 @@ fn forward_frame(
     from: usize,
     bytes: Vec<u8>,
 ) -> bool {
-    // Dropped the same way a full queue drops, so a byte flood costs the sender its
-    // frames rather than costing this node its memory.
     let len = bytes.len();
     if !queued.reserve(from, len) {
         return true;
@@ -802,8 +727,6 @@ fn read_peer_with_stop(
     genesis_hash: [u8; 32],
     stop: &dyn Fn() -> bool,
 ) {
-    // The hello has a deadline of its own. A peer that completes the handshake and then
-    // sends nothing must not hold this thread and its socket for the life of the node.
     let hello_deadline = Instant::now() + HELLO_DEADLINE;
     loop {
         if Instant::now() >= hello_deadline {
@@ -812,8 +735,6 @@ fn read_peer_with_stop(
         match channel.recv() {
             Ok(frame) if hello_ok(&frame, &genesis_hash) => break,
             Ok(frame) => {
-                // Only the genesis hash field is meaningful, and the rest is peer
-                // chosen, so log a bounded prefix rather than expanding a whole frame.
                 log(&format!(
                     "refusing peer {}: its genesis hash {} is not ours, wrong chain",
                     from + 1,
@@ -836,9 +757,6 @@ fn read_peer_with_stop(
     loop {
         let bytes = match channel.recv() {
             Ok(bytes) => bytes,
-            // A deadline expiring is not a broken link. Wake, ask whether this reader is
-            // still wanted, and carry on. This is what lets a superseded or silent link
-            // release its thread and its socket instead of parking for ever.
             Err(err) if err.is_timeout() => {
                 if stop() {
                     return;
@@ -906,8 +824,6 @@ mod tests {
 
     #[test]
     fn the_inbound_queue_is_bounded_by_bytes_not_only_by_frame_count() {
-        // A count only bound let peers park INBOUND_CAP megabyte frames, gigabytes of
-        // resident memory, because the record layer admits a frame that large.
         let (tx, _rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_CAP);
         let queued = InboundBudget::new(2);
         let big = super::INBOUND_BYTES_CAP / 4;
@@ -1032,8 +948,6 @@ mod bootstrap_report {
 
     #[test]
     fn a_configured_peer_with_no_link_is_reported_down() {
-        // Peer 2 answered, peer 1 and 3 did not. Without the report the redialer
-        // never hears about 1 or 3 and they are written off for the process lifetime.
         let peers = addrs(&[Some("a:1"), Some("b:2"), Some("c:3"), Some("d:4")]);
         let send: Vec<Option<()>> = vec![None, None, Some(()), None];
         assert_eq!(bootstrap_misses(&peers, &send, 0), vec![1, 3]);
@@ -1048,7 +962,6 @@ mod bootstrap_report {
 
     #[test]
     fn a_peer_with_no_configured_address_is_not_reported() {
-        // Nothing to redial, so reporting it would spin the redialer forever.
         let peers = addrs(&[Some("a:1"), None, Some("c:3")]);
         let send: Vec<Option<()>> = vec![None, None, None];
         assert_eq!(bootstrap_misses(&peers, &send, 0), vec![2]);
@@ -1082,10 +995,6 @@ mod per_ip_slots {
 
     #[test]
     fn a_finished_handshake_gives_its_slot_back() {
-        // The guard used to live for the whole LINK, so two unclean disconnects from
-        // one address parked two readers and locked that address out of the inbound
-        // path for the life of the process. Scoped to the handshake, a completed one
-        // always returns its slot and a validator can always come back.
         let map: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
         let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
 
@@ -1141,14 +1050,8 @@ mod bootstrap_wiring {
 
     #[test]
     fn a_peer_that_never_answered_is_handed_to_the_redialer() {
-        // The unit test on `bootstrap_misses` covers the rule. This covers the
-        // WIRING: with the handover deleted the rule stays correct, stays tested and
-        // stays green, which is exactly how the fix shipped unguarded the first time.
-        // Safety: single threaded within this test, restored immediately.
         std::env::set_var("QTV_BOOTSTRAP_DEADLINE_MS", "300");
         let listener = TcpListener::bind("127.0.0.1:0").expect("a local listener");
-        // A closed port on loopback: the dial fails fast and the peer ends bootstrap
-        // with no link, which is the restarting validator this fix exists for.
         let dead = TcpListener::bind("127.0.0.1:0").expect("a port to close");
         let dead_addr = dead.local_addr().expect("addr").to_string();
         drop(dead);

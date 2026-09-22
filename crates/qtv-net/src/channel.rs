@@ -50,13 +50,8 @@ impl<S> Channel<S> {
     }
 }
 
-/// The largest message a channel carries. A record holds at most a megabyte, so anything
-/// larger, a block, a sync reply, a view change justification, goes as a run of records.
 pub const MAX_MESSAGE: usize = 16 * 1024 * 1024;
 
-// Each record starts with one byte saying whether another follows. The records are sealed
-// under consecutive sequence numbers, so a run cannot be reordered, cut short or spliced
-// without the channel failing.
 const FRAGMENT_FINAL: u8 = 0;
 const FRAGMENT_MORE: u8 = 1;
 const FRAGMENT_PAYLOAD: usize = crate::record::MAX_RECORD_PLAINTEXT - 1;
@@ -102,9 +97,6 @@ impl<S: Read + Write> Channel<S> {
     }
 }
 
-/// How long a live link may be silent before its reader wakes to re-check whether it
-/// is still wanted. Not a liveness requirement, just a bound on how long a dead or
-/// superseded link can hold a thread.
 pub const POST_HANDSHAKE_READ: std::time::Duration = std::time::Duration::from_secs(20);
 
 pub const POST_HANDSHAKE_WRITE: std::time::Duration = std::time::Duration::from_secs(10);
@@ -115,9 +107,6 @@ impl Channel<std::net::TcpStream> {
         self.stream.set_write_timeout(timeout)
     }
 
-    /// A live link still gets a read deadline. With none, a reader blocks in recv for
-    /// ever on a peer that simply stops sending, so a superseded or silent link holds a
-    /// thread and a socket until the process dies.
     pub(crate) fn set_post_handshake(&self) -> std::io::Result<()> {
         self.stream.set_read_timeout(Some(POST_HANDSHAKE_READ))?;
         self.stream.set_write_timeout(Some(POST_HANDSHAKE_WRITE))

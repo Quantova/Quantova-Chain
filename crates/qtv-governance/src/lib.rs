@@ -30,14 +30,8 @@ pub const HOUR_SECONDS: u64 = 3_600;
 pub const MONTH_SECONDS: u64 = 30 * DAY_SECONDS;
 pub const YEAR_SECONDS: u64 = 365 * DAY_SECONDS;
 
-/// A deposit may never be free and may never be a lockout. The compiled figures
-/// are only the starting point, governance retunes them by vote inside this band,
-/// which is why a bad number no longer needs a coordinated restart to correct.
 pub const MIN_GOV_DEPOSIT: u64 = 1_000 * NATIVE_UNIT;
 
-/// The widest a deposit may be set, as a share of the supply that exists. A
-/// deposit larger than this could not be funded by a realistic holder, which is
-/// precisely how a track gets locked shut.
 pub const MAX_GOV_DEPOSIT_BPS: u64 = 1_000;
 
 pub fn gov_deposit_bounds(total_supply: u64) -> (u64, u64) {
@@ -854,7 +848,6 @@ impl Status {
     }
 }
 
-/// How long an approved action stays enactable once its delay has elapsed.
 pub const ENACTMENT_WINDOW_SECONDS: u64 = 30 * 86_400;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -905,8 +898,6 @@ impl Referendum {
         now >= opens && now <= opens.saturating_add(ENACTMENT_WINDOW_SECONDS)
     }
 
-    /// An approval that never expires can be enacted by anyone at any later time, long
-    /// after the conditions it was voted under have gone. The window bounds that.
     pub fn enactment_expired(&self, now: u64) -> bool {
         let opens = self
             .decides_at()
@@ -1639,9 +1630,6 @@ mod tests {
 mod approval_boundary_tests {
     use super::*;
 
-    // Approval is measured against the WHOLE electorate, not against the votes cast, so a
-    // quiet vote cannot carry a proposal. These pin the exact edges, which is where an off
-    // by one decides whether a chain upgrade or a mint passes.
     #[test]
     fn a_tally_exactly_on_the_threshold_passes_and_one_unit_under_does_not() {
         let electorate = 1_000_000u128;

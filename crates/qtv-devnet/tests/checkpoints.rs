@@ -65,8 +65,6 @@ fn a_fork_before_the_checkpoint_is_refused() {
     let honest_value = header_value(&honest.header_hash());
 
     let base_b = unique_base("wscp-fork");
-    // Diverge the fork by its genesis state. Block time is the wall clock now, so
-    // two chains that differ only in genesis_time would produce identical blocks.
     let cfg_b = config(
         &base_b,
         &online,

@@ -8,10 +8,6 @@ use qtv_codec::{Decoder, Encoder, Error, LENGTH_WIDTH};
 
 use crate::log::{frame_len, Log, CHECKSUM_WIDTH};
 
-/// One block's events, as encoded leaves.
-///
-/// The leaves are stored exactly as the ledger encodes them, so this file never has to
-/// know what an event means. Reading one back is the caller's job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
     pub height: u64,
@@ -33,7 +29,6 @@ impl EventRecord {
         let mut decoder = Decoder::new(bytes);
         let height = decoder.get_u64()?;
         let count = decoder.get_u64()?;
-        // Not pre allocated from `count`: a torn tail can claim any size.
         let mut events = Vec::new();
         for _ in 0..count {
             events.push(decoder.get_bytes()?.to_vec());
@@ -43,8 +38,6 @@ impl EventRecord {
     }
 }
 
-/// A durable, append only record of the events each block emitted. Only the height
-/// index is held in memory; payloads stay on disk and are read on demand.
 #[derive(Debug)]
 pub struct EventStore {
     log: Log,
@@ -80,7 +73,6 @@ impl EventStore {
         })
     }
 
-    /// A block with no events is not written at all, so an empty height costs nothing.
     pub fn put_events(&mut self, height: u64, events: &[Vec<u8>]) -> io::Result<()> {
         if events.is_empty() {
             return Ok(());
@@ -122,14 +114,11 @@ impl EventStore {
         self.log.sync()
     }
 
-    /// Drop everything above `height`, so a reorg does not leave events for blocks that
-    /// no longer exist.
     pub fn truncate_to_height(&mut self, height: u64) -> io::Result<()> {
         let keep = self.heights.iter().take_while(|&&h| h <= height).count();
         if keep == self.heights.len() {
             return Ok(());
         }
-        // `starts` is the payload offset, so the frame checksum has to be counted.
         let len = if keep == 0 {
             self.log.data_start()
         } else {
@@ -203,7 +192,6 @@ mod tests {
         assert_eq!(store.events_at(3), Some(vec![leaf(3, 4)]));
         assert_eq!(store.events_at(4), None, "a rolled back height is gone");
 
-        // And the truncation has to survive a reopen, not just the in memory index.
         store.sync().expect("syncs");
         drop(store);
         let store = EventStore::open(&dir).expect("reopens");

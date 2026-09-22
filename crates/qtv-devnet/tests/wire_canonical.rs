@@ -100,8 +100,6 @@ fn every_decoder_a_peer_can_reach_never_panics_on_arbitrary_bytes() {
         for b in bytes.iter_mut() {
             *b = (next() & 0xFF) as u8;
         }
-        // Steer a share of the corpus at the tag and length fields the decoders branch on,
-        // since uniform noise almost never forms a plausible header.
         if bytes.len() > 9 {
             match round % 4 {
                 0 => bytes[0] = (next() % 8) as u8,

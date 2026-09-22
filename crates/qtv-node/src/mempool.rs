@@ -290,11 +290,6 @@ fn funding_gate_passes(wrapper: &Wrapper, ledger: &Ledger, fee_params: &FeeParam
     wrapper.body().nonce() == account.nonce && account.balance >= charged
 }
 
-// The verdicts a worker thread computes for a submitted transaction against a ledger
-// snapshot so the consensus thread never runs a post quantum verify or a bridge proof
-// check. The signature carries the key it was checked against, and admit only trusts it
-// when that key still matches the sender; the feeless verdict is a spam filter only,
-// since block execution re-verifies every bridge operation before it moves value.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AdmitHint {
     pub signature: Option<VerifyHint>,
@@ -305,8 +300,6 @@ pub struct AdmitHint {
 pub fn admission_hint(wrapper: &Wrapper, ledger: &Ledger, fee_params: &FeeParams) -> AdmitHint {
     let mut hint = AdmitHint::default();
     if crate::node::is_key_register(wrapper) {
-        // Only spend a worker verify on a submission whose cheap funding checks already
-        // pass, so an unfunded flood cannot burn worker cpu either.
         if funding_gate_passes(wrapper, ledger, fee_params) {
             hint.key_register_ok = Some(crate::node::key_register_signature(wrapper));
         }
@@ -768,8 +761,6 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_bridge_mint(&wrapper) {
-            // The verification below is the expensive part, so the attempt is charged
-            // before it runs rather than after, or a failing proof costs no budget.
             if feeless_hint.is_none() && !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
@@ -1050,9 +1041,6 @@ impl Mempool {
         refs.into_iter().cloned().collect()
     }
 
-    // Drops what can no longer execute, a spent nonce, a barred sender, or a passed
-    // validity window. Eviction needs a strictly higher fee and fees clamp to the
-    // ceiling, so without this the pool wedges full of entries that never run.
     pub fn revalidate(&mut self, ledger: &Ledger) {
         let height = ledger.execution_height();
         let mut kept = Vec::with_capacity(self.pending.len());
@@ -1285,8 +1273,6 @@ mod tests {
         ));
         assert_eq!(pool.pending_len(), 1);
 
-        // The account's nonce advances (its nonce-0 transfer executed in a block),
-        // so the pooled nonce-0 entry can never execute again.
         let mut acct = ledger.account(&alice.address());
         acct.nonce = 1;
         ledger.set_account(&alice.address(), &acct);

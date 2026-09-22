@@ -221,9 +221,6 @@ pub fn bootstrap(
     })
 }
 
-/// The signature has to be made at or after the header it attests, and in the same
-/// committee period. Enforced on the deposit path and on the committee update path alike,
-/// or an update is admitted under rules the deposits it then authorises never allowed.
 fn slots_are_consistent(
     store: &LightClientStore,
     signature_slot: u64,
@@ -398,9 +395,6 @@ fn verify_deposit_core(
         update.signature_slot,
         verifier,
     )?;
-    // Keyed on the attested header, as the committee update path and bootstrap already
-    // are. The signature slot is only ever at or after it, so keying on that selects a
-    // layout the state may not have yet and rejects honest proofs across a fork boundary.
     let electra = store.config.is_electra_at_slot(update.attested_header.slot);
     verify_finality(update, electra)?;
     let block = if deposit.historical_branch.is_empty() {
@@ -436,8 +430,6 @@ fn verify_deposit_core(
         });
     }
 
-    // Carried on the wire and otherwise never read, so an unlimited number of byte
-    // distinct proofs verify to one fact. Bind it to the value the verifier derives.
     if update.execution.block_number != block.slot {
         return Err(EthError::InconsistentSlots {
             signature_slot: update.execution.block_number,
@@ -1468,11 +1460,6 @@ mod corridor_binding_tests {
     use super::*;
     use qlc_stark::corridors::{evm_light_client, EventClaim};
 
-    // The airlock separates proofs only by tier and family, and the registry marks many EVM
-    // chains as the LightClient tier. So an Ethereum proof reaches the same admission path
-    // as an Arbitrum one. The only thing keeping a deposit proved on one EVM chain from
-    // being admitted as a deposit on another is that corridor_id sits inside the statement
-    // the digest is taken over. If that ever stops being true, the separation is gone.
     fn claim() -> EventClaim {
         EventClaim {
             source_ref: [4u8; 32],

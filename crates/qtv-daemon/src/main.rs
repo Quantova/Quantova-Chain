@@ -34,10 +34,6 @@ static TERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(unix)]
 extern "C" fn note_term(_signum: libc::c_int) {
-    // A signal handler runs where almost nothing is safe to call. An atomic
-    // store is the one thing this is allowed to do; everything else, closing
-    // the round out and flushing state, happens back on the driver's own
-    // thread once it next checks this flag.
     TERM_RECEIVED.store(true, Ordering::SeqCst);
 }
 
@@ -194,8 +190,6 @@ fn run(config_path: &Path) -> Result<(), String> {
     }
 
     let port = port_of(&settings.listen)?;
-    // Honour the configured listen host. Binding 0.0.0.0 exposed a node an operator
-    // meant to keep on loopback to the whole network.
     let listener = TcpListener::bind(settings.listen.as_str())
         .map_err(|e| format!("binding the transport address {}: {e}", settings.listen))?;
     let identity = node.identity().clone();

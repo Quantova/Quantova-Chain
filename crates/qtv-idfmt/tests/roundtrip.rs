@@ -124,10 +124,6 @@ fn address_string_begins_with_q1() {
     assert!(text.starts_with("Q1"));
 }
 
-// An address is a key into the ledger and it appears in transactions, blocks and the
-// explorer. If one account can be written two ways, the two spellings index apart while
-// spending the same balance, so these pin the rules that keep the encoding unique.
-
 #[test]
 fn a_mixed_case_address_is_refused() {
     let raw = pattern(32);
@@ -162,8 +158,6 @@ fn a_mixed_case_address_is_refused() {
 
 #[test]
 fn a_bech32_checksum_does_not_pass_as_bech32m() {
-    // Flipping the final data symbol moves the residue off the bech32m constant. A decoder
-    // that accepted the older bech32 constant as well would let a second checksum verify.
     let raw = pattern(32);
     let text = render_address(&raw).unwrap();
     let mut bytes: Vec<char> = text.chars().collect();

@@ -2,10 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 use qtv_crypto::{ml_dsa, sha3};
 
-/// Operator secrets come from the operating system's entropy, never from anything
-/// derivable. Seeding these from the chain name meant every secret key could be
-/// recomputed by anyone who knew the name, which is public, so the whole operator
-/// quorum was forgeable by any observer.
 fn urandom(n: usize) -> Vec<u8> {
     let mut b = vec![0u8; n];
     qtv_crypto::rng::fill_random(&mut b);
@@ -45,7 +41,6 @@ fn main() {
         sk.zeroize();
         seed.zeroize();
     }
-    // Owner only, not the process umask.
     #[cfg(unix)]
     {
         use std::io::Write;

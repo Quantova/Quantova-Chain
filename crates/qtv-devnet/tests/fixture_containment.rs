@@ -7,9 +7,6 @@ use std::path::Path;
 
 const WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
-// The simulation harnesses exist to drive a devnet, so they are allowed to turn the
-// deterministic id derived secrets on. Nothing else may, and these three stay out of
-// default-members so a plain build never reaches them.
 const SIMULATION_CRATES: &[&str] = &["qtv-live", "qtv-loopback", "qtv-widearea"];
 
 fn normal_section(manifest: &str) -> String {

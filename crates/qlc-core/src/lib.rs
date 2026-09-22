@@ -11,7 +11,6 @@ pub enum VerificationTier {
 }
 
 impl VerificationTier {
-    // an explicit trust rank so the one-way ratchet never depends on enum declaration order
     fn rank(self) -> u8 {
         match self {
             VerificationTier::Federated => 0,

@@ -152,10 +152,6 @@ pub fn parse_ingress(bytes: &[u8]) -> Result<Ingress, IngressError> {
     if !is_proof_corridor(statement.kind) {
         return Err(IngressError::NotProofCorridor);
     }
-    // The corridor id must name a registered corridor whose verification tier AND chain family match
-    // the proof kind, so a proof cannot be presented under an unregistered id, a federated corridor it
-    // was not built for, or a same-tier corridor of the wrong family (an EVM proof under a Cosmos
-    // corridor). Both share the LightClient tier, so the family check is what separates them.
     let corridor =
         corridor_for_id(statement.corridor_id).map_err(|_| IngressError::UnknownCorridor {
             corridor_id: statement.corridor_id,
@@ -292,8 +288,6 @@ mod tests {
 
     #[test]
     fn every_proof_corridor_statement_crosses_the_airlock() {
-        // Each kind is presented under a corridor whose tier matches: Bitcoin (Spv), Ethereum and
-        // Cosmos Hub (LightClient). A mismatched or unregistered corridor id is rejected below.
         for (kind, corridor_id) in [
             (StatementKind::BitcoinSpv, 43u32),
             (StatementKind::EvmLightClient, 2u32),
@@ -313,7 +307,6 @@ mod tests {
 
     #[test]
     fn a_proof_under_a_mismatched_or_unknown_corridor_is_rejected() {
-        // A Bitcoin SPV proof presented under a federated corridor (Circle CCTP, id 38).
         let mismatched = StarkStatement {
             corridor_id: 38,
             dest_chain_id: 4801,
@@ -340,7 +333,6 @@ mod tests {
             Err(IngressError::UnknownCorridor { corridor_id: 0 })
         );
 
-        // An unregistered corridor id past the registry.
         let unknown = StarkStatement {
             corridor_id: 4_000_000_000,
             dest_chain_id: 4801,
@@ -356,8 +348,6 @@ mod tests {
             })
         );
 
-        // An EVM light-client proof presented under a Cosmos corridor (Cosmos Hub, id 16): both are the
-        // LightClient tier, so only the family check rejects the cross-family crossing.
         let cross = StarkStatement {
             corridor_id: 16,
             dest_chain_id: 4801,
@@ -612,13 +602,6 @@ mod same_family_boundary_tests {
     use super::tests::ml_dsa_attestation;
     use super::*;
 
-    // The airlock separates proofs by TIER and FAMILY. It deliberately does not separate
-    // two corridors that share both, and the registry marks many EVM chains LightClient,
-    // so an Ethereum proof does pass the airlock under an Arbitrum corridor id. What stops
-    // it is downstream and cryptographic: corridor_id is inside the ProofStatement that
-    // public_input_digest hashes, so changing the corridor changes the digest and the
-    // STARK no longer matches. This pins where that boundary actually sits, because a
-    // reader of parse_ingress alone would reasonably assume the airlock separated them.
     #[test]
     fn the_airlock_does_not_separate_two_corridors_of_the_same_tier_and_family() {
         let ethereum = StarkStatement {

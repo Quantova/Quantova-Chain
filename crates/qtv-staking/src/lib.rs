@@ -9,35 +9,12 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const NATIVE_UNIT: u128 = 1_000_000;
 pub const MIN_STAKE: u64 = 2_000 * NATIVE_UNIT as u64;
 pub const STAKING_POOL: u64 = 685_714 * NATIVE_UNIT as u64;
-/// Issuance is sized to the square root of the stake rather than a flat share of
-/// it. A flat share pays the same yield however much security the chain already
-/// has. Under a square root a thin validator set is paid well enough to attract
-/// more, and a deep one costs the chain proportionally less, with no vote needed
-/// to adjust either way.
-///
-/// This constant is the whole monetary policy. It is set so a session pays about
-/// five percent a year when a million QTOV is staked, and two sessions make a
-/// year.
 pub const EMISSION_K: u64 = 25_000;
 
-/// The only rail on issuance. There is no ceiling on total supply and there is
-/// not meant to be one. This bounds what a single session may add as a share of
-/// what already exists, so the chain can mint forever while a wrong stake
-/// reading still cannot mint the world in one step.
 pub const MAX_SESSION_EMISSION_BPS: u64 = 500;
 
-/// The most a single governance mint may create, as a share of the supply that
-/// already exists. There is no ceiling on total supply, so this only paces how
-/// fast one vote can expand it. At one hundred percent a single proposal may at
-/// most double the supply, which stops a captured vote minting the world in one
-/// step while leaving a real expansion a handful of votes rather than years.
 pub const GOV_MINT_MAX_BPS: u64 = 200;
 
-/// A share of supply alone would be zero on a young chain, which is the same
-/// bootstrap deadlock an absolute cap creates from the other direction. The
-/// ceiling is whichever of the share and this floor is larger, so a mint is
-/// always possible and the share takes over once the chain is big enough for it
-/// to matter.
 pub const GOV_MINT_FLOOR: u64 = 100_000 * NATIVE_UNIT as u64;
 
 pub const REWARD_VEST_DAYS: u64 = 365;
@@ -74,20 +51,13 @@ pub fn eligible(stake: u64) -> bool {
     stake >= MIN_STAKE
 }
 
-/// What the whole validator set is paid for one session at this much stake.
 pub fn session_emission(total_staked: u64, total_supply: u64) -> u64 {
-    // Nobody can stake more than exists, so a staked figure above the supply is a
-    // corrupted input rather than a real one. Clamping it here is what makes the
-    // rail below reachable at all: measured against the supply, the square root
-    // term sits far under the percentage cap at every realistic supply, so the cap
-    // alone was a backstop that could never fire.
     let staked = total_staked.min(total_supply);
     let raw = EMISSION_K.saturating_mul((staked as u128).isqrt() as u64);
     let bound = ((total_supply as u128) * (MAX_SESSION_EMISSION_BPS as u128) / BPS_DENOM) as u64;
     raw.min(bound)
 }
 
-/// The most a single governance proposal may mint against the supply that exists.
 pub fn gov_mint_ceiling(total_supply: u64) -> u64 {
     let share = ((total_supply as u128) * (GOV_MINT_MAX_BPS as u128) / BPS_DENOM) as u64;
     share.max(GOV_MINT_FLOOR)
@@ -381,7 +351,6 @@ impl StakeLedger {
             Some(bond) if bond.can_withdraw(now_day) => bond.amount,
             _ => return None,
         };
-        // The bond only leaves once the credit is known to fit, or the withdraw burns it.
         let credited = balance.checked_add(amount)?;
         self.bonds.remove(id);
         Some(credited)
@@ -714,9 +683,6 @@ mod tests {
     fn a_single_session_can_never_mint_more_than_a_share_of_what_exists() {
         let supply = 1_000_000 * QTOV;
         let bound = supply / 20;
-        // An absurd stake reading is clamped to what staking the entire supply would
-        // pay, which is a tighter limit than the rate cap, so the cap is the outer
-        // belt and this is the inner one.
         assert_eq!(
             session_emission(u64::MAX, supply),
             session_emission(supply, supply),
@@ -760,8 +726,6 @@ mod tests {
     fn a_corrupted_staked_figure_cannot_outrun_the_supply() {
         let supply = 1_600_000_000u64 * NATIVE_UNIT as u64;
         let honest = session_emission(supply, supply);
-        // A staked figure far above the supply must not buy more issuance than
-        // staking the entire supply does.
         let corrupted = session_emission(u64::MAX, supply);
         assert_eq!(
             corrupted, honest,
@@ -790,9 +754,6 @@ mod tests {
 mod emission_bounds_tests {
     use super::*;
 
-    // session_emission and session_reward both narrow a u128 product back to u64. That is
-    // only sound while the bounds below hold, so assert them over the whole range rather
-    // than at the handful of points the worked examples happen to use.
     #[test]
     fn an_emission_never_exceeds_its_cap_or_the_supply_it_is_measured_against() {
         let supplies = [
@@ -879,7 +840,6 @@ mod emission_bounds_tests {
 mod withdraw_overflow_tests {
     use super::*;
 
-    // A balance that cannot take the bond declines rather than trapping.
     #[test]
     fn a_withdrawal_that_cannot_fit_the_balance_declines_rather_than_panicking() {
         let id = [7u8; 32];

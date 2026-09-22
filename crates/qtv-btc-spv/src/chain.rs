@@ -19,12 +19,6 @@ pub struct VerifiedChain {
 pub struct Checkpoint {
     pub height: u32,
     pub hash: [u8; 32],
-    /// The work the submitted headers AFTER `height` must carry, NOT the chain's cumulative work at
-    /// `height`. `VerifiedChain::work` sums `block_work` over the headers the caller
-    /// handed in and nothing else, so those two readings differ by orders of magnitude:
-    /// armed with a real cumulative figure no honest relayer run could ever reach it and
-    /// the corridor bricks. What stops a cheap substituted chain is `height` and `hash`
-    /// pinning a real block, plus the `BrokenLink` chaining; this is a floor on the run.
     pub min_work: U256,
 }
 
@@ -110,11 +104,6 @@ pub fn verify_chain(
             let interval = params.retarget_interval() as usize;
             if height % params.retarget_interval() == 0 {
                 if i < interval {
-                    // The window does not carry the period's first header, so the real
-                    // timespan cannot be checked and the only rule left is the loose four
-                    // times relief. That would let a submitter pick a target four times
-                    // easier than the timestamps dictate and mine the confirmations above
-                    // the deposit at that eased difficulty. Refuse the window instead.
                     return Err(SpvError::UnverifiableRetarget { index: i });
                 }
                 check_retarget_boundary(&headers[i - interval], prev, h, params)?;
@@ -367,8 +356,6 @@ mod tests {
             prev = h.block_hash();
             headers.push(h);
         }
-        // A 13th header whose timestamp sits at or below the median of the prior eleven
-        // is a backdate; the median-time-past rule refuses it.
         let backdated = mine(prev, [0xff; 32], 1_700_000_000);
         headers.push(backdated);
         assert_eq!(

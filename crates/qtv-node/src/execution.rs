@@ -35,20 +35,10 @@ pub const TRANSFER_METER: u64 = 1_210;
 
 pub const CODE_ACCESS_BYTE_METER: u64 = 1;
 pub const STORAGE_ACCESS_BYTE_METER: u64 = 1;
-/// What one slot costs to touch. A slot is a trie read plus, if written, a trie write,
-/// so it is charged well above a plain instruction. This replaces charging a call for
-/// the size of the whole contract, which is what created the size ceiling, while still
-/// pricing the real work so a call cannot walk a large keyspace for nothing.
 pub const SLOT_ACCESS_METER: u64 = 200;
 
-/// What one byte of PERMANENT contract code costs to deploy.
-///
-/// Set against MAX_TX_METER, which caps a deployable contract at 125,000 bytes. This
-/// bounds the rate permanent state can be bought, not the price of permanence.
 pub const DEPLOY_BYTE_METER: u64 = 100;
 
-/// What a deploy of this size must pay before anything is written. Saturating, so an
-/// absurd size prices out rather than wrapping cheap.
 pub fn deploy_meter_cost(container_bytes: usize) -> u64 {
     (container_bytes as u64).saturating_mul(DEPLOY_BYTE_METER)
 }
@@ -59,11 +49,6 @@ mod deploy_price {
 
     #[test]
     fn permanent_state_costs_more_than_the_flat_fee_can_buy() {
-        // A container used to be written into the trie before anything charged for it,
-        // so one flat fee transaction bought 130,984 bytes of permanent state, and a
-        // full block of them bought gigabytes. The price has to be payable from the
-        // declared meter, not discovered afterwards.
-        // The block VM budget, mirrored from node.rs so this test is self contained.
         const BLOCK_BUDGET: u64 = 50_000_000;
         let big = 130_984usize;
         let cost = deploy_meter_cost(big);
@@ -79,15 +64,12 @@ mod deploy_price {
 
     #[test]
     fn the_block_budget_bounds_how_much_state_a_block_can_buy() {
-        // What matters is the total: a block must not be able to write gigabytes.
         const BLOCK_BUDGET: u64 = 50_000_000;
         let max_bytes = BLOCK_BUDGET / DEPLOY_BYTE_METER;
         assert!(
             max_bytes <= 1_000_000,
             "a block must not admit {max_bytes} bytes of permanent contract code"
         );
-        // And the largest contract anyone actually writes must still fit in one
-        // transaction, with room to spare. The biggest in examples/ is under 60 KiB.
         const MAX_TX: u64 = BLOCK_BUDGET / 4;
         assert!(
             deploy_meter_cost(60 * 1024) < MAX_TX / 2,
@@ -98,7 +80,6 @@ mod deploy_price {
 
     #[test]
     fn the_price_saturates_rather_than_wrapping() {
-        // An absurd size must yield an unpayable price, never a cheap one.
         assert_eq!(deploy_meter_cost(usize::MAX), u64::MAX);
     }
 }
@@ -139,10 +120,6 @@ mod slot_charge {
 
     #[test]
     fn a_read_costs_the_same_slot_charge_as_a_write() {
-        // Separating fetched slots from written ones stopped a read looking like a
-        // write, and in doing so took reads out of this charge entirely. A read is a
-        // trie lookup on every validator, so leaving it free let one transaction walk
-        // an unbounded keyspace inside its own meter budget.
         let with_read = run("LDI r0, 0\nSLOAD r1, r0\nHALT", vec![0]);
         let without = run("LDI r0, 0\nHALT", vec![]);
         assert!(
@@ -307,8 +284,6 @@ pub fn decode_container(bytes: &[u8]) -> Option<qtv_vm::container::Container> {
     Some(Container::new(code, consts, entries))
 }
 
-/// Run an entry, reading storage slots on demand, so a call costs what it touches
-/// rather than what the contract holds.
 pub fn execute_contract_call_lazy(
     container_bytes: &[u8],
     selector: [u8; qtv_vm::container::SELECTOR_BYTES],
@@ -335,10 +310,6 @@ pub fn execute_contract_call_lazy(
             Fault::OutOfMeter => ExecError::MeterExhausted,
             other => ExecError::Vm(other),
         })?;
-    // Reads cost the node a trie lookup exactly like writes do. Charging only the
-    // written set made walking an unbounded keyspace free, so one transaction could
-    // force arbitrarily many lookups inside its own meter budget. The two sets are
-    // disjoint by construction: the loader only runs on a miss in `storage`.
     let touched = outcome.storage.len() as u64 + outcome.fetched as u64;
     let meter_used = outcome
         .meter_used
@@ -358,9 +329,6 @@ pub fn execute_contract_call_lazy(
     })
 }
 
-/// Test only. The live call path is `execute_contract_call_lazy`, which meters the reads
-/// it actually performs. Kept private so this cannot become a second production path that
-/// drifts from it on metering.
 #[cfg(test)]
 fn execute_contract_call(
     container_bytes: &[u8],

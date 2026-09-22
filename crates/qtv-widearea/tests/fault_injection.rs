@@ -73,7 +73,6 @@ fn faults_degrade_honestly_over_real_sockets() {
     let mut drop_two = base_scenario();
     drop_two.up[2] = false;
     drop_two.up[3] = false;
-    // Only the leg asserting a stall wants a short deadline.
     drop_two.stall_secs = 5;
     let drop_two_reports = run_scenario(&drop_two);
     let drop_two_ingress = ingress(&drop_two_reports);

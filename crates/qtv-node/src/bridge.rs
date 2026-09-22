@@ -452,9 +452,6 @@ pub fn quorum_attests(
     if fact.dest_chain != dest_chain || fact.direction != Direction::Deposit {
         return false;
     }
-    // No valid distinct signer set can exceed the operator count. Refusing a longer
-    // list up front bounds the work to the operator count and stops a fee-less
-    // artifact carrying ~175k signer entries from costing ~n^2 comparisons.
     if attestation.signatures.len() > set.operators.len() {
         return false;
     }

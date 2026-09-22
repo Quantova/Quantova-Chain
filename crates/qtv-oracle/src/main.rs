@@ -76,9 +76,6 @@ fn keygen(a: &[String]) {
         committee.push_str(&format!("{id} {} {}\n", hexs(&pk), hexs(&pop)));
     }
     let secrets_path = format!("{prefix}.secrets");
-    // The secrets file holds every operator's signing key. Create it owner-only in the
-    // first place, rather than writing at the process umask and narrowing it after: the
-    // gap between the two is long enough to open the file.
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -225,7 +222,6 @@ fn guardian_keygen(a: &[String]) {
     seed.copy_from_slice(&urandom(32));
     let (pk, mut sk) = ml_dsa::keygen(&seed);
     let mut rendered = format!("{} {}\n", hexs(&pk), hexs(&sk));
-    // Owner only, not the process umask.
     let gsecret_path = format!("{prefix}.gsecret");
     #[cfg(unix)]
     {

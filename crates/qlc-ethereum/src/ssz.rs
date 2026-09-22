@@ -79,8 +79,6 @@ pub fn is_valid_merkle_branch(
     &value == root
 }
 
-// The bit of `index` at position `i`, treating every position at or beyond the width of
-// the index as zero so an over-long branch shifts to zero rather than panicking.
 fn branch_bit(index: u64, i: usize) -> bool {
     i < 64 && (index >> i) & 1 == 1
 }

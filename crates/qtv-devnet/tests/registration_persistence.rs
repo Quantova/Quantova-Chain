@@ -101,8 +101,6 @@ fn a_node_restarting_within_an_epoch_rebuilds_peers_rotated_roots_from_the_chain
         height_before,
         "the height reloaded"
     );
-    // Its own root included: the restarted node takes every root, its own among them,
-    // from the chain, so it lands on the committee its peers use rather than one of its own.
     for (j, id) in ids.iter().enumerate() {
         assert_eq!(
             devnet.node(index).roster_root(*id),

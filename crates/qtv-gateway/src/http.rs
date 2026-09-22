@@ -113,9 +113,6 @@ impl LimiterInner {
 
     fn strike(&mut self, ip: IpAddr, now: Instant) -> bool {
         if self.strikes.len() >= RATE_TABLE_CAP {
-            // Drop the entries whose strike window has already lapsed before resorting to
-            // emptying the table, so a flood of fresh addresses cannot wipe the strikes
-            // being accumulated against a live attacker.
             self.strikes
                 .retain(|_, (_, seen)| now.saturating_duration_since(*seen) <= STRIKE_WINDOW);
             if self.strikes.len() >= RATE_TABLE_CAP {
@@ -132,9 +129,6 @@ impl LimiterInner {
         }
         self.strikes.remove(&ip);
         if self.banned.len() >= RATE_TABLE_CAP {
-            // Expired bans first, then the one closest to expiring. Emptying the table
-            // would release every address still serving a ban, which is exactly what a
-            // flood of fresh addresses would be aiming for.
             self.banned.retain(|_, until| *until > now);
             while self.banned.len() >= RATE_TABLE_CAP {
                 let soonest = self
@@ -389,7 +383,6 @@ fn unmapped(ip: IpAddr) -> IpAddr {
     }
 }
 
-// v6 callers are charged per /64, v4 whole
 fn limiter_key(ip: IpAddr) -> IpAddr {
     let ip = unmapped(ip);
     match ip {
@@ -672,9 +665,6 @@ fn handle_connection(
         );
     }
 
-    // Bounded. REQUEST_DEADLINE covers only the head and body reads, so an unbounded wait
-    // here pins this connection and its descriptor for as long as the node is busy, which
-    // is exactly when the pool is most contended.
     match reply_rx.recv_timeout(REQUEST_DEADLINE) {
         Ok(Ok(value)) => write_response(&mut stream, 200, &value.render()),
         Ok(Err(err)) => write_error(&mut stream, err.http, &err.code, &err.message),
@@ -1251,9 +1241,6 @@ mod ban_table_pressure_tests {
         IpAddr::from(std::net::Ipv4Addr::from(n))
     }
 
-    // Both tables used to empty themselves when they filled. That hands an attacker a way
-    // to clear the record: flood enough fresh addresses and every live ban is released.
-    // Expiring first means a flood can only reclaim room that was already dead.
     #[test]
     fn a_live_ban_survives_the_table_filling_up() {
         let mut inner = LimiterInner::default();

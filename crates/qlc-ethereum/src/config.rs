@@ -300,7 +300,6 @@ mod tests {
         assert_eq!(eth.fork_version_at_epoch(74240), ForkVersion([1, 0, 0, 0]));
         assert_eq!(eth.fork_version_at_epoch(200000), ForkVersion([3, 0, 0, 0]));
         assert_eq!(eth.fork_version_at_epoch(300000), ForkVersion([4, 0, 0, 0]));
-        // Post-Electra but pre-Fulu resolves to Electra; post-Fulu resolves to Fulu.
         assert_eq!(eth.fork_version_at_epoch(400000), ForkVersion([5, 0, 0, 0]));
         assert_eq!(eth.fork_version_at_epoch(999999), ForkVersion([6, 0, 0, 0]));
     }

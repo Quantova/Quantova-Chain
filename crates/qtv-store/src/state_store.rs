@@ -81,12 +81,8 @@ fn entry_record_len(value_len: usize) -> usize {
     1 + qtv_state::KEY_LEN + qtv_codec::LENGTH_WIDTH + value_len
 }
 
-/// A log below this size is left alone, because rewriting a small file buys
-/// nothing and a fresh chain would otherwise compact on every open.
 const COMPACT_FLOOR_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Compact once the log costs this many times what the live set needs. Four
-/// means the log is three quarters superseded copies before it is rewritten.
 const COMPACT_RATIO: u64 = 4;
 
 #[derive(Debug)]
@@ -98,11 +94,6 @@ pub struct StateStore {
     committed_height: Option<u64>,
 }
 
-/// How recently the holder must have committed for the store to be treated as live.
-///
-/// Only ever used to decide whether it is safe to REWRITE the log on open. It never
-/// refuses to open, because a store that will not open is a validator that cannot
-/// restart, which is a far worse failure than a skipped compaction.
 const HOLDER_FRESH: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn holder_path(path: &Path) -> PathBuf {
@@ -111,12 +102,6 @@ fn holder_path(path: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
-/// Whether another process is actively committing to this log right now.
-///
-/// The running store touches its holder file on every commit. Nothing here refuses
-/// to open: it only tells `open` to leave the bytes alone, because truncating and
-/// renaming underneath a live node hands it a descriptor with no name and silently
-/// throws away every block it goes on to write.
 fn another_process_is_live(path: &Path) -> bool {
     let holder = holder_path(path);
     let Ok(meta) = std::fs::metadata(&holder) else {
@@ -125,7 +110,6 @@ fn another_process_is_live(path: &Path) -> bool {
     let Ok(modified) = meta.modified() else {
         return false;
     };
-    // A holder stamped in the future is a clock change, not a live writer.
     let fresh = std::time::SystemTime::now()
         .duration_since(modified)
         .map(|age| age < HOLDER_FRESH)
@@ -139,22 +123,14 @@ fn another_process_is_live(path: &Path) -> bool {
     let Ok(pid) = text.trim().parse::<u32>() else {
         return false;
     };
-    // Our own holder from earlier in this process is not contention.
     if pid == std::process::id() {
         return false;
     }
-    // Freshness alone would call a node that crashed seconds ago a live writer and
-    // refuse to clean its torn tail on restart. Only a pid that still exists is a
-    // reason to leave the bytes alone.
     process_is_alive(pid)
 }
 
 #[cfg(unix)]
 fn process_is_alive(pid: u32) -> bool {
-    // `ps` rather than `kill -0`, which reports a live process owned by another user
-    // as dead: it fails with EPERM, and an exit status cannot tell that apart from
-    // "no such process". Reading a live holder as dead is the dangerous direction,
-    // because it is what lets a second opener rewrite the log underneath it.
     std::process::Command::new("ps")
         .arg("-p")
         .arg(pid.to_string())
@@ -167,8 +143,6 @@ fn process_is_alive(pid: u32) -> bool {
 
 #[cfg(not(unix))]
 fn process_is_alive(_pid: u32) -> bool {
-    // Without a portable liveness check, keep the previous behaviour rather than
-    // silently declining to clean a torn tail.
     false
 }
 
@@ -191,18 +165,11 @@ impl StateStore {
 
     pub fn open_with_floor(path: impl AsRef<Path>, floor: Option<u64>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        // Stream the log rather than materialising every frame first. Holding the
-        // whole log in a Vec and then building the live set from it meant a log too
-        // big for memory could never be opened, so it could never be compacted back
-        // down either, which is the state that traps a node with a large history.
         let mut entries: BTreeMap<Key, Vec<u8>> = BTreeMap::new();
         let mut head: Option<Hash> = None;
         let mut committed_height: Option<u64> = None;
         let mut pending: Vec<(Key, Option<Vec<u8>>)> = Vec::new();
         let mut committed_len: u64 = 0;
-        // Decided BEFORE the scan, because the scan itself truncates. Cutting the log
-        // under a process that is appending to it leaves that process writing at a stale
-        // offset, and every block it goes on to write is lost with no error anywhere.
         let contended = another_process_is_live(&path);
         let visit = |frame: &[u8], _start: u64, end_offset: u64| match qtv_codec::from_bytes::<
             StateRecord,
@@ -242,10 +209,6 @@ impl StateStore {
             head,
             committed_height,
         };
-        // Another process committing right now owns these bytes. Truncating or
-        // renaming underneath it leaves its descriptor pointing at an unlinked inode
-        // and every block it goes on to write is lost on the next restart, with no
-        // error anywhere. Opening still succeeds: this only declines to REWRITE.
         let behind = floor.is_some_and(|floor| committed_height.is_none_or(|c| c < floor));
         if contended || behind {
             return Ok(store);
@@ -254,10 +217,6 @@ impl StateStore {
             store.log.truncate(committed_len)?;
         }
         if store.should_compact(committed_len) {
-            // Compaction is an optimisation, never a correctness requirement. A store
-            // that cannot be rewritten, for want of disk or a read only mount, still
-            // holds every committed byte, so refusing to boot over it would turn a
-            // housekeeping failure into a halted validator that cannot restart.
             if let Err(e) = store.compact() {
                 eprintln!("state log compaction skipped at open: {e}");
             }
@@ -265,7 +224,6 @@ impl StateStore {
         Ok(store)
     }
 
-    /// The bytes a freshly written log would occupy for the current live set.
     fn live_bytes(&self) -> u64 {
         self.entries
             .values()
@@ -281,18 +239,11 @@ impl StateStore {
         on_disk / live >= COMPACT_RATIO
     }
 
-    /// Compact only when the log has become mostly superseded copies.
-    ///
-    /// Cheap enough for the block loop to call on a schedule: it stats the file
-    /// and returns immediately unless a rewrite is actually warranted. Returns
-    /// whether a rewrite happened.
     pub fn compact_if_bloated(&mut self) -> io::Result<bool> {
         let on_disk = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
         if !self.should_compact(on_disk) {
             return Ok(false);
         }
-        // Never propagate a compaction failure into the block loop. The chain is
-        // correct without compaction, it simply uses more disk until the next attempt.
         if let Err(e) = self.compact() {
             eprintln!("state log compaction skipped: {e}");
             return Ok(false);
@@ -300,31 +251,17 @@ impl StateStore {
         Ok(true)
     }
 
-    /// Rewrite the log so it holds one entry per live key and a single commit.
-    ///
-    /// The in-memory map is already the compacted state, so this replays to the
-    /// identical trie. The rewrite lands in a sibling file and is renamed over
-    /// the original, so an interrupted compaction leaves the previous log whole.
     pub fn compact(&mut self) -> io::Result<()> {
         let (height, root) = match (self.committed_height, self.head) {
             (Some(height), Some(root)) => (height, root),
-            // Nothing has been committed, so there is no state worth keeping.
             _ => return Ok(()),
         };
         let mut temp = self.path.clone().into_os_string();
         temp.push(".compact");
         let temp = PathBuf::from(temp);
-        // A temp file left by an interrupted earlier attempt is not state, drop it.
         if temp.exists() {
             std::fs::remove_file(&temp)?;
         }
-        // The fresh handle is kept open ACROSS the rename and installed directly.
-        // Reopening the path afterwards used to sit between the rename and the
-        // install: the rename had already unlinked the old file, so a reopen that
-        // failed left `self.log` writing into an inode with no name, and every
-        // append after it was lost on the next restart while the node went on
-        // finalizing blocks. A descriptor follows the inode through a rename, so
-        // there is nothing left to fail here.
         let (mut fresh, _) = Log::open(&temp)?;
         for (key, value) in &self.entries {
             let record = StateRecord::Entry {
@@ -336,8 +273,6 @@ impl StateStore {
         fresh.append(&to_bytes(&StateRecord::Commit { height, root }))?;
         fresh.sync()?;
         std::fs::rename(&temp, &self.path)?;
-        // The rename itself has to reach the disk, otherwise a crash here can
-        // leave a directory entry pointing at neither file.
         sync_parent_dir(&self.path);
         self.log = fresh;
         Ok(())
@@ -366,7 +301,6 @@ impl StateStore {
         self.log.sync()?;
         self.head = Some(root);
         self.committed_height = Some(height);
-        // Say we are alive, so nothing else rewrites this log underneath us.
         touch_holder(&self.path);
         Ok(())
     }
@@ -752,7 +686,6 @@ mod tests {
                 .expect("put");
         }
         store.commit(1, [7u8; 32]).expect("commit");
-        // Rewrite every key many times so the log is mostly superseded copies.
         for round in 1..40u64 {
             for index in 0..16u8 {
                 store
@@ -775,7 +708,6 @@ mod tests {
             "compaction did not shrink the log, {before_bytes} -> {after_bytes}"
         );
 
-        // and it survives a reopen
         drop(store);
         let reopened = StateStore::open(&path).expect("reopen");
         assert_eq!(
@@ -825,8 +757,6 @@ mod tests {
         drop(store);
         let original = std::fs::read(&path).expect("read");
 
-        // A temp file left behind by a compaction that died midway must not be
-        // mistaken for state, and must not stop a later compaction.
         let mut temp = path.clone().into_os_string();
         temp.push(".compact");
         let temp = std::path::PathBuf::from(temp);
@@ -901,28 +831,13 @@ mod compaction_survives_the_rename {
         for i in 0..64u64 {
             let mut k = [0u8; 32];
             k[24..].copy_from_slice(&i.to_be_bytes());
-            // Rewrite each key repeatedly so the log goes mostly stale.
             for v in 0..8u64 {
                 s.put_account(k, v.to_be_bytes().to_vec()).unwrap();
             }
         }
         s.commit(1, [7u8; 32]).unwrap();
-        // What this covers: compaction round trips, and a write made through the
-        // handle compaction installed still survives a restart.
-        //
-        // What it does NOT cover, stated plainly because the first version of this
-        // test was cited as evidence for a fix it could not detect: the failure the
-        // fix removes is a reopen of `self.path` FAILING after the rename has already
-        // unlinked the old file. Forcing that needs a descriptor limit this crate
-        // cannot lower without `unsafe`, which the workspace forbids. The guarantee is
-        // structural instead, and it is worth stating: `compact` holds the fresh
-        // handle across the rename and installs it directly, so there is no fallible
-        // call between the two for a failure to land in.
         s.compact().unwrap();
 
-        // The write below goes through the handle the compaction installed. If that
-        // handle still pointed at the unlinked pre rename inode it would be accepted
-        // here and gone after the reopen.
         let mut late = [0u8; 32];
         late[31] = 0xEE;
         s.put_account(late, vec![1, 2, 3]).unwrap();
@@ -953,11 +868,6 @@ mod live_holder {
 
     #[test]
     fn a_second_open_does_not_rewrite_a_log_a_live_process_is_committing_to() {
-        // Nothing locks this path, so any tool, backup script or mistakenly started
-        // second node used to rewrite a running validator's log. The cheap and most
-        // dangerous half is the truncate: a live node always has entries appended
-        // past its last commit, and a second open threw exactly those away, leaving
-        // the running node writing into a file nobody would read back.
         let d = dir("live");
         let path = d.join("state.log");
 
@@ -966,8 +876,6 @@ mod live_holder {
         live.commit(1, [7u8; 32]).unwrap();
         let committed = std::fs::metadata(&path).unwrap().len();
 
-        // Work in flight: appended, not yet committed. The normal state of a running
-        // node between blocks.
         live.put_account([2u8; 32], vec![2, 2]).unwrap();
         live.put_account([3u8; 32], vec![3, 3, 3]).unwrap();
         let with_inflight = std::fs::metadata(&path).unwrap().len();
@@ -976,8 +884,6 @@ mod live_holder {
             "there is uncommitted work on disk"
         );
 
-        // Stand in for the other process. Pid 1 always exists on unix, so this is a
-        // holder naming a genuinely live process that is not this one.
         std::fs::write(holder_path(&path), b"1").unwrap();
         assert!(
             another_process_is_live(&path),
@@ -997,8 +903,6 @@ mod live_holder {
 
     #[test]
     fn our_own_holder_is_not_treated_as_contention() {
-        // Otherwise a restart within the freshness window would decline to clean its
-        // own torn tail, and every reopen inside one process would too.
         let d = dir("self");
         let path = d.join("state.log");
         let mut s = StateStore::open(&path).unwrap();
@@ -1013,9 +917,6 @@ mod live_holder {
 
     #[test]
     fn a_stale_holder_never_stops_a_restart() {
-        // A crashed node leaves its holder behind. Refusing to compact forever would
-        // be a slow leak, and refusing to OPEN would be a validator that cannot come
-        // back, which is the worse failure by far.
         let d = dir("stale");
         let path = d.join("state.log");
         let mut s = StateStore::open(&path).unwrap();
@@ -1023,7 +924,6 @@ mod live_holder {
         s.commit(1, [1u8; 32]).unwrap();
         drop(s);
 
-        // Backdate the holder well past the freshness window.
         let holder = holder_path(&path);
         assert!(holder.exists(), "committing stamps a holder");
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);

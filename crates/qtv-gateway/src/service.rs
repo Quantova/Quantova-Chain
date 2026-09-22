@@ -213,7 +213,6 @@ fn string_field(body: &Json, key: &str) -> Result<String, ClientError> {
 
 const MAX_STORAGE_KEYS: usize = 64;
 
-// a full contract deploy fits well under this
 const MAX_TX_BYTES: usize = 256 * 1024;
 
 fn key_list(body: &Json) -> Result<Vec<[u8; 32]>, ClientError> {
@@ -482,8 +481,6 @@ fn genesis_accounts(node: &DevNode) -> Json {
     ])
 }
 
-// The bridge epoch rides with the head so the oracle's epoch caps roll when the chain's
-// do, rather than holding for the life of the process.
 fn finalized_head(node: &DevNode) -> Json {
     object(vec![
         ("head", Json::Int(node.finalized_head())),
@@ -494,8 +491,6 @@ fn finalized_head(node: &DevNode) -> Json {
 fn burn_block(node: &DevNode, height: u64) -> Result<Json, ClientError> {
     match node.burn_block(height) {
         Some(entry) => {
-            // Capped like every sibling list endpoint, so one block cannot serve an
-            // unbounded array to any caller that asks for it.
             let total = entry.events.len();
             let events: Vec<Json> = entry
                 .events
@@ -563,7 +558,6 @@ fn chain_params(node: &DevNode) -> Json {
         .map(|track| {
             object(vec![
                 ("code", Json::Int(u64::from(track.code()))),
-                // what governance charges now, not the compiled constant
                 ("deposit", Json::Int(ledger.gov_track_deposit(*track))),
                 (
                     "threshold_bps",
@@ -1301,9 +1295,6 @@ fn block(node: &DevNode, selector: BlockSelector) -> Result<Json, ClientError> {
 
     let block = &served.block;
     let header = block.header();
-    // Capped like every sibling list. Each id re-serialises a whole wrapper, the ML-DSA
-    // signature included, and hashes it, and this runs inline on the driver thread, so an
-    // uncapped list over a full block is seconds of block production per request.
     let total = block.body().len();
     let tx_ids: Vec<Json> = served
         .ids_prefix(MAX_LIST_ITEMS)

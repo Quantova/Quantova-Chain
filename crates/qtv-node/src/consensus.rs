@@ -22,7 +22,6 @@ pub struct ConsensusValidator {
     pub bond_address: String,
 }
 
-// Hand written so the signing secret never reaches a log line.
 impl std::fmt::Debug for ConsensusValidator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConsensusValidator")
@@ -235,8 +234,6 @@ pub enum FinalityStatus {
     },
 }
 
-/// Epochs of finalized heights kept for the conflict check. A conflict older than this
-/// window is not detected here; the slashing record is the evidence pool.
 const FINALITY_RETAINED_EPOCHS: u64 = 64;
 const FINALITY_RETAINED_HEIGHTS: u64 = FINALITY_RETAINED_EPOCHS * DEFAULT_SLOTS;
 
@@ -267,7 +264,6 @@ impl FinalityLedger {
                 conflicting: value,
             },
             None => {
-                // Below the window, so it cannot be judged and must not be recorded.
                 if height.saturating_add(FINALITY_RETAINED_HEIGHTS) < self.highest {
                     return FinalityStatus::Confirms;
                 }
@@ -406,11 +402,6 @@ impl Consensus {
             .admits(beacon, slot, reveal.id, &reveal.credential)
     }
 
-    /// Explains a `select` refusal that was not simply an empty committee. This
-    /// recomputes the same saturation check `select` already runs, purely to
-    /// report on it, so it changes nothing about whether a round proceeds.
-    /// `None` means the roster is saturated and something else, most likely too
-    /// few published reveals, is why a committee could not form.
     pub fn saturation_shortfall(&self) -> Option<(usize, u64, u128, u128)> {
         let weights = self.view().weights();
         let total: u128 = weights
@@ -773,11 +764,6 @@ mod tests {
 
     #[test]
     fn the_stake_cap_lets_an_imbalanced_roster_still_select() {
-        // Before the committee weight cap, one validator at a thousand times the
-        // ordinary stake pushed the three ordinary validators under the budget
-        // floor, so the roster refused to select and saturation_shortfall had to
-        // explain it. The cap holds any weight to ten times the median, so the
-        // ordinary validators keep their draw and the roster selects normally.
         let standard = qtv_bft::params::VALIDATOR_STAKE_QTOV;
         let outsized = standard * 1_000;
         let validators = vec![

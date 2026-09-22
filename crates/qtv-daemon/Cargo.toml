@@ -15,39 +15,22 @@ path = "src/main.rs"
 
 [dependencies]
 qtv-wipe = { path = "../qtv-wipe" }
-# The account model, for deriving a funded genesis account's address from its
-# scheme and public key.
 qtv-account = { path = "../qtv-account" }
 
-# The node engine: the genesis, the account and validator specs, the fee schedule,
-# and the committee selection the daemon drives. No test fixtures, so the daemon binary
-# carries no path that turns a validator id into key material.
 qtv-node = { path = "../qtv-node" }
 qtv-tx = { path = "../qtv-tx" }
 qtv-governance = { path = "../qtv-governance" }
 
-# The block model, for the header arbitrary data limit the daemon checks a note
-# against before handing it to the node.
 qtv-block = { path = "../qtv-block" }
 
-# The real post quantum secure channel the mesh is built from.
 qtv-net = { path = "../qtv-net" }
 
-# The devnet node and its round primitives. The daemon reuses DevNode as the one
-# node core rather than forking it, and drives it over a continuous production loop
-# instead of the harness measurement loop. No test fixtures on this path.
 qtv-devnet = { path = "../qtv-devnet" }
 
-# The RPC gateway. The daemon runs it in process as a thread, feeding client requests
-# to the round loop over a channel so the node stays the single owner of its state.
 qtv-gateway = { path = "../qtv-gateway" }
 
-# The audited post quantum crypto, for the SHA3 that fixes the genesis hash a chain
-# id is bound through. Pinned at the same tag the rest of the graph uses.
-qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "cf5ec8f2e884a7dda052fe04f38ef6a0c1dbd055" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "37a7a4963888a4bb0854d346583e26928659aa63" }
 
-# For a raw SIGTERM handler. A signal handler runs in a context where almost nothing
-# is safe to call, so the handler body itself is one atomic store and nothing else.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

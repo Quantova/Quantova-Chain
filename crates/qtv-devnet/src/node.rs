@@ -113,25 +113,12 @@ impl ServedBlock {
 
 const FINALIZED_RETAINED: usize = 512;
 
-// How often the node checks whether its state log has gone mostly stale.
-// The check is a stat, so this is about bounding the wasted work, not the cost.
 const STATE_COMPACT_CHECK_BLOCKS: u64 = 1000;
 
 const MAX_FUTURE_PROPOSALS: usize = 256;
-// Transactions waiting to be passed to peers. A driver that never drains it must not turn
-// every admitted transaction into memory held until the process dies; past the bound a
-// transaction still sits in the mempool, it is only not forwarded.
 const MAX_OUTBOX: usize = 4096;
-// How far ahead of this node's clock a proposal's time may sit. Wide enough for honest
-// skew between validators, narrow enough that a leader stamping a block in the future
-// cannot hold every honest proposal below its parent's time for minutes on end.
 const MAX_BLOCK_TIME_AHEAD_SECS: u64 = 15;
-// A block body no receiver will refuse. Peers rebuild a proposal from shards and refuse
-// one whose coded form is past MAX_CODED_BYTES; a leader filling its block from a deep
-// mempool would otherwise build a proposal nobody can reassemble, every view it leads.
 const MAX_BLOCK_BODY_BYTES: usize = 6 * 1024 * 1024;
-// A sync reply's block bytes, kept under the channel's message limit with room for the
-// framing around them.
 const MAX_SERVE_BYTES: usize = 12 * 1024 * 1024;
 
 fn locked_body_fits(block: &LockedBlock) -> bool {
@@ -146,7 +133,6 @@ fn body_bytes(body: &[Wrapper]) -> usize {
         .fold(0usize, usize::saturating_add)
 }
 
-// What every parked proposal may hold in total, not per entry.
 const MAX_FUTURE_PROPOSAL_BYTES: usize = 16 * 1024 * 1024;
 
 fn proposal_weight(proposal: &Proposal) -> usize {
@@ -309,11 +295,8 @@ struct Lock {
     polka: Certificate,
 }
 
-/// Recent heights of events kept in memory. The store is the durable record; this is a
-/// read cache.
 const EVENTS_CACHED_HEIGHTS: Height = 1024;
 
-/// The index is keyed by a fixed width digest of the rendered id.
 fn tx_key(tx_id: &str) -> [u8; 32] {
     qtv_crypto::sha3::sha3_256(tx_id.as_bytes())
 }
@@ -360,23 +343,15 @@ pub struct DevNode {
     chain: Vec<FinalizedBlock>,
     slashed: Vec<u64>,
     tx_index: TxIndex,
-    /// What this node has already prevoted at each view of the current height. A second,
-    /// different prevote in one view is what lets two conflicting polkas form from honest
-    /// signatures, so it is refused at the point of signing.
     prevoted: std::collections::BTreeMap<View, [u8; 32]>,
     events_by_height: HashMap<Height, Vec<BlockEvent>>,
     side_events_by_height: HashMap<Height, Vec<SideEvent>>,
     block_messages: HashMap<u64, Vec<u8>>,
-    // Sortition roots for the current epoch, taken only from registrations the chain
-    // recorded inside the previous epoch's window. Every node derives the same map from
-    // the same blocks, so no node's committee depends on what gossip it happened to see.
     epoch_roots: HashMap<u64, Root>,
     epoch_conflicted: HashSet<u64>,
-    // Registrations for the NEXT epoch recorded so far by blocks of this one.
     next_roots: std::collections::BTreeMap<u64, Root>,
     next_conflicted: std::collections::BTreeSet<u64>,
     next_for: u64,
-    // Gossiped notes waiting for a leader to carry them on chain. Never consensus state.
     pending_notes: Vec<RegisterNote>,
     sign_guard: SignGuard,
     prevote_guard: PrevoteGuard,
@@ -421,10 +396,6 @@ impl DevNode {
 
         let genesis = devnet.genesis();
         let genesis_accounts = genesis.accounts.clone();
-        // The genesis total is summed with saturating adds, so a mis-authored genesis
-        // whose balances and bonds overrun a u64 would clamp here and start the chain
-        // with a supply that no longer equals what the accounts hold. Refuse it rather
-        // than run with a total that breaks conservation from the first block.
         let genesis_supply = genesis_supply_value(&genesis, &roster);
         if genesis_supply == u64::MAX {
             return Err(RoundError::GenesisOverSupply {
@@ -635,13 +606,6 @@ impl DevNode {
         self.epoch_roster_for(self.consensus.epoch_for(self.height))
     }
 
-    // The same rule for every validator, this node included, so no node ever holds a
-    // committee its peers do not. Epoch zero draws from the genesis roots. After it a
-    // validator is seated at the root the chain recorded for it in time, and otherwise at a
-    // root no reveal can open: it cannot be drawn that epoch, yet its stake stays in the
-    // finality total, as if it were offline. Falling back to the genesis tree instead would
-    // reuse one time leaves already made public, which anyone could replay to make an
-    // absent validator look present.
     fn epoch_roster_for(&self, epoch: u64) -> Vec<ValidatorRegistration> {
         reweigh_roster(&self.ledger, &self.base_roster)
             .into_iter()
@@ -658,10 +622,6 @@ impl DevNode {
             .collect()
     }
 
-    // A root for the next epoch counts only when a block in the first part of this epoch
-    // carries it. The beacon that seeds the next epoch then still depends on reveals made
-    // after the root was fixed, so the root cannot be ground against a beacon its owner can
-    // already see.
     fn registration_open(&self, height: Height) -> bool {
         let len = self.consensus.epoch_len();
         let lead = (len / 4).max(1);
@@ -758,8 +718,6 @@ impl DevNode {
         })
     }
 
-    // Gossip only queues a note for a leader to carry. The committee is taken from what
-    // the chain records, so a note one node saw and another did not changes nothing.
     pub fn collect_registration(&mut self, note: RegisterNote) -> bool {
         if !self.registration_open(self.height) || note.id == self.id {
             return false;
@@ -827,7 +785,6 @@ impl DevNode {
         self.reveals.iter().map(|r| r.id).collect()
     }
 
-    /// The sortition root this node holds for a validator in the current epoch.
     pub fn roster_root(&self, id: u64) -> Option<Root> {
         self.epoch_roster()
             .into_iter()
@@ -835,7 +792,6 @@ impl DevNode {
             .map(|r| r.root)
     }
 
-    /// The root this node's own tree commits to for an epoch.
     pub fn own_rotated_root(&self, epoch: u64) -> Root {
         self.consensus.own_epoch_root(epoch)
     }
@@ -850,9 +806,6 @@ impl DevNode {
         ids
     }
 
-    // Everything a leader should carry: this node's own note and any gossiped note the
-    // chain has not yet recorded, a second conflicting note included so every node marks
-    // the conflict from the same block.
     fn epoch_registration_notes(&self) -> Vec<RegisterNote> {
         let mut notes: Vec<RegisterNote> = Vec::new();
         let recorded = |note: &RegisterNote| {
@@ -869,15 +822,10 @@ impl DevNode {
                 notes.push(note.clone());
             }
         }
-        // Ordered by validator and root, not by who builds, so two nodes holding the same
-        // notes assemble the same block.
         notes.sort_by(|a, b| a.id.cmp(&b.id).then(a.root.digest.cmp(&b.root.digest)));
         notes
     }
 
-    // Rebuilt from the chain alone: the previous epoch's window gives this epoch's roots,
-    // and this epoch's blocks so far give the next epoch's. Nothing held only in gossip is
-    // needed, so a restart lands on exactly the committee its peers use.
     fn rebuild_epoch_registrations(&mut self, head: Height) {
         let len = self.consensus.epoch_len();
         let head_epoch = self.consensus.epoch_for(head);
@@ -951,10 +899,6 @@ impl DevNode {
     fn reload(&mut self) -> Result<(), RoundError> {
         self.refuse_state_behind_blocks()?;
         self.ledger = Ledger::from_trie(self.state_store.load_trie());
-        // The state commit is the durability point, and the block and event stores are
-        // synced just before it. A crash in that window leaves them one height ahead.
-        // Refusing to start there strands the validator, so drop back to the height the
-        // state actually committed and let the node re sync the rest from its peers.
         if let (Some(head), Some(committed)) = (
             self.block_store.head_height(),
             self.state_store.committed_height(),
@@ -1023,8 +967,6 @@ impl DevNode {
             .beacon
             .advance_from_reveals(self.consensus.slot_for(head), &reveals);
         self.height = head + 1;
-        // Resume from the view this node last signed at for this height, so a restart does
-        // not walk back through views it has already moved past.
         if let Some((height, view)) = self.sign_guard.mark() {
             if height == self.height {
                 self.view = view;
@@ -1165,8 +1107,6 @@ impl DevNode {
         ledger.clear_block_events();
         ledger.set_round_proposer(&proposer);
         ledger.set_execution_height(height);
-        // Never below the parent, so a parent stamped ahead of this clock does not make this
-        // node's own proposal one that every peer must refuse.
         let block_time = qtv_node::node::wall_clock_seconds().max(self.parent_time);
         let outcome = qtv_node::node::execute_ordered_within(
             &mut ledger,
@@ -1373,11 +1313,7 @@ impl DevNode {
                 self.guarded_height = Some(self.height);
                 true
             }
-            // The guard refused a signature at or below one already made. Not signing is
-            // the safe outcome; stopping the node would let any peer that replays an old
-            // view's polka shut it down.
             Ok(false) => false,
-            // The mark could not be written, so a restart could sign twice. Stop.
             Err(_) => {
                 self.fatal = Some(Fatal::DoubleSignRefused {
                     height: self.height,
@@ -1388,7 +1324,6 @@ impl DevNode {
         }
     }
 
-    /// Drop cached events below `floor`. A read past the window goes to disk.
     fn forget_cached_events_before(&mut self, floor: Height) {
         if floor == 0 {
             return;
@@ -1428,7 +1363,6 @@ impl DevNode {
 
     pub fn attest(&self) -> Result<Attestation, RoundError> {
         let staged = self.staged.as_ref().ok_or(RoundError::NotStaged)?;
-        // The view that authorised the stage, not the one the node has moved to.
         Ok(self.consensus.own_attestation(
             self.height,
             self.slot(),
@@ -2345,9 +2279,6 @@ impl DevNode {
         self.round_atts_seq = self.round_atts_seq.wrapping_add(1);
     }
 
-    /// The bond address behind a genuinely signed attestation, or None. This is the only
-    /// authentication on the precommit path, so it must run for EVERY attestation
-    /// regardless of view, not only for those the evidence pool can key.
     fn signed_offender(&self, attestation: &Attestation) -> Option<String> {
         let chain_id = self.consensus.chain_id();
         self.base_roster.iter().find_map(|r| {
@@ -2407,9 +2338,6 @@ impl DevNode {
         self.trim_future_props();
     }
 
-    // The count cap alone bounds nothing: one leader of many views can park 256 proposals
-    // of the full reassembly ceiling each and hold gigabytes on every honest node until a
-    // height it is itself preventing. Bound the held bytes, not just the entries.
     fn trim_future_props(&mut self) {
         let mut held: usize = self.future_props.iter().map(proposal_weight).sum();
         while held > MAX_FUTURE_PROPOSAL_BYTES && self.future_props.len() > 1 {
@@ -2454,7 +2382,6 @@ impl DevNode {
                 None => self.state_store.delete_account(key)?,
             }
         }
-        // Collected before the store is touched, so the map read ends before the write.
         let leaves: Vec<Vec<u8>> = self
             .events_by_height
             .get(&height)
@@ -2471,17 +2398,10 @@ impl DevNode {
         self.block_store.sync()?;
         self.event_store.sync()?;
         self.side_event_store.sync()?;
-        // Synced with the block, so a crash cannot leave the block store holding a
-        // transaction the index has never heard of.
         self.tx_index.sync()?;
         self.archive_burn_block(block)?;
         self.state_store.commit(height, self.ledger.q_root())?;
-        // After the commit, so the registrations counted are exactly those of blocks a
-        // restart finds on disk, and rebuild_epoch_registrations reaches the same map.
         self.record_registrations(block);
-        // The state log only ever grows while the node runs, so give it a chance
-        // to shed superseded copies. The call stats the file and returns unless a
-        // rewrite is warranted, so this stays cheap at every checked height.
         if height % STATE_COMPACT_CHECK_BLOCKS == 0 {
             self.state_store.compact_if_bloated()?;
         }
@@ -2751,7 +2671,6 @@ impl DevNode {
         if let Some(events) = self.events_by_height.get(&height) {
             return events.clone();
         }
-        // Past the cache, so read from disk. An undecodable leaf is dropped, not faked.
         self.event_store
             .events_at(height)
             .map(|leaves| {
@@ -2806,8 +2725,6 @@ impl DevNode {
             let Some(bytes) = self.block_store.block_by_height(height) else {
                 break;
             };
-            // Always at least one block, then stop before the reply outgrows what a channel
-            // carries. A reply that cannot be sent strands the node asking for it.
             if !blocks.is_empty() && served.saturating_add(bytes.len()) > MAX_SERVE_BYTES {
                 break;
             }
@@ -2897,9 +2814,6 @@ impl DevNode {
                 .retain(|&h, _| h >= self.height.saturating_sub(EVENTS_CACHED_HEIGHTS));
         }
         if self.persist(&block).is_err() {
-            // The in-memory ledger has already advanced; a persist failure here would
-            // leave the node running ahead of its durable state. Halt instead of
-            // continuing corrupted.
             self.fatal = Some(Fatal::PersistFailed {
                 height: self.height,
             });
@@ -2953,7 +2867,6 @@ fn evidence_transaction(evidence: &Equivocation, chain_id: u64) -> Wrapper {
     Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new())
 }
 
-/// Opens nothing: membership needs a position below `slots`, and there is none.
 const UNSEATED_ROOT: Root = Root {
     digest: [0u8; 32],
     slots: 0,
@@ -3301,7 +3214,6 @@ mod registration_window_tests {
         let chain_id = node.fee_params.chain_id;
         let tx = registration_transaction(&note, chain_id);
 
-        // Slot 7 of epoch zero: a leader here already knows the reveals that seed epoch one.
         node.record_registrations(&block_at(SLOTS - 1, vec![tx.clone()]));
         assert!(
             node.next_roots.is_empty(),

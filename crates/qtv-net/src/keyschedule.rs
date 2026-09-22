@@ -13,8 +13,6 @@ pub struct DirKey {
     pub iv: [u8; NONCE_BYTES],
 }
 
-// A session key that outlives its channel in freed memory is a decryption key for anything
-// captured on the wire, so it is wiped on drop like every other secret in the stack.
 impl Drop for DirKey {
     fn drop(&mut self) {
         self.key.zeroize();
@@ -51,7 +49,6 @@ pub fn derive(shared_secret: &[u8; 32], transcript_hash: &[u8; 32]) -> SessionKe
 
     let mut exporter = [0u8; 32];
     exporter.copy_from_slice(&stream[iv_base + 2 * NONCE_BYTES..]);
-    // The stream still holds both directional keys and the exporter.
     stream.zeroize();
 
     SessionKeys {

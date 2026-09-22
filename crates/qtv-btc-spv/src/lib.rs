@@ -36,45 +36,26 @@ pub struct BlockHeader {
 pub enum SpvError {
     ShortHeader,
     PowNotMet,
-    TargetBelowFloor {
-        index: usize,
-    },
-    BrokenLink {
-        index: usize,
-    },
+    TargetBelowFloor { index: usize },
+    BrokenLink { index: usize },
     EmptyChain,
     MerkleMismatch,
-    RetargetOnANonBoundary {
-        index: usize,
-    },
-    RetargetMismatch {
-        index: usize,
-    },
+    RetargetOnANonBoundary { index: usize },
+    RetargetMismatch { index: usize },
     HeightOverflow,
     HeightOutOfRange,
-    InsufficientConfirmations {
-        have: u32,
-        need: u32,
-    },
+    InsufficientConfirmations { have: u32, need: u32 },
     CheckpointNotInChain,
     CheckpointMismatch,
     InsufficientWork,
-    /// A retarget boundary fell inside the window without the period first header, so the
-    /// real timespan could not be checked and only the loose four times rule would apply.
-    UnverifiableRetarget {
-        index: usize,
-    },
+    UnverifiableRetarget { index: usize },
     CheckpointNotArmed,
     DepositTooLarge,
     MalformedTransaction,
     TransactionMismatch,
     MerkleBranchTooLong,
-    MedianTimePast {
-        index: usize,
-    },
-    NonCanonicalBits {
-        index: usize,
-    },
+    MedianTimePast { index: usize },
+    NonCanonicalBits { index: usize },
 }
 
 pub const MAX_MERKLE_BRANCH: usize = 64;

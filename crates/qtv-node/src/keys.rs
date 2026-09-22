@@ -61,7 +61,6 @@ fn write_keystore(path: &Path, secret: &[u8; SECRET_LEN]) -> io::Result<()> {
         }
     }
     let mut file = open_private(path)?;
-    // The hex rendering is the key in another shape.
     let mut rendered = to_hex(secret);
     let result = file
         .write_all(rendered.as_bytes())
@@ -88,9 +87,6 @@ fn open_private(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-/// The kernel entropy call, which blocks until the pool is seeded. This is the source of
-/// the node's master secret, and that secret is then PERSISTED, so bytes drawn from an
-/// unseeded pool on a first boot stay weak for the life of the validator.
 fn fill_random(buf: &mut [u8]) -> io::Result<()> {
     qtv_crypto::rng::fill_random(buf);
     Ok(())
@@ -142,7 +138,6 @@ fn parse_hex32(hex: &str) -> Option<[u8; SECRET_LEN]> {
 
 fn to_hex(bytes: &[u8; SECRET_LEN]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    // A per byte format! would leave the secret in freed temporaries the caller cannot wipe.
     let mut out = String::with_capacity(SECRET_LEN * 2);
     for byte in bytes {
         out.push(DIGITS[(byte >> 4) as usize] as char);

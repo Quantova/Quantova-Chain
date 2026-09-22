@@ -35,8 +35,6 @@ impl SignGuard {
         self.mark.map(|(height, view, _)| (height, view))
     }
 
-    /// Signing the same value again at the same height is a resumption, not a second
-    /// vote. Without that a restart before the block is persisted is fatal forever.
     pub fn permits(&self, height: u64, view: u64, value: &[u8; 32]) -> bool {
         match &self.mark {
             Some((mh, mv, mval)) => match (height, view).cmp(&(*mh, *mv)) {
@@ -335,8 +333,6 @@ mod tests {
     }
 
     #[test]
-    // A node that signs, restarts before the block persists, and reproduces the same
-    // block must resume. Refusing that is what bricked a validator for good.
     fn a_restart_resumes_the_same_value_but_refuses_a_different_one() {
         let path = temp_path("sign-resume");
         let value = [7u8; 32];
@@ -359,8 +355,6 @@ mod tests {
         cleanup(&path);
     }
 
-    // Precommitting a different value at a HIGHER view is ordinary consensus, not a
-    // double sign. Refusing it killed a validator that restarted during a stalled height.
     #[test]
     fn a_higher_view_may_precommit_a_different_value() {
         let path = temp_path("higher-view");

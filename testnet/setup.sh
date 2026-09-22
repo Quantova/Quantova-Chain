@@ -2,18 +2,6 @@
 # Copyright 2026 Quantova Inc
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 
-#
-# Bring up a Quantova public testnet node. This generates the faucet wallet, writes the genesis file
-# and the node config, and prints the next steps. The operator holds the faucet seed. It is printed
-# once and never written into the genesis or committed anywhere, only the faucet public key goes into
-# the genesis so the faucet account can sign from the first block.
-#
-# Requirements: the qcore binary (from QCore.rs) and quantovad (from this repo) on PATH, or set QCORE
-# and QUANTOVAD to their paths.
-#
-# Usage:
-#   OUT=./testnet-live CHAIN_ID=Q-test-net-1 FAUCET_TQTOV=1000000 ./testnet/setup.sh
-#
 set -euo pipefail
 
 QCORE="${QCORE:-qcore}"
@@ -24,10 +12,6 @@ FAUCET_TQTOV="${FAUCET_TQTOV:-1000000}"
 STAKE="${STAKE:-2000}"
 RPC="${RPC:-127.0.0.1:8645}"
 LISTEN="${LISTEN:-127.0.0.1:40404}"
-# The height horizon. The sortition keys are one time, so the chain halts honestly at this height. A
-# longer testnet raises this at the cost of larger validator key trees and more startup time. Running
-# with no horizon needs the epoch and key rotation mechanism, which is a known open item, so a public
-# testnet either sets a horizon it is willing to reach and resets, or waits for key rotation.
 SLOTS="${SLOTS:-100000}"
 
 mkdir -p "$OUT/store"
@@ -36,18 +20,11 @@ echo "Generating the faucet wallet"
 FAUCET=$("$QCORE" new)
 FAUCET_SEED=$(printf '%s\n' "$FAUCET" | awk '/^seed/{print $2}')
 FAUCET_ADDR=$(printf '%s\n' "$FAUCET" | awk '/^address/{print $2}')
-# Derive the pubkey without putting the seed on the command line, where it would show
-# in ps and /proc/<pid>/cmdline to every local user. qcore reads env:VAR itself.
 FAUCET_PUBKEY=$(FAUCET_SEED="$FAUCET_SEED" "$QCORE" pubkey env:FAUCET_SEED 0 | awk '/^pubkey/{print $2}')
 
-# One TQTOV is one million Quon, the base unit the ledger accounts in.
 FAUCET_QUON=$(( FAUCET_TQTOV * 1000000 ))
 GENESIS_TIME=$(date +%s)
 
-# The node generates its own secret into its own keystore and prints only its public
-# registration line. The secret stays in the keystore and is never written into the
-# genesis. Each operator runs this on their own machine and contributes the printed line,
-# so no party can reproduce another's key material.
 KEYSTORE="$OUT/store/keystore"
 echo "Generating the node keystore and its published registration"
 VALIDATOR_LINE=$("$QUANTOVAD" register --keystore "$KEYSTORE" --id 1 --stake "$STAKE" --online --slots "$SLOTS")
@@ -83,8 +60,6 @@ echo "Faucet float $FAUCET_TQTOV TQTOV"
 echo "Faucet addr  $FAUCET_ADDR"
 echo "Height horizon $SLOTS blocks"
 echo
-# Write the seed to an owner-only file rather than echoing it to the terminal, where it
-# would land in scrollback, screen sharing and any log that captures stdout.
 SEED_FILE="$OUT/faucet.seed"
 ( umask 077; printf 'FAUCET_OPERATOR_SEED=%s\n' "$FAUCET_SEED" > "$SEED_FILE" )
 echo "The faucet seed was written to $SEED_FILE (mode 600). Move it somewhere safe and"

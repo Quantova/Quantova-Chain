@@ -9,11 +9,6 @@ use std::sync::Mutex;
 
 pub const ETH_SYNC_COMMITTEE_DST: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
-/// Decompressing and subgroup checking a whole sync committee is the bulk of a
-/// verification, and the committee only changes once a period, so the validated keys are
-/// memoised against the exact key set they came from. The cache holds validated keys
-/// only: a set that fails validation is never stored, so a bad committee cannot be
-/// smuggled past by a later call.
 #[derive(Debug, Default)]
 pub struct Bls12381AggregateVerifier {
     cached: Mutex<Option<(Vec<BlsPubkey>, Vec<PublicKey>)>>,

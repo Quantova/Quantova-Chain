@@ -35,20 +35,11 @@ struct VerifyJob {
 
 struct VerifyDone {
     wrapper: Wrapper,
-    // None means verification panicked on a malformed submission. The consensus thread
-    // then rejects it outright rather than re-running the same panic inline.
     hint: Option<AdmitHint>,
     tx_id: String,
     reply: Option<Sender<Result<Json, ClientError>>>,
 }
 
-// A pool of worker threads that run every submitted transaction's heavy verification
-// off the consensus thread. Signed transactions have their post quantum signature
-// checked, and feeless bridge submissions have their operator and foreign chain proofs
-// checked, all against a ledger snapshot. The consensus thread only finalises admission
-// with the returned verdict, so a burst of submissions cannot delay block production.
-// Block execution re-verifies every bridge operation, so the snapshot verdict is only a
-// spam filter and can never move value on a stale read.
 fn queue_verify(jobs: &SyncSender<VerifyJob>, job: VerifyJob) {
     if let Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) = jobs.try_send(job) {
         if let Some(reply) = &job.reply {
@@ -111,8 +102,6 @@ use crate::mesh::Mesh;
 use crate::util::{hex, log};
 
 const TICK: Duration = Duration::from_millis(20);
-// New transactions forwarded to peers per pass of the round loop. The rest stay in this
-// node's mempool and go into its own blocks.
 const MAX_GOSSIP_PER_TICK: usize = 256;
 
 const MAX_BUFFERED_FRAMES: usize = 8192;
@@ -277,7 +266,6 @@ pub struct Driver {
 }
 
 impl Driver {
-    /// Hand queued bytes back to the mesh budget as soon as a frame leaves the queue.
     fn release_queued(&self, from: usize, len: usize) {
         self.queued_bytes.release(from, len);
     }
@@ -367,9 +355,6 @@ impl Driver {
     fn serve_rpc(&mut self) {
         const RPC_CALLS_PER_TICK: usize = 128;
         self.ensure_verify_pool();
-        // Finalise any submissions the verify pool has now checked. Admission is cheap
-        // here because the post quantum verify already ran on a worker thread; the
-        // verdict is carried back as a hint and reused unless the sender key changed.
         let completed: Vec<VerifyDone> = self
             .verify_done
             .as_ref()
@@ -388,8 +373,6 @@ impl Driver {
             };
             let result = match done.hint {
                 Some(hint) => self.node.submit_hinted(done.wrapper, Some(hint)),
-                // Verification panicked on this submission. Reject it outright rather
-                // than re-running the same panic on the consensus thread.
                 None => Err(qtv_node::mempool::Reject::BadCall),
             };
             let _ = reply.send(Ok(qtv_gateway::submit_reply(result, &done.tx_id)));
@@ -405,9 +388,6 @@ impl Driver {
             return;
         }
 
-        // Refresh the read-only ledger snapshot the workers verify against, at most
-        // once per block and only when there is a submission to serve. The snapshot is
-        // shared by reference count, so each job clone is cheap.
         let fee_params = self.node.fee_params();
         let snapshot = if calls
             .iter()
@@ -419,9 +399,6 @@ impl Driver {
         };
 
         for call in calls {
-            // A submission has its heavy verification run on the pool against a ledger
-            // snapshot rather than inline, so a post quantum signature or a bridge proof
-            // never competes with block production.
             if let Request::Submit(bytes) = &call.request {
                 if let (Some(ledger), Some(jobs)) = (snapshot.as_ref(), self.verify_jobs.as_ref()) {
                     if let Ok(wrapper) = wrapper_from_bytes(bytes) {
@@ -500,9 +477,6 @@ impl Driver {
         let selection = match self.node.freeze_committee() {
             Ok(selection) => selection,
             Err(e) => {
-                // A transient partition or a too-thin reveal set must not terminate the
-                // daemon. Log the reason, back off one view, and let the outer loop
-                // re-disseminate and retry rather than forcing a manual restart.
                 let reason = match self.node.saturation_shortfall() {
                     Some((count, lightest, floor, total)) => format!(
                         "cannot select a committee at height {start_height}: {e:?}. {count} \
@@ -572,23 +546,15 @@ impl Driver {
         }
     }
 
-    /// Take up any link the redialler has re-established. A peer that went away and
-    /// came back is put straight back into the round rather than staying dropped for
-    /// the life of the process.
     fn adopt_rejoined(&mut self) {
         while let Ok((q, channel)) = self.rejoined.try_recv() {
             if q < self.send.len() {
-                // Only the transport is restored here. `up` is NOT link health, it is
-                // the membership of the reveal barrier that decides which set every
-                // node calls select() on, so moving it from one node's view of a
-                // socket would let two nodes form different committees.
                 self.send[q] = Some(Link::spawn(q, channel, self.down.clone()));
             }
         }
     }
 
     fn disseminate_registrations(&mut self, window: Duration) {
-        // Outside the registration window nothing a peer sends can count, so do not wait.
         let Some(note) = self.node.own_registration_note() else {
             return;
         };
@@ -917,8 +883,6 @@ impl Driver {
         self.offer(q, &Arc::new(bytes.to_vec()));
     }
 
-    // Frames parked for a height above ours mean peers have moved on without us. Without
-    // this the node waits on a round the rest of the set already finalised, forever.
     fn request_catch_up(&mut self) {
         if self.ahead.is_empty() {
             return;
@@ -938,8 +902,6 @@ impl Driver {
         self.send_one(source as usize, &request);
     }
 
-    // Pass what this node admitted to its peers, so a transaction does not wait for the
-    // node it was sent to to lead. One hop: a peer admits it and does not forward it again.
     fn gossip_outbox(&mut self) {
         for transaction in self
             .node
@@ -1027,8 +989,6 @@ mod tests {
         assert!(reply.is_ok(), "a busy reply, not a transport error");
     }
 
-    // A node that has fallen behind only ever sees sync traffic if it is exempt from the
-    // height gate. Gating it would park the reply for a height the node cannot reach.
     #[test]
     fn only_a_peer_asked_for_blocks_is_heard_and_only_once() {
         let mut solicited = Solicited::default();

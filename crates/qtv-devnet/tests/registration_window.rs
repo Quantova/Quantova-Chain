@@ -9,8 +9,6 @@ use qtv_node::fee::FeeParams;
 
 use support::{header_chain, unique_base, GENESIS_TIME, VALIDATOR_STAKE};
 
-// Eight heights an epoch, so the window for the next epoch's roots is slots 0 to 5 and the
-// last two heights of every epoch carry reveals made after every root was fixed.
 const SLOTS: u64 = 8;
 
 fn config(base: &std::path::Path) -> DevnetConfig {
@@ -96,7 +94,6 @@ fn a_validator_offline_through_the_window_sits_out_one_epoch_on_every_node_then_
     };
 
     devnet.set_active(late, false);
-    // Heights 1 to 5 are the window for epoch one. Past them, a root can no longer count.
     step_to(
         &mut devnet,
         SLOTS - 2,
@@ -110,8 +107,6 @@ fn a_validator_offline_through_the_window_sits_out_one_epoch_on_every_node_then_
     );
 
     step_to(&mut devnet, SLOTS + 1, "into epoch one");
-    // Every node, the late one included, agrees it holds no seat this epoch. Its genesis
-    // tree is not reused: leaves revealed in epoch zero are public and would replay.
     assert_eq!(agreed_root(&devnet, late_id), unseated);
     for j in 0..late {
         let id = j as u64 + 1;
@@ -123,8 +118,6 @@ fn a_validator_offline_through_the_window_sits_out_one_epoch_on_every_node_then_
         "an unseated validator is never drawn"
     );
 
-    // The other three carry the epoch, and the late validator follows and registers
-    // inside this epoch's window, so it is seated again from epoch two.
     step_to(&mut devnet, 2 * SLOTS + 1, "into epoch two");
     assert_eq!(
         agreed_root(&devnet, late_id),
@@ -142,7 +135,6 @@ fn a_note_that_arrives_after_the_window_closes_is_refused() {
     let mut devnet = Devnet::over_duplex(config(&unique_base("reg-window-late"))).expect("devnet");
     let late = 3usize;
     devnet.set_active(late, false);
-    // Built while the late validator still sits inside the window, then held back.
     let held = devnet
         .node(late)
         .own_registration_note()

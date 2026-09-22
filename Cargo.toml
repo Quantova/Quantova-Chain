@@ -18,10 +18,6 @@ panic = "unwind"
 panic = "unwind"
 overflow-checks = true
 
-# The hash based verifiable random function in qtv-crypto is heavy without
-# optimization, and the node drives it once per validator per height. Optimize
-# the crypto dependency in dev and test builds so the node loop and its tests run
-# in reasonable time, while our own crates stay debuggable.
 [profile.dev.package.qtv-crypto]
 opt-level = 3
 

@@ -537,14 +537,6 @@ mod merkle_tests {
 mod inclusion_boundary_tests {
     use super::*;
 
-    // verify_inclusion walks however many steps the proof carries, with no bound tying that
-    // to the depth of the tree the root was built at. A shortened path therefore reaches
-    // the root starting from an interior node. Two things keep that unreachable, and both
-    // are asserted here because the exit burn proof in q-exits depends on them.
-    //
-    // First, leaves and internal nodes are hashed under different domain bytes. Second,
-    // and this is the load bearing one, verify_inclusion takes the RAW EVENT BYTES and
-    // leaf hashes them itself, so a caller cannot hand it a digest lifted out of the tree.
     #[test]
     fn a_leaf_and_an_internal_node_never_share_a_digest() {
         assert_ne!(
@@ -575,8 +567,6 @@ mod inclusion_boundary_tests {
         collect_steps(&leaves, 0, &mut steps);
         let full = MerkleProof { steps };
 
-        // The interior node above events 0 and 1, offered with the remaining path. It is
-        // only refused because no event byte string hashes to it.
         let interior = pair_hash(&leaves[0], &leaves[1]);
         let shortened = MerkleProof {
             steps: full.steps[1..].to_vec(),

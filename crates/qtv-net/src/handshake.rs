@@ -44,9 +44,6 @@ fn guarded_handshake<T>(
     body: impl FnOnce(TcpStream) -> Result<T>,
 ) -> Result<T> {
     let socket = stream.try_clone().map_err(Error::Io)?;
-    // Signalled, not polled. A 50 ms poll meant every completed handshake still waited on
-    // the join, holding an inflight slot and a per address slot for up to that long, which
-    // turns the handshake caps into a throughput ceiling under ordinary load.
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let gate_watchdog = Arc::clone(&gate);
     let watchdog = thread::spawn(move || {
@@ -197,8 +194,6 @@ fn initiate<S: Read + Write>(
     stream.flush()?;
 
     let keys = keyschedule::derive(&shared_secret, &final_bound);
-    // Both regenerate the session keys, so leaving them in freed memory defeats the wipe
-    // on the keys themselves.
     let mut shared_secret = shared_secret;
     shared_secret.zeroize();
     kem_random.zeroize();
@@ -226,7 +221,6 @@ fn respond_known<S: Read + Write>(
     if expected.is_some_and(|pin| &peer != pin) {
         return Err(Error::UnexpectedPeer);
     }
-    // Refused before the keygen and the signature below, not after.
     if known.is_some_and(|set| !set.contains(&peer)) {
         return Err(Error::UnexpectedPeer);
     }
@@ -277,8 +271,6 @@ fn respond_known<S: Read + Write>(
 
     let shared_secret = ml_kem::decaps(&decaps_key, &ciphertext);
     let keys = keyschedule::derive(&shared_secret, &final_bound);
-    // The decapsulation key recovers this session from a recorded ciphertext, so it goes
-    // too, along with the secret and the seeds that produced it.
     let mut shared_secret = shared_secret;
     shared_secret.zeroize();
     let mut decaps_key = decaps_key;

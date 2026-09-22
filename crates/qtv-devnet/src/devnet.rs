@@ -290,7 +290,6 @@ impl<S> Devnet<S> {
         }
     }
 
-    // An inactive node is offline: it sends no note and hears none.
     fn exchange_registrations(&mut self) {
         let active = self.active_indices();
         let notes: Vec<RegisterNote> = active
@@ -426,8 +425,6 @@ impl<S: Read + Write> Devnet<S> {
         Ok(())
     }
 
-    // A validator with no seat this epoch holds no reveal of its own, so until its peers'
-    // reveals reach it there is no committee to act on. It waits, as a running node does.
     fn ready_selection(
         &self,
         i: usize,

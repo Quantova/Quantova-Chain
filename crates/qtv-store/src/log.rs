@@ -8,8 +8,7 @@ use std::sync::Mutex;
 
 use qtv_codec::{Encoder, LENGTH_WIDTH};
 
-pub(crate) // How far past a bad frame to look for an intact one before calling it a torn tail.
-const MAX_RESYNC_PROBES: u32 = 1 << 20;
+pub(crate) const MAX_RESYNC_PROBES: u32 = 1 << 20;
 
 pub(crate) const CHECKSUM_WIDTH: usize = 4;
 
@@ -58,20 +57,12 @@ pub struct Log {
     salt: Salt,
 }
 
-// Whether a complete, checksum clean frame starts at `at`. Used to tell a torn tail
-// apart from corruption in the middle of the log.
-// Whether any checksum clean frame starts at or after `from`. The bad frame's own length
-// field cannot be trusted to find the next one: a bit flip in that prefix is one of the
-// commonest single byte corruptions, and following it lands at an arbitrary offset. So
-// step forward a word at a time and look for a frame that stands on its own.
 fn a_well_formed_frame_follows(
     stream: &mut BufReader<File>,
     salt: &Salt,
     from: u64,
     total: u64,
 ) -> io::Result<bool> {
-    // Byte by byte: frames are variable length and not aligned to anything, so a coarser
-    // step walks straight past the intact frame it is meant to find.
     let mut at = from;
     let mut probed = 0u32;
     let mut budget = MAX_PROBE_BYTES;
@@ -177,8 +168,6 @@ impl Log {
         Ok((Log { file, reader, salt }, frames))
     }
 
-    /// Recovers by dropping everything from the first bad frame. Correct where the log is
-    /// a sequence of commits and rolling back to the last intact one is the design.
     pub fn open_scanned<F>(path: impl AsRef<Path>, visit: F) -> io::Result<Self>
     where
         F: FnMut(&[u8], u64, u64) -> bool,
@@ -186,8 +175,6 @@ impl Log {
         Self::scan_open(path, visit, false)
     }
 
-    /// Refuses to open when a bad frame has intact frames behind it. For logs holding
-    /// finalised history, where discarding the tail loses records nothing can rebuild.
     pub fn open_scanned_strict<F>(path: impl AsRef<Path>, visit: F) -> io::Result<Self>
     where
         F: FnMut(&[u8], u64, u64) -> bool,
@@ -195,8 +182,6 @@ impl Log {
         Self::scan_open(path, visit, true)
     }
 
-    /// Scans without truncating. For a store another process may be appending to right
-    /// now: cutting the log under its descriptor loses every block it goes on to write.
     pub fn open_scanned_keeping_tail<F>(path: impl AsRef<Path>, visit: F) -> io::Result<Self>
     where
         F: FnMut(&[u8], u64, u64) -> bool,
@@ -265,10 +250,6 @@ impl Log {
             if u32::from_le_bytes(checksum_bytes)
                 != checksum_parts(&[&salt, &length_bytes, &payload])
             {
-                // A torn tail is the last write losing power, and truncating it is right.
-                // A bad frame with a well formed one behind it is corruption in the middle
-                // of the log, and truncating there destroys finalised records that are
-                // still intact. Refuse to open instead of quietly deleting them.
                 if strict && a_well_formed_frame_follows(&mut stream, &salt, payload_start, total)?
                 {
                     return Err(corrupt_middle());
@@ -313,8 +294,6 @@ impl Log {
         Ok(payload)
     }
 
-    /// Where the next frame's PAYLOAD will start. Lets a caller index a record it is
-    /// about to append without re-reading the file.
     pub fn next_payload_start(&self) -> io::Result<u64> {
         Ok(self.file.metadata()?.len() + LENGTH_WIDTH as u64)
     }
@@ -399,7 +378,6 @@ fn checksum_parts(parts: &[&[u8]]) -> u32 {
     crc ^ 0xFFFF_FFFF
 }
 
-/// Whether a single well-formed, checksum-valid frame begins exactly at `pos`.
 fn valid_frame_at(salt: &Salt, bytes: &[u8], pos: usize) -> bool {
     if bytes.len().saturating_sub(pos) < LENGTH_WIDTH {
         return false;
@@ -424,11 +402,7 @@ fn valid_frame_at(salt: &Salt, bytes: &[u8], pos: usize) -> bool {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ScanStop {
-    /// The stream ended on an incomplete frame (a crash mid-write). Truncating the
-    /// torn tail is safe.
     TornTail,
-    /// A complete frame failed its checksum. This is real corruption, not a torn
-    /// write, so later records must not be silently discarded.
     Corrupt,
 }
 
@@ -460,11 +434,6 @@ fn scan(salt: &Salt, bytes: &[u8]) -> (Vec<Vec<u8>>, u64, ScanStop) {
                 .expect("checksum slice is four bytes"),
         );
         if stored != checksum_parts(&[salt, &bytes[pos..payload_end]]) {
-            // A complete frame failed its checksum. If a valid frame follows it, this
-            // is mid-log corruption and dropping the rest would lose finalized records.
-            // If nothing valid follows, the corrupt frame is at the tail and is safe
-            // to drop. A torn write never leaves a complete-but-wrong frame, only an
-            // incomplete one (handled above), so a bad checksum is real corruption.
             if valid_frame_at(salt, bytes, frame_end) {
                 break ScanStop::Corrupt;
             }
@@ -630,8 +599,6 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    // open_scanned is the path the state and block stores actually reopen through, so it
-    // has to refuse mid log corruption exactly as open does rather than discard the rest.
     #[test]
     fn a_scanned_open_refuses_mid_log_corruption_instead_of_truncating() {
         let path = temp_path("scanned-middle");
@@ -660,9 +627,6 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    // The commonest single byte corruption is in a frame's LENGTH prefix, not its
-    // checksum. Following that length lands at an arbitrary offset, so the guard has to
-    // resync independently of it or it silently deletes every intact record behind.
     #[test]
     fn a_flipped_length_prefix_is_refused_like_any_other_mid_log_corruption() {
         for flip in [0usize, 7] {
@@ -694,7 +658,6 @@ mod tests {
         }
     }
 
-    // A tail torn by a crash mid append is still dropped, which is the whole point.
     #[test]
     fn a_scanned_open_still_truncates_a_torn_tail() {
         let path = temp_path("scanned-tail");

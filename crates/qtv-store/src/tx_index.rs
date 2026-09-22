@@ -5,10 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-/// A transaction id and the height that finalized it, as stored.
 const RECORD: usize = 40;
-/// Merge the tail into the sorted run once it passes this many records, so a lookup
-/// never scans a long tail.
 const TAIL_MERGE_AT: usize = 4096;
 
 fn record_bytes(id: &[u8; 32], height: u64) -> [u8; RECORD] {
@@ -353,15 +350,12 @@ mod tests {
 
     #[test]
     fn a_merge_across_many_entries_keeps_every_answer_in_order() {
-        // The merge streams rather than loading the index, so this also stands as the
-        // check that the two ordered walks stay in step over a run longer than the tail.
         let d = dir("stream");
         let mut ix = TxIndex::open(&d).expect("opens");
         for n in 0..255u8 {
             ix.insert(&id(n), 100 + n as u64).expect("insert");
         }
         ix.merge().expect("first merge");
-        // A second round interleaves new ids among the sorted run and rewrites some.
         for n in 0..255u8 {
             if n % 3 == 0 {
                 ix.insert(&id(n), 9000 + n as u64).expect("rewrite");

@@ -53,9 +53,6 @@ impl BurnArchiveEntry {
     }
 }
 
-/// An offset index, not the entries themselves. Holding every archived burn block in RAM
-/// for the life of the process grows without bound and nothing prunes it, and loading the
-/// whole log to build that map read the file twice at open.
 #[derive(Debug)]
 pub struct BurnArchive {
     log: Log,

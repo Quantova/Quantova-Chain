@@ -118,10 +118,6 @@ pub fn code_block(block: &ChainBlock, k: usize, n: usize) -> Result<CodedBlock, 
     })
 }
 
-/// A single shard is never larger than one coding target, and the whole coded
-/// payload never exceeds one max block. Without these a Byzantine leader could pick
-/// oversized shard_len/k and force every node to spend seconds of CPU and ~128 MB
-/// per led view reconstructing before any header check runs.
 pub const MAX_CODED_BYTES: usize = 12 * 1024 * 1024;
 
 pub fn commitment_in_bounds(commitment: &Commitment) -> bool {
@@ -295,8 +291,6 @@ impl ProposalAssembler {
         self.prepin_tokens.clear();
     }
 
-    /// The node's current consensus height. A coded proposal is only admitted for
-    /// this height or the next one; anything else is refused before it can steer prune.
     pub fn set_round_height(&mut self, height: u64) {
         self.round_height = height;
     }

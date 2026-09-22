@@ -206,11 +206,6 @@ mod tests {
 
     #[test]
     fn the_validator_set_hash_stays_linear_against_a_large_untrusted_set() {
-        // Compares two sizes rather than a wall clock bound. A fixed deadline fails on a
-        // loaded machine even when the algorithm is linear, which reddens CI for a reason
-        // that has nothing to do with the property under test. Doubling the input roughly
-        // doubles a linear hash and roughly quadruples a quadratic one, and load moves
-        // both measurements together.
         fn timed(n: u32) -> std::time::Duration {
             let set = ValidatorSet::new(
                 (0..n)
@@ -246,8 +241,6 @@ mod tests {
             });
         }
         let new = ValidatorSet::new(new_vals);
-        // Scaling ratio rather than a wall clock deadline, for the same reason as the
-        // hash test above: a fixed bound fails on a loaded machine even when linear.
         fn timed(extra: u32) -> (std::time::Duration, u128) {
             let old = ValidatorSet::new((0..128).map(|i| validator(i as u8, 10)).collect());
             let mut vals: Vec<ValidatorInfo> = (0..40).map(|i| validator(i as u8, 10)).collect();

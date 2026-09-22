@@ -21,7 +21,6 @@ pub fn cosmos_source_chain(config_selector: u8) -> u32 {
     0xFFFF_FD00u32 | config_selector as u32
 }
 
-// The block's real wall clock, which is what a trusting period and a drift bound mean.
 pub fn block_now(now_seconds: u64) -> Timestamp {
     Timestamp {
         seconds: now_seconds as i64,

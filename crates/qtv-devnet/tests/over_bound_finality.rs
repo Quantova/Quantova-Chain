@@ -103,8 +103,6 @@ fn an_over_bound_block_finalizes_over_the_coded_path() {
             .block;
         let ids: std::collections::HashSet<String> =
             node_block.body().iter().map(Wrapper::id).collect();
-        // The leader also carries the validators' sortition registrations for the next
-        // epoch, which are system transactions and not part of what was submitted.
         let registration = qtv_node::ledger::registration_address();
         let user_count = node_block
             .body()

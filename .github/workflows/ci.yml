@@ -12,25 +12,23 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           path: Quantova-Chain
           persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: Quantova/QCore.rs
-          ref: b412bf7f10d551918ccad2d28fe79fc670d942b8
+          ref: a6b6a02509788a1c30dce4fb696a64f23799d18a
           path: QCore.rs
           persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          # The same revision qtv-node pins, so the relay's sibling checkout and the
-          # node's git dependency are one version of the machine, never two.
           repository: Quantova/QVM
-          ref: 0026c817d09da828b458d2d82b89ae1c7afc151c
+          ref: 62fadd4ced98c4c4eb5042391aba54dabac51431
           path: QVM
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -43,8 +41,6 @@ jobs:
       - name: test
         working-directory: Quantova-Chain
         run: cargo test --workspace --all-features --locked
-      # The relay roots its own workspace, so --workspace above never reaches it. The
-      # sibling checkout it needs is already present, so build and test it directly.
       - name: relay
         working-directory: Quantova-Chain/crates/qtv-bridge-relay
         run: |

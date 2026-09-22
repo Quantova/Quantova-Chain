@@ -212,8 +212,6 @@ impl Decode for Proof {
 
 #[derive(Debug, Clone)]
 struct RootCache {
-    // Shared too. The node hashes are the bulk of a snapshot, and a snapshot that never
-    // recomputes a root has no reason to pay for copying them.
     nodes: Arc<HashMap<NodeId, Hash>>,
     root: Hash,
     changed: BTreeSet<Key>,
@@ -221,9 +219,6 @@ struct RootCache {
 
 #[derive(Debug)]
 pub struct Trie {
-    // Shared behind an Arc so a snapshot is O(1). A snapshot that is never written, and
-    // the node takes several per block, then costs nothing instead of a full copy of
-    // every leaf in the state.
     leaves: Arc<BTreeMap<Key, Vec<u8>>>,
     defaults: Vec<Hash>,
     cache: Mutex<RootCache>,

@@ -348,9 +348,6 @@ fn run_scripted(params: &FeeParams) -> Result<Node, ProduceError> {
 
 #[test]
 fn the_same_inputs_give_the_same_finalized_chain() {
-    // The header carries the wall clock, so two runs either side of a second boundary
-    // stamp different times and produce different block ids through no fault of the
-    // chain. The timestamp is one of the inputs, so hold it still and compare the rest.
     qtv_node::node::pin_block_time(1_760_000_000);
     let params = FeeParams::devnet();
     let one = run_scripted(&params).expect("first run");
@@ -392,8 +389,6 @@ fn run_batch(params: &FeeParams, threads: usize) -> Node {
 
 #[test]
 fn a_parallel_node_finalizes_the_identical_chain_as_the_sequential_node() {
-    // Same reason as the determinism test above. Two runs either side of a second
-    // boundary stamp different header times, which is not what this test is about.
     qtv_node::node::pin_block_time(1_760_000_000);
     let params = FeeParams::devnet();
     let sequential = run_batch(&params, 1);
@@ -659,10 +654,6 @@ fn the_chain_finalises_across_epoch_boundaries_past_the_old_one_time_ceiling() {
 
 #[test]
 fn a_contract_call_worth_more_than_the_sender_holds_is_never_admitted() {
-    // Admission used to test only the fee while dispatch tested fee plus value, so a
-    // transaction declaring more value than the sender holds was admitted, refused at
-    // execution, never included, and therefore never removed. It sat in every node's
-    // mempool for ever, and enough of them wedge the pool against honest traffic.
     let params = FeeParams::devnet();
     let alice = user(0);
     let mut node = boot(genesis(

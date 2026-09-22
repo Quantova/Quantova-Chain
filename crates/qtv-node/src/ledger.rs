@@ -569,7 +569,6 @@ fn gov_freeze_key(id: &[u8; 32]) -> Key {
     sha3::sha3_256(&input)
 }
 
-/// Keyed by asset id, so a mover can ask without holding the issuer address.
 fn gov_stopped_asset_key(asset_id: &[u8; 16]) -> Key {
     let mut input = Vec::with_capacity(GOV_STOPPED_ASSET_TAG.len() + asset_id.len());
     input.extend_from_slice(GOV_STOPPED_ASSET_TAG);
@@ -705,11 +704,7 @@ pub fn bridge_settle_address() -> String {
 
 const VM_CODE_TAG: &[u8] = b"qtv/vm/code/";
 const VM_STORE_TAG: &[u8] = b"qtv/vm/store/";
-/// One trie leaf per storage slot, so a call costs what it touches rather than the
-/// whole contract.
 const VM_SLOT_TAG: &[u8] = b"qtv/vm/slot/";
-/// Bytes of the key given over to a per contract prefix, so one contract's slots sit
-/// in a contiguous range and can be walked without an index.
 const SLOT_PREFIX_BYTES: usize = 8;
 
 fn contract_slot_prefix(id: &[u8; 32]) -> [u8; SLOT_PREFIX_BYTES] {
@@ -722,8 +717,6 @@ fn contract_slot_prefix(id: &[u8; 32]) -> [u8; SLOT_PREFIX_BYTES] {
     prefix
 }
 
-/// The prefix makes the range walkable, the tail binds the contract AND the slot so
-/// two contracts can never collide on a slot even if their prefixes collide.
 fn contract_slot_key(id: &[u8; 32], slot: &StorageKey) -> Key {
     let mut input = Vec::with_capacity(VM_SLOT_TAG.len() + id.len() + slot.len());
     input.extend_from_slice(VM_SLOT_TAG);
@@ -745,11 +738,6 @@ fn contract_slot_range(id: &[u8; 32]) -> (Key, Key) {
     (low, high)
 }
 
-/// A slot leaf carries the contract id and the slot alongside the value. The id is
-/// what lets a range walk filter out a foreign contract whose prefix collides, and the
-/// slot is what lets the walk report which slot it found. The value is eight fixed big
-/// endian bytes, never a codec framing, so one value has exactly one encoding under
-/// the state root.
 fn encode_slot_leaf(id: &[u8; 32], slot: &StorageKey, value: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(72);
     out.extend_from_slice(id);
@@ -1062,8 +1050,6 @@ impl Ledger {
         self.execution_time = now_seconds;
     }
 
-    /// The wall clock of the last executed block. What a foreign chain's trusting period
-    /// and drift bound are measured against, unlike a clock synthesised from height.
     pub fn execution_time(&self) -> u64 {
         if self.execution_time > 0 {
             self.execution_time
@@ -1219,8 +1205,6 @@ impl Ledger {
         matches!(self.trie.get(&gov_freeze_key(id)), Some(bytes) if !bytes.is_empty())
     }
 
-    /// Whether governance has stopped the account that issued this asset. The asset id
-    /// is a one way hash of the issuer, so it is taken at stop time and kept by key.
     fn asset_issuer_is_stopped(&self, asset_id: &[u8; 16]) -> bool {
         matches!(self.trie.get(&gov_stopped_asset_key(asset_id)), Some(bytes) if !bytes.is_empty())
     }
@@ -1303,13 +1287,6 @@ impl Ledger {
         {
             return false;
         }
-        // A target already frozen by something other than the guardians is out of
-        // bounds. A governance freeze deliberately carries no expiry entry so it never
-        // lapses; a guardian freeze over the top of it ADDS one, and the next expiry
-        // sweep then clears the voted freeze. That turned a threshold of guardians
-        // into a one transaction override of a referendum: freeze what governance
-        // froze, wait out your own window, and the vote is undone. Extending a freeze
-        // the guardians themselves placed is still allowed.
         let held = self.guardian_freeze_entries();
         if targets
             .iter()
@@ -1481,9 +1458,6 @@ impl Ledger {
         )
     }
 
-    /// The largest exit the off chain desk will serve. A burn above it is refused here,
-    /// before the tokens are destroyed, rather than being burned on chain and then dropped
-    /// by a desk that will not open it, which is an unrecoverable loss for the holder.
     pub fn bridge_exit_max_amount(&self) -> u128 {
         self.trie
             .get(&stake_singleton_key(BRIDGE_EXIT_MAX_TAG))
@@ -1618,10 +1592,6 @@ impl Ledger {
     pub fn bridge_expire(&mut self, now: u64) {
         if let Some(record) = self.bridge_freeze() {
             if now >= record.until {
-                // A good-faith freezer unfreezes early and is refunded. Letting a
-                // freeze run the full duration keeps the bridge down for the maximum
-                // window, which is the griefing shape, so the bond is forfeited on
-                // expiry rather than refunded for free.
                 self.lift_bridge_freeze(now, FreezeLift::Slash);
             }
         }
@@ -2721,11 +2691,6 @@ impl Ledger {
             Some(id) => id,
             None => return Some(std::collections::BTreeMap::new()),
         };
-        // Read the per slot leaves, not the single blob the store used to hold.
-        // Writes moved to per slot leaves and this reader was left behind, so every
-        // `get_storage` over RPC answered with an empty map for every contract: the
-        // explorer showed no state, and an SDK reading a contract nonce through the
-        // gateway read zero and signed against it.
         let (low, high) = contract_slot_range(&id);
         let mut out = std::collections::BTreeMap::new();
         let mut bytes = 0usize;
@@ -2774,7 +2739,6 @@ impl Ledger {
         Some(contract)
     }
 
-    /// One slot, one trie read.
     pub fn contract_slot(&self, id: &[u8; 32], slot: &StorageKey) -> u64 {
         match self.trie.get(&contract_slot_key(id, slot)) {
             Some(bytes) => decode_slot_leaf(bytes)
@@ -2785,8 +2749,6 @@ impl Ledger {
         }
     }
 
-    /// One slot, one trie write. A zero clears the leaf so an absent slot and a slot
-    /// holding zero are the same state, which keeps the root canonical.
     pub fn set_contract_slot(&mut self, id: &[u8; 32], slot: &StorageKey, value: u64) {
         let key = contract_slot_key(id, slot);
         if value == 0 {
@@ -2796,9 +2758,6 @@ impl Ledger {
         }
     }
 
-    /// Every slot a contract owns, by walking its prefix range. The id in each leaf is
-    /// checked so a foreign contract whose prefix collides is filtered out rather than
-    /// reported as this contract's state.
     pub fn contract_storage(&self, id: &[u8; 32]) -> std::collections::BTreeMap<StorageKey, u64> {
         let (low, high) = contract_slot_range(id);
         self.trie
@@ -2856,15 +2815,7 @@ impl Ledger {
                 }
             }
         }
-        // No size gate any more. A call is charged for the slots it touches, not for
-        // everything the contract holds, so a contract can grow without ever becoming
-        // uncallable.
         let mut memory = vec![0u8; user_memory.len().max(CONTRACT_CONTEXT_BYTES)];
-        // Copy the caller's payload ONLY above the context window. Copying it across
-        // the whole buffer and stamping the trusted fields on top left any byte the
-        // stamping happened to miss under the caller's control, which is how the
-        // paying asset field became forgeable. Starting from a zeroed window closes
-        // that for every field the context carries now or later.
         if user_memory.len() > CONTRACT_CONTEXT_BYTES {
             memory[CONTRACT_CONTEXT_BYTES..user_memory.len()]
                 .copy_from_slice(&user_memory[CONTRACT_CONTEXT_BYTES..]);
@@ -2874,13 +2825,7 @@ impl Ledger {
         memory[64..72].copy_from_slice(&now_seconds.to_be_bytes());
         memory[72..80].copy_from_slice(&chain_id.to_be_bytes());
         memory[80..88].copy_from_slice(&value.to_be_bytes());
-        // Always write this window. The caller's arguments were copied across the
-        // whole buffer above, so leaving it untouched on a call that carried no asset
-        // let the caller keep its own bytes here and forge the paying asset. Zero is
-        // the documented value for a call funded with native value.
         memory[88..120].copy_from_slice(&in_asset.unwrap_or([0u8; 32]));
-        // The loader borrows the trie immutably for the length of the run, which ends
-        // before anything below mutates the ledger.
         let executed = {
             let trie = &self.trie;
             let owner = contract_id;
@@ -2897,15 +2842,6 @@ impl Ledger {
         };
         match executed {
             Ok(outcome) => {
-                // ADD to whatever was already armed, never overwrite it. A deploy arms
-                // the price of the permanent state it is about to write and then runs
-                // the container's genesis entry through here; a plain assignment threw
-                // that price away and left the block charged only what the constructor
-                // itself cost, a hundredth of the real figure. The per transaction gate
-                // still held, so a single deploy was bounded, but the block wide bound
-                // did not exist and one block could buy tens of megabytes of permanent
-                // code for a handful of flat fees. Only containers WITH a constructor
-                // got the discount, which is every contract anyone actually writes.
                 self.last_vm_meter_used =
                     self.last_vm_meter_used.saturating_add(outcome.meter_used);
                 self.last_vm_call_cost = Some(outcome.meter_used);
@@ -2993,11 +2929,6 @@ impl Ledger {
                             {
                                 return false;
                             }
-                            // The issuer of the carried asset, not the contract
-                            // being called. A pass through contract could otherwise
-                            // move a frozen issuer's asset in one transaction, and
-                            // the transaction gate cannot see it because the
-                            // transaction never names the frozen address.
                             if self.asset_issuer_is_stopped(&asset) {
                                 return false;
                             }
@@ -3027,8 +2958,6 @@ impl Ledger {
                     {
                         return false;
                     }
-                    // Same question on the way out: a pool holding a frozen asset
-                    // used to pay it to any passer by who never named the issuer.
                     if self.asset_issuer_is_stopped(asset) {
                         return false;
                     }
@@ -3045,8 +2974,6 @@ impl Ledger {
                             let mut holder = [0u8; 32];
                             holder.copy_from_slice(&data[..32]);
                             let amount = u64::from_be_bytes(data[32..40].try_into().unwrap());
-                            // A refused mint must take the call down with it, or the
-                            // contract's own books record supply the ledger never issued.
                             if !self.mint_asset(&contract_id, &holder, u128::from(amount)) {
                                 return false;
                             }
@@ -3059,8 +2986,6 @@ impl Ledger {
                         });
                     }
                 }
-                // Only the slots this call wrote. Rewriting every slot the contract
-                // owns to change one of them is what made a call cost O(contract).
                 for (slot, value) in &outcome.storage {
                     self.set_contract_slot(&contract_id, slot, *value);
                 }
@@ -3435,10 +3360,6 @@ impl Ledger {
         match action {
             Action::Mint { to, amount } => {
                 let addr = id_bytes_to_address(to).ok_or(EnactError::BadAddress)?;
-                // Cumulative annual ceiling: governance may mint at most gov_mint_ceiling
-                // of supply per year across ALL referenda, so a captured governance
-                // cannot mint the chain a few percent at a time across many votes, nor
-                // double the supply in one referendum.
                 let period = now / qtv_governance::YEAR_SECONDS;
                 let already = self.gov_minted_in_period(period);
                 let after_period = already
@@ -3726,11 +3647,6 @@ impl Ledger {
                 if *cap == 0 || *epoch_cap == 0 {
                     return Err(EnactError::BadValue);
                 }
-                // A stark requirement cannot be honoured because the FRI verification is
-                // unwired, and check_stark never returns Verified, so such an asset would
-                // be unmintable. Genesis refuses this for the same reason; refuse it here
-                // too rather than register a bridged asset that promises a proof it cannot
-                // check.
                 if *requires_stark {
                     return Err(EnactError::BadValue);
                 }
@@ -3896,9 +3812,6 @@ impl Ledger {
             }
             b"mainnet_start" => {
                 let day = u64_from_le(value).ok_or(EnactError::BadValue)?;
-                // Set once. Re-enacting this used to re-arm the session meter, which
-                // opens another full session emission each time it is passed, so a
-                // repeatable parameter change became a repeatable mint.
                 if self.stake_mainnet_start() != u64::MAX {
                     return Err(EnactError::BadValue);
                 }
@@ -4118,7 +4031,6 @@ impl Ledger {
         let taken = qtv_staking::slash(bond.amount, fault);
         let treasury = self.stake_treasury().saturating_add(taken);
         self.set_stake_treasury(treasury);
-        // The whole bond is cleared below, so the whole bond leaves the staked total.
         self.debit_staked(bond.amount);
         if taken > 0 {
             self.record_slash_event(address, taken);
@@ -4247,10 +4159,6 @@ mod stake_state_tests {
 
     #[test]
     fn a_contract_far_past_the_old_size_ceiling_is_still_callable() {
-        // The old layout kept a contract's whole storage in one leaf and charged a
-        // call for its size, so a contract holding more than about 260,416 entries
-        // could never be called again and its assets were frozen. Per slot leaves mean
-        // a call is charged for what it touches, so size stops mattering.
         let code =
             qtv_vm::asm::assemble("LDI r1, 88\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
                 .expect("the program assembles");
@@ -4274,7 +4182,6 @@ mod stake_state_tests {
         let contract = qtv_idfmt::render_address(&contract_id).unwrap();
         l.set_contract_code(&contract_id, &container.canonical_bytes());
 
-        // Well past the old ceiling.
         let entries = 300_000u64;
         for i in 0..entries {
             let mut slot = [0u8; 32];
@@ -4296,11 +4203,6 @@ mod stake_state_tests {
 
     #[test]
     fn guardians_cannot_lift_a_governance_freeze_by_refreezing_it() {
-        // A governance freeze deliberately carries no expiry entry so it never lapses.
-        // A guardian freeze over the top of it used to ADD one, and the next expiry
-        // sweep then cleared the voted freeze: a threshold of guardians could undo a
-        // referendum in one transaction by freezing what governance froze and waiting
-        // out their own window.
         let mut l = Ledger::new();
         let target = [91u8; 32];
         l.set_guardian_set(&qtv_governance::GuardianSet::new(
@@ -4308,12 +4210,10 @@ mod stake_state_tests {
             2,
         ));
 
-        // Governance freezes it, permanently.
         l.set_frozen(&target);
         l.guardian_freeze_forget(&[target]);
         assert!(l.is_frozen_id(&target), "governance froze it");
 
-        // The caucus tries to take it over.
         let epoch = l.guardian_freeze_epoch();
         let took = l.guardian_freeze(epoch, &[target], &[[1u8; 32], [2u8; 32]], 1_000);
         assert!(
@@ -4321,7 +4221,6 @@ mod stake_state_tests {
             "guardians must not freeze over a freeze they did not place"
         );
 
-        // And it survives their window either way.
         l.guardian_expire(1_000 + 30 * 86_400);
         assert!(
             l.is_frozen_id(&target),
@@ -4331,12 +4230,6 @@ mod stake_state_tests {
 
     #[test]
     fn a_frozen_issuers_asset_cannot_be_moved_by_any_contract() {
-        // Gating the CALL was not enough. A contract moves asset balances for an
-        // arbitrary issuer, so a pass through contract carrying a frozen issuer's
-        // asset moved it in one transaction, and a pool holding a frozen asset paid it
-        // out to a passer by who never named the issuer at all. Neither is visible to
-        // the transaction gate, because the transaction never mentions the frozen
-        // address. The question has to be asked where the asset actually moves.
         let mut l = Ledger::new();
         let issuer = [0x5Eu8; 32];
         let asset = asset_id_of(&issuer);
@@ -4346,21 +4239,18 @@ mod stake_state_tests {
             "nothing is stopped to begin with"
         );
 
-        // Governance freezes the ISSUER, not the contract doing the moving.
         l.set_frozen(&issuer);
         assert!(
             l.asset_issuer_is_stopped(&asset),
             "freezing the issuer must stop its asset wherever it sits"
         );
 
-        // Lifting the freeze releases it again.
         l.clear_frozen(&issuer);
         assert!(
             !l.asset_issuer_is_stopped(&asset),
             "clearing the freeze must release the asset"
         );
 
-        // A blacklist stops it too, and outlives a freeze being lifted.
         l.set_gov_blacklisted(&issuer);
         l.set_frozen(&issuer);
         l.clear_frozen(&issuer);
@@ -4372,9 +4262,6 @@ mod stake_state_tests {
 
     #[test]
     fn every_side_event_survives_a_round_trip_through_its_encoding() {
-        // Governance, staking and bridge history. These had no encoding at all, so they
-        // could not be written down and a restart lost them. Every variant has to
-        // return exactly, or a persisted event comes back as a different fact.
         let all = vec![
             SideEvent::GovPropose {
                 referendum: 7,
@@ -4522,9 +4409,6 @@ mod stake_state_tests {
             assert_eq!(decoded, *event, "{} did not return exactly", event.kind());
         }
 
-        // A variant added later must not slip past the codec unnoticed. This match has
-        // no wildcard, so adding one stops the build here rather than silently losing
-        // that event on the next restart.
         for event in &all {
             match event {
                 SideEvent::GovPropose { .. }
@@ -4575,9 +4459,6 @@ mod stake_state_tests {
 
     #[test]
     fn a_block_event_survives_a_round_trip_through_its_encoding() {
-        // Nothing could read a persisted event back, because only the encode half
-        // existed. Every field has to return exactly, including an empty payload and a
-        // contract name that is not a plain address.
         for event in [
             BlockEvent {
                 contract: "Q1EXAMPLE".to_string(),
@@ -4603,18 +4484,6 @@ mod stake_state_tests {
 
     #[test]
     fn a_long_blacklist_does_not_change_what_moving_an_asset_costs() {
-        // The first version of this gate held the stopped accounts as one list and
-        // searched it by hashing every entry forward, because the asset id is a one way
-        // hash of its issuer. That ran inside the loop over a call's asset credits, so a
-        // single transaction paid a hash per stopped account per credit, and the meter
-        // charged for none of it. The price of moving an asset grew with the length of
-        // the blacklist rather than with anything the transaction asked for, which is
-        // the wrong way round for a chain expected to carry a sanctions sized list.
-        //
-        // Each stopped account now writes one leaf under its own asset id, so the check
-        // is a single keyed read. This pins the correctness half of that: a long list
-        // still answers exactly, with no collisions between neighbours and no drift for
-        // an issuer that was never stopped at all.
         let mut l = Ledger::new();
         let stopped: Vec<[u8; 32]> = (0u16..512)
             .map(|i| {
@@ -4640,7 +4509,6 @@ mod stake_state_tests {
             "an issuer that was never stopped must not be caught by a neighbour's entry"
         );
 
-        // Releasing one leaves the rest alone, which a shared blob would not guarantee.
         l.clear_frozen(&stopped[100]);
         assert!(
             !l.asset_issuer_is_stopped(&asset_id_of(&stopped[100])),
@@ -4654,12 +4522,6 @@ mod stake_state_tests {
 
     #[test]
     fn a_genesis_run_does_not_wipe_a_price_armed_before_it() {
-        // The deploy branch arms the price of the permanent state it is about to write
-        // and then runs the container's genesis entry through call_contract. A plain
-        // assignment there threw the armed price away, and the block was charged only
-        // what the constructor itself cost. The earlier test for this passed because it
-        // asserted arithmetic on the constants and never ran a call at all, which is
-        // exactly how the hole survived the first pass.
         let mut l = Ledger::new();
         let id = [0x6Cu8; 32];
         let contract = qtv_idfmt::render_address(&id).unwrap();
@@ -4695,17 +4557,11 @@ mod stake_state_tests {
 
     #[test]
     fn one_slot_can_be_read_out_of_a_contract_too_large_to_enumerate() {
-        // The targeted read used to walk the contract's WHOLE storage first and refuse
-        // past about seven thousand slots, so reading one known slot failed on a
-        // contract that had simply grown. Worse, any stranger who could create a slot
-        // in it, by taking a token balance or a name, could push it over that line and
-        // the condition was permanent from the owner's side.
         let mut l = Ledger::new();
         let id = [0x7Au8; 32];
         let wanted = qtv_vm::abi::scalar_key(42);
         l.set_contract_slot(&id, &wanted, 4242);
 
-        // Well past the enumeration cap of roughly 7,281 slots.
         for i in 1_000u64..12_000 {
             l.set_contract_slot(&id, &qtv_vm::abi::scalar_key(i), i);
         }
@@ -4724,9 +4580,6 @@ mod stake_state_tests {
 
     #[test]
     fn the_rpc_storage_reader_sees_what_a_call_actually_wrote() {
-        // The gateway answers `get_storage` through contract_storage_at_capped. When
-        // writes moved to per slot leaves this reader was left on the old single blob,
-        // so it returned an empty map for every contract while the state was there.
         let mut l = Ledger::new();
         let id = [0x5Au8; 32];
         let address = qtv_idfmt::render_address(&id).unwrap();
@@ -4748,13 +4601,6 @@ mod stake_state_tests {
     }
 
     fn a_native_call_cannot_forge_the_paying_asset() {
-        // Read all four words of the paying asset window (88..120) plus the first word
-        // of the argument area (120), so a forged byte anywhere in the window is caught
-        // and the caller's own arguments are shown to survive above it.
-        //
-        // SSTORE takes the ADDRESS of its 32 byte key, not the key, so each read needs
-        // its own key written into memory first. Sharing one all zero key would make
-        // every store land on the same slot and only the last read would be checked.
         let mut prog = String::new();
         for (slot, off) in [(0u64, 88u64), (1, 96), (2, 104), (3, 112), (4, 120)] {
             let key = 1024 + slot * 32;
@@ -4788,11 +4634,6 @@ mod stake_state_tests {
         l.set_contract_code(&contract_id, &container.canonical_bytes());
         let caller = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
 
-        // The caller supplies arguments long enough to reach the paying asset window
-        // and fills it with an issuer it never paid.
-        // Longer than the context on purpose. A payload of exactly CONTRACT_CONTEXT_BYTES
-        // never reaches the copy fbc4528 added, so the old shape of this test could not
-        // have failed even with the fix reverted.
         const ARG: u64 = 0x1234_5678_9abc_def0;
         let mut forged = vec![0u8; CONTRACT_CONTEXT_BYTES + 8];
         forged[88..120].copy_from_slice(&[0xAB; 32]);
@@ -4818,8 +4659,6 @@ mod stake_state_tests {
             ARG,
             "the caller's own arguments above the context must survive untouched"
         );
-        // The same call carrying a real asset must read that issuer, which proves the
-        // slot is genuinely written and the zero above is not simply an absent write.
         let issuer = [0xBBu8; 32];
         assert!(l.call_contract(
             &caller,
@@ -6907,8 +6746,6 @@ mod stake_state_tests {
         );
     }
 
-    // Everything the chain can hold value in. If a code path ever moves value without
-    // moving it between two of these, this sum stops matching the supply.
     fn held_value(l: &Ledger, addresses: &[&str]) -> u128 {
         let balances: u128 = addresses.iter().map(|a| u128::from(l.balance(a))).sum();
         let rewards: u128 = addresses
@@ -7309,8 +7146,6 @@ mod stake_state_tests {
             !l.bridge_is_frozen(),
             "the freeze lifts itself at the horizon"
         );
-        // Letting a freeze run to expiry is the griefing shape; the bond is forfeited
-        // to the treasury rather than refunded, so keeping the bridge down has a cost.
         assert_eq!(
             l.balance(&freezer),
             1_500_000 * 1_000_000 - bond,
@@ -8859,7 +8694,7 @@ mod stake_state_tests {
     #[test]
     fn a_mainnet_start_day_in_the_past_is_refused() {
         let mut l = Ledger::new();
-        let now = 20_000 * 86_400; // ~day 20000
+        let now = 20_000 * 86_400;
         assert_eq!(
             l.apply_parameter(b"mainnet_start", &0u64.to_le_bytes(), now),
             Err(EnactError::BadValue)
@@ -9030,9 +8865,6 @@ mod stake_state_tests {
         );
     }
 
-    // Nesting is live: dispatch_vm runs apply_atomic inside the outer one. An inner
-    // commit whose undo records were dropped would survive an outer rollback, so a
-    // contract write would persist inside a transaction the block rejected.
     #[test]
     fn an_inner_commit_is_still_reversed_by_an_outer_rollback() {
         let mut l = Ledger::new();
@@ -9061,8 +8893,6 @@ mod stake_state_tests {
     }
 
     #[test]
-    // A rolled back transition must not leave the block charged for leaves that do not
-    // exist, or a cheap failing transaction censors every candidate behind it.
     fn a_rolled_back_transition_does_not_leave_the_block_charged_for_its_leaves() {
         let mut l = Ledger::new();
         l.seed_supply(1_000_000);
@@ -9329,7 +9159,6 @@ impl BlockEvent {
         encoder.into_bytes()
     }
 
-    /// The inverse of `encode`.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let mut decoder = Decoder::new(bytes);
         let contract = String::from_utf8(decoder.get_bytes().ok()?.to_vec()).ok()?;
@@ -9535,7 +9364,6 @@ impl SideEvent {
     }
 }
 
-/// These fields are `&'static str` over closed sets. An unknown value fails the decode.
 fn intern_action(text: &str) -> Option<&'static str> {
     const ALL: [&str; 16] = [
         "activate",
@@ -9585,7 +9413,6 @@ fn get_word16(decoder: &mut Decoder<'_>) -> Option<[u8; 16]> {
 }
 
 impl SideEvent {
-    /// A side event as bytes, tagged by variant.
     pub fn encode(&self) -> Vec<u8> {
         let mut e = Encoder::new();
         match self {
@@ -9838,8 +9665,6 @@ impl SideEvent {
         e.into_bytes()
     }
 
-    /// The inverse of `encode`. Anything that does not decode exactly returns None
-    /// rather than a partly filled event.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let mut d = Decoder::new(bytes);
         let event = match d.get_tag().ok()? {
@@ -10050,9 +9875,6 @@ pub struct Ledger {
     execution_height: u64,
     execution_time: u64,
     journal: Option<Vec<(Key, Option<Vec<u8>>)>>,
-    /// Meter actually consumed by the most recent contract call. The block budget
-    /// charges this rather than the limit a transaction declared, so declaring a
-    /// large limit and doing nothing cannot reserve the block against everyone else.
     block_fresh_leaves: u64,
     fresh_leaf_ceiling: Option<u64>,
     last_vm_meter_used: u64,
@@ -10097,10 +9919,6 @@ impl Ledger {
     }
 
     fn write_leaf(&mut self, key: Key, value: Vec<u8>) {
-        // A key the trie has never held is a new leaf, and the node recomputes the state
-        // root over every one of them once per block. The meter prices them per call, and
-        // per call allowances multiply by the call count, so the block bound has to be
-        // counted here where a leaf actually comes into existence.
         if self.trie.get(&key).is_none() {
             self.block_fresh_leaves = self.block_fresh_leaves.saturating_add(1);
         }
@@ -10115,7 +9933,6 @@ impl Ledger {
         trie.insert(key, value);
     }
 
-    /// New state trie leaves created since the block began.
     pub fn block_fresh_leaves(&self) -> u64 {
         self.block_fresh_leaves
     }
@@ -10144,37 +9961,22 @@ impl Ledger {
         trie.remove(key)
     }
 
-    /// What the last contract call actually cost, for charging the block budget.
     pub fn last_vm_meter_used(&self) -> u64 {
         self.last_vm_meter_used
     }
 
-    /// Arm the reading with what this transaction declared, before any execution.
-    ///
-    /// A transaction can finish without ever reaching call_contract, through a failed
-    /// deploy, a short payload, or a genesis selector, and execution can fault after
-    /// consuming real meter. In every one of those the block budget would otherwise be
-    /// charged whatever the PREVIOUS transaction happened to leave behind, so a caller
-    /// making calls that fault would be charged nearly nothing and the budget would
-    /// stop bounding anything. Starting from the declared limit means the charge is
-    /// only ever revised DOWN, by a call that actually completed and reported its cost.
     pub fn arm_vm_meter(&mut self, declared: u64) {
         self.last_vm_meter_used = declared;
         self.last_vm_call_cost = None;
         self.vm_deploy_armed = false;
     }
 
-    /// A deploy pre arms the price of the permanent state it is about to write, then runs
-    /// the constructor through the same path, so there the two costs add.
     pub fn arm_vm_meter_deploy(&mut self, cost: u64) {
         self.last_vm_meter_used = cost;
         self.last_vm_call_cost = None;
         self.vm_deploy_armed = true;
     }
 
-    /// What the block budget should be charged. A plain call is charged what it actually
-    /// cost. Charging the declared limit let calls that execute nothing reserve the whole
-    /// block budget and censor every real contract call for a flat fee each.
     pub fn vm_meter_charge(&self) -> u64 {
         if self.vm_deploy_armed {
             return self.last_vm_meter_used;
@@ -10188,9 +9990,6 @@ impl Ledger {
     {
         let events_mark = self.block_events.len();
         let side_mark = self.side_events.len();
-        // The fresh leaf count is block state, so a transition that writes leaves and then
-        // fails must not leave the block charged for leaves that no longer exist: that
-        // would let a cheap failing transaction truncate the rest of the block.
         let leaves_mark = self.block_fresh_leaves;
         let restore = self.journal.take();
         let outermost = restore.is_none();
@@ -10204,10 +10003,6 @@ impl Ledger {
                 .is_some_and(|ceiling| self.block_fresh_leaves > ceiling);
         let committed = matches!(outcome, Ok(true)) && !over_ceiling;
         if committed {
-            // Nested calls are live: dispatch_vm runs apply_atomic inside the outer one.
-            // An inner commit that DROPS its undo records leaves the outer rollback unable
-            // to reverse those writes, so an inner contract write would survive a
-            // transaction the outer layer rejected. Fold them into the outer journal.
             if let Some(outer) = self.journal.as_mut() {
                 outer.extend(unwound);
             }
@@ -10747,8 +10542,6 @@ mod tests {
             );
         }
 
-        // Sweep the small sizes exhaustively, where the flooring dust is proportionally
-        // largest and an off by one in the remainder would show up first.
         for fee in 0u64..5_000 {
             let split = FeeSplit::of(fee);
             assert_eq!(split.total(), fee, "the split of {fee} does not conserve");

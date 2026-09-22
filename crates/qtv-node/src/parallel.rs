@@ -163,7 +163,6 @@ pub fn execute_parallel(
     let bridge_unfreeze_address = crate::ledger::bridge_unfreeze_address();
     let round_proposer = ledger.round_proposer().map(str::to_string);
     let grants_address = crate::ledger::grants_address();
-    // Ask the dispatcher's own predicates rather than a second list of addresses.
     if candidates.iter().any(|wrapper| {
         let (sender, target) = access(wrapper);
         round_proposer.as_deref() == Some(sender)

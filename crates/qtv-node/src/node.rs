@@ -90,8 +90,6 @@ pub struct Genesis {
     pub bridge_operators: Option<crate::bridge::OperatorSet>,
     pub bridged_assets: Vec<GenesisBridgedAsset>,
     pub bridge_era: Option<[u8; 32]>,
-    // The largest single bridge exit the off chain desk will serve. Unset reads as zero,
-    // which both exit checks treat as closed: no exit is admitted until a ceiling is set.
     pub bridge_exit_max_amount: Option<u128>,
     pub bridge_bitcoin_anchor: Option<crate::bridge_btc::BitcoinAnchor>,
     pub bridge_eth_anchors: Vec<crate::bridge_eth::EthAnchor>,
@@ -212,21 +210,14 @@ pub fn min_validator_cores() -> usize {
     (machine / 2).max(1)
 }
 
-/// A block clock a test can hold still. Zero means the real clock. Compiled out of a
-/// default build.
 #[cfg(any(test, feature = "test-fixtures"))]
 static PINNED_BLOCK_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Hold the block clock at `seconds`, or release it with zero. The timestamp is one of
-/// the inputs, so a test comparing two runs has to hold it still.
 #[cfg(any(test, feature = "test-fixtures"))]
 pub fn pin_block_time(seconds: u64) {
     PINNED_BLOCK_TIME.store(seconds, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// Real seconds since the unix epoch. A block stamps this once, carries it in
-/// the header, and every node applying the block reads it back from there, so
-/// the proposer and the applier execute against the identical value.
 pub fn wall_clock_seconds() -> u64 {
     #[cfg(any(test, feature = "test-fixtures"))]
     {
@@ -330,8 +321,6 @@ pub(crate) fn key_register_admissible(
     if qtv_account::address_for_key(wrapper.scheme(), &public_key).as_str() != body.sender() {
         return None;
     }
-    // The cheap nonce, meter and funding checks run before the post quantum verify so a
-    // flood of self signed registrations for unfunded accounts cannot force a verify.
     if body.nonce() != account.nonce || body.meter_limit() < crate::execution::TRANSFER_METER {
         return None;
     }
@@ -343,8 +332,6 @@ pub(crate) fn key_register_admissible(
     if account.balance < charged {
         return None;
     }
-    // The registration signs the very key it registers, so the verify is a pure function
-    // of the wrapper. A worker may precompute it off the consensus thread.
     let verified = signature_ok.unwrap_or_else(|| qtv_tx::verify(wrapper, &public_key));
     if !verified {
         return None;
@@ -369,11 +356,6 @@ fn dispatch_governance(
     fee_params: &FeeParams,
     now: u64,
 ) -> bool {
-    // Governance moves by referendum, not by whatever a chain happens to call its
-    // native unit today. A genesis names its real asset once and that name is
-    // baked into the genesis hash every node already agreed to, so this checks a
-    // fact fixed at launch, never a live balance. Until a genesis actually names
-    // QTOV, there is nothing here to vote with, propose against, or enact.
     if fee_params.native_asset != QTOV_ASSET_TAG {
         return false;
     }
@@ -944,8 +926,6 @@ fn dispatch_bridge_cosmos_update(ledger: &mut Ledger, wrapper: &Wrapper, now_sec
         Some(anchor) => anchor,
         None => return false,
     };
-    // The block's own timestamp. A clock synthesised from height drifts away from the
-    // foreign chain's real time, which is what the trusting period is measured against.
     let now = crate::bridge_cosmos::block_now(now_seconds);
     match crate::bridge_cosmos::verify_cosmos_anchor_update(&anchor, &proof, now) {
         Some(next) => {
@@ -1283,9 +1263,6 @@ pub(crate) fn bridge_exit_admissible(
         return None;
     }
     let request = crate::bridge::ExitRequest::decode(body.call().args())?;
-    // Admitting one weaker than dispatch parks it in the pool for ever: the dispatch
-    // rolls back the fee AND the nonce, and nothing after that evicts the entry, so it
-    // is re verified with a post quantum signature check every block from then on.
     if ledger.bridged_asset(&request.asset_id).is_none() {
         return None;
     }
@@ -1327,9 +1304,6 @@ fn dispatch_bridge_exit(
         Some(request) => request,
         None => return false,
     };
-    // A ceiling the off chain desk will not serve means the burn is dropped there and the
-    // holder's tokens are gone with nothing that can settle or slash. Refuse it here,
-    // while the tokens still exist.
     let ceiling = ledger.bridge_exit_max_amount();
     if ceiling == 0 || request.amount > ceiling {
         return false;
@@ -1365,15 +1339,9 @@ fn dispatch_bridge_exit(
 
 const VM_BLOCK_METER_BUDGET: u64 = 50_000_000;
 
-/// New state trie leaves one block may create. The meter prices a leaf per call, and a
-/// per call allowance multiplies by the call count, so the meter alone does not bound the
-/// block. This does, counted where a leaf actually comes into existence. Derived from the
-/// measured incremental root cost, about 0.9 ms a leaf, against a 200 ms block share.
 const BLOCK_FRESH_LEAF_CEILING: u64 = 220;
 const MAX_TX_METER: u64 = VM_BLOCK_METER_BUDGET / 4;
 
-// A registration note is an id, an epoch, a root and one ML-DSA signature. Anything past
-// this is not a note, so it does not earn a free seat in a block.
 const MAX_REGISTRATION_BYTES: usize = 4096;
 const MAX_VM_ARGS: usize = 128 * 1024;
 
@@ -1420,10 +1388,6 @@ pub(crate) fn vm_admissible(
     if body.fee() < u128::from(charged) {
         return false;
     }
-    // The same test dispatch applies, so a transaction that can never execute is never
-    // admitted. Admitting one weaker than dispatch parks it in the pool for ever: it is
-    // refused at execution, so it is never included, so nothing ever removes it, and the
-    // sender's balance and nonce never move to make it inadmissible later.
     let native_debit = if body.in_asset().is_none() {
         body.value()
     } else {
@@ -1432,11 +1396,6 @@ pub(crate) fn vm_admissible(
     account.balance >= charged.saturating_add(native_debit)
 }
 
-/// Deploy frame version. QDEPLOY1 carried containers built for the 88 byte call
-/// context, where arguments began at 88. The context is now 120 bytes and arguments
-/// begin at 120, so an old container would read its first argument out of the paying
-/// asset field. Bumping the tag means such a frame no longer matches, falls through,
-/// and fails to parse as a container rather than running against the wrong offsets.
 const DEPLOY_PARAMS_TAG: &[u8; 8] = b"QDEPLOY2";
 
 fn split_deploy_args(args: &[u8]) -> (&[u8], &[u8]) {
@@ -1470,7 +1429,6 @@ fn dispatch_vm(
     if !vm_admissible(wrapper, &account, fee_params, signature_ok) {
         return false;
     }
-    // Charge the declared limit unless a completed call reports less.
     ledger.arm_vm_meter(wrapper.body().meter_limit());
     let charged = vm_meter_fee(wrapper.body().meter_limit(), fee_params);
     let value = wrapper.body().value();
@@ -1490,11 +1448,8 @@ fn dispatch_vm(
     ledger.collect_fee(charged);
     if target == crate::ledger::vm_deploy_address() {
         let (container, params) = split_deploy_args(&args);
-        // Price the permanent state before writing it.
         let deploy_cost = crate::execution::deploy_meter_cost(container.len());
         if deploy_cost > meter {
-            // Too little meter declared. The fee and nonce are already spent, so the
-            // sender pays for the attempt and nothing is written.
             ledger.arm_vm_meter(meter);
             return true;
         }
@@ -1616,7 +1571,6 @@ fn execute_ordered_across(
             feeless: crate::mempool::is_feeless(wrapper),
             index,
         });
-        // root recompute over them runs synchronously on every validator.
         if wrapper.body().chain_id() != fee_params.chain_id {
             continue;
         }
@@ -1624,9 +1578,6 @@ fn execute_ordered_across(
         if valid_until != 0 && ledger.execution_height() > valid_until {
             continue;
         }
-        // Both ends of the call. A freeze stops spending, so a plain transfer into a
-        // frozen account still lands, but a contract is never a sender and gating only
-        // the sender left a frozen contract callable.
         let target = wrapper.body().call().target();
         let calling_a_contract = is_vm_op(ledger, wrapper);
         if ledger.is_blacklisted(wrapper.body().sender())
@@ -1653,10 +1604,6 @@ fn execute_ordered_across(
             if ledger
                 .apply_atomic(|l| dispatch_vm(l, wrapper, verified[index], fee_params, now_seconds))
             {
-                // Charge what the call actually cost, not what it declared. Reserving
-                // the declared limit let a handful of transactions that execute
-                // nothing hold the whole block budget and censor every real contract
-                // call in the block, for a flat fee each.
                 let used = ledger.vm_meter_charge();
                 vm_meter = vm_meter.saturating_add(used);
                 *sender_vm_meter.entry(sender).or_insert(0) = sender_used.saturating_add(used);
@@ -1727,9 +1674,6 @@ fn execute_ordered_across(
             continue;
         }
         if is_registration(wrapper) {
-            // The envelope is system built and carries no wrapper signature, so the bound
-            // is what stops a leader seating megabytes of junk every node stores forever.
-            // The inner note signature is checked where the note decoder lives.
             if wrapper.body().call().args().len() <= MAX_REGISTRATION_BYTES
                 && registrations < registration_cap
             {
@@ -2195,8 +2139,6 @@ impl Node {
         let header_hash = header.hash();
 
         let value = header_value(&header_hash);
-        // Bound to the value, so a restart that reproduces the same block resumes rather
-        // than refusing forever.
         if let Some(guard) = self.sign_guard.as_mut() {
             if !guard.try_sign(height, 0, &value).unwrap_or(false) {
                 return Err(ProduceError::DoubleSignRefused);
@@ -2376,8 +2318,6 @@ impl Node {
 #[cfg(test)]
 mod tests {
 
-    // The meter prices a fresh leaf per call, and the per call allowances multiply by the
-    // call count, so the meter alone does not bound a block. This is the bound that does.
     #[test]
     fn a_block_stops_admitting_once_it_has_made_its_share_of_new_leaves() {
         let fee = FeeParams::devnet();
@@ -2386,7 +2326,6 @@ mod tests {
         let sender = derive(&[21u8; 32], 0);
         fund(&mut ledger, &sender, 500_000_000);
 
-        // Each transfer to a fresh address is a new account leaf.
         let wanted = (BLOCK_FRESH_LEAF_CEILING + 40) as usize;
         let mut batch = Vec::with_capacity(wanted);
         for i in 0..wanted as u64 {
@@ -2407,8 +2346,6 @@ mod tests {
         );
     }
 
-    // A call that executes almost nothing must not reserve its declared limit, or a
-    // handful of them hold the whole block budget and censor every real contract call.
     #[test]
     fn a_call_that_executes_nothing_does_not_reserve_the_block_budget() {
         let fee = FeeParams::devnet();
@@ -3885,11 +3822,6 @@ mod tests {
 
     #[test]
     fn a_governance_freeze_stops_a_contract_being_called() {
-        // A contract is never a sender, so gating only the sender made freezing a
-        // contract address do nothing at all: a compromised token or pool stayed
-        // callable and kept paying out while the freeze was nominally in force. Since
-        // a non native asset only ever moves when its own contract moves it, this was
-        // the one control governance had for stopping exactly that.
         let fee = devnet_with_governance();
         let mut ledger = Ledger::new();
         let proposer = keypair(150);
@@ -3900,7 +3832,6 @@ mod tests {
         fund(&mut ledger, &user, 10_000 * 1_000_000);
         ledger.seed_validator_bond(&voter.address(), 10_000 * 1_000_000);
 
-        // A contract that simply halts, so a call to it is included when allowed.
         let contract_id = [120u8; 32];
         let contract = qtv_idfmt::render_address(&contract_id).unwrap();
         let selector = [4u8, 4, 4, 4];

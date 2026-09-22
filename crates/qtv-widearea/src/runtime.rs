@@ -124,7 +124,6 @@ impl Runtime {
     }
 
     fn disseminate_registrations(&mut self) {
-        // Outside the registration window nothing a peer sends can count, so do not wait.
         let Some(note) = self.node.own_registration_note() else {
             return;
         };

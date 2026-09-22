@@ -52,9 +52,6 @@ pub enum NetworkId {
 
 pub const NETWORK_COUNT: u32 = 44;
 
-/// The consensus/proof family a network belongs to. The airlock requires a proof of a given kind to be
-/// presented under a corridor of the matching family, so an EVM light-client proof cannot cross under a
-/// Cosmos corridor that merely shares the same verification tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChainFamily {
     Bitcoin,

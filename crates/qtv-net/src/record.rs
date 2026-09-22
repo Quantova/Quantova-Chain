@@ -27,10 +27,6 @@ pub struct Sealer {
     key: [u8; KEY_BYTES],
     iv: [u8; NONCE_BYTES],
     sequence: u64,
-    // A write that failed partway left the stream mid frame. How many bytes reached the
-    // peer is unknowable, so the next record would start inside the previous one and every
-    // record after it is unframeable for the life of the link, while the link still looks
-    // healthy from this side. Fail closed instead and let the caller tear it down.
     torn: bool,
 }
 
@@ -63,9 +59,6 @@ impl Sealer {
         if self.sequence == u64::MAX {
             return Err(Error::Handshake("record sequence exhausted"));
         }
-        // Consume the sequence BEFORE the write. A partial write followed by a retry
-        // must never reseal under the same nonce; reusing a ChaCha20-Poly1305 nonce
-        // leaks the keystream and lets the tag be forged.
         let sequence = self.sequence;
         self.sequence += 1;
         let nonce = record_nonce(&self.iv, sequence);

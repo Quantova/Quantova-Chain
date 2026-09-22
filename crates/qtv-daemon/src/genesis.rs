@@ -760,13 +760,7 @@ mod tests {
 
     #[test]
     fn cloned_key_material_under_two_ids_is_rejected() {
-        // C1: one operator registers its own key material under two ids. Each id
-        // would be an independent committee seat, all met by one signature. The
-        // genesis must refuse it.
         let secret = [9u8; 32];
-        // Two clones share one secret but sit at a small stake among honest peers,
-        // so the stake-share cap is satisfied and the ONLY reason to reject is the
-        // reused key material.
         let clone_a = ValidatorSpec::from_secret(1, 2_000, true, &secret, 64);
         let clone_b = ValidatorSpec::from_secret(2, 2_000, true, &secret, 64);
         let set = vec![
