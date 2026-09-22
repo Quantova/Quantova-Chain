@@ -77,6 +77,10 @@ impl Decode for StateRecord {
     }
 }
 
+fn entry_record_len(value_len: usize) -> usize {
+    1 + qtv_state::KEY_LEN + qtv_codec::LENGTH_WIDTH + value_len
+}
+
 /// A log below this size is left alone, because rewriting a small file buys
 /// nothing and a fresh chain would otherwise compact on every open.
 const COMPACT_FLOOR_BYTES: u64 = 64 * 1024 * 1024;
@@ -265,15 +269,7 @@ impl StateStore {
     fn live_bytes(&self) -> u64 {
         self.entries
             .values()
-            .map(|value| {
-                frame_len(
-                    to_bytes(&StateRecord::Entry {
-                        key: [0u8; qtv_state::KEY_LEN],
-                        value: value.clone(),
-                    })
-                    .len(),
-                )
-            })
+            .map(|value| frame_len(entry_record_len(value.len())))
             .sum()
     }
 
@@ -413,6 +409,17 @@ impl StateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sized_entry_matches_its_encoded_record() {
+        for len in [0usize, 1, 31, 72, 4096] {
+            let record = StateRecord::Entry {
+                key: [7u8; qtv_state::KEY_LEN],
+                value: vec![9u8; len],
+            };
+            assert_eq!(entry_record_len(len), to_bytes(&record).len());
+        }
+    }
 
     use qtv_state::KEY_LEN;
 
