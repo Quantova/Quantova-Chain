@@ -1339,7 +1339,7 @@ fn dispatch_bridge_exit(
 
 const VM_BLOCK_METER_BUDGET: u64 = 50_000_000;
 
-const BLOCK_FRESH_LEAF_CEILING: u64 = 220;
+pub(crate) const BLOCK_FRESH_LEAF_CEILING: u64 = 220;
 const MAX_TX_METER: u64 = VM_BLOCK_METER_BUDGET / 4;
 
 const MAX_REGISTRATION_BYTES: usize = 4096;

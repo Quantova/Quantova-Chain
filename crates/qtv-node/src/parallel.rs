@@ -76,6 +76,9 @@ fn run_task(
     let sender = account_at(leaves, &sender_key);
     let plan = plan_from_account(task.wrapper, &sender, fee_params).ok()?;
     let recipient_key = state_key(&task.recipient_address);
+    if plan.amount == 0 && !leaves.contains_key(&recipient_key) {
+        return None;
+    }
     let recipient = account_at(leaves, &recipient_key);
     let transferred = execute_transfer(
         sender.balance,
@@ -146,6 +149,8 @@ fn run_layer(
     writes
 }
 
+const FEE_SINK_LEAVES: u64 = 3;
+
 pub fn execute_parallel(
     ledger: &mut Ledger,
     candidates: &[Wrapper],
@@ -190,6 +195,13 @@ pub fn execute_parallel(
             || ledger.is_frozen(sender)
             || crate::node::is_vm_op(ledger, wrapper)
     }) {
+        return crate::node::execute_ordered(ledger, candidates, fee_params, now_seconds);
+    }
+    let fresh_recipients = candidates
+        .iter()
+        .filter(|wrapper| !ledger.leaves().contains_key(&state_key(access(wrapper).1)))
+        .count() as u64;
+    if fresh_recipients.saturating_add(FEE_SINK_LEAVES) > crate::node::BLOCK_FRESH_LEAF_CEILING {
         return crate::node::execute_ordered(ledger, candidates, fee_params, now_seconds);
     }
     ledger.bridge_expire(now_seconds);
@@ -326,6 +338,25 @@ mod tests {
                 "included set differs at {threads} threads"
             );
         }
+    }
+
+    #[test]
+    fn a_zero_amount_transfer_to_a_fresh_account_matches() {
+        let fee = FeeParams::devnet();
+        let (ledger, keys) = population(1, 1_000_000);
+        let fresh = keypair(500).address();
+        let block = vec![transfer(&keys[0], &fresh, 0, 0, &fee)];
+        assert_matches(&ledger, &block, &fee);
+    }
+
+    #[test]
+    fn a_block_past_the_fresh_account_ceiling_matches() {
+        let fee = FeeParams::devnet();
+        let (ledger, keys) = population(1, 1_000_000_000);
+        let block: Vec<Wrapper> = (0..230u64)
+            .map(|i| transfer(&keys[0], &keypair(1_000 + i).address(), 10, i, &fee))
+            .collect();
+        assert_matches(&ledger, &block, &fee);
     }
 
     #[test]
