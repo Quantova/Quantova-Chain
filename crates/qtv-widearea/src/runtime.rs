@@ -124,14 +124,13 @@ impl Runtime {
     }
 
     fn disseminate_registrations(&mut self) {
-        if self.node.epoch() == 0 {
+        // Outside the registration window nothing a peer sends can count, so do not wait.
+        let Some(note) = self.node.own_registration_note() else {
             return;
-        }
+        };
         if self.i_am_up() {
-            if let Some(note) = self.node.own_registration_note() {
-                let bytes = Message::Register(Box::new(note)).encode();
-                self.broadcast(&bytes);
-            }
+            let bytes = Message::Register(Box::new(note)).encode();
+            self.broadcast(&bytes);
         }
         let expected: Vec<u64> = self
             .expected_reveal_ids()

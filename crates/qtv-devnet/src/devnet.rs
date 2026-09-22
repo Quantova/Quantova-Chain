@@ -202,6 +202,10 @@ impl<S> Devnet<S> {
         &self.nodes[index]
     }
 
+    pub fn node_mut(&mut self, index: usize) -> &mut DevNode {
+        &mut self.nodes[index]
+    }
+
     pub fn nodes(&self) -> &[DevNode] {
         &self.nodes
     }
@@ -286,18 +290,21 @@ impl<S> Devnet<S> {
         }
     }
 
+    // An inactive node is offline: it sends no note and hears none.
     fn exchange_registrations(&mut self) {
-        let notes: Vec<RegisterNote> = (0..self.nodes.len())
-            .filter_map(|i| self.nodes[i].own_registration_note())
+        let active = self.active_indices();
+        let notes: Vec<RegisterNote> = active
+            .iter()
+            .filter_map(|&i| self.nodes[i].own_registration_note())
             .collect();
         if notes.is_empty() {
             return;
         }
-        for node in &mut self.nodes {
+        for &i in &active {
             for note in &notes {
-                node.collect_registration(note.clone());
+                self.nodes[i].collect_registration(note.clone());
             }
-            node.apply_registrations();
+            self.nodes[i].apply_registrations();
         }
     }
 
@@ -419,8 +426,25 @@ impl<S: Read + Write> Devnet<S> {
         Ok(())
     }
 
+    // A validator with no seat this epoch holds no reveal of its own, so until its peers'
+    // reveals reach it there is no committee to act on. It waits, as a running node does.
+    fn ready_selection(
+        &self,
+        i: usize,
+    ) -> Result<Option<qtv_node::consensus::Selection>, RoundError> {
+        match self.nodes[i].select() {
+            Ok(selection) => Ok(Some(selection)),
+            Err(RoundError::NoCommittee) if self.nodes[i].collected_reveal_ids().is_empty() => {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     fn enter_round(&mut self, i: usize, active: &[usize]) -> Result<(), RoundError> {
-        let selection = self.nodes[i].select()?;
+        let Some(selection) = self.ready_selection(i)? else {
+            return Ok(());
+        };
         let online = self.active[i];
         let messages = self.nodes[i].enter_round(&selection, online);
         for message in messages {
@@ -454,7 +478,9 @@ impl<S: Read + Write> Devnet<S> {
         if !self.active[i] {
             return Ok(());
         }
-        let selection = self.nodes[i].select()?;
+        let Some(selection) = self.ready_selection(i)? else {
+            return Ok(());
+        };
         let view = self.nodes[i].view();
         if view == 0 || leader_for(&selection, view) != self.nodes[i].id() {
             return Ok(());
@@ -472,7 +498,9 @@ impl<S: Read + Write> Devnet<S> {
     }
 
     fn settle(&mut self, i: usize, ceiling: Height, active: &[usize]) -> Result<(), RoundError> {
-        let selection = self.nodes[i].select()?;
+        let Some(selection) = self.ready_selection(i)? else {
+            return Ok(());
+        };
         if !self.nodes[i].has_finality_threshold(selection.tau) {
             return Ok(());
         }
@@ -489,7 +517,9 @@ impl<S: Read + Write> Devnet<S> {
         ceiling: Height,
         active: &[usize],
     ) -> Result<(), RoundError> {
-        let selection = self.nodes[to].select()?;
+        let Some(selection) = self.ready_selection(to)? else {
+            return Ok(());
+        };
         let proposer = leader_for(&selection, proposal.view);
         let messages = self.nodes[to].on_proposal(&selection, proposer, proposal);
         for message in &messages {
@@ -530,7 +560,9 @@ impl<S: Read + Write> Devnet<S> {
         ceiling: Height,
         active: &[usize],
     ) -> Result<(), RoundError> {
-        let selection = self.nodes[to].select()?;
+        let Some(selection) = self.ready_selection(to)? else {
+            return Ok(());
+        };
         self.nodes[to].collect_view_change(&selection, record);
         if let Some(target) = self.nodes[to].view_sync_target(&selection) {
             if target > self.nodes[to].view() {
@@ -572,11 +604,12 @@ impl<S: Read + Write> Devnet<S> {
                         self.deliver_coded_proposal(to, *coded, ceiling, active)?
                     }
                     Message::Prevote(prevote) => {
-                        let selection = self.nodes[to].select()?;
-                        for message in self.nodes[to].on_prevote(&selection, *prevote) {
-                            self.originate(to, &message, active)?;
+                        if let Some(selection) = self.ready_selection(to)? {
+                            for message in self.nodes[to].on_prevote(&selection, *prevote) {
+                                self.originate(to, &message, active)?;
+                            }
+                            self.settle(to, ceiling, active)?;
                         }
-                        self.settle(to, ceiling, active)?;
                     }
                     Message::Attest(attestation) => {
                         self.nodes[to].on_attestation(*attestation);

@@ -70,10 +70,19 @@ fn a_node_restarting_within_an_epoch_rebuilds_peers_rotated_roots_from_the_chain
         devnet.node(index).epoch() >= 1,
         "the node has crossed a boundary"
     );
-    assert!(
-        !devnet.node(index).collected_registration_ids().is_empty(),
-        "before the restart the node holds the peers rotated roots"
-    );
+    let epoch = devnet.node(index).epoch();
+    let ids: Vec<u64> = (1..=devnet.len() as u64).collect();
+    let before: Vec<_> = ids
+        .iter()
+        .map(|id| devnet.node(index).roster_root(*id))
+        .collect();
+    for (j, id) in ids.iter().enumerate() {
+        assert_eq!(
+            before[j],
+            Some(devnet.node(j).own_rotated_root(epoch)),
+            "validator {id} registered in time, so it sits at its rotated root"
+        );
+    }
 
     let head_before = devnet.node(index).head_hash();
     let height_before = devnet.node(index).height();
@@ -92,16 +101,18 @@ fn a_node_restarting_within_an_epoch_rebuilds_peers_rotated_roots_from_the_chain
         height_before,
         "the height reloaded"
     );
-    let rebuilt = devnet.node(index).collected_registration_ids();
-    assert!(
-        !rebuilt.is_empty(),
-        "the restarted node rebuilt the peers rotated roots from chain history"
-    );
-    for id in &rebuilt {
-        assert_ne!(
-            *id,
-            devnet.node(index).id(),
-            "a rebuilt root is a peer, not the node's own"
+    // Its own root included: the restarted node takes every root, its own among them,
+    // from the chain, so it lands on the committee its peers use rather than one of its own.
+    for (j, id) in ids.iter().enumerate() {
+        assert_eq!(
+            devnet.node(index).roster_root(*id),
+            before[j],
+            "the restart rebuilt validator {id}'s rotated root from chain history"
+        );
+        assert_eq!(
+            devnet.node(index).roster_root(*id),
+            devnet.node(0).roster_root(*id),
+            "the restarted node and a peer hold validator {id} at the same root"
         );
     }
 

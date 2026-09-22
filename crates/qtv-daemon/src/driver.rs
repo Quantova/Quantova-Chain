@@ -449,13 +449,12 @@ impl Driver {
     }
 
     fn disseminate_registrations(&mut self, window: Duration) {
-        if self.node.epoch() == 0 {
+        // Outside the registration window nothing a peer sends can count, so do not wait.
+        let Some(note) = self.node.own_registration_note() else {
             return;
-        }
-        if let Some(note) = self.node.own_registration_note() {
-            let bytes = Message::Register(Box::new(note)).encode();
-            self.broadcast(&bytes);
-        }
+        };
+        let bytes = Message::Register(Box::new(note)).encode();
+        self.broadcast(&bytes);
         let expected: Vec<u64> = (0..self.n)
             .filter(|&q| q != self.idx && self.up.get(q).copied().unwrap_or(false))
             .map(|q| q as u64 + 1)

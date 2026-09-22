@@ -34,6 +34,15 @@ fn open_nodes(config: &DevnetConfig) -> Vec<DevNode> {
             node.collect_reveal(note.clone());
         }
     }
+    let registrations: Vec<_> = nodes
+        .iter()
+        .filter_map(|node| node.own_registration_note())
+        .collect();
+    for node in &mut nodes {
+        for note in &registrations {
+            node.collect_registration(note.clone());
+        }
+    }
     nodes
 }
 

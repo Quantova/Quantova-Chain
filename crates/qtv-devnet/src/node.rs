@@ -297,10 +297,17 @@ pub struct DevNode {
     events_by_height: HashMap<Height, Vec<BlockEvent>>,
     side_events_by_height: HashMap<Height, Vec<SideEvent>>,
     block_messages: HashMap<u64, Vec<u8>>,
+    // Sortition roots for the current epoch, taken only from registrations the chain
+    // recorded inside the previous epoch's window. Every node derives the same map from
+    // the same blocks, so no node's committee depends on what gossip it happened to see.
     epoch_roots: HashMap<u64, Root>,
-    epoch_notes: HashMap<u64, RegisterNote>,
     epoch_conflicted: HashSet<u64>,
-    epoch_conflict_notes: Vec<RegisterNote>,
+    // Registrations for the NEXT epoch recorded so far by blocks of this one.
+    next_roots: std::collections::BTreeMap<u64, Root>,
+    next_conflicted: std::collections::BTreeSet<u64>,
+    next_for: u64,
+    // Gossiped notes waiting for a leader to carry them on chain. Never consensus state.
+    pending_notes: Vec<RegisterNote>,
     sign_guard: SignGuard,
     prevote_guard: PrevoteGuard,
     finality: FinalityLedger,
@@ -400,9 +407,11 @@ impl DevNode {
             side_events_by_height: HashMap::new(),
             block_messages: HashMap::new(),
             epoch_roots: HashMap::new(),
-            epoch_notes: HashMap::new(),
             epoch_conflicted: HashSet::new(),
-            epoch_conflict_notes: Vec::new(),
+            next_roots: std::collections::BTreeMap::new(),
+            next_conflicted: std::collections::BTreeSet::new(),
+            next_for: 1,
+            pending_notes: Vec::new(),
             sign_guard,
             prevote_guard,
             finality: FinalityLedger::new(),
@@ -517,29 +526,105 @@ impl DevNode {
         self.epoch_roster_for(self.consensus.epoch_for(self.height))
     }
 
+    // The same rule for every validator, this node included, so no node ever holds a
+    // committee its peers do not. Epoch zero draws from the genesis roots. After it a
+    // validator is seated at the root the chain recorded for it in time, and otherwise at a
+    // root no reveal can open: it cannot be drawn that epoch, yet its stake stays in the
+    // finality total, as if it were offline. Falling back to the genesis tree instead would
+    // reuse one time leaves already made public, which anyone could replay to make an
+    // absent validator look present.
     fn epoch_roster_for(&self, epoch: u64) -> Vec<ValidatorRegistration> {
-        let own_id = self.consensus.own_id();
-        let own_root = self.consensus.own_epoch_root(epoch);
         reweigh_roster(&self.ledger, &self.base_roster)
             .into_iter()
             .map(|mut r| {
-                if r.id == own_id {
-                    r.root = own_root;
-                } else if let Some(root) = self.epoch_roots.get(&r.id) {
-                    r.root = *root;
+                if epoch != 0 {
+                    r.root = self
+                        .epoch_roots
+                        .get(&r.id)
+                        .copied()
+                        .unwrap_or(UNSEATED_ROOT);
                 }
                 r
             })
             .collect()
     }
 
+    // A root for the next epoch counts only when a block in the first part of this epoch
+    // carries it. The beacon that seeds the next epoch then still depends on reveals made
+    // after the root was fixed, so the root cannot be ground against a beacon its owner can
+    // already see.
+    fn registration_open(&self, height: Height) -> bool {
+        let len = self.consensus.epoch_len();
+        let lead = (len / 4).max(1);
+        len > lead && self.consensus.slot_for(height) < len - lead
+    }
+
+    fn record_registrations(&mut self, block: &ChainBlock) {
+        let height = block.header().height();
+        if !self.registration_open(height) {
+            return;
+        }
+        let next = self.consensus.epoch_for(height).saturating_add(1);
+        if next != self.next_for {
+            self.next_roots.clear();
+            self.next_conflicted.clear();
+            self.next_for = next;
+        }
+        for wrapper in block.body() {
+            if wrapper.body().call().target() != registration_address() {
+                continue;
+            }
+            let Ok(note) = decode_register_note(wrapper.body().call().args()) else {
+                continue;
+            };
+            if note.epoch != next || self.next_conflicted.contains(&note.id) {
+                continue;
+            }
+            let Some(reg) = self.base_roster.iter().find(|r| r.id == note.id) else {
+                continue;
+            };
+            if !qtv_attest::epoch_registration_verifies(
+                &reg.attest_pk,
+                note.id,
+                note.epoch,
+                &note.root,
+                &note.sig,
+            ) {
+                continue;
+            }
+            match self.next_roots.get(&note.id) {
+                Some(existing) if *existing == note.root => {}
+                Some(_) => {
+                    self.next_roots.remove(&note.id);
+                    self.next_conflicted.insert(note.id);
+                }
+                None => {
+                    self.next_roots.insert(note.id, note.root);
+                }
+            }
+        }
+    }
+
+    fn promote_registrations(&mut self, epoch: u64) {
+        if self.next_for == epoch {
+            self.epoch_roots = std::mem::take(&mut self.next_roots).into_iter().collect();
+            self.epoch_conflicted = std::mem::take(&mut self.next_conflicted)
+                .into_iter()
+                .collect();
+        } else {
+            self.epoch_roots.clear();
+            self.epoch_conflicted.clear();
+            self.next_roots.clear();
+            self.next_conflicted.clear();
+        }
+        self.next_for = epoch.saturating_add(1);
+        self.pending_notes.retain(|note| note.epoch > epoch);
+    }
+
     fn refresh_committee(&mut self) {
         let epoch = self.consensus.epoch_for(self.height);
         if epoch != self.consensus.epoch() {
-            self.epoch_roots.clear();
-            self.epoch_notes.clear();
-            self.epoch_conflicted.clear();
-            self.epoch_conflict_notes.clear();
+            self.promote_registrations(epoch);
         }
         let roster = self.epoch_roster();
         self.consensus.rotate_to_epoch(epoch, roster);
@@ -549,10 +634,10 @@ impl DevNode {
     }
 
     pub fn own_registration_note(&self) -> Option<RegisterNote> {
-        let epoch = self.consensus.epoch_for(self.height);
-        if epoch == 0 {
+        if !self.registration_open(self.height) {
             return None;
         }
+        let epoch = self.consensus.epoch_for(self.height).saturating_add(1);
         let (root, sig) = self.consensus.own_epoch_registration(epoch);
         Some(RegisterNote {
             height: self.height,
@@ -563,9 +648,14 @@ impl DevNode {
         })
     }
 
+    // Gossip only queues a note for a leader to carry. The committee is taken from what
+    // the chain records, so a note one node saw and another did not changes nothing.
     pub fn collect_registration(&mut self, note: RegisterNote) -> bool {
-        let epoch = self.consensus.epoch_for(self.height);
-        if note.epoch != epoch || note.id == self.id {
+        if !self.registration_open(self.height) || note.id == self.id {
+            return false;
+        }
+        let next = self.consensus.epoch_for(self.height).saturating_add(1);
+        if note.epoch != next {
             return false;
         }
         let Some(reg) = self.base_roster.iter().find(|r| r.id == note.id) else {
@@ -580,23 +670,26 @@ impl DevNode {
         ) {
             return false;
         }
-        if self.epoch_conflicted.contains(&note.id) {
+        if self.next_conflicted.contains(&note.id)
+            || self.next_for == next && self.next_roots.get(&note.id) == Some(&note.root)
+        {
             return false;
         }
-        match self.epoch_roots.get(&note.id) {
-            Some(existing) if *existing == note.root => false,
-            Some(_) => {
-                self.epoch_conflicted.insert(note.id);
-                self.epoch_roots.remove(&note.id);
-                self.epoch_notes.remove(&note.id);
-                true
-            }
-            None => {
-                self.epoch_notes.insert(note.id, note.clone());
-                self.epoch_roots.insert(note.id, note.root);
-                true
-            }
+        let held = self
+            .pending_notes
+            .iter()
+            .filter(|n| n.id == note.id)
+            .count();
+        if held >= 2
+            || self
+                .pending_notes
+                .iter()
+                .any(|n| n.id == note.id && n.root == note.root)
+        {
+            return false;
         }
+        self.pending_notes.push(note);
+        true
     }
 
     pub fn apply_registrations(&mut self) {
@@ -620,32 +713,76 @@ impl DevNode {
         self.reveals.iter().map(|r| r.id).collect()
     }
 
-    pub fn collected_registration_ids(&self) -> Vec<u64> {
-        self.epoch_roots.keys().copied().collect()
+    /// The sortition root this node holds for a validator in the current epoch.
+    pub fn roster_root(&self, id: u64) -> Option<Root> {
+        self.epoch_roster()
+            .into_iter()
+            .find(|r| r.id == id)
+            .map(|r| r.root)
     }
 
+    /// The root this node's own tree commits to for an epoch.
+    pub fn own_rotated_root(&self, epoch: u64) -> Root {
+        self.consensus.own_epoch_root(epoch)
+    }
+
+    pub fn collected_registration_ids(&self) -> Vec<u64> {
+        let mut ids: Vec<u64> = self.pending_notes.iter().map(|n| n.id).collect();
+        if self.next_for == self.consensus.epoch_for(self.height).saturating_add(1) {
+            ids.extend(self.next_roots.keys().copied());
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    // Everything a leader should carry: this node's own note and any gossiped note the
+    // chain has not yet recorded, a second conflicting note included so every node marks
+    // the conflict from the same block.
     fn epoch_registration_notes(&self) -> Vec<RegisterNote> {
         let mut notes: Vec<RegisterNote> = Vec::new();
+        let recorded = |note: &RegisterNote| {
+            self.next_for == note.epoch && self.next_roots.get(&note.id) == Some(&note.root)
+                || self.next_conflicted.contains(&note.id)
+        };
         if let Some(own) = self.own_registration_note() {
-            notes.push(own);
+            if !recorded(&own) {
+                notes.push(own);
+            }
         }
-        let mut ids: Vec<u64> = self.epoch_notes.keys().copied().collect();
-        ids.sort_unstable();
-        for id in ids {
-            if let Some(note) = self.epoch_notes.get(&id) {
+        for note in &self.pending_notes {
+            if !recorded(note) {
                 notes.push(note.clone());
             }
         }
-        notes.extend(self.epoch_conflict_notes.iter().cloned());
+        // Ordered by validator and root, not by who builds, so two nodes holding the same
+        // notes assemble the same block.
+        notes.sort_by(|a, b| a.id.cmp(&b.id).then(a.root.digest.cmp(&b.root.digest)));
         notes
     }
 
+    // Rebuilt from the chain alone: the previous epoch's window gives this epoch's roots,
+    // and this epoch's blocks so far give the next epoch's. Nothing held only in gossip is
+    // needed, so a restart lands on exactly the committee its peers use.
     fn rebuild_epoch_registrations(&mut self, head: Height) {
-        let epoch = self.consensus.epoch_for(head);
-        if epoch == 0 {
-            return;
-        }
-        for height in qtv_bft::params::MIN_HEIGHT..=head {
+        let len = self.consensus.epoch_len();
+        let head_epoch = self.consensus.epoch_for(head);
+        let from_epoch = head_epoch.saturating_sub(1);
+        self.epoch_roots.clear();
+        self.epoch_conflicted.clear();
+        self.next_roots.clear();
+        self.next_conflicted.clear();
+        self.next_for = from_epoch.saturating_add(1);
+        let from = from_epoch
+            .saturating_mul(len)
+            .max(qtv_bft::params::MIN_HEIGHT);
+        let mut at = from_epoch;
+        for height in from..=head {
+            let epoch = self.consensus.epoch_for(height);
+            if epoch != at {
+                self.promote_registrations(epoch);
+                at = epoch;
+            }
             let Some(block) = self
                 .block_store
                 .block_by_height(height)
@@ -653,43 +790,7 @@ impl DevNode {
             else {
                 continue;
             };
-            for wrapper in block.body() {
-                if wrapper.body().call().target() != registration_address() {
-                    continue;
-                }
-                let Ok(note) = decode_register_note(wrapper.body().call().args()) else {
-                    continue;
-                };
-                if note.epoch != epoch || note.id == self.id {
-                    continue;
-                }
-                let Some(reg) = self.base_roster.iter().find(|r| r.id == note.id) else {
-                    continue;
-                };
-                if qtv_attest::epoch_registration_verifies(
-                    &reg.attest_pk,
-                    note.id,
-                    note.epoch,
-                    &note.root,
-                    &note.sig,
-                ) {
-                    if self.epoch_conflicted.contains(&note.id) {
-                        continue;
-                    }
-                    match self.epoch_roots.get(&note.id) {
-                        Some(existing) if *existing == note.root => {}
-                        Some(_) => {
-                            self.epoch_conflicted.insert(note.id);
-                            self.epoch_roots.remove(&note.id);
-                            self.epoch_notes.remove(&note.id);
-                        }
-                        None => {
-                            self.epoch_notes.insert(note.id, note.clone());
-                            self.epoch_roots.insert(note.id, note.root);
-                        }
-                    }
-                }
-            }
+            self.record_registrations(&block);
         }
     }
 
@@ -767,12 +868,10 @@ impl DevNode {
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
         self.beacon = Beacon::from_seed(*header.beacon_seed());
         let head_epoch = self.consensus.epoch_for(head);
-        if head_epoch != 0 {
-            self.rebuild_epoch_registrations(head);
-            let roster = self.epoch_roster_for(head_epoch);
-            self.consensus.rotate_to_epoch(head_epoch, roster);
-            *self.selection_cache.borrow_mut() = None;
-        }
+        self.rebuild_epoch_registrations(head);
+        let roster = self.epoch_roster_for(head_epoch);
+        self.consensus.rotate_to_epoch(head_epoch, roster);
+        *self.selection_cache.borrow_mut() = None;
         let reveals = match self.committee_for_certificate(head, &certificate) {
             Some(selection) => {
                 debug_assert!(
@@ -891,8 +990,7 @@ impl DevNode {
             .iter()
             .map(|evidence| evidence_transaction(evidence, chain_id))
             .collect();
-        let epoch = self.consensus.epoch_for(height);
-        if epoch != 0 && qtv_sampler::epoch::is_epoch_start(height, self.consensus.epoch_len()) {
+        if self.registration_open(height) {
             for note in self.epoch_registration_notes() {
                 candidates.push(registration_transaction(&note, chain_id));
             }
@@ -2043,6 +2141,9 @@ impl DevNode {
         // transaction the index has never heard of.
         self.tx_index.sync()?;
         self.state_store.commit(height, self.ledger.q_root())?;
+        // After the commit, so the registrations counted are exactly those of blocks a
+        // restart finds on disk, and rebuild_epoch_registrations reaches the same map.
+        self.record_registrations(block);
         // The state log only ever grows while the node runs, so give it a chance
         // to shed superseded copies. The call stats the file and returns unless a
         // rewrite is warranted, so this stays cheap at every checked height.
@@ -2326,22 +2427,6 @@ impl DevNode {
         {
             return Err(SyncError::WrongSubject);
         }
-        // The rotated sortition roots for a new epoch are published in this block's
-        // registration transactions. Absorb and verify them before reconstructing the
-        // committee, otherwise verifying the first block of an epoch would deadlock on
-        // roots that can only be learned from a block we have not yet applied — which
-        // is why a node offline across an epoch boundary, or any fresh node past epoch
-        // one, could never sync.
-        if qtv_sampler::epoch::is_epoch_start(self.height, self.consensus.epoch_len()) {
-            for wrapper in block.body() {
-                if wrapper.body().call().target() == registration_address() {
-                    if let Ok(note) = decode_register_note(wrapper.body().call().args()) {
-                        self.collect_registration(note);
-                    }
-                }
-            }
-            self.apply_registrations();
-        }
         let selection = self
             .committee_for_certificate(self.height, &certificate)
             .ok_or(SyncError::NoCommittee)?;
@@ -2444,6 +2529,12 @@ fn evidence_transaction(evidence: &Equivocation, chain_id: u64) -> Wrapper {
     let body = Body::with_context(target, 0, 0, 0, call, 0, chain_id);
     Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new())
 }
+
+/// Opens nothing: membership needs a position below `slots`, and there is none.
+const UNSEATED_ROOT: Root = Root {
+    digest: [0u8; 32],
+    slots: 0,
+};
 
 fn registration_transaction(note: &RegisterNote, chain_id: u64) -> Wrapper {
     let target = registration_address();
@@ -2691,5 +2782,113 @@ mod eviction_fairness_tests {
         let mut buffer: Vec<(u64, u64)> = Vec::new();
         evict_fairly(&mut buffer, 1, |item| item.0);
         assert!(buffer.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod registration_window_tests {
+    use super::{registration_transaction, ChainBlock, DevNode, Header};
+    use crate::config::{DevnetConfig, NodeConfig, FULL_FANOUT};
+    use qtv_node::fee::FeeParams;
+
+    const SLOTS: u64 = 8;
+
+    fn node() -> DevNode {
+        let base = std::env::temp_dir().join(format!(
+            "qtv-reg-window-unit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let nodes: Vec<NodeConfig> = (1..=4u64)
+            .map(|id| NodeConfig {
+                id,
+                stake: 2_000,
+                online: true,
+                store_dir: base.join(format!("node-{id}")),
+                bootstrap: vec![],
+                address: format!("mem://{id}"),
+                secret: qtv_node::keys::fixture_secret(id),
+            })
+            .collect();
+        let config = DevnetConfig {
+            fee_params: FeeParams::devnet(),
+            accounts: vec![],
+            nodes: nodes.clone(),
+            genesis_time: 1_700_000_000_000,
+            fanout: FULL_FANOUT,
+            slots: SLOTS,
+            published_roster: None,
+            bridge_dest_chain: None,
+            guardians: Default::default(),
+            bridge_operators: None,
+            bridged_assets: vec![],
+            bridge_era: None,
+            bridge_exit_max_amount: None,
+        };
+        DevNode::open(&nodes[0], &config).expect("node opens")
+    }
+
+    fn block_at(height: u64, body: Vec<qtv_tx::Wrapper>) -> ChainBlock {
+        let header = Header::new(
+            height,
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            String::new(),
+            0,
+        );
+        ChainBlock::new(header, Vec::new(), body)
+    }
+
+    #[test]
+    fn a_leader_carrying_a_root_past_the_window_does_not_seat_it() {
+        let mut node = node();
+        let note = node
+            .own_registration_note()
+            .expect("height one is inside the window");
+        assert_eq!(note.epoch, 1);
+        let chain_id = node.fee_params.chain_id;
+        let tx = registration_transaction(&note, chain_id);
+
+        // Slot 7 of epoch zero: a leader here already knows the reveals that seed epoch one.
+        node.record_registrations(&block_at(SLOTS - 1, vec![tx.clone()]));
+        assert!(
+            node.next_roots.is_empty(),
+            "a root carried after the window closed is not recorded"
+        );
+
+        node.record_registrations(&block_at(2, vec![tx]));
+        assert_eq!(
+            node.next_roots.get(&note.id),
+            Some(&note.root),
+            "the same note inside the window is recorded"
+        );
+    }
+
+    #[test]
+    fn a_root_its_owner_did_not_sign_is_ignored() {
+        let mut node = node();
+        let note = node.own_registration_note().expect("inside the window");
+        let chain_id = node.fee_params.chain_id;
+        let mut forged = note.clone();
+        forged.root.digest[0] ^= 1;
+        node.record_registrations(&block_at(
+            2,
+            vec![registration_transaction(&forged, chain_id)],
+        ));
+        assert!(
+            node.next_roots.is_empty(),
+            "a root its owner did not sign is ignored"
+        );
+        node.record_registrations(&block_at(
+            3,
+            vec![registration_transaction(&note, chain_id)],
+        ));
+        assert_eq!(node.next_roots.get(&note.id), Some(&note.root));
     }
 }
