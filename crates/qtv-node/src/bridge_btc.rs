@@ -4,8 +4,8 @@
 use crate::bridge::{Direction, Fact, FACT_VERSION};
 use qtv_btc_spv::chain::Checkpoint;
 use qtv_btc_spv::{
-    network_params, verify_chain, verify_trustless_deposit, BlockHeader, MerkleStep, Network,
-    NetworkParams, HEADER_LEN, MAX_MERKLE_BRANCH, U256,
+    network_params, verify_chain, verify_trustless_deposit, BlockHeader, CoinbaseProof, MerkleStep,
+    Network, NetworkParams, HEADER_LEN, MAX_MERKLE_BRANCH, U256,
 };
 
 pub const MAX_BTC_HEADERS: usize = 4096;
@@ -113,6 +113,45 @@ pub struct BitcoinMintProof {
     pub deposit_height: u32,
     pub branch: Vec<MerkleStep>,
     pub raw_tx: Vec<u8>,
+    pub coinbase_tx: Vec<u8>,
+    pub coinbase_branch: Vec<MerkleStep>,
+}
+
+fn put_branch(out: &mut Vec<u8>, branch: &[MerkleStep]) {
+    out.extend_from_slice(&(branch.len() as u32).to_le_bytes());
+    for step in branch {
+        out.extend_from_slice(&step.hash);
+        out.push(step.sibling_on_left as u8);
+    }
+}
+
+fn take_branch(cursor: &mut Cursor) -> Option<Vec<MerkleStep>> {
+    let step_count = cursor.u32()? as usize;
+    if step_count > MAX_MERKLE_BRANCH {
+        return None;
+    }
+    let mut branch = Vec::with_capacity(step_count);
+    for _ in 0..step_count {
+        let hash: [u8; 32] = cursor.take(32)?.try_into().ok()?;
+        let sibling_on_left = match cursor.u8()? {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        branch.push(MerkleStep {
+            hash,
+            sibling_on_left,
+        });
+    }
+    Some(branch)
+}
+
+fn take_tx(cursor: &mut Cursor) -> Option<Vec<u8>> {
+    let tx_len = cursor.u32()? as usize;
+    if tx_len > MAX_BTC_RAW_TX {
+        return None;
+    }
+    Some(cursor.take(tx_len)?.to_vec())
 }
 
 impl BitcoinMintProof {
@@ -124,13 +163,12 @@ impl BitcoinMintProof {
             out.extend_from_slice(header);
         }
         out.extend_from_slice(&self.deposit_height.to_le_bytes());
-        out.extend_from_slice(&(self.branch.len() as u32).to_le_bytes());
-        for step in &self.branch {
-            out.extend_from_slice(&step.hash);
-            out.push(step.sibling_on_left as u8);
-        }
+        put_branch(&mut out, &self.branch);
         out.extend_from_slice(&(self.raw_tx.len() as u32).to_le_bytes());
         out.extend_from_slice(&self.raw_tx);
+        out.extend_from_slice(&(self.coinbase_tx.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.coinbase_tx);
+        put_branch(&mut out, &self.coinbase_branch);
         out
     }
 
@@ -147,30 +185,18 @@ impl BitcoinMintProof {
             headers.push(header);
         }
         let deposit_height = cursor.u32()?;
-        let step_count = cursor.u32()? as usize;
-        if step_count > MAX_MERKLE_BRANCH {
-            return None;
-        }
-        let mut branch = Vec::with_capacity(step_count);
-        for _ in 0..step_count {
-            let hash: [u8; 32] = cursor.take(32)?.try_into().ok()?;
-            let sibling_on_left = cursor.u8()? != 0;
-            branch.push(MerkleStep {
-                hash,
-                sibling_on_left,
-            });
-        }
-        let tx_len = cursor.u32()? as usize;
-        if tx_len > MAX_BTC_RAW_TX {
-            return None;
-        }
-        let raw_tx = cursor.take(tx_len)?.to_vec();
+        let branch = take_branch(&mut cursor)?;
+        let raw_tx = take_tx(&mut cursor)?;
+        let coinbase_tx = take_tx(&mut cursor)?;
+        let coinbase_branch = take_branch(&mut cursor)?;
         cursor.done().then_some(BitcoinMintProof {
             start_height,
             headers,
             deposit_height,
             branch,
             raw_tx,
+            coinbase_tx,
+            coinbase_branch,
         })
     }
 }
@@ -213,6 +239,10 @@ pub fn verify_bitcoin_mint(
         proof.deposit_height,
         &proof.branch,
         &proof.raw_tx,
+        &CoinbaseProof {
+            raw_tx: &proof.coinbase_tx,
+            branch: &proof.coinbase_branch,
+        },
         &anchor.deposit_script,
     )
     .ok()?;
@@ -309,13 +339,52 @@ mod tests {
         }
     }
 
+    fn coinbase_tx() -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.push(0x01);
+        out.extend_from_slice(&[0u8; 32]);
+        out.extend_from_slice(&[0xff; 4]);
+        out.push(0x04);
+        out.extend_from_slice(&[0x03, 0x01, 0x00, 0x00]);
+        out.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+        out.push(0x01);
+        out.extend_from_slice(&5_000_000_000u64.to_le_bytes());
+        out.push(0x01);
+        out.push(0x51);
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out
+    }
+
+    fn coinbase_id() -> [u8; 32] {
+        Transaction::parse(&coinbase_tx()).unwrap().txid()
+    }
+
+    fn mine_with(txid: [u8; 32]) -> BlockHeader {
+        let mut buf = [0u8; 64];
+        buf[..32].copy_from_slice(&coinbase_id());
+        buf[32..].copy_from_slice(&txid);
+        mine(qtv_btc_spv::sha256::double_sha256(&buf))
+    }
+
     fn proof_for(header: &BlockHeader, raw_tx: Vec<u8>) -> BitcoinMintProof {
+        let txid = Transaction::parse(&raw_tx)
+            .map(|tx| tx.txid())
+            .unwrap_or([0u8; 32]);
         BitcoinMintProof {
             start_height: 0,
             headers: vec![header.serialize()],
             deposit_height: 0,
-            branch: vec![],
+            branch: vec![MerkleStep {
+                hash: coinbase_id(),
+                sibling_on_left: true,
+            }],
             raw_tx,
+            coinbase_tx: coinbase_tx(),
+            coinbase_branch: vec![MerkleStep {
+                hash: txid,
+                sibling_on_left: false,
+            }],
         }
     }
 
@@ -334,7 +403,7 @@ mod tests {
         let recipient = [0x42u8; 32];
         let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return(recipient))]);
         let txid = Transaction::parse(&raw).unwrap().txid();
-        let header = mine(txid);
+        let header = mine_with(txid);
         let fact = verify_bitcoin_mint(
             &anchor_for(&header, bridge.clone()),
             &proof_for(&header, raw),
@@ -353,7 +422,7 @@ mod tests {
         let bridge = p2pkh([0x11; 20]);
         let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return([0x42u8; 32]))]);
         let txid = Transaction::parse(&raw).unwrap().txid();
-        let header = mine(txid);
+        let header = mine_with(txid);
         let mut anchor = anchor_for(&header, bridge);
         anchor.network = NETWORK_BITCOIN_CASH;
         let proof = proof_for(&header, raw);
@@ -366,7 +435,7 @@ mod tests {
         let bridge = p2pkh([0x11; 20]);
         let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return([0x42u8; 32]))]);
         let txid = Transaction::parse(&raw).unwrap().txid();
-        let header = mine(txid);
+        let header = mine_with(txid);
         let anchor = anchor_for(&header, bridge);
         let proof = proof_for(&header, raw);
         let work = bitcoin_mint_work(&anchor, &proof).expect("a real proof carries work");
@@ -388,7 +457,7 @@ mod tests {
         let bridge = p2pkh([0x11; 20]);
         let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return([0x42u8; 32]))]);
         let txid = Transaction::parse(&raw).unwrap().txid();
-        let header = mine(txid);
+        let header = mine_with(txid);
         let mut proof = proof_for(&header, raw);
         proof.branch = vec![MerkleStep {
             hash: [0x99u8; 32],
@@ -405,7 +474,7 @@ mod tests {
         let elsewhere = p2pkh([0x22; 20]);
         let raw = raw_deposit_tx(&[(250_000, elsewhere), (0, op_return([0x42u8; 32]))]);
         let txid = Transaction::parse(&raw).unwrap().txid();
-        let header = mine(txid);
+        let header = mine_with(txid);
         assert_eq!(
             verify_bitcoin_mint(
                 &anchor_for(&header, p2pkh([0x11; 20])),
@@ -421,7 +490,7 @@ mod tests {
         let bridge = p2pkh([0x11; 20]);
         let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return([0x42u8; 32]))]);
         let txid = Transaction::parse(&raw).unwrap().txid();
-        let header = mine(txid);
+        let header = mine_with(txid);
         let mut anchor = anchor_for(&header, bridge);
         anchor.checkpoint_hash = [0xabu8; 32];
         assert_eq!(

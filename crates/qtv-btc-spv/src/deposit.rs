@@ -14,6 +14,27 @@ pub struct TrustlessDeposit {
     pub confirmations: u32,
 }
 
+pub struct CoinbaseProof<'a> {
+    pub raw_tx: &'a [u8],
+    pub branch: &'a [MerkleStep],
+}
+
+const SATS_PER_BTC: u128 = 100_000_000;
+
+pub fn confirmations_for(amount: u128, base: u32) -> u32 {
+    let scale = if amount <= SATS_PER_BTC {
+        1
+    } else if amount <= 10 * SATS_PER_BTC {
+        2
+    } else if amount <= 100 * SATS_PER_BTC {
+        6
+    } else {
+        24
+    };
+    base.saturating_mul(scale)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn verify_trustless_deposit(
     chain: &VerifiedChain,
     params: &NetworkParams,
@@ -21,6 +42,7 @@ pub fn verify_trustless_deposit(
     deposit_height: u32,
     branch: &[MerkleStep],
     raw_tx: &[u8],
+    coinbase: &CoinbaseProof<'_>,
     deposit_script: &[u8],
 ) -> Result<TrustlessDeposit, SpvError> {
     let pinned;
@@ -32,13 +54,33 @@ pub fn verify_trustless_deposit(
         checkpoint
     };
     chain.anchored_to(anchor)?;
+    let first = Transaction::parse(coinbase.raw_tx)?;
+    if !first.is_coinbase() || coinbase.branch.iter().any(|step| step.sibling_on_left) {
+        return Err(SpvError::TransactionMismatch);
+    }
+    chain.verify_deposit(
+        deposit_height,
+        first.txid(),
+        coinbase.branch,
+        params.confirmation_depth,
+    )?;
+    if branch.len() != coinbase.branch.len() {
+        return Err(SpvError::MerkleMismatch);
+    }
     let tx = Transaction::parse(raw_tx)?;
+    if tx.is_coinbase() {
+        return Err(SpvError::TransactionMismatch);
+    }
     let txid = tx.txid();
-    let confirmed =
-        chain.verify_deposit(deposit_height, txid, branch, params.confirmation_depth)?;
     let (amount, recipient) = tx
         .deposit_to(deposit_script)
         .ok_or(SpvError::TransactionMismatch)?;
+    let confirmed = chain.verify_deposit(
+        deposit_height,
+        txid,
+        branch,
+        confirmations_for(amount, params.confirmation_depth),
+    )?;
     Ok(TrustlessDeposit {
         txid,
         amount,
@@ -96,11 +138,68 @@ mod tests {
         out
     }
 
-    fn mined_block(txid: [u8; 32]) -> BlockHeader {
+    fn coinbase_tx() -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.push(0x01);
+        out.extend_from_slice(&[0u8; 32]);
+        out.extend_from_slice(&[0xff; 4]);
+        out.push(0x04);
+        out.extend_from_slice(&[0x03, 0x01, 0x00, 0x00]);
+        out.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+        out.push(0x01);
+        out.extend_from_slice(&5_000_000_000u64.to_le_bytes());
+        out.push(0x01);
+        out.push(0x51);
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out
+    }
+
+    struct Block {
+        header: BlockHeader,
+        coinbase: Vec<u8>,
+        coinbase_branch: Vec<MerkleStep>,
+        branch: Vec<MerkleStep>,
+    }
+
+    impl Block {
+        fn coinbase(&self) -> CoinbaseProof<'_> {
+            CoinbaseProof {
+                raw_tx: &self.coinbase,
+                branch: &self.coinbase_branch,
+            }
+        }
+    }
+
+    fn pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+        let mut buf = [0u8; 64];
+        buf[..32].copy_from_slice(left);
+        buf[32..].copy_from_slice(right);
+        crate::sha256::double_sha256(&buf)
+    }
+
+    fn block_with(txid: [u8; 32]) -> Block {
+        let coinbase = coinbase_tx();
+        let coinbase_id = Transaction::parse(&coinbase).unwrap().txid();
+        Block {
+            header: mined_block(pair(&coinbase_id, &txid)),
+            coinbase,
+            coinbase_branch: vec![MerkleStep {
+                hash: txid,
+                sibling_on_left: false,
+            }],
+            branch: vec![MerkleStep {
+                hash: coinbase_id,
+                sibling_on_left: true,
+            }],
+        }
+    }
+
+    fn mined_block(root: [u8; 32]) -> BlockHeader {
         let mut header = BlockHeader {
             version: 1,
             prev_block: [0u8; 32],
-            merkle_root: txid,
+            merkle_root: root,
             timestamp: 1_700_000_000,
             bits: EASY.pow_limit_bits,
             nonce: 0,
@@ -117,15 +216,17 @@ mod tests {
         let recipient = [0x42u8; 32];
         let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return(recipient))]);
         let txid = Transaction::parse(&raw).unwrap().txid();
-        let chain = verify_chain(&[mined_block(txid)], 0, &EASY).unwrap();
+        let block = block_with(txid);
+        let chain = verify_chain(&[block.header], 0, &EASY).unwrap();
 
         let proven = verify_trustless_deposit(
             &chain,
             &EASY,
             &Checkpoint::accepting(&chain),
             0,
-            &[],
+            &block.branch,
             &raw,
+            &block.coinbase(),
             &bridge,
         )
         .unwrap();
@@ -145,10 +246,11 @@ mod tests {
         let recipient = [0x42u8; 32];
         let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return(recipient))]);
         let txid = Transaction::parse(&raw).unwrap().txid();
-        let chain = verify_chain(&[mined_block(txid)], 0, &armed).unwrap();
+        let block = block_with(txid);
+        let chain = verify_chain(&[block.header], 0, &armed).unwrap();
 
         assert_eq!(
-            verify_trustless_deposit(&chain, &armed, &Checkpoint::accepting(&chain), 0, &[], &raw, &bridge),
+            verify_trustless_deposit(&chain, &armed, &Checkpoint::accepting(&chain), 0, &block.branch, &raw, &block.coinbase(), &bridge),
             Err(SpvError::CheckpointNotArmed),
             "a checkpoint requiring network anchors only to its pinned block, never a caller supplied one"
         );
@@ -160,7 +262,8 @@ mod tests {
         let recipient = [0x42u8; 32];
         let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return(recipient))]);
         let txid = Transaction::parse(&raw).unwrap().txid();
-        let chain = verify_chain(&[mined_block(txid)], 0, &EASY).unwrap();
+        let block = block_with(txid);
+        let chain = verify_chain(&[block.header], 0, &EASY).unwrap();
 
         let foreign = Checkpoint {
             height: 0,
@@ -168,7 +271,16 @@ mod tests {
             min_work: crate::work::U256::ZERO,
         };
         assert_eq!(
-            verify_trustless_deposit(&chain, &EASY, &foreign, 0, &[], &raw, &bridge),
+            verify_trustless_deposit(
+                &chain,
+                &EASY,
+                &foreign,
+                0,
+                &block.branch,
+                &raw,
+                &block.coinbase(),
+                &bridge
+            ),
             Err(SpvError::CheckpointMismatch),
             "a proof on a chain the caller mined off its own history cannot admit"
         );
@@ -184,15 +296,17 @@ mod tests {
             (0, op_return(recipient)),
         ]);
         let txid = Transaction::parse(&raw).unwrap().txid();
-        let chain = verify_chain(&[mined_block(txid)], 0, &EASY).unwrap();
+        let block = block_with(txid);
+        let chain = verify_chain(&[block.header], 0, &EASY).unwrap();
 
         let proven = verify_trustless_deposit(
             &chain,
             &EASY,
             &Checkpoint::accepting(&chain),
             0,
-            &[],
+            &block.branch,
             &raw,
+            &block.coinbase(),
             &bridge,
         )
         .unwrap();
@@ -207,7 +321,8 @@ mod tests {
         let recipient = [0x42u8; 32];
         let raw = raw_deposit_tx(&[(250_000, elsewhere), (0, op_return(recipient))]);
         let txid = Transaction::parse(&raw).unwrap().txid();
-        let chain = verify_chain(&[mined_block(txid)], 0, &EASY).unwrap();
+        let block = block_with(txid);
+        let chain = verify_chain(&[block.header], 0, &EASY).unwrap();
 
         assert_eq!(
             verify_trustless_deposit(
@@ -215,8 +330,9 @@ mod tests {
                 &EASY,
                 &Checkpoint::accepting(&chain),
                 0,
-                &[],
+                &block.branch,
                 &raw,
+                &block.coinbase(),
                 &bridge
             ),
             Err(SpvError::TransactionMismatch)
@@ -229,15 +345,17 @@ mod tests {
         let recipient = [0x42u8; 32];
         let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return(recipient))]);
         let txid = Transaction::parse(&raw).unwrap().txid();
-        let chain = verify_chain(&[mined_block(txid)], 0, &EASY).unwrap();
+        let block = block_with(txid);
+        let chain = verify_chain(&[block.header], 0, &EASY).unwrap();
 
         let proven = verify_trustless_deposit(
             &chain,
             &EASY,
             &Checkpoint::accepting(&chain),
             0,
-            &[],
+            &block.branch,
             &raw,
+            &block.coinbase(),
             &bridge,
         )
         .unwrap();
@@ -263,7 +381,8 @@ mod tests {
         let recipient = [0x42u8; 32];
         let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return(recipient))]);
         let txid = Transaction::parse(&raw).unwrap().txid();
-        let chain = verify_chain(&[mined_block(txid)], 0, &deep).unwrap();
+        let block = block_with(txid);
+        let chain = verify_chain(&[block.header], 0, &deep).unwrap();
 
         assert_eq!(
             verify_trustless_deposit(
@@ -271,8 +390,9 @@ mod tests {
                 &deep,
                 &Checkpoint::accepting(&chain),
                 0,
-                &[],
+                &block.branch,
                 &raw,
+                &block.coinbase(),
                 &bridge
             ),
             Err(SpvError::InsufficientConfirmations { have: 1, need: 3 })
@@ -286,7 +406,8 @@ mod tests {
         let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return(recipient))]);
         let other = raw_deposit_tx(&[(999, bridge.clone()), (0, op_return([0x7u8; 32]))]);
         let other_txid = Transaction::parse(&other).unwrap().txid();
-        let chain = verify_chain(&[mined_block(other_txid)], 0, &EASY).unwrap();
+        let block = block_with(other_txid);
+        let chain = verify_chain(&[block.header], 0, &EASY).unwrap();
 
         assert_eq!(
             verify_trustless_deposit(
@@ -294,11 +415,111 @@ mod tests {
                 &EASY,
                 &Checkpoint::accepting(&chain),
                 0,
-                &[],
+                &block.branch,
                 &raw,
+                &block.coinbase(),
                 &bridge
             ),
             Err(SpvError::MerkleMismatch)
         );
+    }
+
+    #[test]
+    fn a_fake_transaction_hung_under_a_64_byte_one_is_refused() {
+        let bridge = p2pkh([0x11; 20]);
+        let recipient = [0x42u8; 32];
+        let fake = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return(recipient))]);
+        let fake_id = Transaction::parse(&fake).unwrap().txid();
+        let left = [0x5au8; 32];
+        let sixty_four_byte_node = pair(&left, &fake_id);
+        let coinbase = coinbase_tx();
+        let coinbase_id = Transaction::parse(&coinbase).unwrap().txid();
+        let header = mined_block(pair(&coinbase_id, &sixty_four_byte_node));
+        let chain = verify_chain(&[header], 0, &EASY).unwrap();
+        let coinbase_branch = vec![MerkleStep {
+            hash: sixty_four_byte_node,
+            sibling_on_left: false,
+        }];
+        let branch = vec![
+            MerkleStep {
+                hash: left,
+                sibling_on_left: true,
+            },
+            MerkleStep {
+                hash: coinbase_id,
+                sibling_on_left: true,
+            },
+        ];
+        assert_eq!(
+            verify_trustless_deposit(
+                &chain,
+                &EASY,
+                &Checkpoint::accepting(&chain),
+                0,
+                &branch,
+                &fake,
+                &CoinbaseProof {
+                    raw_tx: &coinbase,
+                    branch: &coinbase_branch,
+                },
+                &bridge
+            ),
+            Err(SpvError::MerkleMismatch),
+            "the branch is one level deeper than the tree the coinbase proves"
+        );
+    }
+
+    #[test]
+    fn a_coinbase_proof_must_carry_a_coinbase() {
+        let bridge = p2pkh([0x11; 20]);
+        let raw = raw_deposit_tx(&[(250_000, bridge.clone()), (0, op_return([0x42; 32]))]);
+        let txid = Transaction::parse(&raw).unwrap().txid();
+        let block = block_with(txid);
+        let chain = verify_chain(&[block.header], 0, &EASY).unwrap();
+        assert_eq!(
+            verify_trustless_deposit(
+                &chain,
+                &EASY,
+                &Checkpoint::accepting(&chain),
+                0,
+                &block.branch,
+                &raw,
+                &CoinbaseProof {
+                    raw_tx: &raw,
+                    branch: &block.coinbase_branch,
+                },
+                &bridge
+            ),
+            Err(SpvError::TransactionMismatch)
+        );
+    }
+
+    #[test]
+    fn a_larger_deposit_waits_for_more_confirmations() {
+        let bridge = p2pkh([0x11; 20]);
+        let raw = raw_deposit_tx(&[
+            (5 * 100_000_000, bridge.clone()),
+            (0, op_return([0x42; 32])),
+        ]);
+        let txid = Transaction::parse(&raw).unwrap().txid();
+        let block = block_with(txid);
+        let chain = verify_chain(&[block.header], 0, &EASY).unwrap();
+        assert_eq!(
+            verify_trustless_deposit(
+                &chain,
+                &EASY,
+                &Checkpoint::accepting(&chain),
+                0,
+                &block.branch,
+                &raw,
+                &block.coinbase(),
+                &bridge
+            ),
+            Err(SpvError::InsufficientConfirmations { have: 1, need: 2 })
+        );
+        assert_eq!(confirmations_for(100_000_000, 6), 6);
+        assert_eq!(confirmations_for(10 * 100_000_000, 6), 12);
+        assert_eq!(confirmations_for(100 * 100_000_000, 6), 36);
+        assert_eq!(confirmations_for(21_000_000 * 100_000_000, 6), 144);
     }
 }

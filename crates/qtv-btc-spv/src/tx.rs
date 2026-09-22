@@ -174,6 +174,13 @@ impl Transaction {
         out
     }
 
+    pub fn is_coinbase(&self) -> bool {
+        matches!(self.inputs.as_slice(), [only]
+            if only.raw.len() >= 36
+                && only.raw[..32].iter().all(|&b| b == 0)
+                && only.raw[32..36] == [0xff; 4])
+    }
+
     pub fn txid(&self) -> [u8; 32] {
         double_sha256(&self.legacy_bytes())
     }

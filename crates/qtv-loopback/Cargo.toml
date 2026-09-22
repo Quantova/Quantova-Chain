@@ -34,8 +34,8 @@ qtv-devnet = { path = "../qtv-devnet", features = ["test-fixtures"] }
 
 # The consensus parameters reported alongside the numbers, pinned at the same tag the
 # devnet uses so the whole graph keeps one crypto version.
-qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "7f48fca9b7bd6b6f8b558fd587683a851c235f92" }
-qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "7f48fca9b7bd6b6f8b558fd587683a851c235f92" }
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "6c8249ff9b0d8dcc94ba79c8f742079136186cb6" }
+qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "6c8249ff9b0d8dcc94ba79c8f742079136186cb6" }
 
 [lints]
 workspace = true

@@ -227,6 +227,10 @@ fn encode_deposit(out: &mut Vec<u8>, deposit: &DepositProof) {
         put_u32(out, node.len());
         out.extend_from_slice(node);
     }
+    put_u32(out, deposit.ancestry.len());
+    for header in &deposit.ancestry {
+        encode_header(out, header);
+    }
 }
 
 fn decode_deposit(cursor: &mut Cursor) -> Option<DepositProof> {
@@ -243,9 +247,18 @@ fn decode_deposit(cursor: &mut Cursor) -> Option<DepositProof> {
         }
         receipt_proof.push(cursor.take(len)?.to_vec());
     }
+    let links = cursor.u32()? as usize;
+    if links > qlc_ethereum::engine::MAX_DEPOSIT_ANCESTRY {
+        return None;
+    }
+    let mut ancestry = Vec::with_capacity(links);
+    for _ in 0..links {
+        ancestry.push(decode_header(cursor)?);
+    }
     Some(DepositProof {
         receipt_index,
         receipt_proof,
+        ancestry,
     })
 }
 
@@ -323,10 +336,13 @@ impl EthMintProof {
     }
 
     pub fn source_key(&self) -> (u32, [u8; 32]) {
-        let finalized_root = self.update.finalized_header.hash_tree_root();
+        let block_root = self
+            .deposit
+            .deposit_block(&self.update.finalized_header)
+            .hash_tree_root();
         (
             eth_source_chain(self.config_selector),
-            eth_source_ref(&finalized_root, self.deposit.receipt_index),
+            eth_source_ref(&block_root, self.deposit.receipt_index),
         )
     }
 }
@@ -335,6 +351,8 @@ pub const MAX_ETH_UPDATE_BYTES: usize = 1 << 18;
 
 fn encode_committee_update(out: &mut Vec<u8>, update: &SyncCommitteeUpdate) {
     encode_header(out, &update.attested_header);
+    encode_header(out, &update.finalized_header);
+    encode_branch(out, &update.finality_branch);
     encode_committee(out, &update.next_sync_committee);
     encode_branch(out, &update.next_sync_committee_branch);
     encode_aggregate(out, &update.sync_aggregate);
@@ -343,12 +361,16 @@ fn encode_committee_update(out: &mut Vec<u8>, update: &SyncCommitteeUpdate) {
 
 fn decode_committee_update(cursor: &mut Cursor) -> Option<SyncCommitteeUpdate> {
     let attested_header = decode_header(cursor)?;
+    let finalized_header = decode_header(cursor)?;
+    let finality_branch = decode_branch(cursor)?;
     let next_sync_committee = decode_committee(cursor)?;
     let next_sync_committee_branch = decode_branch(cursor)?;
     let sync_aggregate = decode_aggregate(cursor)?;
     let signature_slot = cursor.u64()?;
     Some(SyncCommitteeUpdate {
         attested_header,
+        finalized_header,
+        finality_branch,
         next_sync_committee,
         next_sync_committee_branch,
         sync_aggregate,
@@ -448,7 +470,10 @@ pub fn verify_eth_mint(anchor: &EthAnchor, proof: &EthMintProof, dest_chain: u32
     } else {
         return None;
     };
-    let finalized_root = proof.update.finalized_header.hash_tree_root();
+    let block_root = proof
+        .deposit
+        .deposit_block(&proof.update.finalized_header)
+        .hash_tree_root();
     let store = LightClientStore::from_trusted_committee(
         config,
         period,
@@ -471,7 +496,7 @@ pub fn verify_eth_mint(anchor: &EthAnchor, proof: &EthMintProof, dest_chain: u32
         route_id: 0,
         direction: Direction::Deposit,
         nonce: 0,
-        source_ref: eth_source_ref(&finalized_root, proof.deposit.receipt_index),
+        source_ref: eth_source_ref(&block_root, proof.deposit.receipt_index),
         asset_id: anchor.asset_id,
         amount: deposit.amount(),
         recipient: deposit.recipient(),
@@ -522,6 +547,7 @@ mod tests {
                 },
             },
             deposit: DepositProof {
+                ancestry: vec![dummy_header(0x31), dummy_header(0x32)],
                 receipt_index: 3,
                 receipt_proof: vec![vec![0xa1, 0xa2], vec![], vec![0xb1; 40]],
             },
@@ -534,6 +560,8 @@ mod tests {
             current_sync_committee: dummy_committee(5),
             update: SyncCommitteeUpdate {
                 attested_header: dummy_header(0x30),
+                finalized_header: dummy_header(0x21),
+                finality_branch: vec![[0x5a; 32], [0x5b; 32]],
                 next_sync_committee: dummy_committee(5),
                 next_sync_committee_branch: vec![[0x51; 32], [0x52; 32]],
                 sync_aggregate: SyncAggregate {
@@ -623,14 +651,25 @@ mod tests {
     }
 
     #[test]
-    fn the_source_key_is_per_chain_and_per_finalized_receipt() {
+    fn the_source_key_is_per_chain_and_per_deposit_block_receipt() {
         let proof = dummy_proof();
         let (chain, reference) = proof.source_key();
         assert_eq!(chain, eth_source_chain(proof.config_selector));
-        let finalized_root = proof.update.finalized_header.hash_tree_root();
+        let block_root = proof
+            .deposit
+            .ancestry
+            .last()
+            .expect("the dummy proof reaches back")
+            .hash_tree_root();
         assert_eq!(
             reference,
-            eth_source_ref(&finalized_root, proof.deposit.receipt_index)
+            eth_source_ref(&block_root, proof.deposit.receipt_index)
+        );
+        let finalized_root = proof.update.finalized_header.hash_tree_root();
+        assert_ne!(
+            reference,
+            eth_source_ref(&finalized_root, proof.deposit.receipt_index),
+            "a deposit is keyed by its own block, not by whichever finalized block proved it"
         );
         assert_ne!(eth_source_chain(0), eth_source_chain(1));
     }

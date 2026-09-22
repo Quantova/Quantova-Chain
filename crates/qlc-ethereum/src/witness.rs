@@ -234,6 +234,7 @@ mod tests {
         };
 
         let deposit = DepositProof {
+            ancestry: Vec::new(),
             receipt_index: 3,
             receipt_proof,
         };

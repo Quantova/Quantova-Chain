@@ -5107,7 +5107,26 @@ mod tests {
             (0, btc_op_return(recipient)),
         ]);
         let txid = qtv_btc_spv::tx::Transaction::parse(&raw).unwrap().txid();
-        let header = btc_mine(txid);
+        let mut coinbase = Vec::new();
+        coinbase.extend_from_slice(&1u32.to_le_bytes());
+        coinbase.push(0x01);
+        coinbase.extend_from_slice(&[0u8; 32]);
+        coinbase.extend_from_slice(&[0xff; 4]);
+        coinbase.push(0x04);
+        coinbase.extend_from_slice(&[0x03, 0x01, 0x00, 0x00]);
+        coinbase.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+        coinbase.push(0x01);
+        coinbase.extend_from_slice(&5_000_000_000u64.to_le_bytes());
+        coinbase.push(0x01);
+        coinbase.push(0x51);
+        coinbase.extend_from_slice(&0u32.to_le_bytes());
+        let coinbase_id = qtv_btc_spv::tx::Transaction::parse(&coinbase)
+            .unwrap()
+            .txid();
+        let mut pair = [0u8; 64];
+        pair[..32].copy_from_slice(&coinbase_id);
+        pair[32..].copy_from_slice(&txid);
+        let header = btc_mine(qtv_btc_spv::sha256::double_sha256(&pair));
         let anchor = crate::bridge_btc::BitcoinAnchor {
             network: 255,
             checkpoint_height: 0,
@@ -5121,8 +5140,16 @@ mod tests {
             start_height: 0,
             headers: vec![header.serialize()],
             deposit_height: 0,
-            branch: vec![],
+            branch: vec![qtv_btc_spv::MerkleStep {
+                hash: coinbase_id,
+                sibling_on_left: true,
+            }],
             raw_tx: raw,
+            coinbase_tx: coinbase,
+            coinbase_branch: vec![qtv_btc_spv::MerkleStep {
+                hash: txid,
+                sibling_on_left: false,
+            }],
         };
         let relayer = keypair(410);
         let tx = system_tx(
@@ -5159,8 +5186,9 @@ mod tests {
     fn an_early_committee_update_teaches_the_next_committee_and_moves_nothing() {
         use q_bls::testsign::{aggregate_sign, keypair_from_ikm, BlsKeypair};
         use qlc_ethereum::beacon::{
-            compute_domain, compute_signing_root, next_sync_committee_layout, BeaconBlockHeader,
-            SyncAggregate, SyncCommittee, DOMAIN_SYNC_COMMITTEE,
+            compute_domain, compute_signing_root, finalized_root_layout,
+            next_sync_committee_layout, BeaconBlockHeader, SyncAggregate, SyncCommittee,
+            DOMAIN_SYNC_COMMITTEE,
         };
         use qlc_ethereum::bls::BlsPubkey;
         use qlc_ethereum::engine::SyncCommitteeUpdate;
@@ -5192,13 +5220,25 @@ mod tests {
         let update = |period: u64, signers: &[BlsKeypair], next: &SyncCommittee| {
             let attested_slot = period * PERIOD_SLOTS + 60;
             let signature_slot = period * PERIOD_SLOTS + 100;
-            let (index, depth) = next_sync_committee_layout(cfg.is_electra_at_slot(attested_slot));
-            let branch: Vec<[u8; 32]> = (0..depth).map(|i| [0xc0 + i as u8; 32]).collect();
+            let electra = cfg.is_electra_at_slot(attested_slot);
+            let (index, depth) = next_sync_committee_layout(electra);
+            let (fin_index, fin_depth) = finalized_root_layout(electra);
+            let finalized_header = BeaconBlockHeader {
+                slot: period * PERIOD_SLOTS + 40,
+                proposer_index: 99,
+                parent_root: [0x01; 32],
+                state_root: [0x02; 32],
+                body_root: [0x05; 32],
+            };
+            let (state_root, finality_branch, branch) = ssz::two_leaf_tree(
+                (finalized_header.hash_tree_root(), fin_index, fin_depth),
+                (next.hash_tree_root(), index, depth),
+            );
             let attested_header = BeaconBlockHeader {
                 slot: attested_slot,
                 proposer_index: 100,
                 parent_root: [0x03; 32],
-                state_root: ssz::merkle_root_from_branch(&next.hash_tree_root(), &branch, index),
+                state_root,
                 body_root: [0x04; 32],
             };
             let fork_version = cfg.fork_version_at_slot(signature_slot - 1);
@@ -5211,6 +5251,8 @@ mod tests {
             let keys: Vec<&BlsKeypair> = signers.iter().collect();
             SyncCommitteeUpdate {
                 attested_header,
+                finalized_header,
+                finality_branch,
                 next_sync_committee: next.clone(),
                 next_sync_committee_branch: branch,
                 sync_aggregate: SyncAggregate {
@@ -5385,6 +5427,7 @@ mod tests {
             },
         };
         let deposit = DepositProof {
+            ancestry: Vec::new(),
             receipt_index: 3,
             receipt_proof,
         };
