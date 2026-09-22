@@ -70,10 +70,7 @@ impl EvmChainConfig {
     }
 
     pub fn verifies_beacon_sync_committee(&self) -> bool {
-        matches!(
-            self.consensus,
-            ConsensusKind::BeaconSyncCommittee | ConsensusKind::SettlesToEthereum
-        )
+        matches!(self.consensus, ConsensusKind::BeaconSyncCommittee)
     }
 }
 
@@ -370,10 +367,10 @@ mod tests {
     #[test]
     fn the_consensus_kind_selects_the_sync_committee_path() {
         assert!(ethereum().verifies_beacon_sync_committee());
-        assert!(arbitrum().verifies_beacon_sync_committee());
-        assert!(optimism().verifies_beacon_sync_committee());
-        assert!(base().verifies_beacon_sync_committee());
-        assert!(robinhood_chain().verifies_beacon_sync_committee());
+        assert!(!arbitrum().verifies_beacon_sync_committee());
+        assert!(!optimism().verifies_beacon_sync_committee());
+        assert!(!base().verifies_beacon_sync_committee());
+        assert!(!robinhood_chain().verifies_beacon_sync_committee());
         assert!(!bnb_chain().verifies_beacon_sync_committee());
         assert!(!polygon().verifies_beacon_sync_committee());
         assert!(!avalanche().verifies_beacon_sync_committee());

@@ -10,7 +10,7 @@ use qlc_ethereum::config::{
     EvmChainConfig,
 };
 use qlc_ethereum::engine::{
-    advance_period, apply_sync_committee_update, DepositProof, ExecutionCommit, LightClientStore,
+    apply_sync_committee_update, DepositProof, ExecutionCommit, LightClientStore,
     LightClientUpdate, SyncCommitteeUpdate,
 };
 use qlc_ethereum::verify_trustless_deposit;
@@ -254,16 +254,18 @@ pub struct EthAnchor {
     pub config_selector: u8,
     pub period: u64,
     pub sync_committee_root: [u8; 32],
+    pub next_sync_committee_root: [u8; 32],
     pub deposit_contract: [u8; 20],
     pub asset_id: [u8; 16],
 }
 
 impl EthAnchor {
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(1 + 8 + 32 + 20 + 16);
+        let mut out = Vec::with_capacity(1 + 8 + 32 + 32 + 20 + 16);
         out.push(self.config_selector);
         out.extend_from_slice(&self.period.to_le_bytes());
         out.extend_from_slice(&self.sync_committee_root);
+        out.extend_from_slice(&self.next_sync_committee_root);
         out.extend_from_slice(&self.deposit_contract);
         out.extend_from_slice(&self.asset_id);
         out
@@ -274,12 +276,14 @@ impl EthAnchor {
         let config_selector = cursor.u8()?;
         let period = cursor.u64()?;
         let sync_committee_root = cursor.arr32()?;
+        let next_sync_committee_root = cursor.arr32()?;
         let deposit_contract: [u8; 20] = cursor.take(20)?.try_into().ok()?;
         let asset_id: [u8; 16] = cursor.take(16)?.try_into().ok()?;
         cursor.done().then_some(EthAnchor {
             config_selector,
             period,
             sync_committee_root,
+            next_sync_committee_root,
             deposit_contract,
             asset_id,
         })
@@ -392,22 +396,34 @@ pub fn verify_eth_committee_update(
     if proof.current_sync_committee.pubkeys.len() != config.sync_committee_size {
         return None;
     }
-    if proof.current_sync_committee.hash_tree_root() != anchor.sync_committee_root {
+    let root = proof.current_sync_committee.hash_tree_root();
+    let (period, rotating) = if root == anchor.sync_committee_root {
+        (anchor.period, false)
+    } else if anchor.next_sync_committee_root != [0u8; 32]
+        && root == anchor.next_sync_committee_root
+    {
+        (anchor.period.checked_add(1)?, true)
+    } else {
         return None;
-    }
+    };
     let mut store = LightClientStore::from_trusted_committee(
         config,
-        anchor.period,
+        period,
         proof.current_sync_committee.clone(),
         proof.update.attested_header,
     );
     let verifier = Bls12381AggregateVerifier::new();
     apply_sync_committee_update(&mut store, &proof.update, &verifier).ok()?;
-    advance_period(&mut store).ok()?;
+    let learned = store.next_sync_committee()?.hash_tree_root();
     Some(EthAnchor {
         config_selector: anchor.config_selector,
-        period: anchor.period.saturating_add(1),
-        sync_committee_root: store.current_sync_committee().hash_tree_root(),
+        period,
+        sync_committee_root: if rotating {
+            root
+        } else {
+            anchor.sync_committee_root
+        },
+        next_sync_committee_root: learned,
         deposit_contract: anchor.deposit_contract,
         asset_id: anchor.asset_id,
     })
@@ -422,13 +438,20 @@ pub fn verify_eth_mint(anchor: &EthAnchor, proof: &EthMintProof, dest_chain: u32
     if proof.sync_committee.pubkeys.len() != config.sync_committee_size {
         return None;
     }
-    if proof.sync_committee.hash_tree_root() != anchor.sync_committee_root {
+    let root = proof.sync_committee.hash_tree_root();
+    let period = if root == anchor.sync_committee_root {
+        anchor.period
+    } else if anchor.next_sync_committee_root != [0u8; 32]
+        && root == anchor.next_sync_committee_root
+    {
+        anchor.period.checked_add(1)?
+    } else {
         return None;
-    }
+    };
     let finalized_root = proof.update.finalized_header.hash_tree_root();
     let store = LightClientStore::from_trusted_committee(
         config,
-        anchor.period,
+        period,
         proof.sync_committee.clone(),
         proof.update.finalized_header,
     );
@@ -535,6 +558,7 @@ mod tests {
             config_selector: 3,
             period: 5,
             sync_committee_root: [0xff; 32],
+            next_sync_committee_root: [0u8; 32],
             deposit_contract: [0xbc; 20],
             asset_id: [0x0e; 16],
         };
@@ -547,6 +571,7 @@ mod tests {
             config_selector: 2,
             period: 0x1122_3344_5566_7788,
             sync_committee_root: [0x9a; 32],
+            next_sync_committee_root: [0u8; 32],
             deposit_contract: [0xbc; 20],
             asset_id: [0x0e; 16],
         };
@@ -559,6 +584,7 @@ mod tests {
             config_selector: 0,
             period: 7,
             sync_committee_root: [1; 32],
+            next_sync_committee_root: [0u8; 32],
             deposit_contract: [2; 20],
             asset_id: [3; 16],
         };
@@ -573,6 +599,7 @@ mod tests {
             config_selector: 0,
             period: 7,
             sync_committee_root: [1; 32],
+            next_sync_committee_root: [0u8; 32],
             deposit_contract: [2; 20],
             asset_id: [3; 16],
         };

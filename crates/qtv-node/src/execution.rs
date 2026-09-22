@@ -340,6 +340,13 @@ pub fn execute_contract_call_lazy(
     // force arbitrarily many lookups inside its own meter budget. The two sets are
     // disjoint by construction: the loader only runs on a miss in `storage`.
     let touched = outcome.storage.len() as u64 + outcome.fetched as u64;
+    let meter_used = outcome
+        .meter_used
+        .saturating_add(access_cost)
+        .saturating_add(touched.saturating_mul(SLOT_ACCESS_METER));
+    if meter_used > meter_limit {
+        return Err(ExecError::MeterExhausted);
+    }
     Ok(ContractOutcome {
         storage: outcome
             .dirty
@@ -347,10 +354,7 @@ pub fn execute_contract_call_lazy(
             .filter_map(|slot| outcome.storage.get(slot).map(|v| (*slot, *v)))
             .collect(),
         effects: outcome.effects,
-        meter_used: outcome
-            .meter_used
-            .saturating_add(access_cost)
-            .saturating_add(touched.saturating_mul(SLOT_ACCESS_METER)),
+        meter_used,
     })
 }
 

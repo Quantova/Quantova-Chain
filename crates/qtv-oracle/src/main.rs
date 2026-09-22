@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 use std::env;
 use std::fs;
-use std::io::Read;
 
 use qtv_account::{address_for_key, derive};
 use qtv_codec::to_bytes;
@@ -22,9 +21,8 @@ const MINT_METER: u64 = 5_000_000;
 const GUARDIAN_DOMAIN: &[u8] = b"QUANTOVA/Q/BRIDGE-GUARDIAN/v1";
 
 fn urandom(n: usize) -> Vec<u8> {
-    let mut f = fs::File::open("/dev/urandom").expect("open /dev/urandom");
     let mut b = vec![0u8; n];
-    f.read_exact(&mut b).expect("read /dev/urandom");
+    qtv_crypto::rng::fill_random(&mut b);
     b
 }
 
@@ -87,11 +85,10 @@ fn keygen(a: &[String]) {
         use std::os::unix::fs::OpenOptionsExt;
         let mut file = fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(&secrets_path)
-            .expect("open the secrets file owner only");
+            .expect("create the secrets file, owner only; an existing file is never overwritten");
         file.write_all(secrets.as_bytes()).expect("write secrets");
     }
     #[cfg(not(unix))]
@@ -225,11 +222,12 @@ fn guardian_keygen(a: &[String]) {
         use std::os::unix::fs::OpenOptionsExt;
         let mut file = fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(&gsecret_path)
-            .expect("open the guardian secret owner only");
+            .expect(
+                "create the guardian secret, owner only; an existing file is never overwritten",
+            );
         file.write_all(rendered.as_bytes()).expect("write gsecret");
     }
     #[cfg(not(unix))]

@@ -289,13 +289,14 @@ pub fn serve(
         let limiter = Arc::new(Limiter::default());
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            let ip = limiter_key(
+            let peer = unmapped(
                 stream
                     .peer_addr()
                     .map(|addr| addr.ip())
                     .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
             );
-            if !allow.is_empty() && !allow.contains(&ip) {
+            let ip = limiter_key(peer);
+            if !allow.is_empty() && !allow.contains(&peer) {
                 stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
                 let _ = write_error(
                     &mut stream,
@@ -376,8 +377,16 @@ pub fn serve(
     });
 }
 
+fn unmapped(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+        IpAddr::V4(_) => ip,
+    }
+}
+
 // v6 callers are charged per /64, v4 whole
 fn limiter_key(ip: IpAddr) -> IpAddr {
+    let ip = unmapped(ip);
     match ip {
         IpAddr::V4(_) => ip,
         IpAddr::V6(v6) => {

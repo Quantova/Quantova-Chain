@@ -91,7 +91,7 @@ pub struct Genesis {
     pub bridged_assets: Vec<GenesisBridgedAsset>,
     pub bridge_era: Option<[u8; 32]>,
     // The largest single bridge exit the off chain desk will serve. Unset reads as zero,
-    // which both exit checks treat as no ceiling, so leaving it out is the open setting.
+    // which both exit checks treat as closed: no exit is admitted until a ceiling is set.
     pub bridge_exit_max_amount: Option<u128>,
     pub bridge_bitcoin_anchor: Option<crate::bridge_btc::BitcoinAnchor>,
     pub bridge_eth_anchors: Vec<crate::bridge_eth::EthAnchor>,
@@ -245,6 +245,9 @@ pub(crate) fn governance_admissible(
 ) -> Option<GovOp> {
     let body = wrapper.body();
     if body.call().target() != crate::ledger::gov_system_address() {
+        return None;
+    }
+    if fee_params.native_asset != QTOV_ASSET_TAG {
         return None;
     }
     if !account.has_key() || !qtv_tx::scheme_supported(wrapper.scheme()) || !signature_ok {
@@ -783,6 +786,92 @@ pub(crate) fn is_bridge_eth_update(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::bridge_eth_update_address()
 }
 
+pub(crate) fn transfer_dispatchable(
+    ledger: &Ledger,
+    plan: &crate::mempool::TransferPlan,
+    now_seconds: u64,
+) -> bool {
+    let day = now_seconds / 86_400;
+    let recipient = plan.recipient.as_str();
+    if recipient == crate::ledger::stake_system_address() {
+        ledger.bond_admissible(&plan.sender, plan.amount, plan.fee)
+    } else if recipient == crate::ledger::stake_exit_address() {
+        ledger.request_exit_admissible(&plan.sender, plan.fee, day)
+    } else if recipient == crate::ledger::stake_withdraw_address() {
+        ledger.withdraw_admissible(&plan.sender, plan.fee, day)
+    } else if recipient == crate::ledger::bridge_freeze_address() {
+        ledger.bridge_freeze_admissible(&plan.sender, plan.fee, now_seconds)
+    } else if recipient == crate::ledger::bridge_unfreeze_address() {
+        ledger.bridge_unfreeze_admissible(&plan.sender, plan.fee)
+    } else if recipient == crate::ledger::stake_claim_address() {
+        true
+    } else {
+        !ledger.is_blacklisted(recipient)
+    }
+}
+
+pub(crate) fn feeless_decodes(wrapper: &Wrapper) -> bool {
+    let args = wrapper.body().call().args();
+    if is_evidence(wrapper) {
+        crate::evidence::Equivocation::decode(args).is_some()
+    } else if is_bridge_guardian(wrapper) {
+        GuardianAct::decode(args).is_some()
+    } else if is_bridge_mint(wrapper) {
+        bridge_mint_source_key(wrapper).is_some()
+    } else if is_bridge_settle(wrapper) {
+        crate::bridge::ExitAttestation::decode(args).is_some()
+    } else if is_bridge_eth_update(wrapper) {
+        args.len() <= crate::bridge_eth::MAX_ETH_UPDATE_BYTES
+            && crate::bridge_eth::EthUpdateProof::decode(args).is_some()
+    } else if is_bridge_cosmos_update(wrapper) {
+        args.len() <= crate::bridge_cosmos::MAX_COSMOS_UPDATE_BYTES
+            && crate::bridge_cosmos::CosmosUpdateProof::decode(args).is_some()
+    } else {
+        false
+    }
+}
+
+pub(crate) fn bridge_eth_update_admissible(ledger: &Ledger, wrapper: &Wrapper) -> bool {
+    if ledger.bridge_is_frozen() {
+        return false;
+    }
+    let args = wrapper.body().call().args();
+    if args.len() > crate::bridge_eth::MAX_ETH_UPDATE_BYTES {
+        return false;
+    }
+    let Some(proof) = crate::bridge_eth::EthUpdateProof::decode(args) else {
+        return false;
+    };
+    let Some(anchor) = ledger.bridge_eth_anchor(proof.config_selector) else {
+        return false;
+    };
+    crate::bridge_eth::verify_eth_committee_update(&anchor, &proof)
+        .is_some_and(|next| next != anchor)
+}
+
+pub(crate) fn bridge_cosmos_update_admissible(
+    ledger: &Ledger,
+    wrapper: &Wrapper,
+    now_seconds: u64,
+) -> bool {
+    if ledger.bridge_is_frozen() {
+        return false;
+    }
+    let args = wrapper.body().call().args();
+    if args.len() > crate::bridge_cosmos::MAX_COSMOS_UPDATE_BYTES {
+        return false;
+    }
+    let Some(proof) = crate::bridge_cosmos::CosmosUpdateProof::decode(args) else {
+        return false;
+    };
+    let Some(anchor) = ledger.bridge_cosmos_anchor(proof.config_selector) else {
+        return false;
+    };
+    let now = crate::bridge_cosmos::block_now(now_seconds);
+    crate::bridge_cosmos::verify_cosmos_anchor_update(&anchor, &proof, now)
+        .is_some_and(|next| next != anchor)
+}
+
 fn dispatch_bridge_eth_update(ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
     if ledger.bridge_is_frozen() {
         return false;
@@ -1132,8 +1221,11 @@ pub(crate) fn bridge_exit_admissible(
     if ledger.bridged_asset(&request.asset_id).is_none() {
         return None;
     }
+    if request.amount == 0 {
+        return None;
+    }
     let ceiling = ledger.bridge_exit_max_amount();
-    if ceiling > 0 && request.amount > ceiling {
+    if ceiling == 0 || request.amount > ceiling {
         return None;
     }
     let holder = qtv_idfmt::parse_address(body.sender())
@@ -1171,7 +1263,7 @@ fn dispatch_bridge_exit(
     // holder's tokens are gone with nothing that can settle or slash. Refuse it here,
     // while the tokens still exist.
     let ceiling = ledger.bridge_exit_max_amount();
-    if ceiling > 0 && request.amount > ceiling {
+    if ceiling == 0 || request.amount > ceiling {
         return false;
     }
     let holder = match qtv_idfmt::parse_address(&sender)
@@ -1228,6 +1320,13 @@ pub(crate) fn vm_meter_fee(meter: u64, fee_params: &FeeParams) -> u64 {
 pub(crate) fn is_vm_op(ledger: &Ledger, wrapper: &Wrapper) -> bool {
     let target = wrapper.body().call().target();
     target == crate::ledger::vm_deploy_address() || ledger.is_contract(target)
+}
+
+pub(crate) fn vm_target_dispatchable(ledger: &Ledger, wrapper: &Wrapper) -> bool {
+    let target = wrapper.body().call().target();
+    !ledger.is_blacklisted(target)
+        && !ledger.is_frozen(target)
+        && !(ledger.bridge_is_frozen() && ledger.is_bridge_gateway(target))
 }
 
 pub(crate) fn vm_admissible(
@@ -1344,7 +1443,7 @@ fn dispatch_vm(
                     genesis,
                     &genesis_memory,
                     now_seconds,
-                    meter,
+                    meter.saturating_sub(deploy_cost),
                     value,
                     in_asset,
                     fee_params.chain_id,
@@ -1403,6 +1502,8 @@ fn execute_ordered_across(
     let mut sender_vm_meter: std::collections::BTreeMap<String, u64> =
         std::collections::BTreeMap::new();
     const PER_SENDER_VM_METER: u64 = VM_BLOCK_METER_BUDGET / 4;
+    let registration_cap = ledger.validator_ids().len().max(1).saturating_mul(2);
+    let mut registrations = 0usize;
     for (index, wrapper) in candidates.iter().enumerate() {
         if ledger.block_fresh_leaves() >= BLOCK_FRESH_LEAF_CEILING {
             break;
@@ -1448,7 +1549,7 @@ fn execute_ordered_across(
                 // the declared limit let a handful of transactions that execute
                 // nothing hold the whole block budget and censor every real contract
                 // call in the block, for a flat fee each.
-                let used = ledger.vm_meter_charge().min(meter);
+                let used = ledger.vm_meter_charge();
                 vm_meter = vm_meter.saturating_add(used);
                 *sender_vm_meter.entry(sender).or_insert(0) = sender_used.saturating_add(used);
                 included.push(wrapper.clone());
@@ -1521,7 +1622,10 @@ fn execute_ordered_across(
             // The envelope is system built and carries no wrapper signature, so the bound
             // is what stops a leader seating megabytes of junk every node stores forever.
             // The inner note signature is checked where the note decoder lives.
-            if wrapper.body().call().args().len() <= MAX_REGISTRATION_BYTES {
+            if wrapper.body().call().args().len() <= MAX_REGISTRATION_BYTES
+                && registrations < registration_cap
+            {
+                registrations += 1;
                 included.push(wrapper.clone());
             }
             continue;
@@ -5052,6 +5156,109 @@ mod tests {
         );
     }
     #[test]
+    fn an_early_committee_update_teaches_the_next_committee_and_moves_nothing() {
+        use q_bls::testsign::{aggregate_sign, keypair_from_ikm, BlsKeypair};
+        use qlc_ethereum::beacon::{
+            compute_domain, compute_signing_root, next_sync_committee_layout, BeaconBlockHeader,
+            SyncAggregate, SyncCommittee, DOMAIN_SYNC_COMMITTEE,
+        };
+        use qlc_ethereum::bls::BlsPubkey;
+        use qlc_ethereum::engine::SyncCommitteeUpdate;
+        use qlc_ethereum::{config, ssz};
+
+        const PERIOD: u64 = 870;
+        const PERIOD_SLOTS: u64 = 32 * 256;
+        let cfg = config::ethereum();
+
+        let committee = |tag: u8| -> (SyncCommittee, Vec<BlsKeypair>) {
+            let mut secrets = Vec::with_capacity(512);
+            let mut pubkeys = Vec::with_capacity(512);
+            for i in 0..512u32 {
+                let mut ikm = [0u8; 32];
+                ikm[0..4].copy_from_slice(&i.to_le_bytes());
+                ikm[31] = tag;
+                let kp = keypair_from_ikm(&ikm);
+                pubkeys.push(kp.public);
+                secrets.push(kp);
+            }
+            (
+                SyncCommittee {
+                    pubkeys,
+                    aggregate_pubkey: BlsPubkey([0x11; 48]),
+                },
+                secrets,
+            )
+        };
+        let update = |period: u64, signers: &[BlsKeypair], next: &SyncCommittee| {
+            let attested_slot = period * PERIOD_SLOTS + 60;
+            let signature_slot = period * PERIOD_SLOTS + 100;
+            let (index, depth) = next_sync_committee_layout(cfg.is_electra_at_slot(attested_slot));
+            let branch: Vec<[u8; 32]> = (0..depth).map(|i| [0xc0 + i as u8; 32]).collect();
+            let attested_header = BeaconBlockHeader {
+                slot: attested_slot,
+                proposer_index: 100,
+                parent_root: [0x03; 32],
+                state_root: ssz::merkle_root_from_branch(&next.hash_tree_root(), &branch, index),
+                body_root: [0x04; 32],
+            };
+            let fork_version = cfg.fork_version_at_slot(signature_slot - 1);
+            let domain = compute_domain(
+                DOMAIN_SYNC_COMMITTEE,
+                fork_version.0,
+                &cfg.genesis_validators_root,
+            );
+            let signing_root = compute_signing_root(&attested_header.hash_tree_root(), &domain);
+            let keys: Vec<&BlsKeypair> = signers.iter().collect();
+            SyncCommitteeUpdate {
+                attested_header,
+                next_sync_committee: next.clone(),
+                next_sync_committee_branch: branch,
+                sync_aggregate: SyncAggregate {
+                    participation: vec![true; 512],
+                    signature: aggregate_sign(&keys, &signing_root),
+                },
+                signature_slot,
+            }
+        };
+
+        let (current, current_keys) = committee(0xA1);
+        let (next, next_keys) = committee(0xB2);
+        let (after, _) = committee(0xC3);
+        let anchor = crate::bridge_eth::EthAnchor {
+            config_selector: 0,
+            period: PERIOD,
+            sync_committee_root: current.hash_tree_root(),
+            next_sync_committee_root: [0u8; 32],
+            deposit_contract: [0x1a; 20],
+            asset_id: [0x77; 16],
+        };
+
+        let early = crate::bridge_eth::EthUpdateProof {
+            config_selector: 0,
+            current_sync_committee: current.clone(),
+            update: update(PERIOD, &current_keys, &next),
+        };
+        let learned = crate::bridge_eth::verify_eth_committee_update(&anchor, &early)
+            .expect("the current committee proves the next one");
+        assert_eq!(learned.period, PERIOD, "the anchor does not move early");
+        assert_eq!(learned.sync_committee_root, current.hash_tree_root());
+        assert_eq!(learned.next_sync_committee_root, next.hash_tree_root());
+
+        let handover = crate::bridge_eth::EthUpdateProof {
+            config_selector: 0,
+            current_sync_committee: next.clone(),
+            update: update(PERIOD + 1, &next_keys, &after),
+        };
+        let moved = crate::bridge_eth::verify_eth_committee_update(&learned, &handover)
+            .expect("the next committee has signed in its own period");
+        assert_eq!(moved.period, PERIOD + 1);
+        assert_eq!(moved.sync_committee_root, next.hash_tree_root());
+        assert_eq!(moved.next_sync_committee_root, after.hash_tree_root());
+
+        assert!(crate::bridge_eth::verify_eth_committee_update(&anchor, &handover).is_none());
+    }
+
+    #[test]
     fn an_ethereum_beacon_proof_mints_trustlessly_with_no_operator_set() {
         use q_bls::testsign::{aggregate_sign, keypair_from_ikm, BlsKeypair};
         use qlc_ethereum::beacon::{
@@ -5186,6 +5393,7 @@ mod tests {
             config_selector: 0,
             period: PERIOD,
             sync_committee_root: committee_root,
+            next_sync_committee_root: [0u8; 32],
             deposit_contract: TEST_DEPOSIT_CONTRACT,
             asset_id: asset,
         };
@@ -5975,6 +6183,7 @@ mod tests {
         let asset = [7u8; 16];
         ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
         ledger.seed_bridge_exits_enabled(true);
+        ledger.seed_bridge_exit_max_amount(u128::MAX);
 
         let fact = deposit_fact(holder_id, asset, 500_000, [0x66; 32]);
         assert_eq!(
@@ -6095,6 +6304,8 @@ mod tests {
         );
 
         ledger.seed_bridge_exits_enabled(true);
+
+        ledger.seed_bridge_exit_max_amount(u128::MAX);
         let included = execute_ordered(&mut ledger, &[exit], &fee, 0);
         assert_eq!(included.len(), 1, "the exit rides once exits are enabled");
         assert_eq!(
@@ -6129,6 +6340,7 @@ mod tests {
         let asset = [7u8; 16];
         ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
         ledger.seed_bridge_exits_enabled(true);
+        ledger.seed_bridge_exit_max_amount(u128::MAX);
 
         let seeded = deposit_fact(holder_id, asset, 500_000, [0x77; 32]);
         assert_eq!(
@@ -6216,6 +6428,7 @@ mod tests {
         let asset = [7u8; 16];
         ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
         ledger.seed_bridge_exits_enabled(true);
+        ledger.seed_bridge_exit_max_amount(u128::MAX);
 
         let fact = deposit_fact(holder_id, asset, 500_000, [0xAB; 32]);
         assert_eq!(
@@ -6400,6 +6613,7 @@ mod tests {
         let asset = [7u8; 16];
         ledger.register_bridged_asset(&asset, 1_000_000, 1_000_000, false);
         ledger.seed_bridge_exits_enabled(true);
+        ledger.seed_bridge_exit_max_amount(u128::MAX);
 
         let fact = deposit_fact(holder_id, asset, 500_000, [0xB1; 32]);
         assert_eq!(
@@ -6467,6 +6681,7 @@ mod tests {
         let asset = [7u8; 16];
         base.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
         base.seed_bridge_exits_enabled(true);
+        base.seed_bridge_exit_max_amount(u128::MAX);
 
         let seed = deposit_fact(holder_id, asset, 1_000_000, [0xA1; 32]);
         assert_eq!(
@@ -6610,6 +6825,7 @@ mod tests {
         let (sk0, sk1) = seed_committee(ledger);
         ledger.register_bridged_asset(&EXIT_ASSET, cap, epoch_cap, false);
         ledger.seed_bridge_exits_enabled(true);
+        ledger.seed_bridge_exit_max_amount(u128::MAX);
         ledger.seed_bridge_pool_vault(&EXIT_VAULT);
         ledger.seed_bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET, custody);
         ledger.seed_bridge_payout_cap(payout_cap);
@@ -6634,7 +6850,13 @@ mod tests {
         let relayer = keypair(500);
         let beneficiary = [0x55u8; 32];
         let burn_ref = [0x11u8; 32];
-        ledger.seed_outstanding_burn(&burn_ref, &EXIT_ASSET, 550_000, &beneficiary);
+        ledger.seed_outstanding_burn(
+            &burn_ref,
+            &EXIT_ASSET,
+            550_000,
+            &beneficiary,
+            &EXIT_DESTINATION,
+        );
         let fact = exit_fact(
             crate::bridge::ExitOutcome::Slash,
             550_000,
@@ -6684,7 +6906,13 @@ mod tests {
         let relayer = keypair(500);
         let beneficiary = [0x55u8; 32];
         let burn_ref = [0x22u8; 32];
-        ledger.seed_outstanding_burn(&burn_ref, &EXIT_ASSET, 550_000, &beneficiary);
+        ledger.seed_outstanding_burn(
+            &burn_ref,
+            &EXIT_ASSET,
+            550_000,
+            &beneficiary,
+            &EXIT_DESTINATION,
+        );
         let fact = exit_fact(
             crate::bridge::ExitOutcome::Settle,
             550_000,
@@ -6756,7 +6984,7 @@ mod tests {
         let request = crate::bridge::ExitRequest {
             asset_id: EXIT_ASSET,
             amount: 200_000,
-            destination: [0xEE; 32],
+            destination: EXIT_DESTINATION,
         };
         let exit = system_tx(
             &holder,
@@ -6837,7 +7065,7 @@ mod tests {
         let request = crate::bridge::ExitRequest {
             asset_id: EXIT_ASSET,
             amount: 200_000,
-            destination: [0xEE; 32],
+            destination: EXIT_DESTINATION,
         };
         let exit = system_tx(
             &holder,
@@ -6972,7 +7200,7 @@ mod tests {
         let request = crate::bridge::ExitRequest {
             asset_id: EXIT_ASSET,
             amount: 200_000,
-            destination: [0xEE; 32],
+            destination: EXIT_DESTINATION,
         };
         let exit = system_tx(
             &holder,
@@ -7046,7 +7274,7 @@ mod tests {
         let request = crate::bridge::ExitRequest {
             asset_id: EXIT_ASSET,
             amount: 200_000,
-            destination: [0xEE; 32],
+            destination: EXIT_DESTINATION,
         };
         let exit = system_tx(
             &holder,
@@ -7205,6 +7433,7 @@ mod tests {
         let mut ledger = Ledger::new();
         ledger.register_bridged_asset(&EXIT_ASSET, 10_000_000, 1_000_000, false);
         ledger.seed_bridge_exits_enabled(true);
+        ledger.seed_bridge_exit_max_amount(u128::MAX);
         ledger.seed_bridge_pool_vault(&EXIT_VAULT);
         ledger.seed_bridge_vault_custody(&EXIT_VAULT, &EXIT_ASSET, 1_000_000);
         ledger.seed_bridge_payout_cap(5_000_000);
@@ -7283,7 +7512,13 @@ mod tests {
         let relayer = keypair(500);
         let beneficiary = [0x55u8; 32];
         let burn_ref = [0x88u8; 32];
-        ledger.seed_outstanding_burn(&burn_ref, &EXIT_ASSET, 550_000, &beneficiary);
+        ledger.seed_outstanding_burn(
+            &burn_ref,
+            &EXIT_ASSET,
+            550_000,
+            &beneficiary,
+            &EXIT_DESTINATION,
+        );
         let fact = exit_fact(
             crate::bridge::ExitOutcome::Slash,
             550_000,
@@ -7331,7 +7566,13 @@ mod tests {
         let mut over_global = Ledger::new();
         let (sk0, sk1) =
             seed_exit_bridge(&mut over_global, 1_000_000, 10_000_000, 1_000_000, 500_000);
-        over_global.seed_outstanding_burn(&[0x91u8; 32], &EXIT_ASSET, 550_000, &beneficiary);
+        over_global.seed_outstanding_burn(
+            &[0x91u8; 32],
+            &EXIT_ASSET,
+            550_000,
+            &beneficiary,
+            &EXIT_DESTINATION,
+        );
         let fact = exit_fact(
             crate::bridge::ExitOutcome::Slash,
             550_000,
@@ -7359,7 +7600,13 @@ mod tests {
         let mut over_asset = Ledger::new();
         let (sk0, sk1) =
             seed_exit_bridge(&mut over_asset, 1_000_000, 10_000_000, 500_000, 5_000_000);
-        over_asset.seed_outstanding_burn(&[0x92u8; 32], &EXIT_ASSET, 550_000, &beneficiary);
+        over_asset.seed_outstanding_burn(
+            &[0x92u8; 32],
+            &EXIT_ASSET,
+            550_000,
+            &beneficiary,
+            &EXIT_DESTINATION,
+        );
         let fact = exit_fact(
             crate::bridge::ExitOutcome::Slash,
             550_000,
@@ -7376,7 +7623,13 @@ mod tests {
         let mut thin_pool = Ledger::new();
         let (sk0, sk1) =
             seed_exit_bridge(&mut thin_pool, 100_000, 10_000_000, 1_000_000, 5_000_000);
-        thin_pool.seed_outstanding_burn(&[0x93u8; 32], &EXIT_ASSET, 550_000, &beneficiary);
+        thin_pool.seed_outstanding_burn(
+            &[0x93u8; 32],
+            &EXIT_ASSET,
+            550_000,
+            &beneficiary,
+            &EXIT_DESTINATION,
+        );
         let fact = exit_fact(
             crate::bridge::ExitOutcome::Slash,
             550_000,

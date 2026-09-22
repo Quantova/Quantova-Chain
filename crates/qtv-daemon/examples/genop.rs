@@ -1,16 +1,14 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 use qtv_crypto::{ml_dsa, sha3};
-use std::io::Read;
 
 /// Operator secrets come from the operating system's entropy, never from anything
 /// derivable. Seeding these from the chain name meant every secret key could be
 /// recomputed by anyone who knew the name, which is public, so the whole operator
 /// quorum was forgeable by any observer.
 fn urandom(n: usize) -> Vec<u8> {
-    let mut f = std::fs::File::open("/dev/urandom").expect("open /dev/urandom");
     let mut b = vec![0u8; n];
-    f.read_exact(&mut b).expect("read /dev/urandom");
+    qtv_crypto::rng::fill_random(&mut b);
     b
 }
 
@@ -54,11 +52,10 @@ fn main() {
         use std::os::unix::fs::OpenOptionsExt;
         let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(&out)
-            .expect("open the secrets file owner only");
+            .expect("create the secrets file, owner only; an existing file is never overwritten");
         file.write_all(secrets.as_bytes()).expect("write secrets");
     }
     #[cfg(not(unix))]

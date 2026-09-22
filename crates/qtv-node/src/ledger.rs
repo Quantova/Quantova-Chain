@@ -217,6 +217,7 @@ pub struct OutstandingBurn {
     pub asset_id: [u8; 16],
     pub amount: u128,
     pub beneficiary: [u8; 32],
+    pub destination: [u8; 32],
 }
 
 impl Encode for OutstandingBurn {
@@ -224,6 +225,7 @@ impl Encode for OutstandingBurn {
         encoder.put_bytes(&self.asset_id);
         self.amount.encode(encoder);
         encoder.put_bytes(&self.beneficiary);
+        encoder.put_bytes(&self.destination);
     }
 }
 
@@ -241,10 +243,17 @@ impl Decode for OutstandingBurn {
                 needed: 32,
                 found: beneficiary_bytes.len(),
             })?;
+        let destination_bytes = decoder.get_bytes()?;
+        let destination =
+            <[u8; 32]>::try_from(destination_bytes).map_err(|_| Error::Truncated {
+                needed: 32,
+                found: destination_bytes.len(),
+            })?;
         Ok(OutstandingBurn {
             asset_id,
             amount,
             beneficiary,
+            destination,
         })
     }
 }
@@ -846,6 +855,8 @@ pub enum EnactError {
     NotImplemented,
     Overflow,
 }
+
+pub const BRIDGE_FREEZE_REFUND_GRACE: u64 = 3_600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FreezeLift {
@@ -1564,7 +1575,15 @@ impl Ledger {
         account.nonce += 1;
         self.set_account(caller, &account);
         self.collect_fee(fee);
-        self.lift_bridge_freeze(now, FreezeLift::Refund);
+        let placed = record
+            .until
+            .saturating_sub(qtv_governance::BRIDGE_FREEZE_DURATION);
+        let outcome = if now <= placed.saturating_add(BRIDGE_FREEZE_REFUND_GRACE) {
+            FreezeLift::Refund
+        } else {
+            FreezeLift::Slash
+        };
+        self.lift_bridge_freeze(now, outcome);
         true
     }
 
@@ -1788,8 +1807,9 @@ impl Ledger {
         asset_id: &[u8; 16],
         amount: u128,
         beneficiary: &[u8; 32],
+        destination: &[u8; 32],
     ) {
-        self.record_outstanding_burn(burn_ref, asset_id, amount, beneficiary);
+        self.record_outstanding_burn(burn_ref, asset_id, amount, beneficiary, destination);
     }
 
     pub fn bridge_reserve_state(&self, asset_id: &[u8; 16]) -> Option<(u128, u128)> {
@@ -2119,7 +2139,7 @@ impl Ledger {
             sender_nonce,
             event_index,
         );
-        self.record_outstanding_burn(&burn_ref, asset_id, amount, holder);
+        self.record_outstanding_burn(&burn_ref, asset_id, amount, holder, destination);
         self.record_bridge_burn_event(
             asset_id,
             holder,
@@ -2162,11 +2182,13 @@ impl Ledger {
         asset_id: &[u8; 16],
         amount: u128,
         beneficiary: &[u8; 32],
+        destination: &[u8; 32],
     ) {
         let record = OutstandingBurn {
             asset_id: *asset_id,
             amount,
             beneficiary: *beneficiary,
+            destination: *destination,
         };
         self.write_leaf(bridge_outstanding_key(burn_ref), to_bytes(&record));
     }
@@ -2177,12 +2199,14 @@ impl Ledger {
         asset_id: &[u8; 16],
         amount: u128,
         beneficiary: &[u8; 32],
+        destination: &[u8; 32],
     ) -> bool {
         matches!(
             self.bridge_outstanding_burn(burn_ref),
             Some(record)
                 if record.asset_id == *asset_id
                     && record.amount == amount
+                    && record.destination == *destination
                     && record.beneficiary == *beneficiary
         )
     }
@@ -2255,8 +2279,13 @@ impl Ledger {
         if self.bridge_exit_settled(&fact.burn_ref) {
             return false;
         }
-        if !self.outstanding_burn_matches(&fact.burn_ref, &fact.asset_id, fact.amount, &fact.holder)
-        {
+        if !self.outstanding_burn_matches(
+            &fact.burn_ref,
+            &fact.asset_id,
+            fact.amount,
+            &fact.holder,
+            &fact.destination,
+        ) {
             return false;
         }
         let held = match self
@@ -2308,8 +2337,13 @@ impl Ledger {
         if self.bridge_exit_settled(&fact.burn_ref) {
             return false;
         }
-        if !self.outstanding_burn_matches(&fact.burn_ref, &fact.asset_id, fact.amount, &fact.holder)
-        {
+        if !self.outstanding_burn_matches(
+            &fact.burn_ref,
+            &fact.asset_id,
+            fact.amount,
+            &fact.holder,
+            &fact.destination,
+        ) {
             return false;
         }
         let epoch = self.bridge_epoch();
@@ -3758,7 +3792,14 @@ impl Ledger {
             return;
         }
         self.clear_guardian_pending_enact();
-        if self.bridge_freeze().is_some() {
+        if let Some(mut record) = self.bridge_freeze() {
+            let pot_address = bridge_bond_address();
+            let mut pot = self.account(&pot_address);
+            pot.balance = pot.balance.saturating_sub(record.bond);
+            self.set_account(&pot_address, &pot);
+            self.set_stake_treasury(self.stake_treasury().saturating_add(record.bond));
+            record.bond = 0;
+            self.set_bridge_freeze(&record);
             return;
         }
         let mut decoder = Decoder::new(&action_bytes);
@@ -3901,6 +3942,67 @@ impl Ledger {
         );
         self.credit_staked(amount);
         true
+    }
+
+    pub fn bond_admissible(&self, address: &str, amount: u64, fee: u64) -> bool {
+        let Some(id) = address_id(address) else {
+            return false;
+        };
+        if self.is_stake_banned(&id) || self.is_gov_blacklisted(&id) {
+            return false;
+        }
+        let Some(debit) = amount.checked_add(fee) else {
+            return false;
+        };
+        if self.account(address).balance < debit {
+            return false;
+        }
+        let existing = self.stake_bond(&id).map(|b| b.amount).unwrap_or(0);
+        existing
+            .checked_add(amount)
+            .is_some_and(qtv_staking::eligible)
+    }
+
+    pub fn request_exit_admissible(&self, address: &str, fee: u64, now_day: u64) -> bool {
+        let Some(id) = address_id(address) else {
+            return false;
+        };
+        matches!(
+            self.stake_bond(&id),
+            Some(bond) if bond.exit_requested_at.is_none() && bond.can_request_exit(now_day)
+        ) && self.account(address).balance >= fee
+    }
+
+    pub fn withdraw_admissible(&self, address: &str, fee: u64, now_day: u64) -> bool {
+        let Some(id) = address_id(address) else {
+            return false;
+        };
+        matches!(self.stake_bond(&id), Some(bond) if bond.can_withdraw(now_day))
+            && self.account(address).balance >= fee
+    }
+
+    pub fn bridge_freeze_admissible(&self, caller: &str, fee: u64, now: u64) -> bool {
+        let Some(id) = address_id(caller) else {
+            return false;
+        };
+        if self.is_gov_blacklisted(&id) || self.bridge_freeze().is_some() {
+            return false;
+        }
+        if let Some(last) = self.bridge_last_lift() {
+            if now < last.saturating_add(qtv_governance::BRIDGE_FREEZE_COOLDOWN) {
+                return false;
+            }
+        }
+        fee.checked_add(qtv_governance::BRIDGE_FREEZE_BOND)
+            .is_some_and(|debit| self.account(caller).balance >= debit)
+    }
+
+    pub fn bridge_unfreeze_admissible(&self, caller: &str, fee: u64) -> bool {
+        let Some(id) = address_id(caller) else {
+            return false;
+        };
+        matches!(self.bridge_freeze(), Some(record) if record.who == id)
+            && self.account(caller).balance >= fee
     }
 
     pub fn bond_with_fee(&mut self, address: &str, amount: u64, fee: u64, day: u64) -> bool {
@@ -7165,6 +7267,53 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn a_freeze_held_past_the_grace_and_lifted_by_its_holder_forfeits_the_bond() {
+        let mut l = Ledger::new();
+        let freezer = gov_addr(74);
+        let funded = 1_500_000 * 1_000_000;
+        fund(&mut l, &freezer, funded);
+        let bond = qtv_governance::BRIDGE_FREEZE_BOND;
+        let treasury_before = l.stake_treasury();
+        assert!(l.bridge_freeze_with_fee(&freezer, 0, 1_000));
+        let late = 1_000 + 6 * 86_400;
+        assert!(l.bridge_unfreeze_with_fee(&freezer, 0, late));
+        assert!(!l.bridge_is_frozen());
+        assert_eq!(
+            l.balance(&freezer),
+            funded - bond,
+            "no refund past the grace"
+        );
+        assert_eq!(l.stake_treasury(), treasury_before + bond);
+    }
+
+    #[test]
+    fn a_freeze_that_vetoes_a_guardian_enact_forfeits_its_bond() {
+        let mut l = Ledger::new();
+        let freezer = gov_addr(75);
+        let funded = 1_500_000 * 1_000_000;
+        fund(&mut l, &freezer, funded);
+        let bond = qtv_governance::BRIDGE_FREEZE_BOND;
+        let treasury_before = l.stake_treasury();
+        let mut pending = 100u64.to_le_bytes().to_vec();
+        pending.push(0xFF);
+        l.write_leaf(stake_singleton_key(GUARDIAN_PENDING_ENACT_TAG), pending);
+        assert!(l.bridge_freeze_with_fee(&freezer, 0, 50));
+        l.guardian_apply_due_enact(200);
+        assert!(
+            l.guardian_pending_enact().is_none(),
+            "the freeze vetoes the enact"
+        );
+        assert_eq!(l.stake_treasury(), treasury_before + bond);
+        assert!(l.bridge_unfreeze_with_fee(&freezer, 0, 60));
+        assert_eq!(
+            l.balance(&freezer),
+            funded - bond,
+            "a veto costs the bond even when lifted inside the grace"
+        );
+        assert_eq!(l.account(&bridge_bond_address()).balance, 0);
+    }
+
+    #[test]
     fn a_bridge_freeze_cooldown_blocks_an_immediate_refreeze() {
         let mut l = Ledger::new();
         let freezer = gov_addr(73);
@@ -7927,7 +8076,7 @@ mod stake_state_tests {
             "the vault holds no custody for this asset"
         );
 
-        l.seed_outstanding_burn(&[0x07u8; 32], &asset, 500, &holder);
+        l.seed_outstanding_burn(&[0x07u8; 32], &asset, 500, &holder, &[0xEEu8; 32]);
         let settle = crate::bridge::ExitFact {
             version: crate::bridge::EXIT_FACT_VERSION,
             corridor: 1,
@@ -7950,7 +8099,7 @@ mod stake_state_tests {
             "the refused settle moves no supply"
         );
 
-        l.seed_outstanding_burn(&[0x08u8; 32], &asset, 500, &holder);
+        l.seed_outstanding_burn(&[0x08u8; 32], &asset, 500, &holder, &[0xEEu8; 32]);
         let slash = crate::bridge::ExitFact {
             version: crate::bridge::EXIT_FACT_VERSION,
             corridor: 1,
@@ -7990,6 +8139,7 @@ mod stake_state_tests {
             config_selector: 0,
             period: 870,
             sync_committee_root: [0x44u8; 32],
+            next_sync_committee_root: [0u8; 32],
             deposit_contract: [0x55u8; 20],
             asset_id: [0x66u8; 16],
         };
@@ -8130,7 +8280,7 @@ mod stake_state_tests {
             asset_id: asset,
             amount: 400,
             holder,
-            destination: [0xEEu8; 32],
+            destination,
             burn_ref,
             outcome: crate::bridge::ExitOutcome::Settle,
         };
@@ -8310,6 +8460,40 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn a_settle_naming_another_destination_than_the_burn_is_refused() {
+        let mut l = Ledger::new();
+        let vault = [0x0Fu8; 32];
+        let asset = [0xa1u8; 16];
+        let holder = [0x22u8; 32];
+        l.seed_bridge_pool_vault(&vault);
+        l.seed_bridge_exits_enabled(true);
+        l.seed_bridge_payout_cap(u128::MAX);
+        l.register_bridged_asset(&asset, u128::MAX, u128::MAX, false);
+        l.seed_bridge_vault_custody(&vault, &asset, 1_000_000);
+        l.seed_outstanding_burn(&[0x61u8; 32], &asset, 500, &holder, &[0xEEu8; 32]);
+        let mut settle = crate::bridge::ExitFact {
+            version: crate::bridge::EXIT_FACT_VERSION,
+            corridor: 1,
+            dest_chain: 9_000,
+            asset_id: asset,
+            amount: 500,
+            holder,
+            destination: [0xDDu8; 32],
+            burn_ref: [0x61u8; 32],
+            outcome: crate::bridge::ExitOutcome::Settle,
+        };
+        assert!(
+            !l.bridge_settle(&settle),
+            "the holder asked to be paid at 0xEE, a payout elsewhere is not this exit"
+        );
+        settle.destination = [0xEEu8; 32];
+        assert!(
+            l.bridge_settle(&settle),
+            "the burn's own destination settles"
+        );
+    }
+
+    #[test]
     fn a_slash_beyond_the_vault_custody_is_refused() {
         let mut l = Ledger::new();
         let asset = [0x7bu8; 16];
@@ -8321,7 +8505,7 @@ mod stake_state_tests {
         l.seed_bridge_exits_enabled(true);
         l.seed_bridge_payout_cap(10_000_000);
 
-        l.seed_outstanding_burn(&[0x51u8; 32], &asset, 500, &holder);
+        l.seed_outstanding_burn(&[0x51u8; 32], &asset, 500, &holder, &destination);
         let slash = crate::bridge::ExitFact {
             version: crate::bridge::EXIT_FACT_VERSION,
             corridor: 1,
@@ -8368,7 +8552,7 @@ mod stake_state_tests {
             let mut burn_ref = [0u8; 32];
             burn_ref[..8].copy_from_slice(&i.to_le_bytes());
             let amount = 100u128;
-            l.seed_outstanding_burn(&burn_ref, &asset, amount, &beneficiary);
+            l.seed_outstanding_burn(&burn_ref, &asset, amount, &beneficiary, &[0xEEu8; 32]);
             let settle = crate::bridge::ExitFact {
                 version: crate::bridge::EXIT_FACT_VERSION,
                 corridor: 1,

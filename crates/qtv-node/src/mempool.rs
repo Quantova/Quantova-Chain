@@ -247,6 +247,15 @@ pub const DEFAULT_FEELESS_ADMITS_PER_WINDOW: usize = 128;
 
 pub const DEFAULT_FEELESS_ATTEMPTS_PER_WINDOW: usize = 512;
 
+fn is_plain_transfer(ledger: &Ledger, wrapper: &Wrapper) -> bool {
+    !is_feeless(wrapper)
+        && !crate::node::is_vm_op(ledger, wrapper)
+        && !crate::node::is_key_register(wrapper)
+        && !crate::node::is_bridge_exit(wrapper)
+        && !crate::node::is_registration(wrapper)
+        && wrapper.body().call().target() != crate::ledger::gov_system_address()
+}
+
 fn is_feeless(wrapper: &Wrapper) -> bool {
     crate::node::is_bridge_mint(wrapper)
         || crate::node::is_bridge_settle(wrapper)
@@ -319,7 +328,7 @@ pub fn admission_hint(wrapper: &Wrapper, ledger: &Ledger, fee_params: &FeeParams
             ledger,
             wrapper,
             fee_params.chain_id,
-            ledger.execution_time(),
+            crate::node::wall_clock_seconds(),
         ));
     } else if crate::node::is_bridge_settle(wrapper) {
         hint.feeless_ok = Some(crate::node::bridge_settle_admissible(
@@ -327,15 +336,27 @@ pub fn admission_hint(wrapper: &Wrapper, ledger: &Ledger, fee_params: &FeeParams
             wrapper,
             fee_params.chain_id,
         ));
+    } else if crate::node::is_bridge_eth_update(wrapper) {
+        hint.feeless_ok = Some(crate::node::bridge_eth_update_admissible(ledger, wrapper));
+    } else if crate::node::is_bridge_cosmos_update(wrapper) {
+        hint.feeless_ok = Some(crate::node::bridge_cosmos_update_admissible(
+            ledger,
+            wrapper,
+            crate::node::wall_clock_seconds(),
+        ));
     }
     hint
 }
 
 fn candidate_order(a: &Wrapper, b: &Wrapper, ceiling: u128) -> std::cmp::Ordering {
-    b.body()
-        .fee()
-        .min(ceiling)
-        .cmp(&a.body().fee().min(ceiling))
+    is_feeless(b)
+        .cmp(&is_feeless(a))
+        .then_with(|| {
+            b.body()
+                .fee()
+                .min(ceiling)
+                .cmp(&a.body().fee().min(ceiling))
+        })
         .then_with(|| a.body().sender().cmp(b.body().sender()))
         .then_with(|| a.body().nonce().cmp(&b.body().nonce()))
 }
@@ -355,6 +376,7 @@ pub struct Mempool {
     feeless_attempts_cap: usize,
     evidence_attempts: usize,
     mint_attempts: usize,
+    update_attempts: usize,
     settle_attempts: usize,
     guardian_attempts: usize,
     mint_sources: std::collections::HashSet<(u32, [u8; 32])>,
@@ -391,6 +413,7 @@ impl Mempool {
             feeless_attempts_cap: DEFAULT_FEELESS_ATTEMPTS_PER_WINDOW,
             evidence_attempts: 0,
             mint_attempts: 0,
+            update_attempts: 0,
             settle_attempts: 0,
             guardian_attempts: 0,
             mint_sources: std::collections::HashSet::new(),
@@ -467,7 +490,7 @@ impl Mempool {
         self.pending
             .iter()
             .enumerate()
-            .filter(|(_, w)| !is_priority(w))
+            .filter(|(_, w)| !is_priority(w) && !is_feeless(w))
             .min_by(|a, b| self.effective_fee(a.1).cmp(&self.effective_fee(b.1)))
             .map(|(index, w)| (index, self.effective_fee(w)))
     }
@@ -533,6 +556,10 @@ impl Mempool {
             &mut self.evidence_attempts
         } else if crate::node::is_bridge_mint(wrapper) {
             &mut self.mint_attempts
+        } else if crate::node::is_bridge_eth_update(wrapper)
+            || crate::node::is_bridge_cosmos_update(wrapper)
+        {
+            &mut self.update_attempts
         } else if crate::node::is_bridge_settle(wrapper) {
             &mut self.settle_attempts
         } else {
@@ -643,9 +670,9 @@ impl Mempool {
             if !self.feeless_has_room() {
                 return Err(Reject::RateLimited);
             }
-            // The per-lane attempt counter is charged only AFTER the item passes its
-            // admissibility check below, so garbage cannot drain the lane budget and
-            // censor honest evidence.
+            if !crate::node::feeless_decodes(&wrapper) {
+                return Err(Reject::BadCall);
+            }
         }
         if crate::node::is_vm_op(ledger, &wrapper) {
             if !CONTRACTS_ENABLED {
@@ -659,7 +686,9 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
             let signature_ok = verified(&wrapper, &account.public_key, signature_hint);
-            if !crate::node::vm_admissible(&wrapper, &account, fee_params, signature_ok) {
+            if !crate::node::vm_admissible(&wrapper, &account, fee_params, signature_ok)
+                || !crate::node::vm_target_dispatchable(ledger, &wrapper)
+            {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_key_register(&wrapper) {
@@ -720,7 +749,7 @@ impl Mempool {
                     ledger,
                     &wrapper,
                     fee_params.chain_id,
-                    ledger.execution_time(),
+                    crate::node::wall_clock_seconds(),
                 )
             }) {
                 return Err(Reject::BadCall);
@@ -731,6 +760,28 @@ impl Mempool {
             }
             if !feeless_hint.unwrap_or_else(|| {
                 crate::node::bridge_settle_admissible(ledger, &wrapper, fee_params.chain_id)
+            }) {
+                return Err(Reject::BadCall);
+            }
+        } else if crate::node::is_bridge_eth_update(&wrapper) {
+            if !self.charge_feeless_attempt_for(&wrapper) {
+                return Err(Reject::RateLimited);
+            }
+            if !feeless_hint
+                .unwrap_or_else(|| crate::node::bridge_eth_update_admissible(ledger, &wrapper))
+            {
+                return Err(Reject::BadCall);
+            }
+        } else if crate::node::is_bridge_cosmos_update(&wrapper) {
+            if !self.charge_feeless_attempt_for(&wrapper) {
+                return Err(Reject::RateLimited);
+            }
+            if !feeless_hint.unwrap_or_else(|| {
+                crate::node::bridge_cosmos_update_admissible(
+                    ledger,
+                    &wrapper,
+                    crate::node::wall_clock_seconds(),
+                )
             }) {
                 return Err(Reject::BadCall);
             }
@@ -761,15 +812,17 @@ impl Mempool {
                 return Err(Reject::SenderQueueFull);
             }
             let account = ledger.account(wrapper.body().sender());
-            match signature_hint {
+            let plan = match signature_hint {
                 Some(hint)
                     if !account.public_key.is_empty() && hint.public_key == account.public_key =>
                 {
-                    plan_verified(&wrapper, &account, fee_params, hint.ok)?;
+                    plan_verified(&wrapper, &account, fee_params, hint.ok)?
                 }
-                _ => {
-                    validate(&wrapper, ledger, fee_params)?;
-                }
+                _ => validate(&wrapper, ledger, fee_params)?,
+            };
+            if !crate::node::transfer_dispatchable(ledger, &plan, crate::node::wall_clock_seconds())
+            {
+                return Err(Reject::BadCall);
             }
         }
         if is_feeless(&wrapper) && !self.charge_feeless() {
@@ -840,6 +893,7 @@ impl Mempool {
             if is_feeless(&wrapper)
                 && (!self.has_capacity(&wrapper)
                     || !self.feeless_has_room()
+                    || !crate::node::feeless_decodes(&wrapper)
                     || !self.charge_feeless_attempt_for(&wrapper))
             {
                 continue;
@@ -854,6 +908,7 @@ impl Mempool {
                 } else {
                     let account = ledger.account(wrapper.body().sender());
                     crate::node::vm_admissible(&wrapper, &account, fee_params, verified[index])
+                        && crate::node::vm_target_dispatchable(ledger, &wrapper)
                 }
             } else if crate::node::is_key_register(&wrapper) {
                 !self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce())
@@ -883,10 +938,18 @@ impl Mempool {
                     ledger,
                     &wrapper,
                     fee_params.chain_id,
-                    ledger.execution_time(),
+                    crate::node::wall_clock_seconds(),
                 )
             } else if crate::node::is_bridge_settle(&wrapper) {
                 crate::node::bridge_settle_admissible(ledger, &wrapper, fee_params.chain_id)
+            } else if crate::node::is_bridge_eth_update(&wrapper) {
+                crate::node::bridge_eth_update_admissible(ledger, &wrapper)
+            } else if crate::node::is_bridge_cosmos_update(&wrapper) {
+                crate::node::bridge_cosmos_update_admissible(
+                    ledger,
+                    &wrapper,
+                    crate::node::wall_clock_seconds(),
+                )
             } else if crate::node::is_bridge_exit(&wrapper) {
                 !self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce())
                     && {
@@ -904,7 +967,15 @@ impl Mempool {
                 false
             } else {
                 !self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce())
-                    && validate_verified(&wrapper, ledger, fee_params, verified[index]).is_ok()
+                    && validate_verified(&wrapper, ledger, fee_params, verified[index]).is_ok_and(
+                        |plan| {
+                            crate::node::transfer_dispatchable(
+                                ledger,
+                                &plan,
+                                crate::node::wall_clock_seconds(),
+                            )
+                        },
+                    )
             };
             if !admissible {
                 continue;
@@ -963,7 +1034,23 @@ impl Mempool {
             let barred = ledger.is_blacklisted(sender) || ledger.is_frozen(sender);
             let valid_until = wrapper.body().valid_until_height();
             let expired = valid_until != 0 && height > valid_until;
-            if stale || barred || expired {
+            let refused = is_plain_transfer(ledger, &wrapper)
+                && !crate::node::transfer_dispatchable(
+                    ledger,
+                    &TransferPlan {
+                        sender: sender.to_string(),
+                        recipient: wrapper.body().call().target().to_string(),
+                        amount: crate::execution::transfer_amount(wrapper.body().call())
+                            .unwrap_or(0),
+                        fee: u64::try_from(wrapper.body().fee().min(self.ceiling))
+                            .unwrap_or(u64::MAX),
+                    },
+                    crate::node::wall_clock_seconds(),
+                );
+            let refused = refused
+                || (crate::node::is_vm_op(ledger, &wrapper)
+                    && !crate::node::vm_target_dispatchable(ledger, &wrapper));
+            if stale || barred || expired || refused {
                 self.ids.remove(wrapper.id().as_str());
                 self.untrack(&wrapper);
             } else {
@@ -990,6 +1077,7 @@ impl Mempool {
         self.feeless_admits = 0;
         self.evidence_attempts = 0;
         self.mint_attempts = 0;
+        self.update_attempts = 0;
         self.settle_attempts = 0;
         self.guardian_attempts = 0;
     }
@@ -1561,7 +1649,8 @@ mod tests {
 
     #[test]
     fn the_mempool_is_bounded_and_a_priority_tx_is_always_includable() {
-        let params = FeeParams::devnet();
+        let mut params = FeeParams::devnet();
+        params.native_asset = crate::fee::QTOV_ASSET_TAG;
         let fee = u128::from(params.transfer_fee());
         let mut ledger = Ledger::new();
         let mut pool = Mempool::with_limits(4, 100, 2);

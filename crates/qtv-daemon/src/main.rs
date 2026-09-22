@@ -116,12 +116,14 @@ fn run(config_path: &Path) -> Result<(), String> {
         .ok_or_else(|| format!("this node's id {my_id} is not in the genesis validator set"))?;
     let idx = (my_id - 1) as usize;
 
-    let secret = qtv_node::keys::load_or_generate(&settings.keystore_path).map_err(|e| {
-        format!(
-            "reading the keystore {}: {e}",
-            settings.keystore_path.display()
-        )
-    })?;
+    let secret = qtv_wipe::Zeroizing::new(
+        qtv_node::keys::load_or_generate(&settings.keystore_path).map_err(|e| {
+            format!(
+                "reading the keystore {}: {e}",
+                settings.keystore_path.display()
+            )
+        })?,
+    );
 
     let own = ValidatorSpec::from_secret(
         my_id,
@@ -140,18 +142,20 @@ fn run(config_path: &Path) -> Result<(), String> {
     }
 
     let devnet = build_devnet(&genesis_file);
-    let my_node = NodeConfig {
+    let mut my_node = NodeConfig {
         id: my_id,
         stake: my_spec.stake,
         online: true,
         store_dir: settings.store_dir.clone(),
         bootstrap: settings.peers.iter().map(|(id, _)| *id).collect(),
         address: settings.listen.clone(),
-        secret,
+        secret: *secret,
     };
 
-    let mut node =
-        DevNode::open(&my_node, &devnet).map_err(|e| format!("opening the node: {e:?}"))?;
+    let opened = DevNode::open(&my_node, &devnet);
+    qtv_wipe::Zeroize::zeroize(&mut my_node.secret);
+    drop(secret);
+    let mut node = opened.map_err(|e| format!("opening the node: {e:?}"))?;
 
     if let Some((height, value)) = settings.checkpoint {
         node.set_checkpoint(qtv_devnet::Checkpoint { height, value });

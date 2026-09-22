@@ -203,13 +203,15 @@ impl GenesisFile {
                 }
                 seen.push(*m);
             }
-            if threshold < 2 || (threshold as usize) > guardian_members.len() {
+            let set = GuardianSet::new(guardian_members, threshold);
+            if !set.well_formed() {
                 return Err(
-                    "genesis guardian_threshold must be >=2 and <= the number of guardians"
+                    "genesis guardian_threshold must be at least 2, at most the number of \
+                     guardians, and more than half of them"
                         .to_string(),
                 );
             }
-            GuardianSet::new(guardian_members, threshold)
+            set
         };
         let bridge_operators = if bridge_ops.is_empty() {
             None

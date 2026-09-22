@@ -381,16 +381,17 @@ impl DevNode {
             });
         }
 
-        let secret = node.secret;
+        let secret = qtv_wipe::Zeroizing::new(node.secret);
+        let secret: &[u8; 32] = &secret;
         let mut dev = DevNode {
             id: node.id,
-            identity: p2p_identity(&secret),
+            identity: p2p_identity(secret),
             ledger: Ledger::new(),
             mempool: Mempool::new(),
             consensus: Consensus::with_slots(
                 devnet.fee_params.chain_id,
                 node.id,
-                &secret,
+                secret,
                 roster.clone(),
                 devnet.slots,
             ),

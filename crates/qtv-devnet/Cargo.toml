@@ -26,6 +26,7 @@ qtv-node = { path = "../qtv-node" }
 qtv-governance = { path = "../qtv-governance" }
 qtv-staking = { path = "../qtv-staking" }
 qtv-net = { path = "../qtv-net" }
+qtv-wipe = { path = "../qtv-wipe" }
 qtv-store = { path = "../qtv-store" }
 qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "986b7f75417ff0731bedb940e03e9ff0ebd55bec" }
 qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "7f48fca9b7bd6b6f8b558fd587683a851c235f92" }

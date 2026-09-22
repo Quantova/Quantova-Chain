@@ -19,7 +19,7 @@ pub struct VerifiedChain {
 pub struct Checkpoint {
     pub height: u32,
     pub hash: [u8; 32],
-    /// The work the SUBMITTED HEADER RUN must carry, NOT the chain's cumulative work at
+    /// The work the submitted headers AFTER `height` must carry, NOT the chain's cumulative work at
     /// `height`. `VerifiedChain::work` sums `block_work` over the headers the caller
     /// handed in and nothing else, so those two readings differ by orders of magnitude:
     /// armed with a real cumulative figure no honest relayer run could ever reach it and
@@ -185,11 +185,21 @@ impl VerifiedChain {
         if header.block_hash() != checkpoint.hash {
             return Err(SpvError::CheckpointMismatch);
         }
-        // Against the submitted run, which is what `work` measures. See the field doc.
-        if self.work < checkpoint.min_work {
+        if self.work_above(checkpoint.height) < checkpoint.min_work {
             return Err(SpvError::InsufficientWork);
         }
         Ok(())
+    }
+
+    pub fn work_above(&self, height: u32) -> U256 {
+        let mut work = U256::ZERO;
+        for (i, header) in self.headers.iter().enumerate() {
+            let at = self.start_height.saturating_add(i as u32);
+            if at > height {
+                work = work.wrapping_add(&block_work(header.bits));
+            }
+        }
+        work
     }
 
     pub fn header_at(&self, height: u32) -> Option<&BlockHeader> {

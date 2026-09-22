@@ -77,7 +77,7 @@ pub fn wrap_store_layer(mut iavl: ExistenceProof, store_name: &[u8]) -> ([u8; 32
         key: store_name.to_vec(),
         value: iavl_root.to_vec(),
         leaf: LeafOp {
-            prefix: vec![LEAF_MARKER],
+            prefix: vec![LEAF_MARKER, 0x02, 0x02],
         },
         path: Vec::new(),
         store: None,
@@ -111,6 +111,34 @@ const MAX_OP_PREFIX_LEN: usize = 64;
 const MAX_INNER_SUFFIX_LEN: usize = 64;
 const MAX_PROOF_PATH_LEN: usize = 128;
 
+fn minimal_varint(bytes: &[u8], at: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    for shift in (0..64).step_by(7) {
+        let byte = *bytes.get(*at)?;
+        *at += 1;
+        if shift == 63 && byte > 1 {
+            return None;
+        }
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            if byte == 0 && shift > 0 {
+                return None;
+            }
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn canonical_leaf_prefix(prefix: &[u8]) -> bool {
+    let mut at = 0usize;
+    let height = minimal_varint(prefix, &mut at);
+    let size = minimal_varint(prefix, &mut at);
+    let version = minimal_varint(prefix, &mut at);
+    matches!((height, size, version), (Some(0), Some(2), Some(v)) if v % 2 == 0)
+        && at == prefix.len()
+}
+
 fn canonical_ops(proof: &ExistenceProof) -> Result<(), ProofError> {
     if proof.path.len() > MAX_PROOF_PATH_LEN {
         return Err(ProofError::MalformedProofOp);
@@ -119,6 +147,9 @@ fn canonical_ops(proof: &ExistenceProof) -> Result<(), ProofError> {
         return Err(ProofError::MalformedProofOp);
     }
     if proof.leaf.prefix.len() > MAX_OP_PREFIX_LEN {
+        return Err(ProofError::MalformedProofOp);
+    }
+    if !canonical_leaf_prefix(&proof.leaf.prefix) {
         return Err(ProofError::MalformedProofOp);
     }
     for op in &proof.path {
@@ -135,11 +166,16 @@ fn canonical_ops(proof: &ExistenceProof) -> Result<(), ProofError> {
     Ok(())
 }
 
+const DEPOSIT_REF_DOMAIN: &[u8] = b"QUANTOVA/COSMOS/DEPOSIT-REF/v2";
+
 pub fn deposit_source_ref(store_name: &[u8], proof: &ExistenceProof) -> [u8; 32] {
-    let leaf_hash = proof.leaf.apply(&proof.key, &proof.value);
-    let mut source_pre = Vec::with_capacity(store_name.len() + 32);
+    let mut source_pre =
+        Vec::with_capacity(DEPOSIT_REF_DOMAIN.len() + 16 + store_name.len() + proof.key.len());
+    source_pre.extend_from_slice(DEPOSIT_REF_DOMAIN);
+    source_pre.extend_from_slice(&(store_name.len() as u64).to_le_bytes());
     source_pre.extend_from_slice(store_name);
-    source_pre.extend_from_slice(&leaf_hash);
+    source_pre.extend_from_slice(&(proof.key.len() as u64).to_le_bytes());
+    source_pre.extend_from_slice(&proof.key);
     sha256(&source_pre)
 }
 
@@ -219,11 +255,8 @@ mod tests {
             ],
             store: None,
         };
-        let leaf_hash = proof.leaf.apply(&proof.key, &proof.value);
-        let mut source_pre = STORE_NAME.to_vec();
-        source_pre.extend_from_slice(&leaf_hash);
         let deposit = Deposit {
-            source_ref: sha256(&source_pre),
+            source_ref: deposit_source_ref(STORE_NAME, &proof),
             asset_id,
             amount,
             recipient,
@@ -232,19 +265,55 @@ mod tests {
     }
 
     #[test]
-    fn the_source_ref_binds_the_leaf_hash_not_the_splittable_key() {
+    fn the_source_ref_is_the_store_key_so_a_rewritten_record_cannot_mint_again() {
         let (iavl, _) = sample_proof();
-        let leaf_hash = iavl.leaf.apply(&iavl.key, &iavl.value);
         let (app_hash, proof) = wrap_store_layer(iavl.clone(), STORE_NAME);
-        let deposit = extract_deposit(&app_hash, STORE_NAME, STORE_PREFIX, &proof).unwrap();
-        let mut expect = STORE_NAME.to_vec();
-        expect.extend_from_slice(&leaf_hash);
-        assert_eq!(deposit.source_ref, sha256(&expect));
+        let first = extract_deposit(&app_hash, STORE_NAME, STORE_PREFIX, &proof).unwrap();
+
+        let mut rewritten = iavl.clone();
+        rewritten.leaf.prefix = vec![LEAF_MARKER, 0x02, 0x0a];
+        let (later_hash, later) = wrap_store_layer(rewritten, STORE_NAME);
+        let again = extract_deposit(&later_hash, STORE_NAME, STORE_PREFIX, &later).unwrap();
+        assert_eq!(first.source_ref, again.source_ref);
+
+        let mut other = iavl;
+        other.key.push(b'9');
         assert_ne!(
-            deposit.source_ref,
-            sha256(&iavl.key),
-            "a prefix/key re-split changes sha256(key) but not the leaf hash, so the \
-             source_ref must not key on the raw key"
+            deposit_source_ref(STORE_NAME, &other),
+            first.source_ref,
+            "another deposit key is another deposit"
+        );
+    }
+
+    #[test]
+    fn the_store_name_and_key_do_not_re_split_into_one_reference() {
+        let (mut a, _) = sample_proof();
+        let (mut b, _) = sample_proof();
+        a.key = b"cd".to_vec();
+        b.key = b"bcd".to_vec();
+        assert_ne!(deposit_source_ref(b"ab", &a), deposit_source_ref(b"a", &b));
+    }
+
+    #[test]
+    fn a_leaf_prefix_that_is_not_exactly_height_size_version_is_refused() {
+        assert!(canonical_leaf_prefix(&[0x00, 0x02, 0x02]));
+        assert!(canonical_leaf_prefix(&[0x00, 0x02, 0x80, 0x01]));
+        assert!(!canonical_leaf_prefix(&[0x00]), "no size or version");
+        assert!(
+            !canonical_leaf_prefix(&[0x00, 0x04, 0x02]),
+            "size two is not a leaf"
+        );
+        assert!(
+            !canonical_leaf_prefix(&[0x00, 0x02, 0x03]),
+            "a negative version"
+        );
+        assert!(
+            !canonical_leaf_prefix(&[0x00, 0x02, 0x82, 0x00]),
+            "not minimal"
+        );
+        assert!(
+            !canonical_leaf_prefix(&[0x00, 0x02, 0x02, 0x62]),
+            "trailing bytes could lend the key a byte"
         );
     }
 

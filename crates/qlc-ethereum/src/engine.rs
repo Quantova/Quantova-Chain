@@ -867,20 +867,18 @@ mod tests {
     }
 
     #[test]
-    fn every_rollup_config_is_served_by_the_one_engine() {
+    fn no_rollup_config_is_served_by_the_beacon_engine() {
         for cfg in [
             config::arbitrum(),
             config::optimism(),
             config::base(),
             config::robinhood_chain(),
         ] {
-            let corridor = cfg.corridor_id;
             let f = build_fixture_for(cfg, 5_000_000_000_000_000_000u128, full_participation());
-            let statement =
-                verify_deposit_update(&f.store, &f.update, &f.deposit, &HashCommitmentBls).unwrap();
-            assert_eq!(statement.kind, qlc_stark::StatementKind::EvmLightClient);
-            assert_eq!(statement.corridor_id, corridor);
-            assert_eq!(statement.finality_depth, 64);
+            assert!(matches!(
+                verify_deposit_update(&f.store, &f.update, &f.deposit, &HashCommitmentBls),
+                Err(EthError::NotBeaconChain)
+            ));
         }
     }
 
