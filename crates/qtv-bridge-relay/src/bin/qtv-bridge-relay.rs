@@ -10,7 +10,7 @@ fn parse_hex(text: &str) -> Result<Vec<u8>, String> {
     if !clean.len().is_multiple_of(2) {
         return Err("the hex payload has an odd length".to_string());
     }
-    if !clean.is_ascii() {
+    if !clean.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("the hex payload holds a non hex character".to_string());
     }
     (0..clean.len())
@@ -89,5 +89,16 @@ fn main() {
     if let Err(err) = run() {
         eprintln!("relay error: {err}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod hex_tests {
+    use super::*;
+
+    #[test]
+    fn a_payload_with_a_sign_character_is_refused() {
+        assert!(parse_hex("+a+b").is_err());
+        assert_eq!(parse_hex("0x0aff").unwrap(), vec![0x0a, 0xff]);
     }
 }

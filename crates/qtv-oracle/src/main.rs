@@ -36,7 +36,7 @@ fn hexs(b: &[u8]) -> String {
 
 fn unhex(s: &str) -> Vec<u8> {
     let s = s.trim();
-    if !s.is_ascii() || !s.len().is_multiple_of(2) {
+    if !s.bytes().all(|b| b.is_ascii_hexdigit()) || !s.len().is_multiple_of(2) {
         fail("a hex argument has an odd length or a non hex character");
     }
     (0..s.len())
