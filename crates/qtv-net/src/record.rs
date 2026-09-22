@@ -89,6 +89,24 @@ impl Sealer {
     }
 }
 
+fn fill<R: Read>(reader: &mut R, buf: &mut [u8], mid_frame: bool) -> Result<()> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => {
+                return Err(Error::Io(std::io::Error::from(
+                    std::io::ErrorKind::UnexpectedEof,
+                )))
+            }
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if filled == 0 && !mid_frame => return Err(Error::Io(e)),
+            Err(_) => return Err(Error::Record),
+        }
+    }
+    Ok(())
+}
+
 pub struct Opener {
     key: [u8; KEY_BYTES],
     iv: [u8; NONCE_BYTES],
@@ -113,14 +131,14 @@ impl Opener {
 
     pub fn open<R: Read>(&mut self, reader: &mut R) -> Result<Vec<u8>> {
         let mut length_bytes = [0u8; LENGTH_PREFIX];
-        reader.read_exact(&mut length_bytes)?;
+        fill(reader, &mut length_bytes, false)?;
         let length = u32::from_be_bytes(length_bytes) as usize;
         if !(TAG_BYTES..=MAX_RECORD_PLAINTEXT + TAG_BYTES).contains(&length) {
             return Err(Error::Handshake("record length is out of range"));
         }
 
         let mut body = vec![0u8; length];
-        reader.read_exact(&mut body)?;
+        fill(reader, &mut body, true)?;
         let split = length - TAG_BYTES;
         let tag: [u8; TAG_BYTES] = body[split..]
             .try_into()
@@ -184,6 +202,58 @@ mod tests {
         assert_eq!(opener.open(&mut reader).unwrap(), b"once");
         let mut replay = first.as_slice();
         assert!(matches!(opener.open(&mut replay), Err(Error::Record)));
+    }
+
+    struct Stalls<'a> {
+        bytes: &'a [u8],
+        stall_after: usize,
+        read: usize,
+    }
+
+    impl Read for Stalls<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.read >= self.stall_after || self.read >= self.bytes.len() {
+                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+            }
+            let end = self.stall_after.min(self.bytes.len());
+            let n = buf.len().min(end - self.read);
+            buf[..n].copy_from_slice(&self.bytes[self.read..self.read + n]);
+            self.read += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_deadline_before_a_record_is_a_timeout_but_one_inside_it_is_fatal() {
+        let (key, iv) = direction();
+        let mut sealer = Sealer::new(key, iv);
+        let mut wire = Vec::new();
+        sealer.seal(&mut wire, b"payload").unwrap();
+
+        let mut opener = Opener::new(key, iv);
+        let mut idle = Stalls {
+            bytes: &wire,
+            stall_after: 0,
+            read: 0,
+        };
+        assert!(
+            opener.open(&mut idle).unwrap_err().is_timeout(),
+            "no byte of the record was read, so the link is only quiet"
+        );
+
+        for stall_after in [2, LENGTH_PREFIX, LENGTH_PREFIX + 3] {
+            let mut opener = Opener::new(key, iv);
+            let mut torn = Stalls {
+                bytes: &wire,
+                stall_after,
+                read: 0,
+            };
+            let error = opener.open(&mut torn).unwrap_err();
+            assert!(
+                !error.is_timeout(),
+                "a deadline {stall_after} bytes into a record leaves the stream unframeable"
+            );
+        }
     }
 
     #[test]
