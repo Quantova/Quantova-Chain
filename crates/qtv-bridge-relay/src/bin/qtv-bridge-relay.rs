@@ -10,6 +10,9 @@ fn parse_hex(text: &str) -> Result<Vec<u8>, String> {
     if !clean.len().is_multiple_of(2) {
         return Err("the hex payload has an odd length".to_string());
     }
+    if !clean.is_ascii() {
+        return Err("the hex payload holds a non hex character".to_string());
+    }
     (0..clean.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).map_err(|e| format!("bad hex, {e}")))

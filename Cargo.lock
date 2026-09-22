@@ -186,6 +186,7 @@ dependencies = [
  "qtv-devnet",
  "qtv-gateway",
  "qtv-governance",
+ "qtv-idfmt",
  "qtv-net",
  "qtv-node",
  "qtv-tx",

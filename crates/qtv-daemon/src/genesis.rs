@@ -137,6 +137,17 @@ impl GenesisFile {
             }
         }
 
+        let mut seen_accounts: HashSet<&str> = HashSet::new();
+        for account in &accounts {
+            if !seen_accounts.insert(account.address.as_str()) {
+                return Err(format!(
+                    "genesis account {} appears on more than one line, so its balance would be \
+                     overwritten while the supply still counted both",
+                    account.address
+                ));
+            }
+        }
+
         let chain_id = chain_id.ok_or("the genesis is missing 'chain_id'")?;
         let genesis_time = genesis_time.ok_or("the genesis is missing 'genesis_time'")?;
         let chain_binding = u64::from_be_bytes(
@@ -387,6 +398,12 @@ fn parse_validator(field: &Field, slots: u64) -> Result<ValidatorSpec, String> {
         other => return Err(field.error(&format!("'{other}' is not 'online' or 'offline'"))),
     };
     let bond_address = parts[3].to_string();
+    let canonical = qtv_idfmt::parse_address(&bond_address)
+        .ok()
+        .and_then(|payload| qtv_idfmt::render_address(&payload).ok());
+    if canonical.as_deref() != Some(bond_address.as_str()) {
+        return Err(field.error("the bond address is not a canonical Q address"));
+    }
     let digest = fixed_hex::<32>(parts[4], field, "the sortition root")?;
     let attest_pk = fixed_hex::<PK_BYTES>(parts[5], field, "the attestation public key")?;
     let p2p_public = fixed_hex::<PK_BYTES>(parts[6], field, "the peer identity public key")?;
@@ -416,6 +433,20 @@ fn parse_account(field: &Field) -> Result<GenesisAccount, String> {
         .parse()
         .map_err(|_| field.error("the account scheme is not a byte"))?;
     let public_key = from_hex(parts[1]).map_err(|e| field.error(&format!("public key {e}")))?;
+    let key_len =
+        match scheme {
+            qtv_account::SCHEME_LATTICE => qtv_crypto::ml_dsa::PUBLIC_KEY_BYTES,
+            qtv_account::SCHEME_HASH => qtv_crypto::slh_dsa::PUBLIC_KEY_BYTES,
+            _ => return Err(field.error(
+                "the account scheme is not 1 for lattice or 2 for hash, so no key could spend it",
+            )),
+        };
+    if public_key.len() != key_len {
+        return Err(field.error(&format!(
+            "the account public key is {} bytes, the scheme needs {key_len}",
+            public_key.len()
+        )));
+    }
     let balance: u64 = parts[2]
         .parse()
         .map_err(|_| field.error("the account balance is not a number"))?;
@@ -825,5 +856,76 @@ mod tests {
         let err =
             enforce_no_capture(&validators, &accounts).expect_err("the whale account is rejected");
         assert!(err.contains("account qtv1account2"), "{err}");
+    }
+
+    fn field(key: &str, value: String) -> Field {
+        Field {
+            key: key.to_string(),
+            value,
+            file: "genesis.q".to_string(),
+            line: 1,
+        }
+    }
+
+    fn validator_line(v: &ValidatorSpec, bond_address: &str) -> String {
+        format!(
+            "{} {} online {} {} {} {}",
+            v.id,
+            v.stake,
+            bond_address,
+            crate::util::hex(&v.root.digest),
+            crate::util::hex(&v.attest_pk),
+            crate::util::hex(&v.p2p_public)
+        )
+    }
+
+    #[test]
+    fn a_validator_bond_address_must_be_canonical() {
+        let v = validator(1, 2_000);
+        let canonical = v.bond_address.clone();
+        assert!(parse_validator(&field("validator", validator_line(&v, &canonical)), 64).is_ok());
+        let lowered = canonical.to_ascii_lowercase();
+        assert!(parse_validator(&field("validator", validator_line(&v, &lowered)), 64).is_err());
+        assert!(parse_validator(
+            &field("validator", validator_line(&v, "Q1NOTANADDRESS")),
+            64
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn an_account_needs_a_spendable_scheme_and_a_key_of_its_length() {
+        let key = qtv_account::derive(&[3u8; 32], 0);
+        let good = format!("1 {} 500", crate::util::hex(key.public_key()));
+        assert!(parse_account(&field("account", good)).is_ok());
+        let unknown = format!("7 {} 500", crate::util::hex(key.public_key()));
+        assert!(parse_account(&field("account", unknown)).is_err());
+        let short = format!("1 {} 500", crate::util::hex(&key.public_key()[..32]));
+        assert!(parse_account(&field("account", short)).is_err());
+    }
+
+    #[test]
+    fn a_duplicated_account_line_is_refused() {
+        let key = qtv_account::derive(&[4u8; 32], 0);
+        let a = validator(1, 2_000);
+        let b = validator(2, 2_000);
+        let c = validator(3, 2_000);
+        let text = format!(
+            "chain_id = Q-test-net-9\ngenesis_time = 1\nfee_transfer_micro_usd = 500\n\
+             fee_rate_micro_usd_per_qtov = 1000000\nfee_native_unit = 1000000\n\
+             fee_max_native = 1000\nvalidator = {}\nvalidator = {}\nvalidator = {}\n\
+             account = 1 {} 100\naccount = 1 {} 100\n",
+            validator_line(&a, &a.bond_address),
+            validator_line(&b, &b.bond_address),
+            validator_line(&c, &c.bond_address),
+            crate::util::hex(key.public_key()),
+            crate::util::hex(key.public_key()),
+        );
+        let path = std::env::temp_dir().join(format!("qtv-genesis-dup-{}.q", std::process::id()));
+        std::fs::write(&path, text).expect("write the fixture");
+        let result = GenesisFile::load(&path);
+        let _ = std::fs::remove_file(&path);
+        let err = result.err().expect("a duplicated account line is refused");
+        assert!(err.contains("more than one line"), "{err}");
     }
 }

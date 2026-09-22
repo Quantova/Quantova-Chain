@@ -126,7 +126,7 @@ pub fn p2p_public(secret: &[u8; SECRET_LEN]) -> ml_dsa::PublicKey {
 
 fn parse_hex32(hex: &str) -> Option<[u8; SECRET_LEN]> {
     let hex = hex.trim();
-    if hex.len() != SECRET_LEN * 2 {
+    if hex.len() != SECRET_LEN * 2 || !hex.is_ascii() {
         return None;
     }
     let mut out = [0u8; SECRET_LEN];
@@ -208,5 +208,12 @@ mod tests {
         let secret = [0xabu8; SECRET_LEN];
         assert_eq!(parse_hex32(&to_hex(&secret)), Some(secret));
         assert_eq!(parse_hex32("zz"), None);
+    }
+
+    #[test]
+    fn a_keystore_with_a_multibyte_character_is_refused_without_a_panic() {
+        let text = format!("{}é{}", "a".repeat(31), "b".repeat(31));
+        assert_eq!(text.len(), SECRET_LEN * 2);
+        assert_eq!(parse_hex32(&text), None);
     }
 }

@@ -36,9 +36,15 @@ fn hexs(b: &[u8]) -> String {
 
 fn unhex(s: &str) -> Vec<u8> {
     let s = s.trim();
+    if !s.is_ascii() || !s.len().is_multiple_of(2) {
+        fail("a hex argument has an odd length or a non hex character");
+    }
     (0..s.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+        .map(|i| {
+            u8::from_str_radix(&s[i..i + 2], 16)
+                .unwrap_or_else(|_| fail("a hex argument has a non hex character"))
+        })
         .collect()
 }
 
@@ -251,35 +257,35 @@ fn guardian_keygen(a: &[String]) {
     eprintln!("wrote {prefix}.gsecret + {prefix}.gpub  (member_id {mid})");
 }
 
-fn guardian_enact_asset(a: &[String]) {
-    if a.len() != 11 {
-        fail("guardian-enact-asset <gsecrets_comma_sep> <chain_id> <enact_nonce> <asset_hex16> <cap> <epoch_cap> <stark 0|1> <relayer_seed_hex> <relayer_index> <fee> <era_hex32>");
+fn guardian_enact_anchor(a: &[String]) {
+    if a.len() != 9 {
+        fail("guardian-enact-anchor <gsecrets_comma_sep> <chain_id> <enact_nonce> <corridor 0|1|2> <anchor_hex> <relayer_seed_hex> <relayer_index> <fee> <era_hex32>");
     }
     let chain_id: u64 = a[1].parse().expect("chain_id");
     let enact_nonce: u64 = a[2].parse().expect("enact_nonce");
-    let asset_id: [u8; 16] = unhex(&a[3]).try_into().expect("asset 16 bytes");
-    let cap: u128 = a[4].parse().expect("cap");
-    let epoch_cap: u128 = a[5].parse().expect("epoch_cap");
-    let requires_stark = a[6] == "1";
-    let relayer_seed: [u8; 32] = unhex(&a[7]).try_into().expect("relayer seed");
-    let relayer_index: u64 = a[8].parse().expect("relayer_index");
-    let fee: u128 = a[9].parse().expect("fee");
-    let era: [u8; 32] = unhex(&a[10]).try_into().expect("era 32 bytes");
-    let action = Action::AssetRegister {
-        asset_id,
-        cap,
-        epoch_cap,
-        requires_stark,
-    };
+    let corridor: u8 = a[3].parse().expect("corridor");
+    if corridor > 2 {
+        fail("the corridor is 0 for bitcoin, 1 for ethereum or 2 for cosmos");
+    }
+    let anchor = unhex(&a[4]);
+    let relayer_seed: [u8; 32] = unhex(&a[5]).try_into().expect("relayer seed");
+    let relayer_index: u64 = a[6].parse().expect("relayer_index");
+    let fee: u128 = a[7].parse().expect("fee");
+    let era: [u8; 32] = unhex(&a[8]).try_into().expect("era 32 bytes");
+    let action = Action::BridgeAnchorSet { corridor, anchor };
     let challenge = guardian_enact_challenge(chain_id, &era, enact_nonce, &action);
     let mut approvals: Vec<(u8, Vec<u8>, Vec<u8>)> = Vec::new();
     for path in a[0].split(',') {
         let gsecret = fs::read_to_string(path.trim()).expect("read gsecret");
         let parts: Vec<&str> = gsecret.split_whitespace().collect();
+        if parts.len() != 2 {
+            fail("a guardian secret file holds a public key and a secret key");
+        }
         let pk = unhex(parts[0]);
-        let sk: [u8; SECRET_KEY_BYTES] = unhex(parts[1]).try_into().expect("secret key length");
+        let mut sk: [u8; SECRET_KEY_BYTES] = unhex(parts[1]).try_into().expect("secret key length");
         let sig =
             ml_dsa::sign(&sk, &challenge, GUARDIAN_DOMAIN, &[0u8; 32]).expect("guardian sign");
+        sk.zeroize();
         approvals.push((1, pk, sig.to_vec()));
     }
     let relayer = derive(&relayer_seed, relayer_index);
@@ -303,7 +309,9 @@ fn main() {
         Some("mint") => mint(&argv[1..]),
         Some("check") => check(&argv[1..]),
         Some("guardian-keygen") => guardian_keygen(&argv[1..]),
-        Some("guardian-enact-asset") => guardian_enact_asset(&argv[1..]),
-        _ => fail("usage: qtv-oracle <keygen|mint> ..."),
+        Some("guardian-enact-anchor") => guardian_enact_anchor(&argv[1..]),
+        _ => {
+            fail("usage: qtv-oracle <keygen|mint|check|guardian-keygen|guardian-enact-anchor> ...")
+        }
     }
 }

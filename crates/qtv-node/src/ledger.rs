@@ -1879,8 +1879,12 @@ impl Ledger {
     ) -> (Key, Vec<u8>) {
         let key = stake_singleton_key(BRIDGE_BTC_ANCHOR_TAG);
         let bytes = anchor.encode();
+        let same_checkpoint = self.bridge_bitcoin_anchor().is_some_and(|held| {
+            held.checkpoint_height == anchor.checkpoint_height
+                && held.checkpoint_hash == anchor.checkpoint_hash
+        });
         self.write_leaf(key, bytes.clone());
-        if self.bridge_btc_best_work() < anchor.checkpoint_min_work {
+        if !same_checkpoint || self.bridge_btc_best_work() < anchor.checkpoint_min_work {
             self.set_bridge_btc_best_work(&anchor.checkpoint_min_work);
         }
         (key, bytes)
@@ -10610,5 +10614,40 @@ mod tests {
         let hostile = qtv_idfmt::render_address(&pool_key).expect("a full hash reaches the floor");
         assert_eq!(ledger.account(&hostile), Account::default());
         assert_eq!(ledger.stake_pool(), 9_000);
+    }
+
+    #[test]
+    fn a_new_bitcoin_checkpoint_restarts_the_best_work_floor_at_its_own_minimum() {
+        let mut ledger = Ledger::new();
+        let anchor = |height: u32, hash: u8, work: u8| crate::bridge_btc::BitcoinAnchor {
+            network: 0,
+            checkpoint_height: height,
+            checkpoint_hash: [hash; 32],
+            checkpoint_min_work: {
+                let mut w = [0u8; 32];
+                w[31] = work;
+                w
+            },
+            asset_id: [0xb7; 16],
+            deposit_script: vec![0x51],
+        };
+        ledger.seed_bridge_bitcoin_anchor(&anchor(800_000, 1, 10));
+        let mut reached = [0u8; 32];
+        reached[31] = 200;
+        ledger.set_bridge_btc_best_work(&reached);
+
+        ledger.seed_bridge_bitcoin_anchor(&anchor(800_000, 1, 10));
+        assert_eq!(
+            ledger.bridge_btc_best_work(),
+            reached,
+            "re seeding the same checkpoint keeps the higher floor"
+        );
+
+        ledger.seed_bridge_bitcoin_anchor(&anchor(804_000, 2, 12));
+        assert_eq!(
+            ledger.bridge_btc_best_work()[31],
+            12,
+            "work measured above the old checkpoint must not gate proofs above the new one"
+        );
     }
 }

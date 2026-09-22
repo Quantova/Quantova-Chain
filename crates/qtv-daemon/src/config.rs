@@ -144,7 +144,7 @@ impl NodeSettings {
         let genesis_path = genesis_path.ok_or("the config is missing 'genesis'")?;
         let genesis_path = resolve(path, genesis_path);
         let block_messages_path = block_messages_path.map(|p| resolve(path, p));
-        let store_dir = store_dir.ok_or("the config is missing 'store_dir'")?;
+        let store_dir = resolve(path, store_dir.ok_or("the config is missing 'store_dir'")?);
         let keystore_path = match keystore_path {
             Some(p) => resolve(path, p),
             None => store_dir.join("keystore"),
@@ -205,5 +205,28 @@ fn resolve(config_path: &Path, target: PathBuf) -> PathBuf {
     match config_path.parent() {
         Some(dir) => dir.join(target),
         None => target,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_relative_store_dir_resolves_beside_the_config_like_the_keystore() {
+        let dir = std::env::temp_dir().join(format!("qtv-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("make the fixture dir");
+        let path = dir.join("node.conf");
+        std::fs::write(
+            &path,
+            "id = 1\nstore_dir = store\nlisten = 127.0.0.1:9000\ngenesis = genesis.q\nkeystore = keys/k\n",
+        )
+        .expect("write the fixture");
+        let settings = NodeSettings::load(&path).expect("the config loads");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+        assert_eq!(settings.store_dir, dir.join("store"));
+        assert_eq!(settings.keystore_path, dir.join("keys/k"));
+        assert_eq!(settings.genesis_path, dir.join("genesis.q"));
     }
 }
