@@ -310,7 +310,7 @@ fn enforce_no_capture(
         }
         if !bonds.insert(v.bond_address.clone()) {
             return Err(format!(
-                "genesis validator {} reuses bond address {}, already claimed by another line;                  duplicate key material multiplies one operator into several committee seats",
+                "genesis validator {} reuses bond address {}, already claimed by another line; duplicate key material multiplies one operator into several committee seats",
                 v.id, v.bond_address
             ));
         }

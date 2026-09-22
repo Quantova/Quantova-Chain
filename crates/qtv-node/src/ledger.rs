@@ -10535,7 +10535,7 @@ mod tests {
             assert_eq!(
                 split.total(),
                 fee,
-                "a fee of {fee} split into {} burn, {} proposer and {} grants, which does not                  add back to the fee, so the split either loses or invents value",
+                "a fee of {fee} split into {} burn, {} proposer and {} grants, which does not add back to the fee, so the split either loses or invents value",
                 split.burn,
                 split.proposer,
                 split.grants
