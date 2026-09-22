@@ -1375,7 +1375,7 @@ pub(crate) fn vm_admissible(
     if !account.has_key() || !qtv_tx::scheme_supported(wrapper.scheme()) || !signature_ok {
         return false;
     }
-    if body.call().args().len() > MAX_VM_ARGS {
+    if body.call().args().len() > MAX_VM_ARGS || !vm_memory_fits(wrapper) {
         return false;
     }
     if body.nonce() != account.nonce
@@ -1394,6 +1394,17 @@ pub(crate) fn vm_admissible(
         0
     };
     account.balance >= charged.saturating_add(native_debit)
+}
+
+fn vm_memory_fits(wrapper: &Wrapper) -> bool {
+    let call = wrapper.body().call();
+    let args = call.args();
+    let needed = if call.target() == crate::ledger::vm_deploy_address() {
+        crate::ledger::CONTRACT_CONTEXT_BYTES.saturating_add(split_deploy_args(args).1.len())
+    } else {
+        args.len().saturating_sub(4)
+    };
+    needed <= qtv_vm::state::MEM_BYTES
 }
 
 const DEPLOY_PARAMS_TAG: &[u8; 8] = b"QDEPLOY2";
@@ -2735,6 +2746,50 @@ mod tests {
         );
         crate::parallel::execute_parallel(&mut parallel, &[deploy2], &fee, 8, 0);
         assert!(parallel.is_contract(&contract));
+    }
+
+    #[test]
+    fn a_call_or_deploy_whose_memory_exceeds_the_machine_is_refused() {
+        let fee = FeeParams::devnet();
+        let caller = keypair(141);
+        let mut ledger = Ledger::new();
+        fund(&mut ledger, &caller, 10_000 * 1_000_000);
+        let account = ledger.account(&caller.address());
+        let contract = qtv_idfmt::render_address(&[0x42u8; 32]).unwrap();
+        let fits = system_tx(
+            &caller,
+            &contract,
+            vec![0u8; 4 + qtv_vm::state::MEM_BYTES],
+            0,
+            100_000,
+            &fee,
+        );
+        assert!(vm_admissible(&fits, &account, &fee, true));
+        let over = system_tx(
+            &caller,
+            &contract,
+            vec![0u8; 5 + qtv_vm::state::MEM_BYTES],
+            0,
+            100_000,
+            &fee,
+        );
+        assert!(!vm_admissible(&over, &account, &fee, true));
+
+        let params =
+            vec![0u8; qtv_vm::state::MEM_BYTES + 1 - crate::ledger::CONTRACT_CONTEXT_BYTES];
+        let mut args = DEPLOY_PARAMS_TAG.to_vec();
+        args.extend_from_slice(&4u32.to_be_bytes());
+        args.extend_from_slice(b"QVM1");
+        args.extend_from_slice(&params);
+        let deploy = system_tx(
+            &caller,
+            &crate::ledger::vm_deploy_address(),
+            args,
+            0,
+            100_000,
+            &fee,
+        );
+        assert!(!vm_admissible(&deploy, &account, &fee, true));
     }
 
     #[test]

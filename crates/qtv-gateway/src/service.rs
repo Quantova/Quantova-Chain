@@ -690,6 +690,11 @@ fn account(node: &DevNode, address: &str) -> Result<Json, ClientError> {
 struct SystemAddrs {
     deploy: String,
     bridge_mint: String,
+    bridge_btc_mint: String,
+    bridge_eth_mint: String,
+    bridge_cosmos_mint: String,
+    bridge_eth_update: String,
+    bridge_cosmos_update: String,
     bridge_exit: String,
     bridge_settle: String,
     bridge_guardian: String,
@@ -706,6 +711,11 @@ fn system_addrs() -> &'static SystemAddrs {
         SystemAddrs {
             deploy: l::vm_deploy_address(),
             bridge_mint: l::bridge_mint_address(),
+            bridge_btc_mint: l::bridge_btc_mint_address(),
+            bridge_eth_mint: l::bridge_eth_mint_address(),
+            bridge_cosmos_mint: l::bridge_cosmos_mint_address(),
+            bridge_eth_update: l::bridge_eth_update_address(),
+            bridge_cosmos_update: l::bridge_cosmos_update_address(),
             bridge_exit: l::bridge_exit_address(),
             bridge_settle: l::bridge_settle_address(),
             bridge_guardian: l::bridge_guardian_address(),
@@ -718,7 +728,7 @@ fn system_addrs() -> &'static SystemAddrs {
 }
 
 fn tx_kind(
-    node: &DevNode,
+    is_contract: bool,
     sender: &str,
     target: &str,
     nonce: u64,
@@ -727,11 +737,18 @@ fn tx_kind(
     if target == s.deploy {
         return ("deploy", qtv_node::ledger::contract_address(sender, nonce));
     }
-    if node.ledger().is_contract(target) {
+    if is_contract {
         return ("call", None);
     }
-    if target == s.bridge_mint {
+    if target == s.bridge_mint
+        || target == s.bridge_btc_mint
+        || target == s.bridge_eth_mint
+        || target == s.bridge_cosmos_mint
+    {
         return ("bridge_mint", None);
+    }
+    if target == s.bridge_eth_update || target == s.bridge_cosmos_update {
+        return ("bridge_update", None);
     }
     if target == s.bridge_exit {
         return ("bridge_exit", None);
@@ -760,8 +777,13 @@ fn tx_kind(
 fn tx_fields(node: &DevNode, wrapper: &Wrapper) -> Vec<(&'static str, Json)> {
     let body = wrapper.body();
     let target = body.call().target();
-    let amount = qtv_node::execution::transfer_amount(body.call()).unwrap_or(0);
-    let (kind, contract) = tx_kind(node, body.sender(), target, body.nonce());
+    let (kind, contract) = tx_kind(
+        node.ledger().is_contract(target),
+        body.sender(),
+        target,
+        body.nonce(),
+    );
+    let amount = tx_value(kind, wrapper);
     let mut fields = vec![
         ("from", Json::str(body.sender())),
         ("to", Json::str(target)),
@@ -784,6 +806,14 @@ fn tx_fields(node: &DevNode, wrapper: &Wrapper) -> Vec<(&'static str, Json)> {
         fields.push(("contract", Json::str(contract)));
     }
     fields
+}
+
+fn tx_value(kind: &str, wrapper: &Wrapper) -> u64 {
+    let body = wrapper.body();
+    match kind {
+        "call" | "deploy" => body.value(),
+        _ => qtv_node::execution::transfer_amount(body.call()).unwrap_or(0),
+    }
 }
 
 fn transaction(node: &DevNode, tx_id: &str) -> Result<Json, ClientError> {
@@ -1347,6 +1377,44 @@ fn block(node: &DevNode, selector: BlockSelector) -> Result<Json, ClientError> {
 #[cfg(test)]
 mod storage_at_tests {
     use super::*;
+
+    #[test]
+    fn every_bridge_mint_and_update_target_is_labelled_by_its_kind() {
+        use qtv_node::ledger as l;
+        let sender = qtv_idfmt::render_address(&[7u8; 32]).unwrap();
+        for target in [
+            l::bridge_mint_address(),
+            l::bridge_btc_mint_address(),
+            l::bridge_eth_mint_address(),
+            l::bridge_cosmos_mint_address(),
+        ] {
+            assert_eq!(tx_kind(false, &sender, &target, 0).0, "bridge_mint");
+        }
+        for target in [
+            l::bridge_eth_update_address(),
+            l::bridge_cosmos_update_address(),
+        ] {
+            assert_eq!(tx_kind(false, &sender, &target, 0).0, "bridge_update");
+        }
+    }
+
+    #[test]
+    fn a_call_reports_the_value_it_carries() {
+        let sender = qtv_idfmt::render_address(&[7u8; 32]).unwrap();
+        let contract = qtv_idfmt::render_address(&[8u8; 32]).unwrap();
+        let body = qtv_tx::Body::with_context(
+            sender,
+            0,
+            10_000,
+            1_000,
+            qtv_tx::Call::new(contract, vec![1, 2, 3, 4]),
+            777,
+            qtv_tx::LOCAL_CHAIN_ID,
+        );
+        let wrapper = Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new());
+        assert_eq!(tx_value("call", &wrapper), 777);
+        assert_eq!(tx_value("transfer", &wrapper), 0);
+    }
 
     #[test]
     fn get_storage_at_parses_the_address_and_the_thirty_two_byte_keys() {

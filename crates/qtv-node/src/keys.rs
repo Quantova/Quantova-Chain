@@ -31,6 +31,10 @@ fn wipe(bytes: &mut [u8]) {
 pub fn load_or_generate(path: &Path) -> io::Result<[u8; SECRET_LEN]> {
     match fs::read(path) {
         Ok(mut raw) => {
+            if let Err(error) = refuse_shared(path) {
+                wipe(&mut raw);
+                return Err(error);
+            }
             let parsed = std::str::from_utf8(&raw)
                 .ok()
                 .and_then(|text| parse_hex32(text.trim()));
@@ -52,6 +56,26 @@ pub fn load_or_generate(path: &Path) -> io::Result<[u8; SECRET_LEN]> {
         }
         Err(error) => Err(error),
     }
+}
+
+#[cfg(unix)]
+fn refuse_shared(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "keystore {} is readable by group or others, restrict it with chmod 600",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn refuse_shared(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn write_keystore(path: &Path, secret: &[u8; SECRET_LEN]) -> io::Result<()> {
@@ -180,6 +204,23 @@ mod tests {
         let first = load_or_generate(&path).expect("first run generates");
         let second = load_or_generate(&path).expect("second run loads");
         assert_eq!(first, second, "the keystore did not persist the secret");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_keystore_others_can_read_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("qtv-keystore-shared-{}", std::process::id()));
+        let path = dir.join("keystore");
+        let _ = fs::remove_file(&path);
+        load_or_generate(&path).expect("first run generates");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
+        let refused = load_or_generate(&path).expect_err("a shared keystore is refused");
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod");
+        assert!(load_or_generate(&path).is_ok());
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir(&dir);
     }

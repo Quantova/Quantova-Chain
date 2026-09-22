@@ -774,7 +774,11 @@ impl GuardianSet {
     }
 
     pub fn well_formed(&self) -> bool {
-        self.threshold >= 2
+        let mut sorted = self.members.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        sorted.len() == self.members.len()
+            && self.threshold >= 2
             && (self.threshold as usize) <= self.members.len()
             && (self.threshold as usize).saturating_mul(2) > self.members.len()
     }
@@ -1468,6 +1472,12 @@ mod tests {
         assert!(
             !short.well_formed(),
             "a threshold above the membership is not well formed"
+        );
+
+        let repeated = GuardianSet::new(vec![[1u8; 32], [1u8; 32], [1u8; 32], [2u8; 32]], 3);
+        assert!(
+            !repeated.well_formed(),
+            "a member listed twice would leave the threshold out of reach"
         );
     }
 

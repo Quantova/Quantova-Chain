@@ -53,6 +53,24 @@ fn fail(msg: &str) -> ! {
     std::process::exit(1);
 }
 
+fn private_text(path: &str) -> Result<String, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = fs::metadata(path).map_err(|e| format!("reading {path}: {e}"))?;
+        if meta.permissions().mode() & 0o077 != 0 {
+            return Err(format!(
+                "the secret file {path} is readable by group or others, restrict it with chmod 600"
+            ));
+        }
+    }
+    fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))
+}
+
+fn read_private(path: &str) -> String {
+    private_text(path).unwrap_or_else(|e| fail(&e))
+}
+
 fn keygen(a: &[String]) {
     if a.len() != 4 {
         fail("keygen <n> <threshold> <chain_id> <out_prefix>");
@@ -105,7 +123,7 @@ fn mint(a: &[String]) {
     if a.len() != 18 {
         fail("mint <secrets> <chain_id> <source_chain> <dest_chain> <route_id> <nonce> <source_ref_hex> <asset_hex> <amount> <recipient_hex> <expiry> <observed> <relayer_seed_hex> <relayer_index> <fee> <era_hex> <tx_nonce> <valid_until>");
     }
-    let secrets = fs::read_to_string(&a[0]).expect("read secrets");
+    let secrets = read_private(&a[0]);
     let chain_id: u64 = a[1].parse().expect("chain_id");
     let source_chain: u32 = a[2].parse().expect("source_chain");
     let dest_chain: u32 = a[3].parse().expect("dest_chain");
@@ -276,7 +294,7 @@ fn guardian_enact_anchor(a: &[String]) {
     let challenge = guardian_enact_challenge(chain_id, &era, enact_nonce, &action);
     let mut approvals: Vec<(u8, Vec<u8>, Vec<u8>)> = Vec::new();
     for path in a[0].split(',') {
-        let gsecret = fs::read_to_string(path.trim()).expect("read gsecret");
+        let gsecret = read_private(path.trim());
         let parts: Vec<&str> = gsecret.split_whitespace().collect();
         if parts.len() != 2 {
             fail("a guardian secret file holds a public key and a secret key");
@@ -313,5 +331,24 @@ fn main() {
         _ => {
             fail("usage: qtv-oracle <keygen|mint|check|guardian-keygen|guardian-enact-anchor> ...")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_file_others_can_read_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("qtv-oracle-secret-{}", std::process::id()));
+        fs::write(&path, "1 2 3\n").unwrap();
+        let text = path.to_str().unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(private_text(text).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(private_text(text).unwrap(), "1 2 3\n");
+        let _ = fs::remove_file(&path);
     }
 }

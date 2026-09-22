@@ -19,6 +19,20 @@ fn parse_hex(text: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
+fn env_number<T: std::str::FromStr>(
+    name: &str,
+    value: Option<String>,
+    default: T,
+) -> Result<T, String> {
+    match value {
+        Some(text) => text
+            .trim()
+            .parse::<T>()
+            .map_err(|_| format!("{name} is not a whole number")),
+        None => Ok(default),
+    }
+}
+
 fn corridor_from(name: &str) -> Result<Corridor, String> {
     match name.to_ascii_lowercase().as_str() {
         "bitcoin" | "btc" => Ok(Corridor::Bitcoin),
@@ -58,14 +72,16 @@ fn run() -> Result<(), String> {
     let mut seed = [0u8; SEED_LEN];
     seed.copy_from_slice(&seed_bytes);
 
-    let index = std::env::var("QTV_RELAY_INDEX")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0);
-    let max_fee = std::env::var("QTV_RELAY_MAX_FEE")
-        .ok()
-        .and_then(|v| v.parse::<u128>().ok())
-        .unwrap_or(1_000);
+    let index = env_number(
+        "QTV_RELAY_INDEX",
+        std::env::var("QTV_RELAY_INDEX").ok(),
+        0u64,
+    )?;
+    let max_fee = env_number(
+        "QTV_RELAY_MAX_FEE",
+        std::env::var("QTV_RELAY_MAX_FEE").ok(),
+        1_000u128,
+    )?;
 
     let chain = std::env::var("QTV_RELAY_CHAIN")
         .map_err(|_| "set QTV_RELAY_CHAIN to the chain name the relay signs for".to_string())?;
@@ -100,5 +116,15 @@ mod hex_tests {
     fn a_payload_with_a_sign_character_is_refused() {
         assert!(parse_hex("+a+b").is_err());
         assert_eq!(parse_hex("0x0aff").unwrap(), vec![0x0a, 0xff]);
+    }
+
+    #[test]
+    fn a_malformed_number_in_the_environment_is_refused() {
+        assert!(env_number("QTV_RELAY_MAX_FEE", Some("5000x".to_string()), 1_000u128).is_err());
+        assert_eq!(
+            env_number("QTV_RELAY_MAX_FEE", Some(" 5000 ".to_string()), 1_000u128),
+            Ok(5_000)
+        );
+        assert_eq!(env_number("QTV_RELAY_INDEX", None, 0u64), Ok(0));
     }
 }
