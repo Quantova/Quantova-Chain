@@ -27,10 +27,10 @@ pub fn eth_source_chain(config_selector: u8) -> u32 {
     0xFFFF_FE00u32 | config_selector as u32
 }
 
-fn eth_source_ref(finalized_root: &[u8; 32], receipt_index: u64, log_index: u32) -> [u8; 32] {
+fn eth_source_ref(deposit_block_root: &[u8; 32], receipt_index: u64, log_index: u32) -> [u8; 32] {
     let mut buf = Vec::with_capacity(32 + 8 + 4 + 21);
     buf.extend_from_slice(b"qtv/bridge/eth/ref/v2");
-    buf.extend_from_slice(finalized_root);
+    buf.extend_from_slice(deposit_block_root);
     buf.extend_from_slice(&receipt_index.to_le_bytes());
     buf.extend_from_slice(&log_index.to_le_bytes());
     sha3::sha3_256(&buf)
