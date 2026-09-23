@@ -26,11 +26,11 @@ qtv-block = { path = "../qtv-block" }
 qtv-state = { path = "../qtv-state" }
 qtv-staking = { path = "../qtv-staking" }
 qtv-governance = { path = "../qtv-governance" }
-qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "44d820804a3d30cac41238b1dab1ca71bd195bf4" }
-qtv-vm = { git = "https://github.com/Quantova/QVM.git", rev = "06d22c768a1f05b81cd89bb154c6f0e35d7fa8f5" }
-qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "f30f372f643519dc968c9433570a85eff7785323" }
-qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "f30f372f643519dc968c9433570a85eff7785323" }
-qtv-attest = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "f30f372f643519dc968c9433570a85eff7785323" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "80b30f55cc563018b997eea20c6ee48b76424fa9" }
+qtv-vm = { git = "https://github.com/Quantova/QVM.git", rev = "f7f556a510afb60c52494483e5d255b05e9438e7" }
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "dff518623095aa11a65fbee118281f35b3d082e0" }
+qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "dff518623095aa11a65fbee118281f35b3d082e0" }
+qtv-attest = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "dff518623095aa11a65fbee118281f35b3d082e0" }
 
 [dev-dependencies]
 qtv-node = { path = ".", features = ["test-fixtures"] }

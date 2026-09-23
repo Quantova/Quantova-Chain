@@ -14,7 +14,7 @@ default = []
 fn-dsa = ["qtv-crypto/fn-dsa"]
 
 [dependencies]
-qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "44d820804a3d30cac41238b1dab1ca71bd195bf4" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "80b30f55cc563018b997eea20c6ee48b76424fa9" }
 qtv-idfmt = { path = "../qtv-idfmt" }
 qtv-wipe = { path = "../qtv-wipe" }
 
