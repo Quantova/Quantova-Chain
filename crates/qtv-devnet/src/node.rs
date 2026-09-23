@@ -1540,6 +1540,13 @@ impl DevNode {
             return Vec::new();
         };
         let proposed_value = header_value(&proposal.header.hash());
+        if self
+            .prevoted
+            .get(&view)
+            .is_some_and(|already| *already != proposed_value)
+        {
+            return Vec::new();
+        }
         let Ok(high) = self.justified_lock(selection, &records) else {
             return Vec::new();
         };
@@ -2291,6 +2298,9 @@ impl DevNode {
     }
 
     fn watch_for_equivocation(&mut self, attestation: &Attestation, offender: String) {
+        if self.ledger.is_validator_banned(&offender) {
+            return;
+        }
         self.evidence_pool.observe(
             &offender,
             attestation.height,
@@ -2309,8 +2319,10 @@ impl DevNode {
     fn settle_evidence(&mut self, included: &[String]) {
         let chain_id = self.fee_params.chain_id;
         let height = self.height;
+        let ledger = &self.ledger;
         self.evidence_pool.retain(|evidence| {
             evidence.height.saturating_add(EVIDENCE_WINDOW) > height
+                && !ledger.is_validator_banned(&evidence.offender)
                 && !included.contains(&evidence_transaction(evidence, chain_id).id())
         });
     }
