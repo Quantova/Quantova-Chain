@@ -63,7 +63,10 @@ impl Sealer {
         self.sequence += 1;
         let nonce = record_nonce(&self.iv, sequence);
         let aad = sequence.to_be_bytes();
-        let (ciphertext, tag) = chacha20poly1305::seal(&self.key, &nonce, &aad, plaintext);
+        let Some((ciphertext, tag)) = chacha20poly1305::seal(&self.key, &nonce, &aad, plaintext)
+        else {
+            return Err(Error::Handshake("record plaintext exceeds the aead bound"));
+        };
 
         let length = (ciphertext.len() + TAG_BYTES) as u32;
         let mut frame = Vec::with_capacity(LENGTH_PREFIX + ciphertext.len() + TAG_BYTES);

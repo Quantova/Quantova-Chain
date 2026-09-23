@@ -78,7 +78,7 @@ dependencies = [
 [[package]]
 name = "q-vrf"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=b97713f1862116daed1c901b280caf94d4e352cc#b97713f1862116daed1c901b280caf94d4e352cc"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=f30f372f643519dc968c9433570a85eff7785323#f30f372f643519dc968c9433570a85eff7785323"
 dependencies = [
  "qtv-crypto",
 ]
@@ -133,7 +133,7 @@ dependencies = [
 [[package]]
 name = "qtv-attest"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=b97713f1862116daed1c901b280caf94d4e352cc#b97713f1862116daed1c901b280caf94d4e352cc"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=f30f372f643519dc968c9433570a85eff7785323#f30f372f643519dc968c9433570a85eff7785323"
 dependencies = [
  "qtv-bft",
  "qtv-crypto",
@@ -143,7 +143,7 @@ dependencies = [
 [[package]]
 name = "qtv-bft"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=b97713f1862116daed1c901b280caf94d4e352cc#b97713f1862116daed1c901b280caf94d4e352cc"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=f30f372f643519dc968c9433570a85eff7785323#f30f372f643519dc968c9433570a85eff7785323"
 dependencies = [
  "qtv-crypto",
 ]
@@ -179,7 +179,7 @@ version = "0.1.0"
 [[package]]
 name = "qtv-crypto"
 version = "0.3.0"
-source = "git+https://github.com/Quantova/Q-Crypto.git?rev=37a7a4963888a4bb0854d346583e26928659aa63#37a7a4963888a4bb0854d346583e26928659aa63"
+source = "git+https://github.com/Quantova/Q-Crypto.git?rev=44d820804a3d30cac41238b1dab1ca71bd195bf4#44d820804a3d30cac41238b1dab1ca71bd195bf4"
 
 [[package]]
 name = "qtv-devnet"
@@ -249,7 +249,7 @@ dependencies = [
 [[package]]
 name = "qtv-sampler"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=b97713f1862116daed1c901b280caf94d4e352cc#b97713f1862116daed1c901b280caf94d4e352cc"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=f30f372f643519dc968c9433570a85eff7785323#f30f372f643519dc968c9433570a85eff7785323"
 dependencies = [
  "q-vrf",
  "qtv-crypto",
