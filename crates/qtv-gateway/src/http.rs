@@ -15,6 +15,13 @@ use crate::GatewayCall;
 
 static CORS_ORIGIN: OnceLock<Option<String>> = OnceLock::new();
 
+pub const TRUSTED_LOCAL_ENV: &str = "QTV_RPC_TRUSTED_LOCAL";
+
+fn trusted_local() -> bool {
+    static TRUSTED_LOCAL: OnceLock<bool> = OnceLock::new();
+    *TRUSTED_LOCAL.get_or_init(|| std::env::var(TRUSTED_LOCAL_ENV).as_deref() == Ok("1"))
+}
+
 fn cors_origin() -> Option<&'static str> {
     CORS_ORIGIN.get().and_then(|o| o.as_deref())
 }
@@ -560,7 +567,7 @@ fn handle_connection(
     let mut _forwarded_guard: Option<ForwardedGuard> = None;
     if loopback_only {
         let forwarded = forwarded_client_ip(&forwarded_for);
-        let direct = forwarded_for.is_none();
+        let direct = forwarded_for.is_none() && trusted_local();
         let client = limiter_key(forwarded.unwrap_or(peer));
         match limiter.admit_client(client, direct, MAX_CONNECTIONS_PER_IP, Instant::now()) {
             Admit::Untracked => {}
@@ -926,6 +933,28 @@ mod tests {
                 BodyRead::Done(_)
             ),
             "the budget frees when the held bytes are dropped"
+        );
+    }
+
+    #[test]
+    fn a_caller_that_sends_no_forwarding_header_is_still_rate_limited() {
+        let limiter = Limiter::default();
+        let local = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let t = Instant::now();
+        let mut limited = false;
+        for _ in 0..(RATE_BURST as usize + 8) {
+            if matches!(
+                limiter.admit_client(local, false, usize::MAX, t),
+                Admit::RateLimited | Admit::Banned
+            ) {
+                limited = true;
+                break;
+            }
+        }
+        assert!(
+            limited,
+            "without the trusted local switch a caller behind a proxy that sends no forwarded \
+             header is throttled rather than exempt"
         );
     }
 

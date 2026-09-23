@@ -967,21 +967,23 @@ impl DevNode {
         *self.selection_cache.borrow_mut() = None;
         let reveals = match self.committee_for_certificate(head, &certificate) {
             Some(selection) => {
-                debug_assert!(
-                    certificate.committee_reveals.is_empty() || {
-                        let mut carried = certificate.committee_reveals.clone();
-                        carried.sort_by_key(|r| r.id);
-                        let rebuilt: Vec<_> =
-                            carried.iter().map(|r| r.credential.preimage).collect();
-                        rebuilt == selection.reveals
-                    },
-                    "the certificate reveal reconstruction must match the selected committee"
-                );
+                if !certificate.committee_reveals.is_empty() {
+                    let mut carried = certificate.committee_reveals.clone();
+                    carried.sort_by_key(|r| r.id);
+                    let rebuilt: Vec<_> = carried.iter().map(|r| r.credential.preimage).collect();
+                    if rebuilt != selection.reveals {
+                        return Err(RoundError::Decode);
+                    }
+                }
                 selection.reveals
             }
             None if !certificate.committee_reveals.is_empty() => {
+                let signed = certificate.attesters();
                 let mut carried = certificate.committee_reveals.clone();
                 carried.sort_by_key(|r| r.id);
+                if carried.iter().any(|r| !signed.contains(&r.id)) {
+                    return Err(RoundError::Decode);
+                }
                 carried.iter().map(|r| r.credential.preimage).collect()
             }
             None => return Err(RoundError::Decode),
