@@ -189,17 +189,37 @@ impl Log {
         Self::scan_open_inner(path, visit, false, false)
     }
 
+    pub fn open_scanned_keeping_tail_strict<F>(path: impl AsRef<Path>, visit: F) -> io::Result<Self>
+    where
+        F: FnMut(&[u8], u64, u64) -> bool,
+    {
+        Self::scan_open_parts(path, visit, false, true, false)
+    }
+
     fn scan_open<F>(path: impl AsRef<Path>, visit: F, strict: bool) -> io::Result<Self>
     where
         F: FnMut(&[u8], u64, u64) -> bool,
     {
-        Self::scan_open_inner(path, visit, strict, true)
+        Self::scan_open_parts(path, visit, strict, strict, true)
     }
 
     fn scan_open_inner<F>(
         path: impl AsRef<Path>,
-        mut visit: F,
+        visit: F,
         strict: bool,
+        truncate_tail: bool,
+    ) -> io::Result<Self>
+    where
+        F: FnMut(&[u8], u64, u64) -> bool,
+    {
+        Self::scan_open_parts(path, visit, strict, strict, truncate_tail)
+    }
+
+    fn scan_open_parts<F>(
+        path: impl AsRef<Path>,
+        mut visit: F,
+        strict_frames: bool,
+        strict_decode: bool,
         truncate_tail: bool,
     ) -> io::Result<Self>
     where
@@ -232,7 +252,8 @@ impl Log {
             let payload_start = pos + LENGTH_WIDTH as u64;
             let available = total - payload_start;
             if length > available || available - length < CHECKSUM_WIDTH as u64 {
-                if strict && a_well_formed_frame_follows(&mut stream, &salt, payload_start, total)?
+                if strict_frames
+                    && a_well_formed_frame_follows(&mut stream, &salt, payload_start, total)?
                 {
                     return Err(corrupt_middle());
                 }
@@ -250,7 +271,8 @@ impl Log {
             if u32::from_le_bytes(checksum_bytes)
                 != checksum_parts(&[&salt, &length_bytes, &payload])
             {
-                if strict && a_well_formed_frame_follows(&mut stream, &salt, payload_start, total)?
+                if strict_frames
+                    && a_well_formed_frame_follows(&mut stream, &salt, payload_start, total)?
                 {
                     return Err(corrupt_middle());
                 }
@@ -258,7 +280,7 @@ impl Log {
             }
             let end = payload_start + length + CHECKSUM_WIDTH as u64;
             if !visit(&payload, payload_start, end) {
-                if strict {
+                if strict_decode {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "a checksum clean log frame does not decode; refusing to open so the \

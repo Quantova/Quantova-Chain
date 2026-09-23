@@ -869,7 +869,7 @@ const MAX_LIST_RESPONSE_BYTES: usize = 512 * 1024;
 
 fn pending(node: &DevNode) -> Json {
     let total = node.pending_count();
-    let top = node.pending_snapshot(MAX_LIST_ITEMS);
+    let top = node.pending_snapshot_within(MAX_LIST_ITEMS, MAX_LIST_RESPONSE_BYTES);
     let mut items: Vec<Json> = Vec::new();
     let mut budget = MAX_LIST_RESPONSE_BYTES;
     for wrapper in &top {

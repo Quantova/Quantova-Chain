@@ -1087,14 +1087,27 @@ impl Mempool {
     }
 
     pub fn top_candidates(&self, limit: usize) -> Vec<Wrapper> {
-        if self.pending.len() <= limit {
-            return self.candidates();
-        }
+        self.top_candidates_within(limit, usize::MAX)
+    }
+
+    pub fn top_candidates_within(&self, limit: usize, max_bytes: usize) -> Vec<Wrapper> {
         let mut refs: Vec<&Wrapper> = self.pending.iter().collect();
-        refs.select_nth_unstable_by(limit, |a, b| candidate_order(a, b, self.ceiling));
-        refs.truncate(limit);
+        if refs.len() > limit {
+            refs.select_nth_unstable_by(limit, |a, b| candidate_order(a, b, self.ceiling));
+            refs.truncate(limit);
+        }
         refs.sort_by(|a, b| candidate_order(a, b, self.ceiling));
-        refs.into_iter().cloned().collect()
+        let mut room = max_bytes;
+        let mut taken = Vec::with_capacity(refs.len().min(limit));
+        for wrapper in refs {
+            let weight = wrapper.body().call().args().len() + wrapper.signature().len() + 256;
+            if weight > room && !taken.is_empty() {
+                break;
+            }
+            room = room.saturating_sub(weight);
+            taken.push(wrapper.clone());
+        }
+        taken
     }
 
     pub fn revalidate_with(&mut self, ledger: &Ledger, fee_params: &FeeParams) {
@@ -1471,6 +1484,38 @@ mod tests {
             key_register_ok: None,
         }
     }
+
+    #[test]
+    fn a_pending_snapshot_stops_at_its_byte_budget() {
+        let params = FeeParams::devnet();
+        let ceiling = u128::from(params.ceiling_fee());
+        let mut ledger = Ledger::new();
+        let mut pool = Mempool::new();
+        let bob = keypair(50).address();
+        for index in 0..16u64 {
+            let sender = keypair(100 + index);
+            fund(&mut ledger, &sender, 1_000_000_000);
+            let _ = pool.admit(
+                signed_transfer(&sender, &bob, 10, 0, ceiling),
+                &ledger,
+                &params,
+                None,
+            );
+        }
+        let held = pool.pending_len();
+        assert!(held > 4, "the pool holds several transactions");
+
+        let all = pool.top_candidates_within(MAX_SNAPSHOT_TEST_ITEMS, usize::MAX);
+        assert_eq!(all.len(), held, "with no byte budget the snapshot is whole");
+
+        let bounded = pool.top_candidates_within(MAX_SNAPSHOT_TEST_ITEMS, 8 * 1024);
+        assert!(
+            bounded.len() < held && !bounded.is_empty(),
+            "a byte budget stops the snapshot early rather than copying the whole pool"
+        );
+    }
+
+    const MAX_SNAPSHOT_TEST_ITEMS: usize = 1_000;
 
     #[test]
     fn one_feeless_payload_rewrapped_under_new_senders_holds_one_pool_slot() {

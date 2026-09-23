@@ -201,7 +201,7 @@ impl StateStore {
             }
             Err(_) => false,
         };
-        let log = Log::open_scanned_keeping_tail(&path, visit)?;
+        let log = Log::open_scanned_keeping_tail_strict(&path, visit)?;
         let mut store = StateStore {
             log,
             path,
@@ -350,6 +350,40 @@ impl StateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_committed_record_this_build_cannot_read_is_not_silently_discarded() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("qtv-state-unknown-tag-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(holder_path(&path));
+        {
+            let mut store = StateStore::open(&path).expect("a fresh store opens");
+            store
+                .put_account([4u8; 32], vec![1, 2, 3])
+                .expect("an entry is written");
+            store.commit(1, [8u8; 32]).expect("the entry commits");
+        }
+
+        let mut unknown = qtv_codec::Encoder::new();
+        unknown.put_u8(9);
+        unknown.put_u64(7);
+        {
+            let (mut log, _records) =
+                crate::log::Log::open(&path).expect("the log opens for the append");
+            log.append(&unknown.into_bytes())
+                .expect("a record from a newer build lands");
+            log.sync().expect("it is durable");
+        }
+
+        let refused = StateStore::open(&path);
+        assert!(
+            refused.is_err(),
+            "a committed record this build cannot decode is refused, never dropped on the floor"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(holder_path(&path));
+    }
 
     #[test]
     fn the_sized_entry_matches_its_encoded_record() {

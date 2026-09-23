@@ -479,6 +479,8 @@ impl DevNode {
         dev.refuse_state_behind_blocks()?;
         if let Some(committed) = dev.state_store.committed_height() {
             dev.block_store.truncate_to_height(committed)?;
+            dev.event_store.truncate_to_height(committed)?;
+            dev.side_event_store.truncate_to_height(committed)?;
         }
 
         if dev.block_store.is_empty() {
@@ -1844,11 +1846,27 @@ impl DevNode {
         if record.height != self.height {
             return;
         }
-        let seen = self
+        let held = self
             .view_changes
             .iter()
-            .any(|r| r.att.from == record.att.from && r.target_view == record.target_view);
-        if seen {
+            .position(|r| r.att.from == record.att.from && r.target_view == record.target_view);
+        if let Some(index) = held {
+            if !record_carries_more(&self.view_changes[index], &record) {
+                return;
+            }
+            if record
+                .locked
+                .as_ref()
+                .is_some_and(|block| !locked_body_fits(block))
+            {
+                return;
+            }
+            if !self.verify_view_change_att(selection, &record)
+                || !self.verify_view_change_polka(selection, &record)
+            {
+                return;
+            }
+            self.view_changes[index] = record;
             return;
         }
         let from_count = self
@@ -2596,8 +2614,16 @@ impl DevNode {
     pub fn finalized_location(&self, tx_id: &str) -> Option<(Height, Option<usize>)> {
         let packed = self.tx_index.get(&tx_key(tx_id)).ok().flatten()?;
         let position = packed & TX_POSITION_UNKNOWN;
+        let height = packed >> TX_POSITION_BITS;
+        if self
+            .block_store
+            .head_height()
+            .is_none_or(|head| height > head)
+        {
+            return None;
+        }
         Some((
-            packed >> TX_POSITION_BITS,
+            height,
             (position != TX_POSITION_UNKNOWN).then_some(position as usize),
         ))
     }
@@ -2690,6 +2716,10 @@ impl DevNode {
 
     pub fn pending_snapshot(&self, limit: usize) -> Vec<Wrapper> {
         self.mempool.top_candidates(limit)
+    }
+
+    pub fn pending_snapshot_within(&self, limit: usize, max_bytes: usize) -> Vec<Wrapper> {
+        self.mempool.top_candidates_within(limit, max_bytes)
     }
 
     pub fn events_at(&self, height: Height) -> Vec<BlockEvent> {
@@ -2916,6 +2946,18 @@ fn registration_transaction(note: &RegisterNote, chain_id: u64) -> Wrapper {
     let call = Call::new(target.clone(), encode_register_note(note));
     let body = Body::with_context(target, 0, 0, 0, call, 0, chain_id);
     Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new())
+}
+
+fn record_carries_more(held: &ViewChange, incoming: &ViewChange) -> bool {
+    let held_body = held
+        .locked
+        .as_ref()
+        .is_some_and(|block| !block.body.is_empty());
+    let incoming_body = incoming
+        .locked
+        .as_ref()
+        .is_some_and(|block| !block.body.is_empty());
+    (incoming_body && !held_body) || (incoming.polka.is_some() && held.polka.is_none())
 }
 
 fn view_sync_blocking(expected: u64, members: usize, tau: u64) -> usize {
