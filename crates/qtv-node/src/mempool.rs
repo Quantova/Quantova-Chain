@@ -788,7 +788,7 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_evidence(&wrapper) {
-            if feeless_hint.is_none() && !self.charge_feeless_attempt_for(&wrapper) {
+            if !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
             if !crate::node::evidence_offender_is_slashable(&wrapper, ledger) {
@@ -800,7 +800,7 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_bridge_guardian(&wrapper) {
-            if feeless_hint.is_none() && !self.charge_feeless_attempt_for(&wrapper) {
+            if !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
             if !crate::node::guardian_act_is_current(ledger, &wrapper) {
@@ -812,7 +812,7 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_bridge_mint(&wrapper) {
-            if feeless_hint.is_none() && !self.charge_feeless_attempt_for(&wrapper) {
+            if !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
             if !feeless_hint.unwrap_or_else(|| {
@@ -826,7 +826,7 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_bridge_settle(&wrapper) {
-            if feeless_hint.is_none() && !self.charge_feeless_attempt_for(&wrapper) {
+            if !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
             if !feeless_hint.unwrap_or_else(|| {
@@ -835,7 +835,7 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_bridge_eth_update(&wrapper) {
-            if feeless_hint.is_none() && !self.charge_feeless_attempt_for(&wrapper) {
+            if !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
             if !feeless_hint
@@ -844,7 +844,7 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_bridge_cosmos_update(&wrapper) {
-            if feeless_hint.is_none() && !self.charge_feeless_attempt_for(&wrapper) {
+            if !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
             if !feeless_hint.unwrap_or_else(|| {
@@ -1095,6 +1095,11 @@ impl Mempool {
         refs.truncate(limit);
         refs.sort_by(|a, b| candidate_order(a, b, self.ceiling));
         refs.into_iter().cloned().collect()
+    }
+
+    pub fn revalidate_with(&mut self, ledger: &Ledger, fee_params: &FeeParams) {
+        self.ceiling = u128::from(fee_params.ceiling_fee());
+        self.revalidate(ledger);
     }
 
     pub fn revalidate(&mut self, ledger: &Ledger) {

@@ -139,7 +139,7 @@ fn proposal_weight(proposal: &Proposal) -> usize {
     proposal
         .body
         .iter()
-        .map(|w| w.body().call().args().len() + 256)
+        .map(|w| w.body().call().args().len() + w.signature().len() + 256)
         .sum::<usize>()
         + proposal.justification.len() * 512
         + 1024
@@ -503,6 +503,9 @@ impl DevNode {
             return Err(RoundError::Decode);
         }
         let _ = self.stage_from(&block.header, &block.body, view);
+        if view > self.view {
+            self.view = view;
+        }
         self.lock = Some(Lock {
             view,
             value,
@@ -513,6 +516,7 @@ impl DevNode {
     }
 
     fn init_genesis(&mut self, genesis: &Genesis) -> Result<(), RoundError> {
+        let held = self.state_store.head();
         let mut supply: u64 = 0;
         for account in &genesis.accounts {
             let funded =
@@ -591,8 +595,17 @@ impl DevNode {
                 None => self.state_store.delete_account(key)?,
             }
         }
-        self.state_store
-            .commit(GENESIS_COMMIT_HEIGHT, self.ledger.q_root())?;
+        let root = self.ledger.q_root();
+        if let Some(held) = held {
+            if held != root {
+                return Err(RoundError::StateRootMismatch {
+                    height: GENESIS_COMMIT_HEIGHT,
+                    block_root: root,
+                    state_root: Some(held),
+                });
+            }
+        }
+        self.state_store.commit(GENESIS_COMMIT_HEIGHT, root)?;
         self.ledger.clear_dirty();
         self.refresh_committee();
         Ok(())
@@ -1456,7 +1469,7 @@ impl DevNode {
         self.refresh_committee();
         self.mempool.remove_included(&staged.included_ids);
         self.settle_evidence(&staged.included_ids);
-        self.mempool.revalidate(&self.ledger);
+        self.mempool.revalidate_with(&self.ledger, &self.fee_params);
         self.push_finalized(FinalizedBlock {
             block: chain_block,
             leader: leader_for(selection, staged.view),
@@ -2686,6 +2699,10 @@ impl DevNode {
         self.event_store
             .events_at(height)
             .map(|leaves| {
+                let bytes = leaves.iter().map(|leaf| leaf.len()).sum();
+                if !self.charge_served(bytes) {
+                    return Vec::new();
+                }
                 leaves
                     .iter()
                     .filter_map(|leaf| BlockEvent::decode(leaf))
@@ -2701,6 +2718,10 @@ impl DevNode {
         self.side_event_store
             .events_at(height)
             .map(|leaves| {
+                let bytes = leaves.iter().map(|leaf| leaf.len()).sum();
+                if !self.charge_served(bytes) {
+                    return Vec::new();
+                }
                 leaves
                     .iter()
                     .filter_map(|leaf| SideEvent::decode(leaf))
@@ -2717,6 +2738,9 @@ impl DevNode {
         let payload = qtv_idfmt::parse_block(id).ok()?;
         let hash: [u8; 32] = payload.try_into().ok()?;
         let bytes = self.block_store.block_by_hash(&hash)?;
+        if !self.charge_served(bytes.len()) {
+            return None;
+        }
         crate::wire::chain_block_from_bytes(&bytes).ok()
     }
 
@@ -2738,6 +2762,9 @@ impl DevNode {
                 break;
             };
             if !blocks.is_empty() && served.saturating_add(bytes.len()) > MAX_SERVE_BYTES {
+                break;
+            }
+            if !self.charge_served(bytes.len()) {
                 break;
             }
             match crate::wire::chain_block_from_bytes(&bytes) {
@@ -2862,7 +2889,7 @@ impl DevNode {
         self.refresh_committee();
         self.mempool.remove_included(&included_ids);
         self.settle_evidence(&included_ids);
-        self.mempool.revalidate(&self.ledger);
+        self.mempool.revalidate_with(&self.ledger, &self.fee_params);
         self.push_finalized(FinalizedBlock {
             block,
             leader,

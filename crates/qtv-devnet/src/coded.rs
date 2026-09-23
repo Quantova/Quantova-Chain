@@ -215,6 +215,8 @@ const MAX_PENDING_PROPOSALS: usize = 256;
 
 const MAX_DONE_KEYS: usize = 4_096;
 
+const MAX_PINNED_SLOTS: usize = 4_096;
+
 const MAX_ASSEMBLER_BYTES: usize = 128 * 1024 * 1024;
 
 fn piece_weight(shard: &Shard, proof: &ShardProof) -> usize {
@@ -332,6 +334,9 @@ impl ProposalAssembler {
                 }
             }
             None => {
+                if self.pinned.len() >= MAX_PINNED_SLOTS {
+                    return None;
+                }
                 let tokens = self
                     .prepin_tokens
                     .entry(source)

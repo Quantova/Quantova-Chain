@@ -17,6 +17,8 @@ use crate::util::from_hex;
 
 const PK_BYTES: usize = qtv_crypto::ml_dsa::PUBLIC_KEY_BYTES;
 
+const MAX_GENESIS_SLOTS: u64 = 1 << 20;
+
 pub struct GenesisFile {
     pub chain_id: String,
     pub message: String,
@@ -200,6 +202,12 @@ impl GenesisFile {
         }
         if slots == 0 {
             return Err("the genesis slot budget is zero, so no height can finalise".to_string());
+        }
+        if slots > MAX_GENESIS_SLOTS {
+            return Err(format!(
+                "the genesis slot budget of {slots} is past the ceiling of {MAX_GENESIS_SLOTS}, \
+                 a one time tree that size exhausts memory before the node reaches a peer"
+            ));
         }
         enforce_no_capture(&validators, &accounts)?;
 

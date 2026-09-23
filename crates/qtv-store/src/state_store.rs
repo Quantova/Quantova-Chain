@@ -209,8 +209,15 @@ impl StateStore {
             head,
             committed_height,
         };
+        if contended {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "another live process holds this state log",
+            ));
+        }
+        touch_holder(&store.path);
         let behind = floor.is_some_and(|floor| committed_height.is_none_or(|c| c < floor));
-        if contended || behind {
+        if behind {
             return Ok(store);
         }
         if committed_len.max(crate::log::HEADER_LEN) < store.log.len()? {
@@ -890,8 +897,12 @@ mod live_holder {
             "a fresh holder naming a live pid is contention"
         );
 
-        let second = StateStore::open(&path).unwrap();
-        drop(second);
+        let second = StateStore::open(&path);
+        assert_eq!(
+            second.err().map(|e| e.kind()),
+            Some(io::ErrorKind::AddrInUse),
+            "a second opener refuses the log rather than appending beside a live process"
+        );
 
         assert_eq!(
             std::fs::metadata(&path).unwrap().len(),
