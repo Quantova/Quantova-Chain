@@ -89,6 +89,7 @@ pub fn run_scenario(scenario: &Scenario) -> Vec<RunReport> {
             .env(wenv::STALLSECS, scenario.stall_secs.to_string())
             .env(wenv::SLOWMS, scenario.slow_ms[idx].to_string())
             .env(wenv::BASE, base.to_string_lossy().to_string())
+            .env(wenv::ACK_FIXTURE_KEYS, "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
