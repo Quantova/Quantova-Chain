@@ -242,7 +242,7 @@ dependencies = [
  "qtv-staking",
  "qtv-state",
  "qtv-tx",
- "qtv-vm 0.2.0 (git+https://github.com/Quantova/QVM.git?rev=62fadd4ced98c4c4eb5042391aba54dabac51431)",
+ "qtv-vm 0.2.0 (git+https://github.com/Quantova/QVM.git?rev=06d22c768a1f05b81cd89bb154c6f0e35d7fa8f5)",
  "qtv-wipe",
 ]
 
@@ -301,7 +301,7 @@ dependencies = [
 [[package]]
 name = "qtv-vm"
 version = "0.2.0"
-source = "git+https://github.com/Quantova/QVM.git?rev=62fadd4ced98c4c4eb5042391aba54dabac51431#62fadd4ced98c4c4eb5042391aba54dabac51431"
+source = "git+https://github.com/Quantova/QVM.git?rev=06d22c768a1f05b81cd89bb154c6f0e35d7fa8f5#06d22c768a1f05b81cd89bb154c6f0e35d7fa8f5"
 dependencies = [
  "qtv-crypto",
 ]
