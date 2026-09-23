@@ -105,7 +105,18 @@ impl NodeSettings {
         let mut block_messages_path: Option<PathBuf> = None;
         let mut checkpoint: Option<(u64, [u8; 32])> = None;
 
+        let mut seen: Vec<&str> = Vec::new();
         for field in &fields {
+            if field.key != "peer" {
+                if seen.contains(&field.key.as_str()) {
+                    return Err(field.error(&format!(
+                        "'{}' is set more than once; a repeated key would silently take the last \
+                         value",
+                        field.key
+                    )));
+                }
+                seen.push(field.key.as_str());
+            }
             match field.key.as_str() {
                 "id" => id = Some(field.u64("id")?),
                 "store_dir" => store_dir = Some(PathBuf::from(&field.value)),
@@ -141,6 +152,14 @@ impl NodeSettings {
             }
         }
 
+        if block_interval_ms == 0 {
+            return Err("'block_interval_ms' is zero, so the driver would spin".to_string());
+        }
+        if view_timeout_ms == 0 {
+            return Err(
+                "'view_timeout_ms' is zero, so every round would time out at once".to_string(),
+            );
+        }
         let genesis_path = genesis_path.ok_or("the config is missing 'genesis'")?;
         let genesis_path = resolve(path, genesis_path);
         let block_messages_path = block_messages_path.map(|p| resolve(path, p));
