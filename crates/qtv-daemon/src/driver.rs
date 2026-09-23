@@ -420,9 +420,14 @@ impl Driver {
             let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 qtv_gateway::handle(context, node, request)
             }));
-            if let Ok(result) = served {
-                let _ = call.reply.send(result);
-            }
+            let result = served.unwrap_or_else(|_| {
+                Err(ClientError {
+                    code: "internal".to_string(),
+                    message: "the node could not serve this call".to_string(),
+                    http: 500,
+                })
+            });
+            let _ = call.reply.send(result);
         }
     }
 

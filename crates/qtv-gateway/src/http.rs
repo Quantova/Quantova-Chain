@@ -47,6 +47,7 @@ const BAN_DURATION: Duration = Duration::from_secs(300);
 
 enum Admit {
     Ok,
+    Untracked,
     TotalFull,
     IpFull,
     RateLimited,
@@ -201,7 +202,7 @@ impl Limiter {
 
     fn admit_client(&self, ip: IpAddr, direct: bool, per_ip_cap: usize, now: Instant) -> Admit {
         if direct && ip.is_loopback() {
-            return Admit::Ok;
+            return Admit::Untracked;
         }
         let mut inner = self
             .inner
@@ -319,7 +320,7 @@ pub fn serve(
             } else {
                 match limiter.try_admit(ip, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, Instant::now())
                 {
-                    Admit::Ok => {}
+                    Admit::Ok | Admit::Untracked => {}
                     Admit::TotalFull => {
                         stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
                         let _ = write_error(
@@ -408,10 +409,57 @@ struct BodyGuard {
     held: usize,
 }
 
+impl BodyGuard {
+    fn reserve(&mut self, more: usize) -> bool {
+        if !self.limiter.try_reserve_body(more) {
+            return false;
+        }
+        self.held += more;
+        true
+    }
+}
+
 impl Drop for BodyGuard {
     fn drop(&mut self) {
         self.limiter.release_body(self.held);
     }
+}
+
+enum BodyRead {
+    Done(Vec<u8>),
+    Timeout,
+    Busy,
+    Short,
+}
+
+fn read_body<R: Read>(
+    reader: &mut R,
+    content_length: usize,
+    guard: &mut BodyGuard,
+    deadline: Instant,
+) -> IoResult<BodyRead> {
+    let mut body = Vec::with_capacity(content_length.min(64 * 1024));
+    let mut chunk = [0u8; 8192];
+    while body.len() < content_length {
+        if Instant::now() >= deadline {
+            return Ok(BodyRead::Timeout);
+        }
+        let want = (content_length - body.len()).min(chunk.len());
+        match reader.read(&mut chunk[..want]) {
+            Ok(0) => break,
+            Ok(n) => {
+                if !guard.reserve(n) {
+                    return Ok(BodyRead::Busy);
+                }
+                body.extend_from_slice(&chunk[..n]);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    if body.len() < content_length {
+        return Ok(BodyRead::Short);
+    }
+    Ok(BodyRead::Done(body))
 }
 
 struct ForwardedGuard {
@@ -515,6 +563,7 @@ fn handle_connection(
         let direct = forwarded_for.is_none();
         let client = limiter_key(forwarded.unwrap_or(peer));
         match limiter.admit_client(client, direct, MAX_CONNECTIONS_PER_IP, Instant::now()) {
+            Admit::Untracked => {}
             Admit::Ok => {
                 _forwarded_guard = Some(ForwardedGuard {
                     limiter: limiter.clone(),
@@ -568,48 +617,38 @@ fn handle_connection(
         );
     }
 
-    let _body_guard = if content_length == 0 {
-        None
-    } else if limiter.try_reserve_body(content_length) {
-        Some(BodyGuard {
-            limiter: limiter.clone(),
-            held: content_length,
-        })
-    } else {
-        return write_error(
-            &mut stream,
-            503,
-            "busy",
-            "the gateway is handling too much request data, retry shortly",
-        );
+    let mut body_guard = BodyGuard {
+        limiter: limiter.clone(),
+        held: 0,
     };
 
-    let mut body = Vec::with_capacity(content_length.min(64 * 1024));
-    let mut chunk = [0u8; 8192];
-    while body.len() < content_length {
-        if Instant::now() >= deadline {
+    let body = match read_body(&mut reader, content_length, &mut body_guard, deadline)? {
+        BodyRead::Done(body) => body,
+        BodyRead::Timeout => {
             return write_error(
                 &mut stream,
                 408,
                 "timeout",
                 "the request body did not arrive in time",
-            );
+            )
         }
-        let want = (content_length - body.len()).min(chunk.len());
-        match reader.read(&mut chunk[..want]) {
-            Ok(0) => break,
-            Ok(n) => body.extend_from_slice(&chunk[..n]),
-            Err(e) => return Err(e),
+        BodyRead::Busy => {
+            return write_error(
+                &mut stream,
+                503,
+                "busy",
+                "the gateway is handling too much request data, retry shortly",
+            )
         }
-    }
-    if body.len() < content_length {
-        return write_error(
-            &mut stream,
-            400,
-            "bad_request",
-            "the request body was shorter than declared",
-        );
-    }
+        BodyRead::Short => {
+            return write_error(
+                &mut stream,
+                400,
+                "bad_request",
+                "the request body was shorter than declared",
+            )
+        }
+    };
     let Ok(body_text) = std::str::from_utf8(&body) else {
         return write_error(
             &mut stream,
@@ -794,6 +833,130 @@ mod tests {
     }
 
     #[test]
+    fn a_body_that_is_declared_but_never_sent_holds_none_of_the_in_flight_budget() {
+        let limiter = Arc::new(Limiter::default());
+        let stalled = MAX_INFLIGHT_BODY / MAX_BODY;
+        let mut guards: Vec<BodyGuard> = Vec::new();
+        for _ in 0..stalled {
+            let mut guard = BodyGuard {
+                limiter: limiter.clone(),
+                held: 0,
+            };
+            let mut silent = Cursor::new(Vec::new());
+            let read = read_body(
+                &mut silent,
+                MAX_BODY,
+                &mut guard,
+                Instant::now() + REQUEST_DEADLINE,
+            )
+            .expect("a silent reader is not an io error");
+            assert!(
+                matches!(read, BodyRead::Short),
+                "a declared body that never arrives ends short"
+            );
+            guards.push(guard);
+        }
+        assert!(
+            guards.iter().all(|guard| guard.held == 0),
+            "a connection that declared a length but sent nothing holds no budget"
+        );
+
+        let mut real = BodyGuard {
+            limiter: limiter.clone(),
+            held: 0,
+        };
+        let payload = vec![b'x'; MAX_BODY];
+        let mut sender = Cursor::new(payload.clone());
+        let read = read_body(
+            &mut sender,
+            MAX_BODY,
+            &mut real,
+            Instant::now() + REQUEST_DEADLINE,
+        )
+        .expect("the body reads");
+        match read {
+            BodyRead::Done(body) => assert_eq!(body.len(), MAX_BODY),
+            _ => panic!("a full body that arrives is served while others only declared a length"),
+        }
+        assert_eq!(
+            real.held, MAX_BODY,
+            "the budget counts the bytes that arrived"
+        );
+    }
+
+    #[test]
+    fn the_in_flight_budget_refuses_a_body_once_the_bytes_are_really_held() {
+        let limiter = Arc::new(Limiter::default());
+        let mut held = BodyGuard {
+            limiter: limiter.clone(),
+            held: 0,
+        };
+        assert!(held.reserve(MAX_INFLIGHT_BODY));
+        let mut late = BodyGuard {
+            limiter: limiter.clone(),
+            held: 0,
+        };
+        let mut sender = Cursor::new(vec![b'x'; 16]);
+        let read = read_body(
+            &mut sender,
+            16,
+            &mut late,
+            Instant::now() + REQUEST_DEADLINE,
+        )
+        .expect("the body reads");
+        assert!(
+            matches!(read, BodyRead::Busy),
+            "once the budget is really held the next body is refused"
+        );
+        drop(held);
+        let mut after = BodyGuard {
+            limiter: limiter.clone(),
+            held: 0,
+        };
+        let mut sender = Cursor::new(vec![b'x'; 16]);
+        assert!(
+            matches!(
+                read_body(
+                    &mut sender,
+                    16,
+                    &mut after,
+                    Instant::now() + REQUEST_DEADLINE
+                )
+                .expect("the body reads"),
+                BodyRead::Done(_)
+            ),
+            "the budget frees when the held bytes are dropped"
+        );
+    }
+
+    #[test]
+    fn an_exempt_local_client_takes_no_connection_slot_it_could_later_free() {
+        let limiter = Limiter::default();
+        let local = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let t = Instant::now();
+        for _ in 0..MAX_CONNECTIONS_PER_IP {
+            assert!(matches!(
+                limiter.admit_client(local, false, MAX_CONNECTIONS_PER_IP, t),
+                Admit::Ok
+            ));
+        }
+        assert!(
+            matches!(
+                limiter.admit_client(local, false, MAX_CONNECTIONS_PER_IP, t),
+                Admit::IpFull
+            ),
+            "the forwarded bucket for this address is full"
+        );
+        assert!(
+            matches!(
+                limiter.admit_client(local, true, MAX_CONNECTIONS_PER_IP, t),
+                Admit::Untracked
+            ),
+            "an exempt client reports that it took no slot, so it never frees one it did not take"
+        );
+    }
+
+    #[test]
     fn a_direct_loopback_client_is_never_rate_limited_or_banned() {
         let limiter = Limiter::default();
         let local = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
@@ -802,7 +965,7 @@ mod tests {
             assert!(
                 matches!(
                     limiter.admit_forwarded(local, MAX_CONNECTIONS_PER_IP, t),
-                    Admit::Ok
+                    Admit::Untracked
                 ),
                 "a trusted local loopback client is exempt from the per address rate limit and ban"
             );
@@ -814,7 +977,7 @@ mod tests {
                     MAX_CONNECTIONS_PER_IP,
                     t
                 ),
-                Admit::Ok
+                Admit::Untracked
             ),
             "ipv6 loopback is exempt too"
         );
