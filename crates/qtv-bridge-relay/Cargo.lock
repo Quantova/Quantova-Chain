@@ -78,7 +78,7 @@ dependencies = [
 [[package]]
 name = "q-vrf"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=f6f0802e96fc2df3568bd81b1c003cc382733042#f6f0802e96fc2df3568bd81b1c003cc382733042"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=b97713f1862116daed1c901b280caf94d4e352cc#b97713f1862116daed1c901b280caf94d4e352cc"
 dependencies = [
  "qtv-crypto",
 ]
@@ -133,7 +133,7 @@ dependencies = [
 [[package]]
 name = "qtv-attest"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=f6f0802e96fc2df3568bd81b1c003cc382733042#f6f0802e96fc2df3568bd81b1c003cc382733042"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=b97713f1862116daed1c901b280caf94d4e352cc#b97713f1862116daed1c901b280caf94d4e352cc"
 dependencies = [
  "qtv-bft",
  "qtv-crypto",
@@ -143,7 +143,7 @@ dependencies = [
 [[package]]
 name = "qtv-bft"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=f6f0802e96fc2df3568bd81b1c003cc382733042#f6f0802e96fc2df3568bd81b1c003cc382733042"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=b97713f1862116daed1c901b280caf94d4e352cc#b97713f1862116daed1c901b280caf94d4e352cc"
 dependencies = [
  "qtv-crypto",
 ]
@@ -249,7 +249,7 @@ dependencies = [
 [[package]]
 name = "qtv-sampler"
 version = "0.1.0"
-source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=f6f0802e96fc2df3568bd81b1c003cc382733042#f6f0802e96fc2df3568bd81b1c003cc382733042"
+source = "git+https://github.com/Quantova/QRC-CONSENSUS.git?rev=b97713f1862116daed1c901b280caf94d4e352cc#b97713f1862116daed1c901b280caf94d4e352cc"
 dependencies = [
  "q-vrf",
  "qtv-crypto",
