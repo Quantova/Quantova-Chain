@@ -454,6 +454,13 @@ pub(crate) fn evidence_admissible(chain_id: u64, wrapper: &Wrapper, ledger: &Led
     }
 }
 
+pub(crate) fn evidence_offender_is_slashable(wrapper: &Wrapper, ledger: &Ledger) -> bool {
+    match crate::evidence::Equivocation::decode(wrapper.body().call().args()) {
+        Some(evidence) => !ledger.is_validator_banned(&evidence.offender),
+        None => false,
+    }
+}
+
 fn dispatch_evidence(chain_id: u64, ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
     let evidence = match crate::evidence::Equivocation::decode(wrapper.body().call().args()) {
         Some(evidence) => evidence,
@@ -748,6 +755,21 @@ pub(crate) fn guardian_admissible(ledger: &Ledger, wrapper: &Wrapper, chain_id: 
         chain_id,
         &ledger.bridge_era(),
     ))
+}
+
+pub(crate) fn guardian_act_is_current(ledger: &Ledger, wrapper: &Wrapper) -> bool {
+    let act = match GuardianAct::decode(wrapper.body().call().args()) {
+        Some(act) => act,
+        None => return false,
+    };
+    match act.op {
+        GUARDIAN_FREEZE => act.bound == ledger.guardian_freeze_epoch(),
+        GUARDIAN_UNFREEZE => {
+            matches!(ledger.bridge_freeze(), Some(freeze) if freeze.until == act.bound)
+        }
+        GUARDIAN_ENACT => act.bound == ledger.guardian_enact_nonce(),
+        _ => false,
+    }
 }
 
 fn dispatch_bridge_guardian(

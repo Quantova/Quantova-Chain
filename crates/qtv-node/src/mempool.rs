@@ -254,6 +254,18 @@ pub const DEFAULT_FEELESS_ADMITS_PER_WINDOW: usize = 128;
 
 pub const DEFAULT_FEELESS_ATTEMPTS_PER_WINDOW: usize = 512;
 
+pub const DEFAULT_FEELESS_POOL_CAP: usize = 1_024;
+
+pub const FEELESS_MAX_AGE_HEIGHTS: u64 = 64;
+
+pub(crate) fn feeless_payload_key(wrapper: &Wrapper) -> [u8; 32] {
+    let call = wrapper.body().call();
+    let mut input = Vec::with_capacity(call.target().len() + call.args().len());
+    input.extend_from_slice(call.target().as_bytes());
+    input.extend_from_slice(call.args());
+    qtv_crypto::sha3::sha3_256(&input)
+}
+
 fn is_plain_transfer(ledger: &Ledger, wrapper: &Wrapper) -> bool {
     !is_feeless(wrapper)
         && !crate::node::is_vm_op(ledger, wrapper)
@@ -381,6 +393,11 @@ pub struct Mempool {
     settle_attempts: usize,
     guardian_attempts: usize,
     mint_sources: std::collections::HashSet<(u32, [u8; 32])>,
+    feeless_count: usize,
+    feeless_pool_cap: usize,
+    feeless_payloads: HashSet<[u8; 32]>,
+    feeless_seen: std::collections::HashMap<String, u64>,
+    height: u64,
     ceiling: u128,
 }
 
@@ -419,6 +436,11 @@ impl Mempool {
             settle_attempts: 0,
             guardian_attempts: 0,
             mint_sources: std::collections::HashSet::new(),
+            feeless_count: 0,
+            feeless_pool_cap: DEFAULT_FEELESS_POOL_CAP,
+            feeless_payloads: HashSet::new(),
+            feeless_seen: std::collections::HashMap::new(),
+            height: 0,
             ceiling: u128::MAX,
         }
     }
@@ -430,7 +452,11 @@ impl Mempool {
             .sender_nonces
             .entry((sender, wrapper.body().nonce()))
             .or_insert(0) += 1;
-        if !is_priority(wrapper) {
+        if is_feeless(wrapper) {
+            self.feeless_count += 1;
+            self.feeless_payloads.insert(feeless_payload_key(wrapper));
+            self.feeless_seen.insert(wrapper.id(), self.height);
+        } else if !is_priority(wrapper) {
             self.normal_count += 1;
         }
         if crate::node::is_bridge_mint(wrapper) {
@@ -457,7 +483,12 @@ impl Mempool {
                 self.sender_nonces.remove(&nonce_key);
             }
         }
-        if !is_priority(wrapper) {
+        if is_feeless(wrapper) {
+            debug_assert!(self.feeless_count > 0, "untracked more feeless than held");
+            self.feeless_count = self.feeless_count.saturating_sub(1);
+            self.feeless_payloads.remove(&feeless_payload_key(wrapper));
+            self.feeless_seen.remove(wrapper.id_str());
+        } else if !is_priority(wrapper) {
             debug_assert!(self.normal_count > 0, "untracked more normals than held");
             self.normal_count = self.normal_count.saturating_sub(1);
         }
@@ -595,6 +626,12 @@ impl Mempool {
         if self.sender_count(incoming.body().sender()) >= self.per_sender {
             return Err(Reject::SenderQueueFull);
         }
+        if is_feeless(incoming) {
+            if self.feeless_count >= self.feeless_pool_cap || self.pending.len() >= self.cap {
+                return Err(Reject::PoolFull);
+            }
+            return Ok(());
+        }
         if is_priority(incoming) {
             if self.pending.len() < self.cap {
                 return Ok(());
@@ -652,8 +689,16 @@ impl Mempool {
             return Err(Reject::WrongChain);
         }
         self.ceiling = u128::from(fee_params.ceiling_fee());
+        self.height = ledger.execution_height();
         let id = wrapper.id();
         if self.ids.contains(&id) {
+            return Ok(Admitted::Known);
+        }
+        if is_feeless(&wrapper)
+            && self
+                .feeless_payloads
+                .contains(&feeless_payload_key(&wrapper))
+        {
             return Ok(Admitted::Known);
         }
         if !canonical_address(wrapper.body().sender()) {
@@ -746,6 +791,9 @@ impl Mempool {
             if feeless_hint.is_none() && !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
             }
+            if !crate::node::evidence_offender_is_slashable(&wrapper, ledger) {
+                return Err(Reject::BadCall);
+            }
             if !feeless_hint.unwrap_or_else(|| {
                 crate::node::evidence_admissible(fee_params.chain_id, &wrapper, ledger)
             }) {
@@ -754,6 +802,9 @@ impl Mempool {
         } else if crate::node::is_bridge_guardian(&wrapper) {
             if feeless_hint.is_none() && !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
+            }
+            if !crate::node::guardian_act_is_current(ledger, &wrapper) {
+                return Err(Reject::BadCall);
             }
             if !feeless_hint.unwrap_or_else(|| {
                 crate::node::guardian_admissible(ledger, &wrapper, fee_params.chain_id)
@@ -1019,6 +1070,11 @@ impl Mempool {
         ordered
     }
 
+    #[cfg(test)]
+    fn set_feeless_pool_cap(&mut self, cap: usize) {
+        self.feeless_pool_cap = cap;
+    }
+
     pub fn pending_len(&self) -> usize {
         self.pending.len()
     }
@@ -1081,6 +1137,11 @@ impl Mempool {
             };
             let exit_closed =
                 crate::node::is_bridge_exit(&wrapper) && !ledger.bridge_exits_enabled();
+            let feeless_aged = is_feeless(&wrapper)
+                && self
+                    .feeless_seen
+                    .get(wrapper.id_str())
+                    .is_none_or(|seen| height.saturating_sub(*seen) > FEELESS_MAX_AGE_HEIGHTS);
             let unfunded = is_signed_lane(&wrapper) && wrapper.body().nonce() == account.nonce && {
                 let fee = u64::try_from(wrapper.body().fee().min(self.ceiling)).unwrap_or(u64::MAX);
                 let amount = if is_plain_transfer(ledger, &wrapper) {
@@ -1090,7 +1151,15 @@ impl Mempool {
                 };
                 account.balance < fee.saturating_add(amount)
             };
-            if stale || barred || expired || refused || settled || exit_closed || unfunded {
+            if stale
+                || barred
+                || expired
+                || refused
+                || settled
+                || exit_closed
+                || unfunded
+                || feeless_aged
+            {
                 self.ids.remove(wrapper.id().as_str());
                 self.untrack(&wrapper);
             } else {
@@ -1370,6 +1439,124 @@ mod tests {
             pool.admit(tx, &ledger, &params, None),
             Ok(Admitted::Fresh),
             "the same tx admits fresh again, proving the set was cleaned"
+        );
+    }
+
+    fn feeless_variant(base: &Wrapper, slot: u64, sender: &str, nonce: u64) -> Wrapper {
+        let mut evidence =
+            crate::evidence::Equivocation::decode(base.body().call().args()).expect("decodes");
+        evidence.slot_b = slot;
+        let call = qtv_tx::Call::new(crate::ledger::evidence_address(), evidence.encode());
+        let body = Body::with_context(
+            sender.to_string(),
+            nonce,
+            0,
+            0,
+            call,
+            0,
+            FeeParams::devnet().chain_id,
+        );
+        Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new())
+    }
+
+    fn allow_feeless() -> AdmitHint {
+        AdmitHint {
+            signature: None,
+            feeless_ok: Some(true),
+            key_register_ok: None,
+        }
+    }
+
+    #[test]
+    fn one_feeless_payload_rewrapped_under_new_senders_holds_one_pool_slot() {
+        let params = FeeParams::devnet();
+        let (ledger, tx, _offender) = seeded_evidence(&[12u8; 32]);
+        let mut pool = Mempool::new();
+        assert_eq!(
+            pool.admit(tx.clone(), &ledger, &params, Some(&allow_feeless())),
+            Ok(Admitted::Fresh)
+        );
+        for index in 0..32u64 {
+            let sender = qtv_idfmt::render_address(&[index as u8 + 1; 32]).expect("an address");
+            let rewrapped = feeless_variant(&tx, 1, &sender, index);
+            assert_eq!(
+                pool.admit(rewrapped, &ledger, &params, Some(&allow_feeless())),
+                Ok(Admitted::Known),
+                "the same feeless payload under a new sender is the one we already hold"
+            );
+        }
+        assert_eq!(
+            pool.pending_len(),
+            1,
+            "a feeless payload costs one pool slot however many wrappers carry it"
+        );
+    }
+
+    #[test]
+    fn feeless_traffic_cannot_grow_past_its_own_share_of_the_pool() {
+        let params = FeeParams::devnet();
+        let (ledger, tx, _offender) = seeded_evidence(&[13u8; 32]);
+        let mut pool = Mempool::new();
+        pool.set_feeless_pool_cap(4);
+        let sender = qtv_idfmt::render_address(&[77u8; 32]).expect("an address");
+        for slot in 0..4u64 {
+            assert_eq!(
+                pool.admit(
+                    feeless_variant(&tx, slot, &sender, slot),
+                    &ledger,
+                    &params,
+                    Some(&allow_feeless())
+                ),
+                Ok(Admitted::Fresh)
+            );
+        }
+        assert_eq!(
+            pool.admit(
+                feeless_variant(&tx, 9, &sender, 9),
+                &ledger,
+                &params,
+                Some(&allow_feeless())
+            ),
+            Err(Reject::PoolFull),
+            "feeless transactions are capped on their own, they never eat the paying pool"
+        );
+    }
+
+    #[test]
+    fn a_feeless_entry_that_no_block_takes_ages_out_of_the_pool() {
+        let params = FeeParams::devnet();
+        let (mut ledger, tx, _offender) = seeded_evidence(&[14u8; 32]);
+        let mut pool = Mempool::new();
+        assert_eq!(
+            pool.admit(tx, &ledger, &params, Some(&allow_feeless())),
+            Ok(Admitted::Fresh)
+        );
+        ledger.set_execution_height(FEELESS_MAX_AGE_HEIGHTS);
+        pool.revalidate(&ledger);
+        assert_eq!(
+            pool.pending_len(),
+            1,
+            "inside its window the entry still waits for a block"
+        );
+        ledger.set_execution_height(FEELESS_MAX_AGE_HEIGHTS + 1);
+        pool.revalidate(&ledger);
+        assert_eq!(
+            pool.pending_len(),
+            0,
+            "past its window a feeless entry no block would take is swept"
+        );
+    }
+
+    #[test]
+    fn evidence_against_an_already_slashed_validator_is_refused() {
+        let params = FeeParams::devnet();
+        let (mut ledger, tx, offender) = seeded_evidence(&[15u8; 32]);
+        assert!(ledger.slash_validator(&offender), "the first slash lands");
+        let mut pool = Mempool::new();
+        assert_eq!(
+            pool.admit(tx, &ledger, &params, Some(&allow_feeless())),
+            Err(Reject::BadCall),
+            "a banned offender cannot be slashed again, so the evidence is not pool traffic"
         );
     }
 

@@ -141,6 +141,10 @@ impl Equivocation {
 
 pub const MAX_HEIGHT_VIEW: u64 = 256;
 
+pub const MAX_PENDING_EVIDENCE: usize = 256;
+
+pub const MAX_WATCHED_ATTESTATIONS: usize = 4_096;
+
 #[derive(Default)]
 pub struct EvidencePool {
     seen: HashMap<(String, u64, u64), (u64, [u8; 32], Vec<u8>, Vec<u8>)>,
@@ -184,6 +188,9 @@ impl EvidencePool {
                 if self.flagged.contains(&key) {
                     return None;
                 }
+                if self.pending.len() >= MAX_PENDING_EVIDENCE {
+                    return None;
+                }
                 let evidence = Equivocation {
                     offender: offender.to_string(),
                     height,
@@ -203,7 +210,9 @@ impl EvidencePool {
                 Some(evidence)
             }
             None => {
-                self.seen.insert(key, (slot, committee, block_bytes, sig));
+                if self.seen.len() < MAX_WATCHED_ATTESTATIONS {
+                    self.seen.insert(key, (slot, committee, block_bytes, sig));
+                }
                 None
             }
         }
@@ -261,6 +270,67 @@ mod tests {
             sig_b: b.sig.to_vec(),
         };
         (evidence, attester.attest_public_key().to_vec())
+    }
+
+    #[test]
+    fn one_offender_cannot_grow_the_pool_past_its_bound() {
+        let (attester, address) = attester();
+        let beacon = Beacon::genesis();
+        let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
+        let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
+        let mut pool = EvidencePool::new();
+        for view in 0..MAX_HEIGHT_VIEW {
+            let a = attester.attest(CHAIN_ID, 1, 1, view, [0u8; 32], block_a, &beacon);
+            let b = attester.attest(CHAIN_ID, 1, 1, view, [0u8; 32], block_b, &beacon);
+            pool.observe(
+                &address,
+                1,
+                1,
+                view,
+                [0u8; 32],
+                block_a.to_bytes(),
+                a.sig.to_vec(),
+            );
+            pool.observe(
+                &address,
+                1,
+                1,
+                view,
+                [0u8; 32],
+                block_b.to_bytes(),
+                b.sig.to_vec(),
+            );
+        }
+        assert_eq!(
+            pool.pending().len(),
+            MAX_PENDING_EVIDENCE,
+            "one offender signing at every view fills the pool to its bound and no further"
+        );
+        let a = attester.attest(CHAIN_ID, 2, 2, 0, [0u8; 32], block_a, &beacon);
+        let b = attester.attest(CHAIN_ID, 2, 2, 0, [0u8; 32], block_b, &beacon);
+        pool.observe(
+            &address,
+            2,
+            2,
+            0,
+            [0u8; 32],
+            block_a.to_bytes(),
+            a.sig.to_vec(),
+        );
+        pool.observe(
+            &address,
+            2,
+            2,
+            0,
+            [0u8; 32],
+            block_b.to_bytes(),
+            b.sig.to_vec(),
+        );
+        assert_eq!(
+            pool.pending().len(),
+            MAX_PENDING_EVIDENCE,
+            "a later height does not grow it either, the bound holds across heights"
+        );
     }
 
     #[test]
