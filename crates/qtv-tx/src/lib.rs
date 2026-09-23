@@ -278,12 +278,7 @@ pub fn sign(account: &Account, body: &Body) -> Wrapper {
 }
 
 pub fn scheme_supported(scheme: u8) -> bool {
-    match scheme {
-        SCHEME_LATTICE | SCHEME_HASH => true,
-        #[cfg(feature = "fn-dsa")]
-        SCHEME_FALCON => true,
-        _ => false,
-    }
+    matches!(scheme, SCHEME_LATTICE | SCHEME_HASH)
 }
 
 pub fn verify(wrapper: &Wrapper, public_key: &[u8]) -> bool {
@@ -338,6 +333,20 @@ mod fail_closed_tests {
         let call = Call::new(target, vec![1, 2, 3]);
         let body = Body::new("not a Q1 address".to_string(), 0, 1_210, 500, call);
         let _ = sign(&account, &body);
+    }
+
+    #[test]
+    fn a_scheme_with_no_verifier_is_never_reported_as_supported() {
+        assert!(!scheme_supported(SCHEME_FALCON));
+        for scheme in [0u8, 3, 4, 9, 200, 255] {
+            if scheme == SCHEME_LATTICE || scheme == SCHEME_HASH {
+                continue;
+            }
+            assert!(
+                !scheme_supported(scheme),
+                "scheme {scheme} is admitted without a verifier behind it"
+            );
+        }
     }
 
     #[test]
