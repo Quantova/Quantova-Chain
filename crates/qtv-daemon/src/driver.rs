@@ -650,7 +650,7 @@ impl Driver {
     }
 
     fn on_view_timeout(&mut self, selection: &Selection) {
-        let target = self.node.view() + 1;
+        let target = self.node.view().saturating_add(1);
         let record = self.node.make_view_change(target);
         self.node.collect_view_change(selection, record.clone());
         self.emit(Message::ViewChange(Box::new(record)));

@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use qtv_codec::{Encoder, LENGTH_WIDTH};
 
-pub(crate) const MAX_RESYNC_PROBES: u32 = 1 << 20;
+pub(crate) const MAX_RESYNC_PROBES: u32 = 1 << 24;
 
 pub(crate) const CHECKSUM_WIDTH: usize = 4;
 
@@ -66,7 +66,10 @@ fn a_well_formed_frame_follows(
     let mut at = from;
     let mut probed = 0u32;
     let mut budget = MAX_PROBE_BYTES;
-    while at + LENGTH_WIDTH as u64 <= total && probed < MAX_RESYNC_PROBES {
+    while at + LENGTH_WIDTH as u64 <= total {
+        if probed >= MAX_RESYNC_PROBES {
+            return Err(corrupt_middle());
+        }
         match frame_is_well_formed(stream, salt, at, total, budget)? {
             Probe::Found => return Ok(true),
             Probe::Missed(spent) => budget -= spent,

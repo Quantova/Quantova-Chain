@@ -145,6 +145,8 @@ fn proposal_weight(proposal: &Proposal) -> usize {
         + 1024
 }
 
+const MAX_VIEW: View = 1 << 20;
+
 const MAX_VIEW_CHANGES_PER_SENDER: usize = 64;
 const MAX_ROUND_VIEW_CHANGES: usize = 8192;
 
@@ -1954,6 +1956,9 @@ impl DevNode {
             Some(block) => (true, header_value(&block.header.hash()), record.lock_view),
             None => (false, [0u8; 32], 0),
         };
+        if record.target_view > MAX_VIEW {
+            return false;
+        }
         if has_lock && record.lock_view > record.target_view {
             return false;
         }
@@ -2166,6 +2171,7 @@ impl DevNode {
     }
 
     pub fn jump_to(&mut self, view: View) {
+        let view = view.min(MAX_VIEW);
         if view > self.view {
             self.view = view;
         }
@@ -2234,7 +2240,7 @@ impl DevNode {
         if self.view != view || self.staged.is_some() {
             return false;
         }
-        self.view += 1;
+        self.view = self.view.saturating_add(1).min(MAX_VIEW);
         true
     }
 
@@ -3510,6 +3516,35 @@ mod finality_gate_tests {
             nodes[0].round_atts.len(),
             2,
             "the later view's precommit is a separate vote, not a duplicate"
+        );
+    }
+
+    #[test]
+    fn a_view_change_cannot_drive_the_view_counter_past_its_ceiling() {
+        let mut nodes = nodes();
+        let selection = staged_everywhere(&mut nodes);
+
+        nodes[0].jump_to(super::View::MAX);
+        assert_eq!(
+            nodes[0].view(),
+            super::MAX_VIEW,
+            "a view jump is clamped to the ceiling"
+        );
+
+        for _ in 0..4 {
+            let next = nodes[0].view().saturating_add(1);
+            let record = nodes[0].make_view_change(next);
+            nodes[0].collect_view_change(&selection, record);
+        }
+        assert!(
+            nodes[0].view() <= super::MAX_VIEW,
+            "the view never climbs past the ceiling"
+        );
+
+        let beyond = nodes[0].make_view_change(super::View::MAX);
+        assert!(
+            !nodes[0].verify_view_change_att(&selection, &beyond),
+            "a view change naming a view past the ceiling is refused"
         );
     }
 

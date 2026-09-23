@@ -1584,6 +1584,8 @@ fn execute_ordered_across(
     const PER_SENDER_VM_METER: u64 = VM_BLOCK_METER_BUDGET / 4;
     let registration_cap = ledger.validator_ids().len().max(1).saturating_mul(2);
     let mut registrations = 0usize;
+    let mut registration_notes: std::collections::BTreeSet<Vec<u8>> =
+        std::collections::BTreeSet::new();
     ledger.set_fresh_leaf_ceiling(Some(BLOCK_FRESH_LEAF_CEILING));
     let mut room = max_bytes;
     let mut refused = Vec::new();
@@ -1707,8 +1709,12 @@ fn execute_ordered_across(
             continue;
         }
         if is_registration(wrapper) {
-            if wrapper.body().call().args().len() <= MAX_REGISTRATION_BYTES
+            let addressed_to_the_system =
+                wrapper.body().sender() == crate::ledger::registration_address();
+            if addressed_to_the_system
+                && wrapper.body().call().args().len() <= MAX_REGISTRATION_BYTES
                 && registrations < registration_cap
+                && registration_notes.insert(wrapper.body().call().args().to_vec())
             {
                 registrations += 1;
                 included.push(wrapper.clone());
