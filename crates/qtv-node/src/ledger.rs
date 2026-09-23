@@ -2495,6 +2495,7 @@ impl Ledger {
             .sum()
     }
 
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub fn accrue_reward(&mut self, address: &str, now_day: u64) -> u64 {
         match address_id(address) {
             Some(id) => {
@@ -4125,6 +4126,36 @@ mod stake_state_tests {
             public_key: pk.to_vec(),
             pop,
         }
+    }
+
+    #[test]
+    fn an_outsider_bond_does_not_change_what_the_roster_is_paid() {
+        let paid = |with_outsider: bool| {
+            let mut l = Ledger::new();
+            let v1 = [1u8; 32];
+            let v2 = [2u8; 32];
+            let outsider = [9u8; 32];
+            let a1 = qtv_idfmt::render_address(&v1).unwrap();
+            let a2 = qtv_idfmt::render_address(&v2).unwrap();
+            let ao = qtv_idfmt::render_address(&outsider).unwrap();
+            l.seed_validator_set(&[v1, v2]);
+            l.seed_stake_pool(700_000 * 1_000_000);
+            l.credit_supply(700_000 * 1_000_000);
+            l.seed_validator_bond(&a1, 3_000 * 1_000_000);
+            l.seed_validator_bond(&a2, 2_000 * 1_000_000);
+            if with_outsider {
+                l.seed_validator_bond(&ao, 30_000 * 1_000_000);
+            }
+            l.set_stake_mainnet_start(0);
+            l.settle_session(400, 1);
+            l.stake_rewards_outstanding(&v1)
+        };
+        assert!(paid(false) > 0, "the roster is paid at all");
+        assert_eq!(
+            paid(false),
+            paid(true),
+            "a bond from outside the roster must not move what a validator is paid"
+        );
     }
 
     #[test]
