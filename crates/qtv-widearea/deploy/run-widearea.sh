@@ -59,7 +59,7 @@ for idx in "${UP_ARR[@]}"; do
   fi
   echo "starting validator $idx on $host (slow ${slow} ms)"
   ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$SSH_USER@$host" \
-    "QTV_WA_INDEX=$idx QTV_WA_ADDRS='$ADDRS' QTV_WA_UP='$UP' \
+    "QTV_WA_ACK_FIXTURE_KEYS=1 QTV_WA_INDEX=$idx QTV_WA_ADDRS='$ADDRS' QTV_WA_UP='$UP' \
      QTV_WA_ACCOUNTS=$ACCOUNTS QTV_WA_HEIGHTS=$HEIGHTS QTV_WA_WARMUP=$WARMUP \
      QTV_WA_VIEWMS=$VIEWMS QTV_WA_STALLSECS=$STALLSECS QTV_WA_SLOWMS=$slow \
      QTV_WA_BASE='$REMOTE_BASE/node-$((idx+1))' \

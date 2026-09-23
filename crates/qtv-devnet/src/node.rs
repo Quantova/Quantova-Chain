@@ -196,6 +196,9 @@ pub enum RoundError {
         head: Height,
         committed: Option<Height>,
     },
+    WatermarkBehindBlocks {
+        head: Height,
+    },
 }
 
 impl From<io::Error> for RoundError {
@@ -390,6 +393,11 @@ impl DevNode {
         let burn_archive = BurnArchive::open(node.store_dir.join("burns.log"))?;
         let sign_guard = SignGuard::open(node.store_dir.join("sign.watermark"))?;
         let prevote_guard = PrevoteGuard::open(node.store_dir.join("prevote.watermark"))?;
+        if let Some(head) = block_store.head_height() {
+            if sign_guard.mark().is_none() || prevote_guard.mark().is_none() {
+                return Err(RoundError::WatermarkBehindBlocks { head });
+            }
+        }
         let lock_file = LockFile::open(node.store_dir.join("lock.state"));
 
         let roster: Vec<ValidatorRegistration> = devnet.roster();

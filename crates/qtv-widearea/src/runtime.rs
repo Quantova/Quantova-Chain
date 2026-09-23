@@ -38,6 +38,10 @@ pub enum HeightOutcome {
     Stalled,
 }
 
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+
+const MESH_JOIN_TIMEOUT: Duration = Duration::from_secs(300);
+
 const MAX_BUFFERED_FRAMES: usize = 8192;
 const MAX_BUFFERED_BYTES: usize = 32 * 1024 * 1024;
 
@@ -520,10 +524,11 @@ pub fn build_mesh(
                 Ok((stream, _)) => stream,
                 Err(_) => continue,
             };
-            let channel = match Channel::accept(stream, &identity_acc) {
-                Ok(channel) => channel,
-                Err(_) => continue,
-            };
+            let channel =
+                match Channel::accept_with_timeout(stream, &identity_acc, HANDSHAKE_TIMEOUT) {
+                    Ok(channel) => channel,
+                    Err(_) => continue,
+                };
             let peer = channel.peer_id().clone();
             let from = match (0..n).find(|&q| {
                 q != idx
@@ -546,15 +551,22 @@ pub fn build_mesh(
             continue;
         }
         let addr = &addrs[q];
-        let stream = loop {
-            match TcpStream::connect(addr) {
-                Ok(stream) => break stream,
+        let peer = node_peer_id(q as u64 + 1);
+        let deadline = std::time::Instant::now() + MESH_JOIN_TIMEOUT;
+        let channel = loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "peer {q} never came up within the mesh join window"
+            );
+            let Ok(stream) = TcpStream::connect(addr) else {
+                thread::sleep(Duration::from_millis(20));
+                continue;
+            };
+            match Channel::connect_pinned_with_timeout(stream, identity, &peer, HANDSHAKE_TIMEOUT) {
+                Ok(channel) => break channel,
                 Err(_) => thread::sleep(Duration::from_millis(20)),
             }
         };
-        let peer = node_peer_id(q as u64 + 1);
-        let channel =
-            Channel::connect_pinned(stream, identity, &peer).expect("initiator handshake");
         send[q] = Some(channel);
     }
 

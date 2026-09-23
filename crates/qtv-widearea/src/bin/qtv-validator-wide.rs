@@ -39,6 +39,16 @@ fn parse_up(n: usize) -> Vec<bool> {
 }
 
 fn main() {
+    if std::env::var(wenv::ACK_FIXTURE_KEYS).as_deref() != Ok("1") {
+        eprintln!(
+            "qtv-validator-wide is a devnet benchmark harness. Every validator key it uses is \
+             derived from the validator index with a published domain, so anyone can forge its \
+             attestations. It cannot join a named network. Set {}=1 to confirm this run is a \
+             throwaway benchmark on hosts you own.",
+            wenv::ACK_FIXTURE_KEYS
+        );
+        std::process::exit(1);
+    }
     let idx: usize = std::env::var(wenv::INDEX)
         .ok()
         .or_else(|| std::env::args().nth(1))

@@ -68,7 +68,7 @@ impl SignGuard {
         file.sync_all()?;
         fs::rename(&temp, &self.path)?;
         if let Some(dir) = self.path.parent() {
-            let _ = fs::File::open(dir).and_then(|d| d.sync_all());
+            fs::File::open(dir)?.sync_all()?;
         }
         Ok(())
     }
@@ -130,6 +130,10 @@ impl PrevoteGuard {
         Ok(PrevoteGuard { path, mark })
     }
 
+    pub fn mark(&self) -> Option<(u64, u64)> {
+        self.mark.map(|(height, view, _)| (height, view))
+    }
+
     pub fn permits(&self, height: u64, view: u64, value: &[u8; 32]) -> bool {
         match &self.mark {
             Some((mh, mv, mval)) => {
@@ -174,7 +178,7 @@ impl PrevoteGuard {
         file.sync_all()?;
         fs::rename(&temp, &self.path)?;
         if let Some(dir) = self.path.parent() {
-            let _ = fs::File::open(dir).and_then(|d| d.sync_all());
+            fs::File::open(dir)?.sync_all()?;
         }
         Ok(())
     }

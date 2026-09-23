@@ -210,7 +210,10 @@ fn run_loopback(
     for (idx, reader) in readers.iter_mut().enumerate() {
         loop {
             let mut line = String::new();
-            reader.read_line(&mut line).expect("read a child port line");
+            let read = reader.read_line(&mut line).expect("read a child port line");
+            if read == 0 {
+                panic!("validator {idx} exited before it reported its listener port");
+            }
             if let Some(port) = line.trim().strip_prefix("PORT ") {
                 ports[idx] = port.parse().expect("a listener port");
                 break;

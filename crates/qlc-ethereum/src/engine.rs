@@ -226,7 +226,7 @@ fn slots_are_consistent(
     signature_slot: u64,
     attested_slot: u64,
 ) -> Result<(), EthError> {
-    if signature_slot < attested_slot
+    if signature_slot <= attested_slot
         || store.config.sync_committee_period(signature_slot)
             != store.config.sync_committee_period(attested_slot)
     {
@@ -551,6 +551,9 @@ pub fn apply_sync_committee_update(
         != store.period
     {
         return Err(EthError::WrongPeriod);
+    }
+    if update.next_sync_committee.pubkeys.len() != store.config.sync_committee_size {
+        return Err(EthError::BadSyncCommitteeProof);
     }
     let (index, depth) = next_sync_committee_layout(electra);
     let leaf = update.next_sync_committee.hash_tree_root();

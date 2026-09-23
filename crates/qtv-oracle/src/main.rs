@@ -15,7 +15,7 @@ use qtv_node::bridge::{
 use qtv_node::ledger::bridge_mint_address;
 use qtv_node::node::{build_guardian_enact_tx, guardian_enact_challenge};
 use qtv_tx::{sign, Body, Call};
-use qtv_wipe::Zeroize;
+use qtv_wipe::{Zeroize, Zeroizing};
 
 const MINT_METER: u64 = 5_000_000;
 const GUARDIAN_DOMAIN: &[u8] = b"QUANTOVA/Q/BRIDGE-GUARDIAN/v1";
@@ -67,8 +67,21 @@ fn private_text(path: &str) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))
 }
 
-fn read_private(path: &str) -> String {
-    private_text(path).unwrap_or_else(|e| fail(&e))
+fn read_private(path: &str) -> Zeroizing<String> {
+    Zeroizing::new(private_text(path).unwrap_or_else(|e| fail(&e)))
+}
+
+fn read_seed(path: &str) -> [u8; 32] {
+    let text = read_private(path);
+    let mut bytes = unhex(text.trim());
+    if bytes.len() != 32 {
+        bytes.zeroize();
+        fail("the relayer seed file must hold 32 bytes as hex");
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&bytes);
+    bytes.zeroize();
+    seed
 }
 
 fn keygen(a: &[String]) {
@@ -79,7 +92,17 @@ fn keygen(a: &[String]) {
     let threshold: u32 = a[1].parse().expect("threshold");
     let chain_id: u64 = a[2].parse().expect("chain_id");
     let prefix = &a[3];
-    let mut secrets = format!("{n} {threshold} {chain_id}\n");
+    if n == 0 {
+        fail("keygen needs at least one operator");
+    }
+    if threshold == 0 || threshold > n {
+        fail("the threshold must be at least one and at most the operator count");
+    }
+    if threshold * 2 <= n {
+        fail("the threshold must be more than half the operators, otherwise two quorums can disagree");
+    }
+    let mut secrets = String::with_capacity(64 + (n as usize) * (2 * SECRET_KEY_BYTES + 16));
+    secrets.push_str(&format!("{n} {threshold} {chain_id}\n"));
     let mut committee = format!("{threshold}\n");
     for id in 0..n {
         let mut seed = [0u8; 32];
@@ -121,7 +144,7 @@ fn keygen(a: &[String]) {
 
 fn mint(a: &[String]) {
     if a.len() != 18 {
-        fail("mint <secrets> <chain_id> <source_chain> <dest_chain> <route_id> <nonce> <source_ref_hex> <asset_hex> <amount> <recipient_hex> <expiry> <observed> <relayer_seed_hex> <relayer_index> <fee> <era_hex> <tx_nonce> <valid_until>");
+        fail("mint <secrets> <chain_id> <source_chain> <dest_chain> <route_id> <nonce> <source_ref_hex> <asset_hex> <amount> <recipient_hex> <expiry> <observed> <relayer_seed_file> <relayer_index> <fee> <era_hex> <tx_nonce> <valid_until>");
     }
     let secrets = read_private(&a[0]);
     let chain_id: u64 = a[1].parse().expect("chain_id");
@@ -135,7 +158,7 @@ fn mint(a: &[String]) {
     let recipient: [u8; 32] = unhex(&a[9]).try_into().expect("recipient 32 bytes");
     let expiry: u64 = a[10].parse().expect("expiry");
     let observed: u64 = a[11].parse().expect("observed");
-    let relayer_seed: [u8; 32] = unhex(&a[12]).try_into().expect("relayer seed 32 bytes");
+    let relayer_seed: [u8; 32] = read_seed(&a[12]);
     let relayer_index: u64 = a[13].parse().expect("relayer_index");
     let fee: u128 = a[14].parse().expect("fee");
     let era: [u8; 32] = unhex(&a[15]).try_into().expect("era 32 bytes");
@@ -277,7 +300,7 @@ fn guardian_keygen(a: &[String]) {
 
 fn guardian_enact_anchor(a: &[String]) {
     if a.len() != 9 {
-        fail("guardian-enact-anchor <gsecrets_comma_sep> <chain_id> <enact_nonce> <corridor 0|1|2> <anchor_hex> <relayer_seed_hex> <relayer_index> <fee> <era_hex32>");
+        fail("guardian-enact-anchor <gsecrets_comma_sep> <chain_id> <enact_nonce> <corridor 0|1|2> <anchor_hex> <relayer_seed_file> <relayer_index> <fee> <era_hex32>");
     }
     let chain_id: u64 = a[1].parse().expect("chain_id");
     let enact_nonce: u64 = a[2].parse().expect("enact_nonce");
@@ -286,7 +309,7 @@ fn guardian_enact_anchor(a: &[String]) {
         fail("the corridor is 0 for bitcoin, 1 for ethereum or 2 for cosmos");
     }
     let anchor = unhex(&a[4]);
-    let relayer_seed: [u8; 32] = unhex(&a[5]).try_into().expect("relayer seed");
+    let relayer_seed: [u8; 32] = read_seed(&a[5]);
     let relayer_index: u64 = a[6].parse().expect("relayer_index");
     let fee: u128 = a[7].parse().expect("fee");
     let era: [u8; 32] = unhex(&a[8]).try_into().expect("era 32 bytes");

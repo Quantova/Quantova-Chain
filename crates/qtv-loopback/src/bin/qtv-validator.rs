@@ -27,6 +27,10 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+
+const MESH_JOIN_TIMEOUT: Duration = Duration::from_secs(120);
+
 const MAX_BUFFERED_FRAMES: usize = 8192;
 const MAX_BUFFERED_BYTES: usize = 32 * 1024 * 1024;
 
@@ -324,18 +328,25 @@ fn build_mesh(
 
     let identity_acc = identity.clone();
     let acceptor = thread::spawn(move || {
-        for _ in 0..(n - 1) {
-            let (stream, _) = listener
-                .accept()
-                .expect("accept an inbound peer connection");
-            let channel = Channel::accept(stream, &identity_acc).expect("responder handshake");
+        let mut accepted = 0usize;
+        while accepted < n - 1 {
+            let Ok((stream, _)) = listener.accept() else {
+                continue;
+            };
+            let Ok(channel) =
+                Channel::accept_with_timeout(stream, &identity_acc, HANDSHAKE_TIMEOUT)
+            else {
+                continue;
+            };
             let peer = channel.peer_id().clone();
-            let from = (0..n)
-                .find(|&q| q != idx && node_peer_id(q as u64 + 1) == peer)
-                .expect("the inbound peer is a known validator");
-            accepted_tx
-                .send((from, channel))
-                .expect("hand the accepted channel to the main thread");
+            let Some(from) = (0..n).find(|&q| q != idx && node_peer_id(q as u64 + 1) == peer)
+            else {
+                continue;
+            };
+            if accepted_tx.send((from, channel)).is_err() {
+                break;
+            }
+            accepted += 1;
         }
     });
 
@@ -345,15 +356,22 @@ fn build_mesh(
             continue;
         }
         let addr = format!("127.0.0.1:{}", ports[q]);
-        let stream = loop {
-            match TcpStream::connect(&addr) {
-                Ok(stream) => break stream,
+        let peer = node_peer_id(q as u64 + 1);
+        let deadline = std::time::Instant::now() + MESH_JOIN_TIMEOUT;
+        let channel = loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "peer {q} never came up within the mesh join window"
+            );
+            let Ok(stream) = TcpStream::connect(&addr) else {
+                thread::sleep(Duration::from_millis(20));
+                continue;
+            };
+            match Channel::connect_pinned_with_timeout(stream, identity, &peer, HANDSHAKE_TIMEOUT) {
+                Ok(channel) => break channel,
                 Err(_) => thread::sleep(Duration::from_millis(20)),
             }
         };
-        let peer = node_peer_id(q as u64 + 1);
-        let channel =
-            Channel::connect_pinned(stream, identity, &peer).expect("initiator handshake");
         send[q] = Some(channel);
     }
 
@@ -383,6 +401,7 @@ fn main() {
         .and_then(|a| a.parse().ok())
         .expect("the validator index is the first argument");
     let n = env_usize("QTV_MP_VALIDATORS", 4).max(1);
+    assert!(idx < n, "the index sits inside the validator set");
     let senders_n = env_usize("QTV_MP_ACCOUNTS", 250).max(2);
     let run_secs = env_usize("QTV_MP_SECS", 60).max(1) as f64;
     let warmup = env_usize("QTV_MP_WARMUP", 2);

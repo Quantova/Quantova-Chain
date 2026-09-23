@@ -88,9 +88,16 @@ fn write_keystore(path: &Path, secret: &[u8; SECRET_LEN]) -> io::Result<()> {
     let mut rendered = to_hex(secret);
     let result = file
         .write_all(rendered.as_bytes())
-        .and_then(|()| file.write_all(b"\n"));
+        .and_then(|()| file.write_all(b"\n"))
+        .and_then(|()| file.sync_all());
     qtv_wipe::Zeroize::zeroize(&mut rendered);
-    result
+    result?;
+    if let Some(dir) = path.parent() {
+        if !dir.as_os_str().is_empty() {
+            fs::File::open(dir)?.sync_all()?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

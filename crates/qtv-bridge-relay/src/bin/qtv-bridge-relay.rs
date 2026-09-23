@@ -4,6 +4,7 @@
 use std::io::Read;
 
 use qtv_bridge_relay::{Corridor, Relay, RELAY_METER, SEED_LEN};
+use qtv_wipe::{Zeroize, Zeroizing};
 
 fn parse_hex(text: &str) -> Result<Vec<u8>, String> {
     let clean = text.trim().strip_prefix("0x").unwrap_or(text.trim());
@@ -17,6 +18,22 @@ fn parse_hex(text: &str) -> Result<Vec<u8>, String> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).map_err(|e| format!("bad hex, {e}")))
         .collect()
+}
+
+fn private_text(path: &str) -> Result<Zeroizing<String>, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(path).map_err(|e| format!("reading {path}, {e}"))?;
+        if meta.permissions().mode() & 0o077 != 0 {
+            return Err(format!(
+                "the seed file {path} is readable by group or others, restrict it with chmod 600"
+            ));
+        }
+    }
+    std::fs::read_to_string(path)
+        .map(Zeroizing::new)
+        .map_err(|e| format!("reading {path}, {e}"))
 }
 
 fn env_number<T: std::str::FromStr>(
@@ -63,14 +80,21 @@ fn run() -> Result<(), String> {
     };
     let proof_bytes = parse_hex(&proof_hex)?;
 
-    let seed_hex = std::env::var("QTV_RELAY_SEED")
-        .map_err(|_| "set QTV_RELAY_SEED to the relayer seed as hex".to_string())?;
-    let seed_bytes = parse_hex(&seed_hex)?;
+    let seed_path = std::env::var("QTV_RELAY_SEED_FILE").map_err(|_| {
+        "set QTV_RELAY_SEED_FILE to a file holding the relayer seed as hex, readable by its \
+         owner only (chmod 600). A seed in an environment variable is readable by every process \
+         sharing the uid and lands in service files and crash dumps."
+            .to_string()
+    })?;
+    let seed_hex = private_text(&seed_path)?;
+    let mut seed_bytes = parse_hex(seed_hex.trim())?;
     if seed_bytes.len() != SEED_LEN {
+        seed_bytes.zeroize();
         return Err(format!("the relayer seed must be {SEED_LEN} bytes"));
     }
     let mut seed = [0u8; SEED_LEN];
     seed.copy_from_slice(&seed_bytes);
+    seed_bytes.zeroize();
 
     let index = env_number(
         "QTV_RELAY_INDEX",

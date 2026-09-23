@@ -22,6 +22,7 @@ pub mod env {
     pub const STALLSECS: &str = "QTV_WA_STALLSECS";
     pub const SLOWMS: &str = "QTV_WA_SLOWMS";
     pub const BASE: &str = "QTV_WA_BASE";
+    pub const ACK_FIXTURE_KEYS: &str = "QTV_WA_ACK_FIXTURE_KEYS";
 }
 
 pub fn env_usize(name: &str, default: usize) -> usize {

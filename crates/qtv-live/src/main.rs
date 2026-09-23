@@ -362,7 +362,16 @@ fn main() {
     }
     let wall_total = run_start.elapsed();
 
-    let dist = Distribution::of(&per_block_ms).expect("at least one finalised block");
+    let Some(dist) = Distribution::of(&per_block_ms) else {
+        println!(
+            " NOTE: no height finalised{}, so there is nothing to measure.",
+            stalled
+                .as_ref()
+                .map(|reason| format!(" ({reason})"))
+                .unwrap_or_default()
+        );
+        return;
+    };
     let consensus_s = consensus_wall.as_secs_f64();
     let tps_consensus = finalized_tx as f64 / consensus_s;
     let tps_end_to_end = finalized_tx as f64 / (consensus_s + sign_wall.as_secs_f64());

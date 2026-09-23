@@ -104,10 +104,8 @@ fn deposit_logs(
         if data.len() < 64 {
             return Err(ReceiptError::Malformed);
         }
-        for &b in &data[0..16] {
-            if b != 0 {
-                return Err(ReceiptError::AmountOverflow);
-            }
+        if data[0..16].iter().any(|&b| b != 0) {
+            continue;
         }
         let mut amount_bytes = [0u8; 16];
         amount_bytes.copy_from_slice(&data[16..32]);
@@ -282,7 +280,34 @@ mod tests {
         ]);
         assert_eq!(
             extract_deposit(&bytes, &contract()),
-            Err(ReceiptError::AmountOverflow)
+            Err(ReceiptError::NoDeposit),
+            "an amount past the base unit word is never minted"
+        );
+    }
+
+    #[test]
+    fn an_oversized_log_does_not_bury_a_good_one_beside_it() {
+        let mut oversized = deposit_data(0, &[0x11; 16]);
+        oversized[15] = 0x01;
+        let bad = encode_log(&contract(), &[deposit_topic(), [0x5c; 32]], &oversized);
+        let good_data = deposit_data(7_000, &[0x22; 16]);
+        let good = encode_log(&contract(), &[deposit_topic(), [0x6d; 32]], &good_data);
+        let bytes = rlp::encode_list(&[
+            rlp::encode_bytes(&[1u8]),
+            rlp::encode_uint(21000),
+            rlp::encode_bytes(&[0u8; 256]),
+            rlp::encode_list(&[bad, good]),
+        ]);
+        let deposit = extract_deposit_at(&bytes, &contract(), 1).expect("the good log still mints");
+        assert_eq!(deposit.amount, 7_000);
+        assert_eq!(
+            deposit.log_index, 1,
+            "the log keeps its index in the receipt"
+        );
+        assert_eq!(
+            extract_deposit_at(&bytes, &contract(), 0),
+            Err(ReceiptError::NoDeposit),
+            "the oversized log is not mintable at its own index either"
         );
     }
 

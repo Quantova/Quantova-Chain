@@ -18,7 +18,11 @@ impl Distribution {
             return None;
         }
         let mut sorted = samples.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).expect("the samples are finite"));
+        sorted.retain(|sample| sample.is_finite());
+        if sorted.is_empty() {
+            return None;
+        }
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let sum: f64 = sorted.iter().sum();
         Some(Distribution {
             count: sorted.len(),
