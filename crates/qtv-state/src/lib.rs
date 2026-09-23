@@ -187,6 +187,7 @@ impl Proof {
 impl Encode for Proof {
     fn encode(&self, encoder: &mut Encoder) {
         self.value.encode(encoder);
+        encoder.put_u32(self.siblings.len() as u32);
         for sibling in &self.siblings {
             for &byte in sibling.iter() {
                 encoder.put_u8(byte);
@@ -198,6 +199,13 @@ impl Encode for Proof {
 impl Decode for Proof {
     fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
         let value = Option::<Vec<u8>>::decode(decoder)?;
+        let count = decoder.get_u32()? as usize;
+        if count != DEPTH {
+            return Err(Error::LengthOverrun {
+                length: count as u64,
+                found: DEPTH,
+            });
+        }
         let mut siblings = Vec::with_capacity(DEPTH);
         for _ in 0..DEPTH {
             let mut hash = [0u8; HASH_LEN];

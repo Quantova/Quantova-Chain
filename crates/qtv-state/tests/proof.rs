@@ -138,3 +138,23 @@ fn proof_round_trips_through_the_codec() {
     assert_eq!(proof, back);
     assert!(verify(&key(10), &back, &root));
 }
+
+#[test]
+fn a_short_proof_does_not_read_the_fields_that_follow_it() {
+    let mut trie = Trie::new();
+    trie.insert(key(1), b"first".to_vec());
+    let proof = trie.prove(&key(1));
+    let full = to_bytes(&proof);
+
+    let short = Proof::new(Some(b"first".to_vec()), proof.siblings()[..4].to_vec());
+    let mut framed = to_bytes(&short);
+    framed.extend_from_slice(&vec![0xAAu8; (256 - 4) * 32]);
+    assert!(
+        from_bytes::<Proof>(&framed).is_err(),
+        "a proof that carries fewer siblings than the tree is depth is refused, \
+         it never reads the bytes that follow it as siblings"
+    );
+
+    let round: Proof = from_bytes(&full).expect("a whole proof round trips");
+    assert_eq!(round, proof);
+}

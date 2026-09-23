@@ -227,6 +227,7 @@ pub fn header_value(header_hash: &[u8; 32]) -> [u8; 32] {
 pub enum FinalityStatus {
     Extends,
     Confirms,
+    Unknown,
     Violation {
         height: u64,
         finalized: [u8; 32],
@@ -265,7 +266,7 @@ impl FinalityLedger {
             },
             None => {
                 if height.saturating_add(FINALITY_RETAINED_HEIGHTS) < self.highest {
-                    return FinalityStatus::Confirms;
+                    return FinalityStatus::Unknown;
                 }
                 self.finalized.insert(height, value);
                 self.highest = self.highest.max(height);
@@ -872,7 +873,12 @@ mod tests {
         );
 
         let before = ledger.finalized.len();
-        assert_eq!(ledger.observe(1, [0xAAu8; 32]), FinalityStatus::Confirms);
+        assert_eq!(ledger.observe(1, [0xAAu8; 32]), FinalityStatus::Unknown);
+        assert_eq!(
+            ledger.observe(1, [0xEEu8; 32]),
+            FinalityStatus::Unknown,
+            "past the window the ledger says it cannot tell, it never calls a conflict agreement"
+        );
         assert_eq!(
             ledger.finalized.len(),
             before,
