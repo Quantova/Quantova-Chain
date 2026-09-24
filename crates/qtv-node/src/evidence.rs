@@ -171,9 +171,6 @@ impl EvidencePool {
         if subject_is_view_change(&block_bytes) {
             return None;
         }
-        if view >= MAX_HEIGHT_VIEW {
-            return None;
-        }
         if height > self.floor {
             self.floor = height;
             self.seen.retain(|(_, h, _), _| *h >= height);

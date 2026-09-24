@@ -108,6 +108,8 @@ const STAKE_METER_TAG: &[u8] = b"qtv/stake/meter";
 const GOV_DEPOSIT_TAG: &[u8] = b"qtv/gov/deposit";
 const STAKE_VALIDATORS_TAG: &[u8] = b"qtv/stake/validators";
 const STAKE_TOTAL_TAG: &[u8] = b"qtv/stake/total";
+const STAKE_TOTAL_ACTIVE_TAG: &[u8] = b"qtv/stake/total/active";
+const STAKE_TOTAL_RAISED_TAG: &[u8] = b"qtv/stake/total/raised";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FeeSplit {
@@ -957,11 +959,58 @@ impl Ledger {
         self.write_leaf(stake_singleton_key(STAKE_TOTAL_TAG), to_bytes(&amount));
     }
 
+    fn total_staked_active(&self) -> u64 {
+        self.trie
+            .get(&stake_singleton_key(STAKE_TOTAL_ACTIVE_TAG))
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical staked total"))
+            .unwrap_or(0)
+    }
+
+    fn set_total_staked_active(&mut self, amount: u64) {
+        self.write_leaf(
+            stake_singleton_key(STAKE_TOTAL_ACTIVE_TAG),
+            to_bytes(&amount),
+        );
+    }
+
+    fn total_staked_raised_at(&self) -> u64 {
+        self.trie
+            .get(&stake_singleton_key(STAKE_TOTAL_RAISED_TAG))
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical raise height"))
+            .unwrap_or(0)
+    }
+
+    fn set_total_staked_raised_at(&mut self, height: u64) {
+        self.write_leaf(
+            stake_singleton_key(STAKE_TOTAL_RAISED_TAG),
+            to_bytes(&height),
+        );
+    }
+
+    pub fn matured_total_staked(&self) -> u64 {
+        let total = self.total_staked();
+        if self.heights_per_epoch == 0 {
+            return total;
+        }
+        let raised_epoch = self
+            .total_staked_raised_at()
+            .checked_div(self.heights_per_epoch)
+            .unwrap_or(0);
+        if raised_epoch < self.current_epoch() {
+            total
+        } else {
+            self.total_staked_active().min(total)
+        }
+    }
+
     fn credit_staked(&mut self, amount: u64) {
         if amount == 0 {
             return;
         }
+        let active = self.matured_total_staked();
         let next = self.total_staked().saturating_add(amount);
+        self.set_total_staked_active(active);
+        self.set_total_staked_raised_at(self.execution_height);
         self.set_total_staked(next);
     }
 
@@ -970,6 +1019,8 @@ impl Ledger {
             return;
         }
         let next = self.total_staked().saturating_sub(amount);
+        let active = self.total_staked_active().min(next);
+        self.set_total_staked_active(active);
         self.set_total_staked(next);
     }
 
@@ -2412,10 +2463,15 @@ impl Ledger {
     }
 
     fn roster_reward_denominator(&self) -> u64 {
+        let epoch = self.current_epoch();
+        let len = self.heights_per_epoch;
         self.validator_ids()
             .iter()
             .filter(|id| !self.is_stake_banned(id) && !self.is_gov_blacklisted(id))
-            .filter_map(|id| self.stake_bond(id).map(|bond| bond.amount))
+            .filter_map(|id| {
+                self.stake_bond(id)
+                    .map(|bond| bond.amount_in_epoch(epoch, len))
+            })
             .sum()
     }
 
@@ -2427,7 +2483,7 @@ impl Ledger {
             return 0;
         }
         let stake = match self.stake_bond(id) {
-            Some(bond) => bond.amount,
+            Some(bond) => bond.amount_in_epoch(self.current_epoch(), self.heights_per_epoch),
             None => return 0,
         };
         let paid = qtv_staking::session_reward(stake, denom, self.total_supply());
@@ -3096,7 +3152,7 @@ impl Ledger {
         let referendum = Referendum::open(id, track, proposer_id.to_vec(), now, deposit);
         self.set_gov_referendum(id, &referendum);
         self.set_gov_action(id, &action);
-        self.set_gov_electorate(id, self.total_staked());
+        self.set_gov_electorate(id, self.matured_total_staked());
         self.set_gov_next_id(id + 1);
         self.record_side_event(SideEvent::GovPropose {
             referendum: id,
@@ -3179,7 +3235,7 @@ impl Ledger {
         if referendum.status != Status::Deciding {
             return Some(referendum.status);
         }
-        let live = self.total_staked();
+        let live = self.matured_total_staked();
         let electorate = u128::from(self.gov_electorate(referendum_id).unwrap_or(live).max(live));
         let status = referendum.resolve(now, electorate);
         if status == Status::Deciding {
@@ -3373,6 +3429,15 @@ impl Ledger {
                                             let residue = bond.amount - from_bond;
                                             self.clear_stake_bond(&from_id);
                                             self.debit_staked(bond.amount);
+                                            let forfeited =
+                                                self.stake_rewards_outstanding(&from_id);
+                                            if forfeited > 0 {
+                                                self.set_stake_treasury(
+                                                    self.stake_treasury().saturating_add(forfeited),
+                                                );
+                                            }
+                                            self.clear_stake_rewards(&from_id);
+                                            self.set_stake_banned(&from_id);
                                             if residue > 0 {
                                                 let mut holder = self.account(&from_addr);
                                                 holder.balance =
@@ -10487,5 +10552,52 @@ mod tests {
         let addr = qtv_idfmt::render_address(&[22u8; 32]).unwrap();
         l.seed_validator_bond(&addr, 4_000 * 1_000_000);
         assert_eq!(l.staked_weight_in_epoch(&addr, 0), 4_000);
+    }
+
+    #[test]
+    fn a_bond_made_after_a_referendum_opened_cannot_raise_the_bar() {
+        let mut l = Ledger::new();
+        l.set_heights_per_epoch(100);
+        let holder = qtv_idfmt::render_address(&[31u8; 32]).unwrap();
+        l.set_account(&holder, &Account::funded(5_000_000 * 1_000_000, 1, vec![]));
+
+        l.set_execution_height(5);
+        assert!(l.bond(&holder, 100_000 * 1_000_000, 0));
+        l.set_execution_height(150);
+        let settled = l.matured_total_staked();
+        assert_eq!(settled, 100_000 * 1_000_000);
+
+        l.set_execution_height(160);
+        assert!(l.bond(&holder, 2_000_000 * 1_000_000, 0));
+        assert_eq!(
+            l.matured_total_staked(),
+            settled,
+            "stake bonded inside the epoch must not move the bar the vote is measured against"
+        );
+        assert!(
+            l.total_staked() > settled,
+            "the live total does move, it is only the matured figure that holds"
+        );
+
+        l.set_execution_height(260);
+        assert_eq!(l.matured_total_staked(), 2_100_000 * 1_000_000);
+    }
+
+    #[test]
+    fn giving_stake_up_lowers_the_matured_total_at_once() {
+        let mut l = Ledger::new();
+        l.set_heights_per_epoch(100);
+        let holder = qtv_idfmt::render_address(&[32u8; 32]).unwrap();
+        l.set_account(&holder, &Account::funded(10_000 * 1_000_000, 1, vec![]));
+        l.set_execution_height(5);
+        assert!(l.bond(&holder, 4_000 * 1_000_000, 0));
+        l.set_execution_height(150);
+        assert_eq!(l.matured_total_staked(), 4_000 * 1_000_000);
+        l.debit_staked(1_000 * 1_000_000);
+        assert_eq!(
+            l.matured_total_staked(),
+            3_000 * 1_000_000,
+            "a reduction is never withheld"
+        );
     }
 }

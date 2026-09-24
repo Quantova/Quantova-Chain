@@ -104,6 +104,16 @@ impl BlockStore {
     }
 
     pub fn put_block(&mut self, block: &Block) -> io::Result<()> {
+        if self
+            .heights
+            .last()
+            .is_some_and(|&last| block.header().height() <= last)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "blocks are appended in strictly increasing height order",
+            ));
+        }
         let record = BlockRecord {
             height: block.header().height(),
             hash: block.header_hash(),

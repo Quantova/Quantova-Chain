@@ -256,7 +256,14 @@ impl TxIndex {
                 Some(b)
             }
         });
-        let run = self.write_run(merged)?;
+        let run = match self.write_run(merged) {
+            Ok(run) => run,
+            Err(err) => {
+                self.runs.push(older);
+                self.runs.push(newer);
+                return Err(err);
+            }
+        };
         std::fs::remove_file(&older.path)?;
         std::fs::remove_file(&newer.path)?;
         sync_dir(&self.dir)?;

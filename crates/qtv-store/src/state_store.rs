@@ -110,13 +110,6 @@ fn another_process_is_live(path: &Path) -> bool {
     let Ok(modified) = meta.modified() else {
         return false;
     };
-    let fresh = std::time::SystemTime::now()
-        .duration_since(modified)
-        .map(|age| age < HOLDER_FRESH)
-        .unwrap_or(false);
-    if !fresh {
-        return false;
-    }
     let Ok(text) = std::fs::read_to_string(&holder) else {
         return false;
     };
@@ -126,7 +119,13 @@ fn another_process_is_live(path: &Path) -> bool {
     if pid == std::process::id() {
         return false;
     }
-    process_is_alive(pid)
+    if process_is_alive(pid) {
+        return true;
+    }
+    std::time::SystemTime::now()
+        .duration_since(modified)
+        .map(|age| age < HOLDER_FRESH)
+        .unwrap_or(false)
 }
 
 #[cfg(unix)]

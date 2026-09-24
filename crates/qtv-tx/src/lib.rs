@@ -62,10 +62,16 @@ impl Call {
     }
 }
 
+fn put_address(encoder: &mut Encoder, address: &str) {
+    match qtv_idfmt::parse_address(address) {
+        Ok(payload) => encoder.put_bytes(&payload),
+        Err(_) => encoder.put_bytes(address.as_bytes()),
+    }
+}
+
 impl Encode for Call {
     fn encode(&self, encoder: &mut Encoder) {
-        let target = qtv_idfmt::parse_address(&self.target).unwrap_or_default();
-        encoder.put_bytes(&target);
+        put_address(encoder, &self.target);
         encoder.put_bytes(&self.args);
     }
 }
@@ -182,8 +188,7 @@ impl Body {
 
 impl Encode for Body {
     fn encode(&self, encoder: &mut Encoder) {
-        let sender = qtv_idfmt::parse_address(&self.sender).unwrap_or_default();
-        encoder.put_bytes(&sender);
+        put_address(encoder, &self.sender);
         self.nonce.encode(encoder);
         self.meter_limit.encode(encoder);
         self.fee.encode(encoder);
@@ -442,5 +447,32 @@ mod fail_closed_tests {
             verify(&aliased, account.public_key()),
             "the signature stands for either surface form because both bind one payload"
         );
+    }
+
+    #[test]
+    fn two_bodies_that_differ_only_in_an_unparseable_address_do_not_share_an_id() {
+        let a = Body::new(
+            "garbage-A".to_string(),
+            1,
+            2,
+            3,
+            Call::new("garbage-B".to_string(), Vec::new()),
+        );
+        let b = Body::new(
+            "garbage-C".to_string(),
+            1,
+            2,
+            3,
+            Call::new("garbage-D".to_string(), Vec::new()),
+        );
+        assert_ne!(a, b);
+        assert_ne!(
+            to_bytes(&a),
+            to_bytes(&b),
+            "an address that does not parse must not collapse onto every other one"
+        );
+        let wa = Wrapper::new(a, SCHEME_LATTICE, vec![0u8; 8]);
+        let wb = Wrapper::new(b, SCHEME_LATTICE, vec![0u8; 8]);
+        assert_ne!(wa.id(), wb.id());
     }
 }

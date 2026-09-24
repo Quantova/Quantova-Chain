@@ -72,6 +72,17 @@ fn run_task(
     leaves: &BTreeMap<Key, Vec<u8>>,
     fee_params: &FeeParams,
 ) -> Option<Write> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_task_inner(task, leaves, fee_params)
+    }))
+    .unwrap_or(None)
+}
+
+fn run_task_inner(
+    task: &Task<'_>,
+    leaves: &BTreeMap<Key, Vec<u8>>,
+    fee_params: &FeeParams,
+) -> Option<Write> {
     let sender_key = state_key(&task.sender_address);
     let sender = account_at(leaves, &sender_key);
     let plan = plan_from_account(task.wrapper, &sender, fee_params).ok()?;
@@ -143,7 +154,7 @@ fn run_layer(
             })
             .collect();
         for handle in handles {
-            writes.extend(handle.join().expect("an execution worker panicked"));
+            writes.extend(handle.join().unwrap_or_default());
         }
     });
     writes

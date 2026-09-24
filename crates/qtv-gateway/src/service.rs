@@ -330,8 +330,8 @@ pub fn handle(
         Request::Container(address) => container(node, &address),
         Request::Storage(address) => storage(node, &address),
         Request::StorageAt { address, keys } => storage_at(node, &address, &keys),
-        Request::Events(height) => Ok(events(node, height)),
-        Request::SideEvents(height) => Ok(side_events(node, height)),
+        Request::Events(height) => events(node, height),
+        Request::SideEvents(height) => side_events(node, height),
         Request::FinalizedHead => Ok(finalized_head(node)),
         Request::BurnBlock(height) => burn_block(node, height),
         Request::BurnHeightsAfter(cursor) => Ok(burn_heights_after(node, cursor)),
@@ -883,8 +883,12 @@ fn supply(node: &DevNode) -> Json {
 
 const MAX_EVENTS_PER_RESPONSE: usize = 4_096;
 
-fn events(node: &DevNode, height: u64) -> Json {
+fn events(node: &DevNode, height: u64) -> Result<Json, ClientError> {
+    node.take_serve_saturated();
     let all = node.events_at(height);
+    if all.is_empty() && node.take_serve_saturated() {
+        return Err(ClientError::busy());
+    }
     let total = all.len();
     let items: Vec<Json> = all
         .iter()
@@ -897,17 +901,21 @@ fn events(node: &DevNode, height: u64) -> Json {
             ])
         })
         .collect();
-    object(vec![
+    Ok(object(vec![
         ("height", Json::Int(height)),
         ("count", Json::Int(items.len() as u64)),
         ("total", Json::Int(total as u64)),
         ("truncated", Json::Bool(total > items.len())),
         ("events", Json::Array(items)),
-    ])
+    ]))
 }
 
-fn side_events(node: &DevNode, height: u64) -> Json {
+fn side_events(node: &DevNode, height: u64) -> Result<Json, ClientError> {
+    node.take_serve_saturated();
     let all = node.side_events_at(height);
+    if all.is_empty() && node.take_serve_saturated() {
+        return Err(ClientError::busy());
+    }
     let total = all.len();
     let items: Vec<Json> = all
         .iter()
@@ -915,13 +923,13 @@ fn side_events(node: &DevNode, height: u64) -> Json {
         .enumerate()
         .map(|(index, event)| side_event_json(index as u64, event))
         .collect();
-    object(vec![
+    Ok(object(vec![
         ("height", Json::Int(height)),
         ("count", Json::Int(items.len() as u64)),
         ("total", Json::Int(total as u64)),
         ("truncated", Json::Bool(total > items.len())),
         ("events", Json::Array(items)),
-    ])
+    ]))
 }
 
 fn amount_str(amount: u128) -> Json {

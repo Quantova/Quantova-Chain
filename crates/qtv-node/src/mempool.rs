@@ -579,6 +579,9 @@ impl Mempool {
         if is_priority(incoming) {
             return true;
         }
+        if is_feeless(incoming) {
+            return self.feeless_count < self.feeless_pool_cap;
+        }
         self.normal_count < self.cap.saturating_sub(self.reserve) && self.pending.len() < self.cap
     }
 
@@ -592,6 +595,19 @@ impl Mempool {
 
     fn feeless_has_room(&self) -> bool {
         self.feeless_admits < self.feeless_cap
+    }
+
+    fn refund_feeless_attempt_for(&mut self, wrapper: &Wrapper) {
+        let counter = if crate::node::is_evidence(wrapper) {
+            &mut self.evidence_attempts
+        } else if crate::node::is_bridge_mint(wrapper) {
+            &mut self.mint_attempts
+        } else if crate::node::is_bridge_settle(wrapper) {
+            &mut self.settle_attempts
+        } else {
+            &mut self.guardian_attempts
+        };
+        *counter = counter.saturating_sub(1);
     }
 
     fn charge_feeless_attempt_for(&mut self, wrapper: &Wrapper) -> bool {
@@ -617,8 +633,19 @@ impl Mempool {
             return Err(Reject::SenderQueueFull);
         }
         if is_feeless(incoming) {
-            if self.feeless_count >= self.feeless_pool_cap || self.pending.len() >= self.cap {
+            if self.feeless_count >= self.feeless_pool_cap {
                 return Err(Reject::PoolFull);
+            }
+            if self.pending.len() >= self.cap {
+                let victim = self
+                    .lowest_fee_normal()
+                    .or_else(|| self.lowest_fee_priority());
+                match victim {
+                    Some((index, _)) => {
+                        self.remove_at(index);
+                    }
+                    None => return Err(Reject::PoolFull),
+                }
             }
             return Ok(());
         }
@@ -789,6 +816,7 @@ impl Mempool {
             }) {
                 return Err(Reject::BadCall);
             }
+            self.refund_feeless_attempt_for(&wrapper);
         } else if crate::node::is_bridge_guardian(&wrapper) {
             if !self.charge_feeless_attempt_for(&wrapper) {
                 return Err(Reject::RateLimited);
@@ -894,6 +922,7 @@ impl Mempool {
     ) -> Vec<Wrapper> {
         let verified = verify_signatures(ledger, &batch, verify_cores);
         self.ceiling = u128::from(fee_params.ceiling_fee());
+        self.height = ledger.execution_height();
         let mut admitted = Vec::new();
         for (index, wrapper) in batch.into_iter().enumerate() {
             if !chain_ok(&wrapper, fee_params) {

@@ -211,15 +211,16 @@ impl Limiter {
         if direct && ip.is_loopback() {
             return Admit::Untracked;
         }
+        let local = ip.is_loopback();
         let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if inner.is_banned(ip, now) {
+        if !local && inner.is_banned(ip, now) {
             return Admit::Banned;
         }
         if !inner.spend_rate_token(ip, now) {
-            return if inner.strike(ip, now) {
+            return if !local && inner.strike(ip, now) {
                 Admit::Banned
             } else {
                 Admit::RateLimited

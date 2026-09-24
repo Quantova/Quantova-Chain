@@ -1215,6 +1215,19 @@ impl DevNode {
     }
 
     fn proposal_auth_ok(&self, selection: &Selection, proposal: &Proposal) -> bool {
+        let leader = leader_for(selection, proposal.view);
+        let Some(member) = selection.commitment.member(leader) else {
+            return false;
+        };
+        if proposal.auth.from != leader
+            || proposal.auth.height != proposal.header.height()
+            || proposal.auth.view != proposal.view
+        {
+            return false;
+        }
+        if body_bytes(&proposal.body) > MAX_BLOCK_BODY_BYTES {
+            return false;
+        }
         let Some(commitment) = crate::coded::proposal_commitment(
             &proposal.header,
             &proposal.body,
@@ -1222,13 +1235,18 @@ impl DevNode {
         ) else {
             return false;
         };
-        self.header_auth_ok(
-            selection,
+        let subject = proposal_subject(
+            proposal.header.height(),
             proposal.view,
-            &proposal.header,
+            &proposal.header.hash(),
             &commitment,
-            &proposal.auth,
-        )
+        );
+        if proposal.auth.block != subject {
+            return false;
+        }
+        proposal
+            .auth
+            .signature_verifies(self.consensus.chain_id(), &member.attest_pk)
     }
 
     pub fn coded_auth_ok(&self, selection: &Selection, coded: &CodedProposal) -> bool {
@@ -2201,9 +2219,7 @@ impl DevNode {
         let Some(offender) = self.signed_offender(&attestation) else {
             return false;
         };
-        if attestation.view < qtv_node::evidence::MAX_HEIGHT_VIEW {
-            self.watch_for_equivocation(&attestation, offender);
-        }
+        self.watch_for_equivocation(&attestation, offender);
         if let Ok(selection) = self.select() {
             if self.seen_atts.len() < MAX_SEEN_ATTESTATIONS {
                 self.seen_atts.insert(digest);

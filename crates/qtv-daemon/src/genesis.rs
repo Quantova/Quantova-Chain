@@ -53,7 +53,25 @@ impl GenesisFile {
         let mut validators: Vec<ValidatorSpec> = Vec::new();
         let mut accounts: Vec<GenesisAccount> = Vec::new();
 
+        const REPEATABLE: &[&str] = &[
+            "validator",
+            "account",
+            "guardian",
+            "bridge_operator",
+            "bridged_asset",
+        ];
+        let mut seen: Vec<&str> = Vec::new();
         for field in &fields {
+            if !REPEATABLE.contains(&field.key.as_str()) {
+                if seen.contains(&field.key.as_str()) {
+                    return Err(field.error(&format!(
+                        "'{}' is set more than once; a repeated key would silently take the last \
+                         value",
+                        field.key
+                    )));
+                }
+                seen.push(field.key.as_str());
+            }
             match field.key.as_str() {
                 "chain_id" => chain_id = Some(field.value.clone()),
                 "message" => message = field.value.clone(),
@@ -110,10 +128,13 @@ impl GenesisFile {
                         .next()
                         .and_then(|s| s.parse().ok())
                         .ok_or_else(|| field.error("bridged_asset epoch_cap"))?;
-                    let requires_stark = parts
-                        .next()
-                        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
-                        .unwrap_or(false);
+                    let requires_stark = match parts.next() {
+                        Some("0") | Some("false") | Some("False") | Some("FALSE") => false,
+                        Some("1") | Some("true") | Some("True") | Some("TRUE") => true,
+                        _ => return Err(field.error(
+                            "bridged_asset expects a fourth field of exactly 0, 1, true or false",
+                        )),
+                    };
                     if cap == 0 || epoch_cap == 0 {
                         return Err(field.error("bridged_asset cap and epoch_cap must be nonzero"));
                     }
@@ -936,5 +957,60 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let err = result.err().expect("a duplicated account line is refused");
         assert!(err.contains("more than one line"), "{err}");
+    }
+
+    fn three_validator_preamble() -> String {
+        let mut text = String::from(
+            "chain_id = Q-test-net-9\ngenesis_time = 1\nfee_transfer_micro_usd = 500\n\
+             fee_rate_micro_usd_per_qtov = 1000000\nfee_native_unit = 1000000\n\
+             fee_max_native = 1000\n",
+        );
+        for id in 1..=5u64 {
+            let v = validator(id, 2_000);
+            text.push_str(&format!(
+                "validator = {}\n",
+                validator_line(&v, &v.bond_address)
+            ));
+        }
+        text
+    }
+
+    fn load_text(tag: &str, text: String) -> Result<GenesisFile, String> {
+        let path = std::env::temp_dir().join(format!("qtv-genesis-{tag}-{}.q", std::process::id()));
+        std::fs::write(&path, text).expect("write the fixture");
+        let result = GenesisFile::load(&path);
+        let _ = std::fs::remove_file(&path);
+        result
+    }
+
+    #[test]
+    fn a_repeated_genesis_key_is_refused_rather_than_taking_the_last_value() {
+        let text = format!("{}chain_id = Q-other-1\n", three_validator_preamble());
+        let err = load_text("dupkey", text).err().expect("refused");
+        assert!(err.contains("set more than once"), "{err}");
+    }
+
+    #[test]
+    fn a_bridged_asset_stark_field_that_is_not_a_plain_boolean_is_refused() {
+        let text = format!(
+            "{}bridged_asset = {} 1000000 100000 yes\n",
+            three_validator_preamble(),
+            "5a".repeat(16)
+        );
+        assert!(
+            load_text("starkspelling", text).is_err(),
+            "a stark field of `yes` must not quietly mean false"
+        );
+    }
+
+    #[test]
+    fn a_bridged_asset_with_a_plain_false_still_loads() {
+        let text = format!(
+            "{}bridged_asset = {} 1000000 100000 0\n",
+            three_validator_preamble(),
+            "5a".repeat(16)
+        );
+        let outcome = load_text("starkzero", text);
+        assert!(outcome.is_ok(), "{:?}", outcome.err());
     }
 }

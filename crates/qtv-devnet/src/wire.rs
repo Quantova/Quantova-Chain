@@ -400,6 +400,9 @@ fn decode_wrapper(decoder: &mut Decoder<'_>) -> Result<Wrapper, DecodeError> {
     let valid_until = decoder.get_u64()?;
     let kind = decoder.get_u8()?;
     let scheme = decoder.get_u8()?;
+    if !qtv_tx::scheme_supported(scheme) {
+        return Err(DecodeError::UnknownTag(scheme));
+    }
     let signature = decoder.get_bytes()?.to_vec();
     let mut body = Body::with_context(
         sender,

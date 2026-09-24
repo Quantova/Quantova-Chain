@@ -94,28 +94,39 @@ pub struct Commitment {
 
 impl Commitment {
     pub fn verify_shard(&self, shard: &Shard, proof: &ShardProof) -> bool {
-        if shard.index >= self.n || shard.bytes.len() != self.shard_len {
+        if self.k == 0
+            || self.n < self.k
+            || self.n > MAX_SHARDS
+            || shard.index >= self.n
+            || shard.bytes.len() != self.shard_len
+        {
             return false;
         }
-        let mut node = sha3_256(&shard.bytes);
+        let mut node = leaf_hash(self.shard_len, &shard.bytes);
         let mut index = shard.index;
         let mut width = self.n;
         let mut level = 0;
         while width > 1 {
-            let sibling = match proof.siblings.get(level) {
-                Some(hash) => hash,
-                None => return false,
-            };
-            node = if index.is_multiple_of(2) {
-                pair_hash(&node, sibling)
+            let last_odd = !width.is_multiple_of(2) && index == width - 1;
+            if last_odd {
+                node = odd_hash(&node);
             } else {
-                pair_hash(sibling, &node)
-            };
+                let sibling = match proof.siblings.get(level) {
+                    Some(hash) => hash,
+                    None => return false,
+                };
+                node = if index.is_multiple_of(2) {
+                    pair_hash(&node, sibling)
+                } else {
+                    pair_hash(sibling, &node)
+                };
+                level += 1;
+            }
             index /= 2;
             width = width.div_ceil(2);
-            level += 1;
         }
-        level == proof.siblings.len() && node == self.root
+        level == proof.siblings.len()
+            && root_hash(&node, self.k, self.n, self.shard_len, self.data_len) == self.root
     }
 }
 
@@ -148,8 +159,12 @@ impl Coded {
             if level.len() <= 1 {
                 break;
             }
+            if pos + 1 == level.len() && pos.is_multiple_of(2) {
+                pos /= 2;
+                continue;
+            }
             let sibling = if pos.is_multiple_of(2) {
-                level.get(pos + 1).copied().unwrap_or(level[pos])
+                level[pos + 1]
             } else {
                 level[pos - 1]
             };
@@ -160,10 +175,47 @@ impl Coded {
     }
 }
 
+const LEAF_TAG: u8 = 0x00;
+const NODE_TAG: u8 = 0x01;
+const ROOT_TAG: u8 = 0x02;
+const ODD_TAG: u8 = 0x03;
+
+fn leaf_hash(shard_len: usize, bytes: &[u8]) -> [u8; DIGEST_LEN] {
+    let mut input = Vec::with_capacity(1 + 8 + bytes.len());
+    input.push(LEAF_TAG);
+    input.extend_from_slice(&(shard_len as u64).to_le_bytes());
+    input.extend_from_slice(bytes);
+    sha3_256(&input)
+}
+
 fn pair_hash(left: &[u8; DIGEST_LEN], right: &[u8; DIGEST_LEN]) -> [u8; DIGEST_LEN] {
-    let mut input = [0u8; DIGEST_LEN * 2];
-    input[..DIGEST_LEN].copy_from_slice(left);
-    input[DIGEST_LEN..].copy_from_slice(right);
+    let mut input = [0u8; 1 + DIGEST_LEN * 2];
+    input[0] = NODE_TAG;
+    input[1..1 + DIGEST_LEN].copy_from_slice(left);
+    input[1 + DIGEST_LEN..].copy_from_slice(right);
+    sha3_256(&input)
+}
+
+fn odd_hash(node: &[u8; DIGEST_LEN]) -> [u8; DIGEST_LEN] {
+    let mut input = [0u8; 1 + DIGEST_LEN];
+    input[0] = ODD_TAG;
+    input[1..].copy_from_slice(node);
+    sha3_256(&input)
+}
+
+fn root_hash(
+    tree_root: &[u8; DIGEST_LEN],
+    k: usize,
+    n: usize,
+    shard_len: usize,
+    data_len: usize,
+) -> [u8; DIGEST_LEN] {
+    let mut input = Vec::with_capacity(1 + DIGEST_LEN + 8 * 4);
+    input.push(ROOT_TAG);
+    input.extend_from_slice(tree_root);
+    for value in [k, n, shard_len, data_len] {
+        input.extend_from_slice(&(value as u64).to_le_bytes());
+    }
     sha3_256(&input)
 }
 
@@ -175,12 +227,11 @@ fn merkle_tree(leaves: Vec<[u8; DIGEST_LEN]>) -> Vec<Vec<[u8; DIGEST_LEN]>> {
         let mut index = 0;
         while index < level.len() {
             let left = level[index];
-            let right = if index + 1 < level.len() {
-                level[index + 1]
+            if index + 1 < level.len() {
+                next.push(pair_hash(&left, &level[index + 1]));
             } else {
-                left
-            };
-            next.push(pair_hash(&left, &right));
+                next.push(odd_hash(&left));
+            }
             index += 2;
         }
         levels.push(next);
@@ -210,9 +261,18 @@ pub fn encode(data: &[u8], k: usize, n: usize) -> Result<Coded, Error> {
         shard_bytes.push(combine(coeffs, &shard_bytes[..k], shard_len));
     }
 
-    let leaves: Vec<[u8; DIGEST_LEN]> = shard_bytes.iter().map(|b| sha3_256(b)).collect();
+    let leaves: Vec<[u8; DIGEST_LEN]> = shard_bytes
+        .iter()
+        .map(|b| leaf_hash(shard_len, b))
+        .collect();
     let tree = merkle_tree(leaves);
-    let root = tree.last().expect("the tree has a root")[0];
+    let root = root_hash(
+        &tree.last().expect("the tree has a root")[0],
+        k,
+        n,
+        shard_len,
+        data.len(),
+    );
 
     let shards = shard_bytes
         .into_iter()
@@ -580,5 +640,65 @@ mod tests {
             data_len: 1,
         };
         assert_eq!(reconstruct(&over_cap, &[]), Err(Error::Parameters));
+    }
+
+    #[test]
+    fn a_reparameterised_commitment_cannot_reuse_an_honest_root() {
+        let data: Vec<u8> = (0..600u32).map(|i| i as u8).collect();
+        let coded = encode(&data, 3, 6).expect("encode");
+        let honest = coded.commitment().clone();
+
+        let forged = Commitment {
+            root: honest.root,
+            k: 2,
+            n: 4,
+            shard_len: DIGEST_LEN * 2,
+            data_len: DIGEST_LEN * 4,
+        };
+        for index in 0..4usize {
+            let shard = Shard {
+                index,
+                bytes: vec![0u8; DIGEST_LEN * 2],
+            };
+            let proof = ShardProof {
+                siblings: vec![[0u8; DIGEST_LEN]; 2],
+            };
+            assert!(
+                !forged.verify_shard(&shard, &proof),
+                "a shard read at a depth the root never committed to must not verify"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shard_does_not_verify_under_a_different_shard_length() {
+        let data: Vec<u8> = (0..600u32).map(|i| i as u8).collect();
+        let coded = encode(&data, 3, 6).expect("encode");
+        let shard = coded.shard(0).expect("shard").clone();
+        let proof = coded.proof(0).expect("proof");
+        assert!(coded.commitment().verify_shard(&shard, &proof));
+
+        let mut moved = coded.commitment().clone();
+        moved.data_len += 1;
+        assert!(
+            !moved.verify_shard(&shard, &proof),
+            "the root commits to the data length, so moving it must break the proof"
+        );
+    }
+
+    #[test]
+    fn every_shard_of_an_odd_width_tree_verifies() {
+        let data: Vec<u8> = (0..500u32).map(|i| i as u8).collect();
+        for (k, n) in [(3usize, 5usize), (2, 7), (4, 9), (1, 3)] {
+            let coded = encode(&data, k, n).expect("encode");
+            for index in 0..n {
+                let shard = coded.shard(index).expect("shard");
+                let proof = coded.proof(index).expect("proof");
+                assert!(
+                    coded.commitment().verify_shard(shard, &proof),
+                    "shard {index} of {k} of {n} must verify"
+                );
+            }
+        }
     }
 }
