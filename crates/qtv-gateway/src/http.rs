@@ -70,6 +70,7 @@ struct Limiter {
 struct LimiterInner {
     total: usize,
     body_bytes: usize,
+    body_by_ip: HashMap<IpAddr, usize>,
     per_ip: HashMap<IpAddr, usize>,
     per_forwarded: HashMap<IpAddr, usize>,
     rate: HashMap<IpAddr, Bucket>,
@@ -247,7 +248,7 @@ impl Limiter {
         }
     }
 
-    fn try_reserve_body(&self, want: usize) -> bool {
+    fn try_reserve_body(&self, ip: IpAddr, want: usize) -> bool {
         let mut inner = self
             .inner
             .lock()
@@ -255,16 +256,27 @@ impl Limiter {
         if inner.body_bytes.saturating_add(want) > MAX_INFLIGHT_BODY {
             return false;
         }
+        let held = inner.body_by_ip.get(&ip).copied().unwrap_or(0);
+        if held.saturating_add(want) > MAX_BODY {
+            return false;
+        }
         inner.body_bytes += want;
+        inner.body_by_ip.insert(ip, held + want);
         true
     }
 
-    fn release_body(&self, held: usize) {
+    fn release_body(&self, ip: IpAddr, held: usize) {
         let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         inner.body_bytes = inner.body_bytes.saturating_sub(held);
+        if let Some(mine) = inner.body_by_ip.get_mut(&ip) {
+            *mine = mine.saturating_sub(held);
+            if *mine == 0 {
+                inner.body_by_ip.remove(&ip);
+            }
+        }
     }
 
     fn release(&self, ip: IpAddr) {
@@ -415,11 +427,12 @@ fn forwarded_client_ip(header: &Option<String>) -> Option<IpAddr> {
 struct BodyGuard {
     limiter: Arc<Limiter>,
     held: usize,
+    ip: IpAddr,
 }
 
 impl BodyGuard {
     fn reserve(&mut self, more: usize) -> bool {
-        if !self.limiter.try_reserve_body(more) {
+        if !self.limiter.try_reserve_body(self.ip, more) {
             return false;
         }
         self.held += more;
@@ -429,7 +442,7 @@ impl BodyGuard {
 
 impl Drop for BodyGuard {
     fn drop(&mut self) {
-        self.limiter.release_body(self.held);
+        self.limiter.release_body(self.ip, self.held);
     }
 }
 
@@ -632,6 +645,7 @@ fn handle_connection(
     let mut body_guard = BodyGuard {
         limiter: limiter.clone(),
         held: 0,
+        ip: limiter_key(peer),
     };
 
     let body = match read_body(&mut reader, content_length, &mut body_guard, deadline)? {
@@ -849,10 +863,11 @@ mod tests {
         let limiter = Arc::new(Limiter::default());
         let stalled = MAX_INFLIGHT_BODY / MAX_BODY;
         let mut guards: Vec<BodyGuard> = Vec::new();
-        for _ in 0..stalled {
+        for index in 0..stalled {
             let mut guard = BodyGuard {
                 limiter: limiter.clone(),
                 held: 0,
+                ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, index as u8)),
             };
             let mut silent = Cursor::new(Vec::new());
             let read = read_body(
@@ -876,6 +891,7 @@ mod tests {
         let mut real = BodyGuard {
             limiter: limiter.clone(),
             held: 0,
+            ip: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
         };
         let payload = vec![b'x'; MAX_BODY];
         let mut sender = Cursor::new(payload.clone());
@@ -899,14 +915,29 @@ mod tests {
     #[test]
     fn the_in_flight_budget_refuses_a_body_once_the_bytes_are_really_held() {
         let limiter = Arc::new(Limiter::default());
-        let mut held = BodyGuard {
+        let mut held: Vec<BodyGuard> = Vec::new();
+        for index in 0..(MAX_INFLIGHT_BODY / MAX_BODY) {
+            let mut guard = BodyGuard {
+                limiter: limiter.clone(),
+                held: 0,
+                ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 100 + index as u8)),
+            };
+            assert!(guard.reserve(MAX_BODY));
+            held.push(guard);
+        }
+        let mut lone = BodyGuard {
             limiter: limiter.clone(),
             held: 0,
+            ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 9)),
         };
-        assert!(held.reserve(MAX_INFLIGHT_BODY));
+        assert!(
+            !lone.reserve(MAX_BODY + 1),
+            "one address may hold at most a single body"
+        );
         let mut late = BodyGuard {
             limiter: limiter.clone(),
             held: 0,
+            ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2)),
         };
         let mut sender = Cursor::new(vec![b'x'; 16]);
         let read = read_body(
@@ -924,6 +955,7 @@ mod tests {
         let mut after = BodyGuard {
             limiter: limiter.clone(),
             held: 0,
+            ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 3)),
         };
         let mut sender = Cursor::new(vec![b'x'; 16]);
         assert!(

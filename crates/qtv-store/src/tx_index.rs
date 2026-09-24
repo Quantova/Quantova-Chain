@@ -5,21 +5,27 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-const RECORD: usize = 40;
+const RECORD: usize = 44;
 const TAIL_MERGE_AT: usize = 4096;
 
 fn record_bytes(id: &[u8; 32], height: u64) -> [u8; RECORD] {
     let mut out = [0u8; RECORD];
     out[..32].copy_from_slice(id);
-    out[32..].copy_from_slice(&height.to_be_bytes());
+    out[32..40].copy_from_slice(&height.to_be_bytes());
+    let sum = crate::log::checksum_parts(&[&out[..40]]);
+    out[40..].copy_from_slice(&sum.to_le_bytes());
     out
 }
 
-fn split_record(buf: &[u8; RECORD]) -> ([u8; 32], u64) {
+fn split_record(buf: &[u8; RECORD]) -> Option<([u8; 32], u64)> {
+    let want = u32::from_le_bytes(buf[40..].try_into().expect("four bytes"));
+    if crate::log::checksum_parts(&[&buf[..40]]) != want {
+        return None;
+    }
     let mut id = [0u8; 32];
     id.copy_from_slice(&buf[..32]);
-    let height = u64::from_be_bytes(buf[32..].try_into().expect("eight bytes"));
-    (id, height)
+    let height = u64::from_be_bytes(buf[32..40].try_into().expect("eight bytes"));
+    Some((id, height))
 }
 
 #[derive(Debug)]
@@ -62,7 +68,7 @@ fn open_run(path: PathBuf) -> io::Result<Run> {
 fn next_record(reader: &mut std::io::BufReader<File>) -> Option<([u8; 32], u64)> {
     let mut buf = [0u8; RECORD];
     reader.read_exact(&mut buf).ok()?;
-    Some(split_record(&buf))
+    split_record(&buf)
 }
 
 impl TxIndex {
@@ -300,7 +306,12 @@ fn search_run(run: &Run, id: &[u8; 32]) -> io::Result<Option<u64>> {
         let mid = lo + (hi - lo) / 2;
         file.seek(SeekFrom::Start((mid * RECORD) as u64))?;
         file.read_exact(&mut buf)?;
-        let (got, height) = split_record(&buf);
+        let Some((got, height)) = split_record(&buf) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a transaction index record failed its checksum",
+            ));
+        };
         match got.cmp(id) {
             std::cmp::Ordering::Less => lo = mid + 1,
             std::cmp::Ordering::Greater => hi = mid,
@@ -431,5 +442,23 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_flipped_bit_in_a_record_is_refused_rather_than_served() {
+        let good = record_bytes(&id(9), 77);
+        assert_eq!(split_record(&good), Some((id(9), 77)));
+
+        let mut height_flip = good;
+        height_flip[36] ^= 0x01;
+        assert_eq!(split_record(&height_flip), None);
+
+        let mut id_flip = good;
+        id_flip[3] ^= 0x80;
+        assert_eq!(split_record(&id_flip), None);
+
+        let mut sum_flip = good;
+        sum_flip[41] ^= 0x10;
+        assert_eq!(split_record(&sum_flip), None);
     }
 }

@@ -131,6 +131,8 @@ impl Drop for InflightGuard {
     }
 }
 
+const KNOWN_PEER_RERESOLVE: Duration = Duration::from_secs(60);
+
 fn known_peer_ips(peer_addrs: &[Option<String>]) -> HashSet<IpAddr> {
     let mut ips = HashSet::new();
     for addr in peer_addrs.iter().flatten() {
@@ -497,7 +499,8 @@ fn spawn_late_acceptor(
 ) {
     thread::spawn(move || {
         let _ = listener.set_nonblocking(false);
-        let known = known_peer_ips(&peer_addrs);
+        let mut known = known_peer_ips(&peer_addrs);
+        let mut resolved_at = Instant::now();
         let inflight = Arc::new(AtomicUsize::new(0));
         let per_ip: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
         let live: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(vec![0; n]));
@@ -506,6 +509,10 @@ fn spawn_late_acceptor(
                 thread::sleep(Duration::from_millis(50));
                 continue;
             };
+            if resolved_at.elapsed() >= KNOWN_PEER_RERESOLVE {
+                known = known_peer_ips(&peer_addrs);
+                resolved_at = Instant::now();
+            }
             let ip = canonical_ip(addr.ip());
             let is_known = known.contains(&ip);
             if !is_known && bar.barred(ip) {
@@ -521,7 +528,9 @@ fn spawn_late_acceptor(
                 continue;
             }
             {
-                let mut map = per_ip.lock().expect("the per ip map is not poisoned");
+                let mut map = per_ip
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let slot = map.entry(slot_key).or_insert(0);
                 let ip_cap = if is_known {
                     LATE_PER_IP_KNOWN
@@ -571,7 +580,9 @@ fn spawn_late_acceptor(
                     return;
                 };
                 let generation = {
-                    let mut g = live_w.lock().expect("the generation table is not poisoned");
+                    let mut g = live_w
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     g[from] = g[from].saturating_add(1);
                     g[from]
                 };

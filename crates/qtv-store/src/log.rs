@@ -400,7 +400,7 @@ const fn crc_table() -> [u32; 256] {
 
 static CRC_TABLE: [u32; 256] = crc_table();
 
-fn checksum_parts(parts: &[&[u8]]) -> u32 {
+pub(crate) fn checksum_parts(parts: &[&[u8]]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for part in parts {
         for &byte in part.iter() {
