@@ -398,6 +398,7 @@ fn decode_wrapper(decoder: &mut Decoder<'_>) -> Result<Wrapper, DecodeError> {
         _ => return Err(DecodeError::BadLength),
     };
     let valid_until = decoder.get_u64()?;
+    let kind = decoder.get_u8()?;
     let scheme = decoder.get_u8()?;
     let signature = decoder.get_bytes()?.to_vec();
     let mut body = Body::with_context(
@@ -412,7 +413,7 @@ fn decode_wrapper(decoder: &mut Decoder<'_>) -> Result<Wrapper, DecodeError> {
     if let Some(issuer) = in_asset {
         body = body.carrying(issuer);
     }
-    body = body.valid_until(valid_until);
+    body = body.valid_until(valid_until).with_kind(kind);
     Ok(Wrapper::new(body, scheme, signature))
 }
 

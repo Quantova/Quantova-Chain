@@ -42,6 +42,25 @@ fn raw(from: &KeyAccount, to: &str, args: Vec<u8>, nonce: u64, fee: u128, meter:
     sign(from, &body)
 }
 
+fn raw_call(
+    from: &KeyAccount,
+    to: &str,
+    args: Vec<u8>,
+    nonce: u64,
+    fee: u128,
+    meter: u64,
+) -> Wrapper {
+    let body = Body::new(
+        from.address(),
+        nonce,
+        meter,
+        fee,
+        Call::new(to.to_string(), args),
+    )
+    .calling();
+    sign(from, &body)
+}
+
 fn container() -> Vec<u8> {
     let code = qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 1\nSSTORE r2, r0\nHALT")
         .expect("the probe program assembles");
@@ -156,7 +175,7 @@ fn ordered_and_parallel_agree_on_random_blocks() {
                         deployed[(rnd(&mut state) % deployed.len() as u64) as usize].clone();
                     let mut args = qtv_vm::container::selector("bump()").to_vec();
                     args.extend_from_slice(&[7u8; 240]);
-                    raw(from, &target, args, nonce, 5_000_000, 12_000_000)
+                    raw_call(from, &target, args, nonce, 5_000_000, 12_000_000)
                 }
                 2 => {
                     let mut junk = vec![0u8; (rnd(&mut state) % 40) as usize];

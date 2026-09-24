@@ -133,6 +133,10 @@ fn plan_from_account_checks(
         return Err(Reject::WrongChain);
     }
 
+    if body.is_call() {
+        return Err(Reject::BadCall);
+    }
+
     if body.nonce() != account.nonce {
         return Err(Reject::BadNonce {
             expected: account.nonce,

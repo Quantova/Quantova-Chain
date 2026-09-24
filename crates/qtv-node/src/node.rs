@@ -1185,8 +1185,9 @@ pub(crate) fn vm_meter_fee(meter: u64, fee_params: &FeeParams) -> u64 {
 }
 
 pub(crate) fn is_vm_op(ledger: &Ledger, wrapper: &Wrapper) -> bool {
+    let _ = ledger;
     let target = wrapper.body().call().target();
-    target == crate::ledger::vm_deploy_address() || ledger.is_contract(target)
+    target == crate::ledger::vm_deploy_address() || wrapper.body().is_call()
 }
 
 pub(crate) fn vm_target_dispatchable(ledger: &Ledger, wrapper: &Wrapper) -> bool {
@@ -1265,6 +1266,10 @@ fn dispatch_vm(
         return false;
     }
     if ledger.bridge_is_frozen() && ledger.is_bridge_gateway(wrapper.body().call().target()) {
+        return false;
+    }
+    let target = wrapper.body().call().target();
+    if target != crate::ledger::vm_deploy_address() && !ledger.is_contract(target) {
         return false;
     }
     let account = ledger.account(&sender);
@@ -2272,6 +2277,26 @@ mod tests {
         sign(from, &body)
     }
 
+    fn call_tx(
+        from: &KeyAccount,
+        target: &str,
+        args: Vec<u8>,
+        nonce: u64,
+        meter: u64,
+        fee: &FeeParams,
+    ) -> Wrapper {
+        let call = qtv_tx::Call::new(target.to_string(), args);
+        let body = Body::new(
+            from.address(),
+            nonce,
+            meter,
+            u128::from(vm_meter_fee(meter, fee)),
+            call,
+        )
+        .calling();
+        sign(from, &body)
+    }
+
     fn payable_tx(
         from: &KeyAccount,
         target: &str,
@@ -2290,7 +2315,8 @@ mod tests {
             call,
             value,
             qtv_tx::LOCAL_CHAIN_ID,
-        );
+        )
+        .calling();
         sign(from, &body)
     }
 
@@ -2437,6 +2463,33 @@ mod tests {
     }
 
     #[test]
+    fn a_call_to_an_address_holding_no_code_never_becomes_a_transfer() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let victim = keypair(211);
+        let attacker = keypair(212);
+        let start = 9_000 * 1_000_000u64;
+        fund(&mut ledger, &victim, start);
+        let sink = crate::ledger::contract_address(&attacker.address(), 0).unwrap();
+        assert!(!ledger.is_contract(&sink), "the target holds no code yet");
+
+        let drain = start - u64::from(fee.ceiling_fee());
+        let call = call_tx(&victim, &sink, drain.to_le_bytes().to_vec(), 0, 1_210, &fee);
+
+        let included = execute_ordered(&mut ledger, &[call], &fee, 0);
+        assert!(
+            included.is_empty(),
+            "a transaction signed as a call must not execute as a transfer"
+        );
+        assert_eq!(
+            ledger.balance(&victim.address()),
+            start,
+            "the victim keeps every unit"
+        );
+        assert_eq!(ledger.balance(&sink), 0, "nothing reached the attacker");
+    }
+
+    #[test]
     fn a_contract_deploys_and_a_call_runs_it_through_the_executor() {
         let fee = FeeParams::devnet();
         let mut ledger = Ledger::new();
@@ -2474,7 +2527,7 @@ mod tests {
         let contract = crate::ledger::contract_address(&deployer.address(), 0).unwrap();
         assert!(ledger.is_contract(&contract));
 
-        let call = system_tx(&deployer, &contract, selector.to_vec(), 1, 100_000, &fee);
+        let call = call_tx(&deployer, &contract, selector.to_vec(), 1, 100_000, &fee);
         assert_eq!(execute_ordered(&mut ledger, &[call], &fee, 0).len(), 1);
         let stored = ledger.contract_storage(&address_bytes(&contract));
         let expected = crate::ledger::address_word(&deployer.address()).unwrap();
@@ -2678,7 +2731,7 @@ mod tests {
             "the deploy runs genesis once and records the deployer as owner"
         );
 
-        let reinvoke = system_tx(&stranger, &contract, genesis.to_vec(), 0, 100_000, &fee);
+        let reinvoke = call_tx(&stranger, &contract, genesis.to_vec(), 0, 100_000, &fee);
         execute_ordered(&mut ledger, &[reinvoke], &fee, 0);
 
         let stranger_word =
@@ -2773,7 +2826,7 @@ mod tests {
 
         let supply_before = ledger.balance(&contract) + ledger.balance(&payee.address());
         let pull_sel = qtv_vm::container::selector("pull()");
-        let pull = system_tx(&payee, &contract, pull_sel.to_vec(), 0, 100_000, &fee);
+        let pull = call_tx(&payee, &contract, pull_sel.to_vec(), 0, 100_000, &fee);
         assert_eq!(execute_ordered(&mut ledger, &[pull], &fee, 0).len(), 1);
 
         assert_eq!(
@@ -2828,7 +2881,7 @@ mod tests {
         assert_eq!(ledger.balance(&contract), 1_000);
 
         let payee_before = ledger.balance(&payee.address());
-        let pull = system_tx(
+        let pull = call_tx(
             &payee,
             &contract,
             qtv_vm::container::selector("pull()").to_vec(),
@@ -3089,8 +3142,8 @@ mod tests {
             100_000,
             &fee,
         );
-        let call_one = system_tx(&deployer, &contract, selector.to_vec(), 1, 100_000, &fee);
-        let call_two = system_tx(&deployer, &contract, selector.to_vec(), 2, 100_000, &fee);
+        let call_one = call_tx(&deployer, &contract, selector.to_vec(), 1, 100_000, &fee);
+        let call_two = call_tx(&deployer, &contract, selector.to_vec(), 2, 100_000, &fee);
         let block = vec![deploy, call_one, call_two];
 
         let mut ledger = Ledger::new();
@@ -3145,7 +3198,7 @@ mod tests {
         let contract = crate::ledger::contract_address(&deployer.address(), 0).unwrap();
         assert!(ledger.block_events().is_empty());
 
-        let call = system_tx(&deployer, &contract, selector.to_vec(), 1, 100_000, &fee);
+        let call = call_tx(&deployer, &contract, selector.to_vec(), 1, 100_000, &fee);
         assert_eq!(execute_ordered(&mut ledger, &[call], &fee, 0).len(), 1);
 
         let events = ledger.block_events();
@@ -4632,7 +4685,7 @@ mod tests {
         let gateway = crate::ledger::contract_address(&deployer.address(), 0).unwrap();
         ledger.seed_bridge_gateway(&address_bytes(&gateway));
 
-        let open_call = system_tx(&user, &gateway, selector.to_vec(), 0, 100_000, &fee);
+        let open_call = call_tx(&user, &gateway, selector.to_vec(), 0, 100_000, &fee);
         assert_eq!(
             execute_ordered(&mut ledger, &[open_call], &fee, 0).len(),
             1,
@@ -4646,7 +4699,7 @@ mod tests {
             0,
             &fee,
         );
-        let frozen_call = system_tx(&user, &gateway, selector.to_vec(), 1, 100_000, &fee);
+        let frozen_call = call_tx(&user, &gateway, selector.to_vec(), 1, 100_000, &fee);
         let included = execute_ordered(&mut ledger, &[freeze, frozen_call], &fee, 0);
         assert_eq!(
             included.len(),

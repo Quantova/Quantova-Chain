@@ -70,6 +70,9 @@ impl Encode for Call {
     }
 }
 
+pub const KIND_TRANSFER: u8 = 0;
+pub const KIND_CALL: u8 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Body {
     sender: String,
@@ -81,6 +84,7 @@ pub struct Body {
     call: Call,
     in_asset: Option<[u8; 32]>,
     valid_until: u64,
+    kind: u8,
 }
 
 impl Body {
@@ -107,7 +111,26 @@ impl Body {
             call,
             in_asset: None,
             valid_until: 0,
+            kind: KIND_TRANSFER,
         }
+    }
+
+    pub fn calling(mut self) -> Self {
+        self.kind = KIND_CALL;
+        self
+    }
+
+    pub fn with_kind(mut self, kind: u8) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    pub fn kind(&self) -> u8 {
+        self.kind
+    }
+
+    pub fn is_call(&self) -> bool {
+        self.kind == KIND_CALL
     }
 
     pub fn carrying(mut self, issuer: [u8; 32]) -> Self {
@@ -169,6 +192,7 @@ impl Encode for Body {
         self.chain_id.encode(encoder);
         encoder.put_bytes(self.in_asset.as_ref().map(|a| a.as_slice()).unwrap_or(&[]));
         self.valid_until.encode(encoder);
+        self.kind.encode(encoder);
     }
 }
 

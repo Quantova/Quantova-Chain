@@ -312,8 +312,9 @@ fn the_body_reproduces_the_qcore_js_transfer_vector() {
         call,
         0,
         qtv_tx::LOCAL_CHAIN_ID,
-    );
-    let want = "20000000000000008c705c118414c1e32a977ca4ee36fc3f2888b67ec031596abf4ac70e5f5a14f00300000000000000085200000000000040420f000000000000000000000000002000000000000000ba83f436d6f46e181c3bae40ba4ffedb0f62e67cde1a0c558f459b996229593b0400000000000000deadbeef000000000000000098ba0ce08f27d0be00000000000000000000000000000000";
+    )
+    .calling();
+    let want = "20000000000000008c705c118414c1e32a977ca4ee36fc3f2888b67ec031596abf4ac70e5f5a14f00300000000000000085200000000000040420f000000000000000000000000002000000000000000ba83f436d6f46e181c3bae40ba4ffedb0f62e67cde1a0c558f459b996229593b0400000000000000deadbeef000000000000000098ba0ce08f27d0be0000000000000000000000000000000001";
     assert_eq!(hex(&qtv_codec::to_bytes(&body)), want);
 }
 
@@ -331,12 +332,13 @@ fn the_signed_transaction_reproduces_the_qcore_js_payable_vector() {
         call,
         250_000,
         qtv_tx::TESTNET_CHAIN_ID,
-    );
+    )
+    .calling();
     let wrapper = sign(&sender, &body);
     assert!(verify(&wrapper, sender.public_key()));
     assert_eq!(
         wrapper.id(),
-        "QTX1XSW6UVTL4QVDRUHCWAWFK7WFAXK88Q0YKAPQYKDPVTX0377Q7S3Q86N0NR"
+        "QTX18MRMZTQ5EPD30MU9FAXLNT076JFV53K3C229TEFXUFS9VHSF3LZSZCN7H6"
     );
 }
 
