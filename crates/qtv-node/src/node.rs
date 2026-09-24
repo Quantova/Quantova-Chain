@@ -878,12 +878,7 @@ fn bridge_mint_fact(
     }
     if let Some(asset) = ledger.bridged_asset(&fact.asset_id) {
         if asset.requires_stark {
-            let prover = operators.operators.first().map(|(id, _)| *id)?;
-            if crate::bridge::check_stark(&fact, artifact.stark.as_ref(), prover)
-                != crate::bridge::StarkCheck::Verified
-            {
-                return None;
-            }
+            return None;
         }
     }
     Some(fact)
@@ -1681,15 +1676,16 @@ pub struct Node {
     finality: crate::consensus::FinalityLedger,
 }
 
-pub fn reweigh_roster(
+pub fn reweigh_roster_for_epoch(
     ledger: &Ledger,
     base: &[crate::consensus::ValidatorRegistration],
+    epoch: u64,
 ) -> Vec<crate::consensus::ValidatorRegistration> {
     let derived: Vec<crate::consensus::ValidatorRegistration> = base
         .iter()
         .map(|r| {
             let mut reweighed = r.clone();
-            reweighed.stake = ledger.staked_weight(&r.bond_address);
+            reweighed.stake = ledger.staked_weight_in_epoch(&r.bond_address, epoch);
             reweighed
         })
         .collect();

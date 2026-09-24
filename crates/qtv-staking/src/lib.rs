@@ -100,6 +100,8 @@ pub struct Bond {
     pub amount: u64,
     pub bonded_at_day: u64,
     pub exit_requested_at: Option<u64>,
+    pub active_amount: u64,
+    pub raised_at_height: u64,
 }
 
 impl Bond {
@@ -109,10 +111,30 @@ impl Bond {
                 amount,
                 bonded_at_day,
                 exit_requested_at: None,
+                active_amount: amount,
+                raised_at_height: 0,
             })
         } else {
             None
         }
+    }
+
+    pub fn amount_in_epoch(&self, epoch: u64, heights_per_epoch: u64) -> u64 {
+        if heights_per_epoch == 0 {
+            return self.amount;
+        }
+        if self.raised_at_height / heights_per_epoch < epoch {
+            self.amount
+        } else {
+            self.active_amount.min(self.amount)
+        }
+    }
+
+    pub fn raise_to(&mut self, total: u64, height: u64, heights_per_epoch: u64) {
+        let epoch = height.checked_div(heights_per_epoch).unwrap_or(0);
+        self.active_amount = self.amount_in_epoch(epoch, heights_per_epoch);
+        self.amount = total;
+        self.raised_at_height = height;
     }
 
     pub fn request_exit(&mut self, now_day: u64) -> bool {
@@ -149,6 +171,8 @@ impl Encode for Bond {
         self.amount.encode(encoder);
         self.bonded_at_day.encode(encoder);
         self.exit_requested_at.encode(encoder);
+        self.active_amount.encode(encoder);
+        self.raised_at_height.encode(encoder);
     }
 }
 
@@ -158,6 +182,8 @@ impl Decode for Bond {
             amount: u64::decode(decoder)?,
             bonded_at_day: u64::decode(decoder)?,
             exit_requested_at: Option::<u64>::decode(decoder)?,
+            active_amount: u64::decode(decoder)?,
+            raised_at_height: u64::decode(decoder)?,
         })
     }
 }
@@ -888,5 +914,44 @@ mod withdraw_conservation_tests {
             Some(amount),
             "the bond was destroyed by a withdraw that credited nothing"
         );
+    }
+
+    #[test]
+    fn a_raise_carries_the_old_weight_for_the_rest_of_its_epoch() {
+        let len = 100;
+        let mut bond = Bond::new(MIN_STAKE, 0).expect("bond");
+        assert_eq!(bond.amount_in_epoch(0, len), MIN_STAKE);
+        bond.raise_to(MIN_STAKE * 4, 250, len);
+        assert_eq!(
+            bond.amount_in_epoch(2, len),
+            MIN_STAKE,
+            "the raise must not count in the epoch it was made"
+        );
+        assert_eq!(bond.amount_in_epoch(3, len), MIN_STAKE * 4);
+        assert_eq!(bond.amount_in_epoch(9, len), MIN_STAKE * 4);
+    }
+
+    #[test]
+    fn a_second_raise_in_a_later_epoch_starts_from_the_matured_weight() {
+        let len = 100;
+        let mut bond = Bond::new(MIN_STAKE, 0).expect("bond");
+        bond.raise_to(MIN_STAKE * 4, 250, len);
+        bond.raise_to(MIN_STAKE * 9, 460, len);
+        assert_eq!(
+            bond.amount_in_epoch(4, len),
+            MIN_STAKE * 4,
+            "the first raise had matured, so it is what carries through epoch four"
+        );
+        assert_eq!(bond.amount_in_epoch(5, len), MIN_STAKE * 9);
+    }
+
+    #[test]
+    fn two_raises_inside_one_epoch_both_wait() {
+        let len = 100;
+        let mut bond = Bond::new(MIN_STAKE, 0).expect("bond");
+        bond.raise_to(MIN_STAKE * 4, 250, len);
+        bond.raise_to(MIN_STAKE * 9, 260, len);
+        assert_eq!(bond.amount_in_epoch(2, len), MIN_STAKE);
+        assert_eq!(bond.amount_in_epoch(3, len), MIN_STAKE * 9);
     }
 }

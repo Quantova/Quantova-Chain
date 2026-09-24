@@ -566,8 +566,12 @@ fn handle_connection(
 
     let mut _forwarded_guard: Option<ForwardedGuard> = None;
     if loopback_only {
-        let forwarded = forwarded_client_ip(&forwarded_for);
-        let direct = forwarded_for.is_none() && trusted_local();
+        let forwarded = if trusted_local() {
+            forwarded_client_ip(&forwarded_for)
+        } else {
+            None
+        };
+        let direct = forwarded.is_none() && trusted_local();
         let client = limiter_key(forwarded.unwrap_or(peer));
         match limiter.admit_client(client, direct, MAX_CONNECTIONS_PER_IP, Instant::now()) {
             Admit::Untracked => {}

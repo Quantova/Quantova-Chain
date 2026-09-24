@@ -192,7 +192,13 @@ impl TxIndex {
                 false
             }
         });
-        let run = self.write_run(tail.into_iter())?;
+        let run = match self.write_run(tail.iter().copied()) {
+            Ok(run) => run,
+            Err(err) => {
+                self.tail_mem = tail;
+                return Err(err);
+            }
+        };
         self.sorted_len += run.len;
         self.runs.push(run);
 

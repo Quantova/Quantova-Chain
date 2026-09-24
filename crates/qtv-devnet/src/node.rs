@@ -21,7 +21,7 @@ use qtv_node::ledger::{
     EVENT_BRIDGE_BURN, NATIVE_EVENT_SOURCE,
 };
 use qtv_node::mempool::{Admitted, Mempool, Reject};
-use qtv_node::node::{execute_ordered, reweigh_roster, Genesis, GenesisAccount};
+use qtv_node::node::{execute_ordered, reweigh_roster_for_epoch, Genesis, GenesisAccount};
 use qtv_node::watermark::{LockFile, PrevoteGuard, SignGuard};
 use qtv_sampler::committee::PublishedReveal;
 use qtv_store::{BlockStore, BurnArchive, BurnArchiveEntry, EventStore, StateStore, TxIndex};
@@ -486,6 +486,7 @@ impl DevNode {
             genesis_supply,
         };
 
+        dev.ledger.set_heights_per_epoch(dev.consensus.epoch_len());
         dev.refuse_state_behind_blocks()?;
         if let Some(committed) = dev.state_store.committed_height() {
             dev.block_store.truncate_to_height(committed)?;
@@ -632,7 +633,7 @@ impl DevNode {
     }
 
     fn epoch_roster_for(&self, epoch: u64) -> Vec<ValidatorRegistration> {
-        reweigh_roster(&self.ledger, &self.base_roster)
+        reweigh_roster_for_epoch(&self.ledger, &self.base_roster, epoch)
             .into_iter()
             .map(|mut r| {
                 if epoch != 0 {
@@ -924,6 +925,8 @@ impl DevNode {
     fn reload(&mut self) -> Result<(), RoundError> {
         self.refuse_state_behind_blocks()?;
         self.ledger = Ledger::from_trie(self.state_store.load_trie());
+        self.ledger
+            .set_heights_per_epoch(self.consensus.epoch_len());
         if let (Some(head), Some(committed)) = (
             self.block_store.head_height(),
             self.state_store.committed_height(),

@@ -869,6 +869,28 @@ impl Ledger {
             .unwrap_or(0)
     }
 
+    pub fn current_epoch(&self) -> u64 {
+        self.execution_height
+            .checked_div(self.heights_per_epoch)
+            .unwrap_or(0)
+    }
+
+    pub fn staked_weight_in_epoch(&self, address: &str, epoch: u64) -> u64 {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return 0,
+        };
+        if self.is_stake_banned(&id) || self.is_gov_blacklisted(&id) {
+            return 0;
+        }
+        self.stake_bond(&id)
+            .map(|bond| {
+                bond.amount_in_epoch(epoch, self.heights_per_epoch)
+                    / qtv_staking::NATIVE_UNIT as u64
+            })
+            .unwrap_or(0)
+    }
+
     pub fn seed_validator_bond(&mut self, address: &str, amount: u64) -> Option<(Key, Vec<u8>)> {
         self.seed_validator_bond_at(address, amount, 0)
     }
@@ -884,6 +906,8 @@ impl Ledger {
             amount,
             bonded_at_day,
             exit_requested_at: None,
+            active_amount: amount,
+            raised_at_height: 0,
         };
         let existing = self.stake_bond(&id).map(|b| b.amount).unwrap_or(0);
         self.set_stake_bond(&id, &bond);
@@ -991,6 +1015,14 @@ impl Ledger {
 
     pub fn round_proposer(&self) -> Option<&str> {
         self.round_proposer.as_deref()
+    }
+
+    pub fn set_heights_per_epoch(&mut self, heights: u64) {
+        self.heights_per_epoch = heights;
+    }
+
+    pub fn heights_per_epoch(&self) -> u64 {
+        self.heights_per_epoch
     }
 
     pub fn set_execution_height(&mut self, height: u64) {
@@ -3103,7 +3135,8 @@ impl Ledger {
         if account.balance < stake {
             return false;
         }
-        let bonded = self.staked_weight(voter) as u128 * qtv_staking::NATIVE_UNIT as u128;
+        let bonded = self.staked_weight_in_epoch(voter, self.current_epoch()) as u128
+            * qtv_staking::NATIVE_UNIT as u128;
         if u128::from(stake) > bonded {
             return false;
         }
@@ -3761,14 +3794,17 @@ impl Ledger {
         }
         account.balance -= amount;
         self.set_account(address, &account);
-        self.set_stake_bond(
-            &id,
-            &Bond {
-                amount: total,
-                bonded_at_day: day,
-                exit_requested_at: None,
-            },
-        );
+        let mut bond = self.stake_bond(&id).unwrap_or(Bond {
+            amount: 0,
+            bonded_at_day: day,
+            exit_requested_at: None,
+            active_amount: 0,
+            raised_at_height: 0,
+        });
+        bond.bonded_at_day = day;
+        bond.exit_requested_at = None;
+        bond.raise_to(total, self.execution_height, self.heights_per_epoch);
+        self.set_stake_bond(&id, &bond);
         self.credit_staked(amount);
         true
     }
@@ -3862,14 +3898,17 @@ impl Ledger {
         account.nonce += 1;
         self.set_account(address, &account);
         self.collect_fee(fee);
-        self.set_stake_bond(
-            &id,
-            &Bond {
-                amount: total,
-                bonded_at_day: day,
-                exit_requested_at: None,
-            },
-        );
+        let mut bond = self.stake_bond(&id).unwrap_or(Bond {
+            amount: 0,
+            bonded_at_day: day,
+            exit_requested_at: None,
+            active_amount: 0,
+            raised_at_height: 0,
+        });
+        bond.bonded_at_day = day;
+        bond.exit_requested_at = None;
+        bond.raise_to(total, self.execution_height, self.heights_per_epoch);
+        self.set_stake_bond(&id, &bond);
         self.credit_staked(amount);
         self.record_bond_event(address, amount, fee);
         self.record_side_event(SideEvent::Bond {
@@ -6877,6 +6916,8 @@ mod stake_state_tests {
             amount: u64::MAX - 1_000,
             bonded_at_day: 0,
             exit_requested_at: None,
+            active_amount: u64::MAX - 1_000,
+            raised_at_height: 0,
         };
         l.set_stake_bond(&id, &ceiling);
         assert!(!l.bond(&addr, 2_000 * 1_000_000, 0));
@@ -9672,6 +9713,7 @@ pub struct Ledger {
     round_proposer: Option<String>,
     execution_height: u64,
     execution_time: u64,
+    heights_per_epoch: u64,
     journal: Option<Vec<(Key, Option<Vec<u8>>)>>,
     block_fresh_leaves: u64,
     fresh_leaf_ceiling: Option<u64>,
@@ -9689,6 +9731,7 @@ impl Ledger {
             round_proposer: None,
             execution_height: 0,
             execution_time: 0,
+            heights_per_epoch: 0,
             journal: None,
             block_fresh_leaves: 0,
             fresh_leaf_ceiling: None,
@@ -9707,6 +9750,7 @@ impl Ledger {
             round_proposer: None,
             execution_height: 0,
             execution_time: 0,
+            heights_per_epoch: 0,
             journal: None,
             block_fresh_leaves: 0,
             fresh_leaf_ceiling: None,
@@ -10408,5 +10452,40 @@ mod tests {
         let hostile = qtv_idfmt::render_address(&pool_key).expect("a full hash reaches the floor");
         assert_eq!(ledger.account(&hostile), Account::default());
         assert_eq!(ledger.stake_pool(), 9_000);
+    }
+
+    #[test]
+    fn a_stake_raise_carries_no_weight_in_the_epoch_it_was_made_in() {
+        let mut l = Ledger::new();
+        l.set_heights_per_epoch(100);
+        let addr = qtv_idfmt::render_address(&[21u8; 32]).unwrap();
+        l.set_account(&addr, &Account::funded(10_000 * 1_000_000, 1, vec![]));
+
+        l.set_execution_height(5);
+        assert!(l.bond(&addr, 2_000 * 1_000_000, 0));
+        assert_eq!(
+            l.staked_weight_in_epoch(&addr, 0),
+            0,
+            "a bond made inside an epoch does not vote in that epoch"
+        );
+        assert_eq!(l.staked_weight_in_epoch(&addr, 1), 2_000);
+
+        l.set_execution_height(350);
+        assert!(l.bond(&addr, 6_000 * 1_000_000, 0));
+        assert_eq!(
+            l.staked_weight_in_epoch(&addr, 3),
+            2_000,
+            "the raise must not take effect in the epoch it was made"
+        );
+        assert_eq!(l.staked_weight_in_epoch(&addr, 4), 8_000);
+    }
+
+    #[test]
+    fn a_genesis_seeded_bond_carries_its_weight_from_the_first_epoch() {
+        let mut l = Ledger::new();
+        l.set_heights_per_epoch(100);
+        let addr = qtv_idfmt::render_address(&[22u8; 32]).unwrap();
+        l.seed_validator_bond(&addr, 4_000 * 1_000_000);
+        assert_eq!(l.staked_weight_in_epoch(&addr, 0), 4_000);
     }
 }

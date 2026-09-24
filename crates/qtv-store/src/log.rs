@@ -96,6 +96,14 @@ fn corrupt_middle() -> io::Error {
     )
 }
 
+fn read_part(stream: &mut BufReader<File>, buf: &mut [u8]) -> io::Result<bool> {
+    match stream.read_exact(buf) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 fn frame_is_well_formed(
     stream: &mut BufReader<File>,
     salt: &Salt,
@@ -108,7 +116,7 @@ fn frame_is_well_formed(
     }
     stream.seek(SeekFrom::Start(at))?;
     let mut length_bytes = [0u8; LENGTH_WIDTH];
-    if stream.read_exact(&mut length_bytes).is_err() {
+    if !read_part(stream, &mut length_bytes)? {
         return Ok(Probe::Missed(0));
     }
     let length = u64::from_le_bytes(length_bytes);
@@ -121,11 +129,11 @@ fn frame_is_well_formed(
         return Ok(Probe::OverBudget);
     }
     let mut payload = vec![0u8; length as usize];
-    if stream.read_exact(&mut payload).is_err() {
+    if !read_part(stream, &mut payload)? {
         return Ok(Probe::Missed(length));
     }
     let mut checksum_bytes = [0u8; CHECKSUM_WIDTH];
-    if stream.read_exact(&mut checksum_bytes).is_err() {
+    if !read_part(stream, &mut checksum_bytes)? {
         return Ok(Probe::Missed(length));
     }
     if u32::from_le_bytes(checksum_bytes) == checksum_parts(&[salt, &length_bytes, &payload]) {
@@ -248,7 +256,7 @@ impl Log {
                 break;
             }
             let mut length_bytes = [0u8; LENGTH_WIDTH];
-            if stream.read_exact(&mut length_bytes).is_err() {
+            if !read_part(&mut stream, &mut length_bytes)? {
                 break;
             }
             let length = u64::from_le_bytes(length_bytes);
@@ -264,11 +272,11 @@ impl Log {
             }
             payload.clear();
             payload.resize(length as usize, 0u8);
-            if stream.read_exact(&mut payload).is_err() {
+            if !read_part(&mut stream, &mut payload)? {
                 break;
             }
             let mut checksum_bytes = [0u8; CHECKSUM_WIDTH];
-            if stream.read_exact(&mut checksum_bytes).is_err() {
+            if !read_part(&mut stream, &mut checksum_bytes)? {
                 break;
             }
             if u32::from_le_bytes(checksum_bytes)
