@@ -690,11 +690,6 @@ fn account(node: &DevNode, address: &str) -> Result<Json, ClientError> {
 struct SystemAddrs {
     deploy: String,
     bridge_mint: String,
-    bridge_btc_mint: String,
-    bridge_eth_mint: String,
-    bridge_cosmos_mint: String,
-    bridge_eth_update: String,
-    bridge_cosmos_update: String,
     bridge_exit: String,
     bridge_settle: String,
     bridge_guardian: String,
@@ -711,11 +706,6 @@ fn system_addrs() -> &'static SystemAddrs {
         SystemAddrs {
             deploy: l::vm_deploy_address(),
             bridge_mint: l::bridge_mint_address(),
-            bridge_btc_mint: l::bridge_btc_mint_address(),
-            bridge_eth_mint: l::bridge_eth_mint_address(),
-            bridge_cosmos_mint: l::bridge_cosmos_mint_address(),
-            bridge_eth_update: l::bridge_eth_update_address(),
-            bridge_cosmos_update: l::bridge_cosmos_update_address(),
             bridge_exit: l::bridge_exit_address(),
             bridge_settle: l::bridge_settle_address(),
             bridge_guardian: l::bridge_guardian_address(),
@@ -740,15 +730,8 @@ fn tx_kind(
     if is_contract {
         return ("call", None);
     }
-    if target == s.bridge_mint
-        || target == s.bridge_btc_mint
-        || target == s.bridge_eth_mint
-        || target == s.bridge_cosmos_mint
-    {
+    if target == s.bridge_mint {
         return ("bridge_mint", None);
-    }
-    if target == s.bridge_eth_update || target == s.bridge_cosmos_update {
-        return ("bridge_update", None);
     }
     if target == s.bridge_exit {
         return ("bridge_exit", None);
@@ -1379,23 +1362,11 @@ mod storage_at_tests {
     use super::*;
 
     #[test]
-    fn every_bridge_mint_and_update_target_is_labelled_by_its_kind() {
+    fn the_attested_mint_target_is_labelled_by_its_kind() {
         use qtv_node::ledger as l;
         let sender = qtv_idfmt::render_address(&[7u8; 32]).unwrap();
-        for target in [
-            l::bridge_mint_address(),
-            l::bridge_btc_mint_address(),
-            l::bridge_eth_mint_address(),
-            l::bridge_cosmos_mint_address(),
-        ] {
-            assert_eq!(tx_kind(false, &sender, &target, 0).0, "bridge_mint");
-        }
-        for target in [
-            l::bridge_eth_update_address(),
-            l::bridge_cosmos_update_address(),
-        ] {
-            assert_eq!(tx_kind(false, &sender, &target, 0).0, "bridge_update");
-        }
+        let target = l::bridge_mint_address();
+        assert_eq!(tx_kind(false, &sender, &target, 0).0, "bridge_mint");
     }
 
     #[test]

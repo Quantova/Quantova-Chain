@@ -3111,9 +3111,6 @@ mod tests {
             bridged_assets: Vec::new(),
             bridge_era: None,
             bridge_exit_max_amount: None,
-            bridge_bitcoin_anchor: None,
-            bridge_eth_anchors: Vec::new(),
-            bridge_cosmos_anchor: None,
         };
         assert_eq!(
             genesis_supply_value(&genesis, &[]),

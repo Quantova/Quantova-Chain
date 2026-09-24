@@ -349,20 +349,6 @@ fn bridge_vault_custody_key(vault: &[u8; 32], asset_id: &[u8; 16]) -> Key {
     sha3::sha3_256(&input)
 }
 
-fn bridge_eth_anchor_key(selector: u8) -> Key {
-    let mut input = Vec::with_capacity(BRIDGE_ETH_ANCHOR_TAG.len() + 1);
-    input.extend_from_slice(BRIDGE_ETH_ANCHOR_TAG);
-    input.push(selector);
-    sha3::sha3_256(&input)
-}
-
-fn bridge_cosmos_anchor_key(selector: u8) -> Key {
-    let mut input = Vec::with_capacity(BRIDGE_COSMOS_ANCHOR_TAG.len() + 1);
-    input.extend_from_slice(BRIDGE_COSMOS_ANCHOR_TAG);
-    input.push(selector);
-    sha3::sha3_256(&input)
-}
-
 const GOV_MINT_PERIOD_TAG: &[u8] = b"qtv/gov/mint-period/";
 
 fn gov_mint_period_key(period: u64) -> Key {
@@ -659,37 +645,6 @@ pub fn bridge_guardian_address() -> String {
 pub fn bridge_mint_address() -> String {
     static BRIDGE_MINT_ADDRESS: OnceLock<String> = OnceLock::new();
     cached_address(&BRIDGE_MINT_ADDRESS, b"qtv/bridge/mint/system")
-}
-
-pub fn bridge_btc_mint_address() -> String {
-    static BRIDGE_BTC_MINT_ADDRESS: OnceLock<String> = OnceLock::new();
-    cached_address(&BRIDGE_BTC_MINT_ADDRESS, b"qtv/bridge/mint/btc/system")
-}
-
-pub fn bridge_eth_mint_address() -> String {
-    static BRIDGE_ETH_MINT_ADDRESS: OnceLock<String> = OnceLock::new();
-    cached_address(&BRIDGE_ETH_MINT_ADDRESS, b"qtv/bridge/mint/eth/system")
-}
-
-pub fn bridge_cosmos_mint_address() -> String {
-    static BRIDGE_COSMOS_MINT_ADDRESS: OnceLock<String> = OnceLock::new();
-    cached_address(
-        &BRIDGE_COSMOS_MINT_ADDRESS,
-        b"qtv/bridge/mint/cosmos/system",
-    )
-}
-
-pub fn bridge_eth_update_address() -> String {
-    static BRIDGE_ETH_UPDATE_ADDRESS: OnceLock<String> = OnceLock::new();
-    cached_address(&BRIDGE_ETH_UPDATE_ADDRESS, b"qtv/bridge/update/eth/system")
-}
-
-pub fn bridge_cosmos_update_address() -> String {
-    static BRIDGE_COSMOS_UPDATE_ADDRESS: OnceLock<String> = OnceLock::new();
-    cached_address(
-        &BRIDGE_COSMOS_UPDATE_ADDRESS,
-        b"qtv/bridge/update/cosmos/system",
-    )
 }
 
 pub fn bridge_exit_address() -> String {
@@ -1866,80 +1821,6 @@ impl Ledger {
         (key, bytes)
     }
 
-    pub fn bridge_bitcoin_anchor(&self) -> Option<crate::bridge_btc::BitcoinAnchor> {
-        self.trie
-            .get(&stake_singleton_key(BRIDGE_BTC_ANCHOR_TAG))
-            .filter(|bytes| !bytes.is_empty())
-            .and_then(|bytes| crate::bridge_btc::BitcoinAnchor::decode(bytes))
-    }
-
-    pub fn seed_bridge_bitcoin_anchor(
-        &mut self,
-        anchor: &crate::bridge_btc::BitcoinAnchor,
-    ) -> (Key, Vec<u8>) {
-        let key = stake_singleton_key(BRIDGE_BTC_ANCHOR_TAG);
-        let bytes = anchor.encode();
-        let same_checkpoint = self.bridge_bitcoin_anchor().is_some_and(|held| {
-            held.checkpoint_height == anchor.checkpoint_height
-                && held.checkpoint_hash == anchor.checkpoint_hash
-        });
-        self.write_leaf(key, bytes.clone());
-        if !same_checkpoint || self.bridge_btc_best_work() < anchor.checkpoint_min_work {
-            self.set_bridge_btc_best_work(&anchor.checkpoint_min_work);
-        }
-        (key, bytes)
-    }
-
-    pub fn bridge_btc_best_work(&self) -> [u8; 32] {
-        self.trie
-            .get(&stake_singleton_key(BRIDGE_BTC_BEST_WORK_TAG))
-            .filter(|bytes| bytes.len() == 32)
-            .map(|bytes| {
-                let mut out = [0u8; 32];
-                out.copy_from_slice(bytes);
-                out
-            })
-            .unwrap_or([0u8; 32])
-    }
-
-    pub fn set_bridge_btc_best_work(&mut self, work: &[u8; 32]) {
-        self.write_leaf(stake_singleton_key(BRIDGE_BTC_BEST_WORK_TAG), work.to_vec());
-    }
-
-    pub fn bridge_eth_anchor(&self, selector: u8) -> Option<crate::bridge_eth::EthAnchor> {
-        self.trie
-            .get(&bridge_eth_anchor_key(selector))
-            .filter(|bytes| !bytes.is_empty())
-            .and_then(|bytes| crate::bridge_eth::EthAnchor::decode(bytes))
-    }
-
-    pub fn seed_bridge_eth_anchor(
-        &mut self,
-        anchor: &crate::bridge_eth::EthAnchor,
-    ) -> (Key, Vec<u8>) {
-        let key = bridge_eth_anchor_key(anchor.config_selector);
-        let bytes = anchor.encode();
-        self.write_leaf(key, bytes.clone());
-        (key, bytes)
-    }
-
-    pub fn bridge_cosmos_anchor(&self, selector: u8) -> Option<crate::bridge_cosmos::CosmosAnchor> {
-        self.trie
-            .get(&bridge_cosmos_anchor_key(selector))
-            .filter(|bytes| !bytes.is_empty())
-            .and_then(|bytes| crate::bridge_cosmos::CosmosAnchor::decode(bytes))
-    }
-
-    pub fn seed_bridge_cosmos_anchor(
-        &mut self,
-        anchor: &crate::bridge_cosmos::CosmosAnchor,
-    ) -> (Key, Vec<u8>) {
-        let key = bridge_cosmos_anchor_key(anchor.config_selector);
-        let bytes = anchor.encode();
-        self.write_leaf(key, bytes.clone());
-        (key, bytes)
-    }
-
     pub fn chain_genesis_time(&self) -> u64 {
         self.trie
             .get(&stake_singleton_key(CHAIN_GENESIS_TIME_TAG))
@@ -2019,16 +1900,8 @@ impl Ledger {
     }
 
     pub fn asset_is_trustlessly_anchored(&self, asset_id: &[u8; 16]) -> bool {
-        self.bridge_bitcoin_anchor()
-            .is_some_and(|anchor| anchor.asset_id == *asset_id)
-            || (0..crate::bridge_eth::ETH_SELECTORS).any(|selector| {
-                self.bridge_eth_anchor(selector)
-                    .is_some_and(|anchor| anchor.asset_id == *asset_id)
-            })
-            || (0..qlc_cosmos::chain::FAMILY.len() as u8).any(|selector| {
-                self.bridge_cosmos_anchor(selector)
-                    .is_some_and(|anchor| anchor.asset_id == *asset_id)
-            })
+        let _ = asset_id;
+        false
     }
 
     pub fn bridge_mint_would_apply(&self, fact: &crate::bridge::Fact) -> bool {
@@ -3665,25 +3538,8 @@ impl Ledger {
                 Ok(())
             }
             Action::BridgeAnchorSet { corridor, anchor } => {
-                match corridor {
-                    0 => {
-                        let a = crate::bridge_btc::BitcoinAnchor::decode(anchor)
-                            .ok_or(EnactError::BadValue)?;
-                        self.seed_bridge_bitcoin_anchor(&a);
-                    }
-                    1 => {
-                        let a = crate::bridge_eth::EthAnchor::decode(anchor)
-                            .ok_or(EnactError::BadValue)?;
-                        self.seed_bridge_eth_anchor(&a);
-                    }
-                    2 => {
-                        let a = crate::bridge_cosmos::CosmosAnchor::decode(anchor)
-                            .ok_or(EnactError::BadValue)?;
-                        self.seed_bridge_cosmos_anchor(&a);
-                    }
-                    _ => return Err(EnactError::BadValue),
-                }
-                Ok(())
+                let _ = (corridor, anchor);
+                Err(EnactError::BadValue)
             }
             Action::EpochAdvance => {
                 let next = self
@@ -8048,99 +7904,6 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn a_guardian_enact_queues_a_bridge_anchor_behind_a_timelock_and_a_freeze_vetoes_it() {
-        use qtv_governance::Action;
-        let mut l = Ledger::new();
-
-        let btc = crate::bridge_btc::BitcoinAnchor {
-            network: 0,
-            checkpoint_height: 100,
-            checkpoint_hash: [0x11u8; 32],
-            checkpoint_min_work: [0x22u8; 32],
-            asset_id: [0x33u8; 16],
-            deposit_script: vec![0x76, 0xa9, 0x14],
-        };
-        let eth = crate::bridge_eth::EthAnchor {
-            config_selector: 0,
-            period: 870,
-            sync_committee_root: [0x44u8; 32],
-            next_sync_committee_root: [0u8; 32],
-            deposit_contract: [0x55u8; 20],
-            asset_id: [0x66u8; 16],
-        };
-
-        assert!(l.guardian_enact_bridge_action(
-            &Action::BridgeAnchorSet {
-                corridor: 0,
-                anchor: btc.encode()
-            },
-            0,
-            0,
-            0
-        ));
-        assert_eq!(
-            l.bridge_bitcoin_anchor(),
-            None,
-            "the anchor waits behind the veto window, guardians cannot install it instantly"
-        );
-
-        assert!(!l.guardian_enact_bridge_action(
-            &Action::BridgeAnchorSet {
-                corridor: 1,
-                anchor: eth.encode()
-            },
-            1,
-            0,
-            0
-        ));
-
-        l.guardian_apply_due_enact(GUARDIAN_ENACT_DELAY_SECONDS - 1);
-        assert_eq!(l.bridge_bitcoin_anchor(), None);
-
-        l.guardian_apply_due_enact(GUARDIAN_ENACT_DELAY_SECONDS);
-        assert_eq!(
-            l.bridge_bitcoin_anchor(),
-            Some(btc),
-            "the anchor installs once the veto window has passed"
-        );
-
-        assert!(!l.guardian_enact_bridge_action(
-            &Action::AssetRegister {
-                asset_id: [0x01u8; 16],
-                cap: 1,
-                epoch_cap: 1,
-                requires_stark: false,
-            },
-            1,
-            0,
-            0
-        ));
-
-        assert!(l.guardian_enact_bridge_action(
-            &Action::BridgeAnchorSet {
-                corridor: 1,
-                anchor: eth.encode()
-            },
-            1,
-            2 * GUARDIAN_ENACT_DELAY_SECONDS,
-            0
-        ));
-        let freezer = gov_addr(88);
-        fund(&mut l, &freezer, 100_000 * 1_000_000);
-        assert!(l.bridge_freeze_with_fee(&freezer, 0, 2 * GUARDIAN_ENACT_DELAY_SECONDS + 1));
-        l.guardian_apply_due_enact(3 * GUARDIAN_ENACT_DELAY_SECONDS + 1);
-        assert_eq!(
-            l.bridge_eth_anchor(0),
-            None,
-            "a bridge freeze during the window vetoes the queued anchor"
-        );
-        assert!(
-            l.guardian_pending_enact().is_none(),
-            "the vetoed enact is cleared from the queue"
-        );
-    }
-
-    #[test]
     fn the_deposit_burn_settle_cycle_conserves_reserves_for_the_watchtower() {
         let mut l = Ledger::new();
         let asset = [0x5au8; 16];
@@ -10645,40 +10408,5 @@ mod tests {
         let hostile = qtv_idfmt::render_address(&pool_key).expect("a full hash reaches the floor");
         assert_eq!(ledger.account(&hostile), Account::default());
         assert_eq!(ledger.stake_pool(), 9_000);
-    }
-
-    #[test]
-    fn a_new_bitcoin_checkpoint_restarts_the_best_work_floor_at_its_own_minimum() {
-        let mut ledger = Ledger::new();
-        let anchor = |height: u32, hash: u8, work: u8| crate::bridge_btc::BitcoinAnchor {
-            network: 0,
-            checkpoint_height: height,
-            checkpoint_hash: [hash; 32],
-            checkpoint_min_work: {
-                let mut w = [0u8; 32];
-                w[31] = work;
-                w
-            },
-            asset_id: [0xb7; 16],
-            deposit_script: vec![0x51],
-        };
-        ledger.seed_bridge_bitcoin_anchor(&anchor(800_000, 1, 10));
-        let mut reached = [0u8; 32];
-        reached[31] = 200;
-        ledger.set_bridge_btc_best_work(&reached);
-
-        ledger.seed_bridge_bitcoin_anchor(&anchor(800_000, 1, 10));
-        assert_eq!(
-            ledger.bridge_btc_best_work(),
-            reached,
-            "re seeding the same checkpoint keeps the higher floor"
-        );
-
-        ledger.seed_bridge_bitcoin_anchor(&anchor(804_000, 2, 12));
-        assert_eq!(
-            ledger.bridge_btc_best_work()[31],
-            12,
-            "work measured above the old checkpoint must not gate proofs above the new one"
-        );
     }
 }

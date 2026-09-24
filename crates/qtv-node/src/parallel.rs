@@ -186,8 +186,6 @@ pub fn execute_parallel(
             || crate::node::is_registration(wrapper)
             || crate::node::is_bridge_guardian(wrapper)
             || crate::node::is_bridge_mint(wrapper)
-            || crate::node::is_bridge_eth_update(wrapper)
-            || crate::node::is_bridge_cosmos_update(wrapper)
             || crate::node::is_bridge_settle(wrapper)
             || crate::node::is_bridge_exit(wrapper)
             || ledger.is_blacklisted(sender)

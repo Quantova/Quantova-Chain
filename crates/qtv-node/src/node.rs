@@ -91,9 +91,6 @@ pub struct Genesis {
     pub bridged_assets: Vec<GenesisBridgedAsset>,
     pub bridge_era: Option<[u8; 32]>,
     pub bridge_exit_max_amount: Option<u128>,
-    pub bridge_bitcoin_anchor: Option<crate::bridge_btc::BitcoinAnchor>,
-    pub bridge_eth_anchors: Vec<crate::bridge_eth::EthAnchor>,
-    pub bridge_cosmos_anchor: Option<crate::bridge_cosmos::CosmosAnchor>,
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -807,27 +804,7 @@ fn dispatch_bridge_guardian(
 }
 
 pub(crate) fn is_bridge_mint(wrapper: &Wrapper) -> bool {
-    let target = wrapper.body().call().target();
-    target == crate::ledger::bridge_mint_address()
-        || target == crate::ledger::bridge_btc_mint_address()
-        || target == crate::ledger::bridge_eth_mint_address()
-        || target == crate::ledger::bridge_cosmos_mint_address()
-}
-
-fn is_bridge_btc_mint(wrapper: &Wrapper) -> bool {
-    wrapper.body().call().target() == crate::ledger::bridge_btc_mint_address()
-}
-
-fn is_bridge_eth_mint(wrapper: &Wrapper) -> bool {
-    wrapper.body().call().target() == crate::ledger::bridge_eth_mint_address()
-}
-
-fn is_bridge_cosmos_mint(wrapper: &Wrapper) -> bool {
-    wrapper.body().call().target() == crate::ledger::bridge_cosmos_mint_address()
-}
-
-pub(crate) fn is_bridge_eth_update(wrapper: &Wrapper) -> bool {
-    wrapper.body().call().target() == crate::ledger::bridge_eth_update_address()
+    wrapper.body().call().target() == crate::ledger::bridge_mint_address()
 }
 
 pub(crate) fn transfer_dispatchable(
@@ -864,97 +841,8 @@ pub(crate) fn feeless_decodes(wrapper: &Wrapper) -> bool {
         bridge_mint_source_key(wrapper).is_some()
     } else if is_bridge_settle(wrapper) {
         crate::bridge::ExitAttestation::decode(args).is_some()
-    } else if is_bridge_eth_update(wrapper) {
-        args.len() <= crate::bridge_eth::MAX_ETH_UPDATE_BYTES
-            && crate::bridge_eth::EthUpdateProof::decode(args).is_some()
-    } else if is_bridge_cosmos_update(wrapper) {
-        args.len() <= crate::bridge_cosmos::MAX_COSMOS_UPDATE_BYTES
-            && crate::bridge_cosmos::CosmosUpdateProof::decode(args).is_some()
     } else {
         false
-    }
-}
-
-pub(crate) fn bridge_eth_update_admissible(ledger: &Ledger, wrapper: &Wrapper) -> bool {
-    let args = wrapper.body().call().args();
-    if args.len() > crate::bridge_eth::MAX_ETH_UPDATE_BYTES {
-        return false;
-    }
-    let Some(proof) = crate::bridge_eth::EthUpdateProof::decode(args) else {
-        return false;
-    };
-    let Some(anchor) = ledger.bridge_eth_anchor(proof.config_selector) else {
-        return false;
-    };
-    crate::bridge_eth::verify_eth_committee_update(&anchor, &proof)
-        .is_some_and(|next| next != anchor)
-}
-
-pub(crate) fn bridge_cosmos_update_admissible(
-    ledger: &Ledger,
-    wrapper: &Wrapper,
-    now_seconds: u64,
-) -> bool {
-    let args = wrapper.body().call().args();
-    if args.len() > crate::bridge_cosmos::MAX_COSMOS_UPDATE_BYTES {
-        return false;
-    }
-    let Some(proof) = crate::bridge_cosmos::CosmosUpdateProof::decode(args) else {
-        return false;
-    };
-    let Some(anchor) = ledger.bridge_cosmos_anchor(proof.config_selector) else {
-        return false;
-    };
-    let now = crate::bridge_cosmos::block_now(now_seconds);
-    crate::bridge_cosmos::verify_cosmos_anchor_update(&anchor, &proof, now)
-        .is_some_and(|next| next != anchor)
-}
-
-fn dispatch_bridge_eth_update(ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
-    if wrapper.body().call().args().len() > crate::bridge_eth::MAX_ETH_UPDATE_BYTES {
-        return false;
-    }
-    let proof = match crate::bridge_eth::EthUpdateProof::decode(wrapper.body().call().args()) {
-        Some(proof) => proof,
-        None => return false,
-    };
-    let anchor = match ledger.bridge_eth_anchor(proof.config_selector) {
-        Some(anchor) => anchor,
-        None => return false,
-    };
-    match crate::bridge_eth::verify_eth_committee_update(&anchor, &proof) {
-        Some(next) => {
-            ledger.seed_bridge_eth_anchor(&next);
-            true
-        }
-        None => false,
-    }
-}
-
-pub(crate) fn is_bridge_cosmos_update(wrapper: &Wrapper) -> bool {
-    wrapper.body().call().target() == crate::ledger::bridge_cosmos_update_address()
-}
-
-fn dispatch_bridge_cosmos_update(ledger: &mut Ledger, wrapper: &Wrapper, now_seconds: u64) -> bool {
-    if wrapper.body().call().args().len() > crate::bridge_cosmos::MAX_COSMOS_UPDATE_BYTES {
-        return false;
-    }
-    let proof = match crate::bridge_cosmos::CosmosUpdateProof::decode(wrapper.body().call().args())
-    {
-        Some(proof) => proof,
-        None => return false,
-    };
-    let anchor = match ledger.bridge_cosmos_anchor(proof.config_selector) {
-        Some(anchor) => anchor,
-        None => return false,
-    };
-    let now = crate::bridge_cosmos::block_now(now_seconds);
-    match crate::bridge_cosmos::verify_cosmos_anchor_update(&anchor, &proof, now) {
-        Some(next) => {
-            ledger.seed_bridge_cosmos_anchor(&next);
-            true
-        }
-        None => false,
     }
 }
 
@@ -968,25 +856,7 @@ fn bridge_mint_fact(
     chain_id: u64,
     now_seconds: u64,
 ) -> Option<crate::bridge::Fact> {
-    if is_bridge_btc_mint(wrapper) {
-        let proof = crate::bridge_btc::BitcoinMintProof::decode(wrapper.body().call().args())?;
-        let anchor = ledger.bridge_bitcoin_anchor()?;
-        let dest_chain = ledger.bridge_dest_chain()?;
-        return crate::bridge_btc::verify_bitcoin_mint(&anchor, &proof, dest_chain);
-    }
-    if is_bridge_eth_mint(wrapper) {
-        let proof = crate::bridge_eth::EthMintProof::decode(wrapper.body().call().args())?;
-        let anchor = ledger.bridge_eth_anchor(proof.config_selector)?;
-        let dest_chain = ledger.bridge_dest_chain()?;
-        return crate::bridge_eth::verify_eth_mint(&anchor, &proof, dest_chain);
-    }
-    if is_bridge_cosmos_mint(wrapper) {
-        let proof = crate::bridge_cosmos::CosmosMintProof::decode(wrapper.body().call().args())?;
-        let anchor = ledger.bridge_cosmos_anchor(proof.config_selector)?;
-        let dest_chain = ledger.bridge_dest_chain()?;
-        let now = crate::bridge_cosmos::block_now(now_seconds);
-        return crate::bridge_cosmos::verify_cosmos_mint(&anchor, &proof, dest_chain, now);
-    }
+    let _ = now_seconds;
     if !ledger.bridge_federated_enabled() {
         return None;
     }
@@ -1035,21 +905,6 @@ fn max_mint_artifact_bytes(ledger: &Ledger) -> usize {
 }
 
 pub(crate) fn bridge_mint_source_key(wrapper: &Wrapper) -> Option<(u32, [u8; 32])> {
-    if is_bridge_btc_mint(wrapper) {
-        let proof = crate::bridge_btc::BitcoinMintProof::decode(wrapper.body().call().args())?;
-        let txid = qtv_btc_spv::tx::Transaction::parse(&proof.raw_tx)
-            .ok()?
-            .txid();
-        return Some((crate::bridge_btc::BITCOIN_MINT_SOURCE_CHAIN, txid));
-    }
-    if is_bridge_eth_mint(wrapper) {
-        let proof = crate::bridge_eth::EthMintProof::decode(wrapper.body().call().args())?;
-        return Some(proof.source_key());
-    }
-    if is_bridge_cosmos_mint(wrapper) {
-        let proof = crate::bridge_cosmos::CosmosMintProof::decode(wrapper.body().call().args())?;
-        return Some(proof.source_key());
-    }
     crate::bridge::MintArtifact::decode(wrapper.body().call().args()).map(|artifact| {
         (
             artifact.attestation.fact.source_chain,
@@ -1059,13 +914,7 @@ pub(crate) fn bridge_mint_source_key(wrapper: &Wrapper) -> Option<(u32, [u8; 32]
 }
 
 fn mint_fits(ledger: &Ledger, wrapper: &Wrapper) -> bool {
-    let max_bytes = if is_bridge_btc_mint(wrapper) {
-        MAX_BTC_MINT_BYTES
-    } else if is_bridge_eth_mint(wrapper) {
-        crate::bridge_eth::MAX_ETH_MINT_BYTES
-    } else if is_bridge_cosmos_mint(wrapper) {
-        crate::bridge_cosmos::MAX_COSMOS_MINT_BYTES
-    } else {
+    let max_bytes = {
         let base = max_mint_artifact_bytes(ledger);
         let requires_stark = crate::bridge::MintArtifact::decode(wrapper.body().call().args())
             .and_then(|a| ledger.bridged_asset(&a.attestation.fact.asset_id))
@@ -1085,15 +934,6 @@ pub(crate) fn bridge_mint_still_live(ledger: &Ledger, wrapper: &Wrapper) -> bool
         if ledger.bridge_reference_seen(source_chain, &source_ref) {
             return false;
         }
-    }
-    if is_bridge_btc_mint(wrapper) {
-        let work = crate::bridge_btc::BitcoinMintProof::decode(wrapper.body().call().args())
-            .zip(ledger.bridge_bitcoin_anchor())
-            .and_then(|(proof, anchor)| crate::bridge_btc::bitcoin_mint_work(&anchor, &proof));
-        return work.is_some_and(|work| work >= ledger.bridge_btc_best_work());
-    }
-    if is_bridge_eth_mint(wrapper) || is_bridge_cosmos_mint(wrapper) {
-        return true;
     }
     crate::bridge::MintArtifact::decode(wrapper.body().call().args()).is_some_and(|artifact| {
         let fact = artifact.attestation.fact;
@@ -1121,14 +961,6 @@ pub(crate) fn bridge_mint_admissible(
     if ledger.bridge_reference_seen(source_chain, &source_ref) {
         return false;
     }
-    if is_bridge_btc_mint(wrapper) {
-        let work = crate::bridge_btc::BitcoinMintProof::decode(wrapper.body().call().args())
-            .zip(ledger.bridge_bitcoin_anchor())
-            .and_then(|(proof, anchor)| crate::bridge_btc::bitcoin_mint_work(&anchor, &proof));
-        if work.is_none_or(|work| work < ledger.bridge_btc_best_work()) {
-            return false;
-        }
-    }
     let fact = match bridge_mint_fact(ledger, wrapper, chain_id, now_seconds) {
         Some(fact) => fact,
         None => return false,
@@ -1145,35 +977,12 @@ fn dispatch_bridge_mint(
     if ledger.bridge_is_frozen() || !mint_fits(ledger, wrapper) {
         return false;
     }
-    let mut btc_work: Option<[u8; 32]> = None;
-    if is_bridge_btc_mint(wrapper) {
-        let proof = match crate::bridge_btc::BitcoinMintProof::decode(wrapper.body().call().args())
-        {
-            Some(proof) => proof,
-            None => return false,
-        };
-        let anchor = match ledger.bridge_bitcoin_anchor() {
-            Some(anchor) => anchor,
-            None => return false,
-        };
-        let work = match crate::bridge_btc::bitcoin_mint_work(&anchor, &proof) {
-            Some(work) => work,
-            None => return false,
-        };
-        if work < ledger.bridge_btc_best_work() {
-            return false;
-        }
-        btc_work = Some(work);
-    }
     let fact = match bridge_mint_fact(ledger, wrapper, chain_id, now_seconds) {
         Some(fact) => fact,
         None => return false,
     };
     if !ledger.bridge_mint(&fact) {
         return false;
-    }
-    if let Some(work) = btc_work {
-        ledger.set_bridge_btc_best_work(&work);
     }
     true
 }
@@ -1682,18 +1491,6 @@ fn execute_ordered_across(
             }
             continue;
         }
-        if is_bridge_eth_update(wrapper) {
-            if ledger.apply_atomic(|l| dispatch_bridge_eth_update(l, wrapper)) {
-                included.push(wrapper.clone());
-            }
-            continue;
-        }
-        if is_bridge_cosmos_update(wrapper) {
-            if ledger.apply_atomic(|l| dispatch_bridge_cosmos_update(l, wrapper, now_seconds)) {
-                included.push(wrapper.clone());
-            }
-            continue;
-        }
         if is_bridge_settle(wrapper) {
             if ledger.apply_atomic(|l| dispatch_bridge_settle(l, wrapper, fee_params.chain_id)) {
                 included.push(wrapper.clone());
@@ -1939,15 +1736,6 @@ impl Node {
         }
         if let Some(ref operators) = genesis.bridge_operators {
             ledger.seed_bridge_operator_set(operators);
-        }
-        if let Some(ref anchor) = genesis.bridge_bitcoin_anchor {
-            ledger.seed_bridge_bitcoin_anchor(anchor);
-        }
-        for anchor in &genesis.bridge_eth_anchors {
-            ledger.seed_bridge_eth_anchor(anchor);
-        }
-        if let Some(ref anchor) = genesis.bridge_cosmos_anchor {
-            ledger.seed_bridge_cosmos_anchor(anchor);
         }
         for asset in &genesis.bridged_assets {
             ledger.register_bridged_asset(
@@ -2514,39 +2302,6 @@ mod tests {
     }
 
     #[test]
-    fn a_bridge_mint_target_lands_the_same_way_in_both_executors() {
-        let fee = FeeParams::devnet();
-        let alice = keypair(711);
-        let mint_target = crate::ledger::bridge_eth_mint_address();
-
-        let mut sequential = Ledger::new();
-        fund(&mut sequential, &alice, 10_000 * 1_000_000);
-        let ordered = execute_ordered(
-            &mut sequential,
-            &[transfer(&alice, &mint_target, 10, 0, &fee)],
-            &fee,
-            0,
-        );
-
-        let mut parallel = Ledger::new();
-        fund(&mut parallel, &alice, 10_000 * 1_000_000);
-        let split = crate::parallel::execute_parallel(
-            &mut parallel,
-            &[transfer(&alice, &mint_target, 10, 0, &fee)],
-            &fee,
-            8,
-            0,
-        );
-
-        assert_eq!(ordered.len(), split.len());
-        assert_eq!(
-            sequential.q_root(),
-            parallel.q_root(),
-            "both executors agree on a bridge mint target"
-        );
-    }
-
-    #[test]
     fn both_execution_paths_drop_a_transaction_past_its_validity_window() {
         let fee = FeeParams::devnet();
         let alice = keypair(701);
@@ -2574,36 +2329,6 @@ mod tests {
         assert!(
             crate::parallel::execute_parallel(&mut parallel, &[expired()], &fee, 8, 0).is_empty(),
             "the parallel path drops what the ordered path drops"
-        );
-    }
-
-    #[test]
-    fn a_due_guardian_enact_installs_on_the_sequential_execution_path() {
-        use qtv_governance::Action;
-        let fee = FeeParams::devnet();
-        let mut ledger = Ledger::new();
-        let anchor = crate::bridge_btc::BitcoinAnchor {
-            network: 0,
-            checkpoint_height: 100,
-            checkpoint_hash: [0x11u8; 32],
-            checkpoint_min_work: [0x22u8; 32],
-            asset_id: [0x33u8; 16],
-            deposit_script: vec![0x76, 0xa9, 0x14],
-        };
-        assert!(ledger.guardian_enact_bridge_action(
-            &Action::BridgeAnchorSet {
-                corridor: 0,
-                anchor: anchor.encode(),
-            },
-            0,
-            0,
-            0
-        ));
-        assert!(execute_ordered(&mut ledger, &[], &fee, 24 * 60 * 60).is_empty());
-        assert_eq!(
-            ledger.bridge_bitcoin_anchor(),
-            Some(anchor),
-            "a block executed without the parallel path still enacts the due anchor"
         );
     }
 
@@ -5238,646 +4963,6 @@ mod tests {
         }
         out.extend_from_slice(&0u32.to_le_bytes());
         out
-    }
-
-    fn btc_mine(merkle_root: [u8; 32]) -> qtv_btc_spv::BlockHeader {
-        let mut header = qtv_btc_spv::BlockHeader {
-            version: 1,
-            prev_block: [0u8; 32],
-            merkle_root,
-            timestamp: 1_700_000_000,
-            bits: 0x207f_ffff,
-            nonce: 0,
-        };
-        while !header.meets_pow() {
-            header.nonce = header.nonce.wrapping_add(1);
-        }
-        header
-    }
-
-    #[test]
-    fn a_bitcoin_spv_proof_mints_trustlessly_with_no_operator_set() {
-        let fee = FeeParams::devnet();
-        let mut ledger = Ledger::new();
-        ledger.seed_bridge_dest_chain(BRIDGE_DEST);
-        ledger.seed_bridge_pool_vault(&BRIDGE_VAULT);
-        let asset = [7u8; 16];
-        ledger.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
-
-        let bridge_script = btc_p2pkh([0x11; 20]);
-        let recipient = [0x42u8; 32];
-        let raw = btc_raw_tx(&[
-            (250_000, bridge_script.clone()),
-            (0, btc_op_return(recipient)),
-        ]);
-        let txid = qtv_btc_spv::tx::Transaction::parse(&raw).unwrap().txid();
-        let mut coinbase = Vec::new();
-        coinbase.extend_from_slice(&1u32.to_le_bytes());
-        coinbase.push(0x01);
-        coinbase.extend_from_slice(&[0u8; 32]);
-        coinbase.extend_from_slice(&[0xff; 4]);
-        coinbase.push(0x04);
-        coinbase.extend_from_slice(&[0x03, 0x01, 0x00, 0x00]);
-        coinbase.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
-        coinbase.push(0x01);
-        coinbase.extend_from_slice(&5_000_000_000u64.to_le_bytes());
-        coinbase.push(0x01);
-        coinbase.push(0x51);
-        coinbase.extend_from_slice(&0u32.to_le_bytes());
-        let coinbase_id = qtv_btc_spv::tx::Transaction::parse(&coinbase)
-            .unwrap()
-            .txid();
-        let mut pair = [0u8; 64];
-        pair[..32].copy_from_slice(&coinbase_id);
-        pair[32..].copy_from_slice(&txid);
-        let header = btc_mine(qtv_btc_spv::sha256::double_sha256(&pair));
-        let anchor = crate::bridge_btc::BitcoinAnchor {
-            network: 255,
-            checkpoint_height: 0,
-            checkpoint_hash: header.block_hash(),
-            checkpoint_min_work: [0u8; 32],
-            asset_id: asset,
-            deposit_script: bridge_script,
-        };
-        ledger.seed_bridge_bitcoin_anchor(&anchor);
-        let proof = crate::bridge_btc::BitcoinMintProof {
-            start_height: 0,
-            headers: vec![header.serialize()],
-            deposit_height: 0,
-            branch: vec![qtv_btc_spv::MerkleStep {
-                hash: coinbase_id,
-                sibling_on_left: true,
-            }],
-            raw_tx: raw,
-            coinbase_tx: coinbase,
-            coinbase_branch: vec![qtv_btc_spv::MerkleStep {
-                hash: txid,
-                sibling_on_left: false,
-            }],
-        };
-        let relayer = keypair(410);
-        let tx = system_tx(
-            &relayer,
-            &crate::ledger::bridge_btc_mint_address(),
-            proof.encode(),
-            0,
-            TRANSFER_METER,
-            &fee,
-        );
-        let included = execute_ordered(&mut ledger, &[tx], &fee, 0);
-
-        assert_eq!(
-            included.len(),
-            1,
-            "the trustless bitcoin mint rides in the block"
-        );
-        assert_eq!(
-            ledger.bridged_balance(&asset, &recipient),
-            250_000,
-            "the proven recipient holds the proven amount with no operator involved"
-        );
-        assert_eq!(ledger.bridged_supply(&asset), 250_000);
-        assert!(
-            ledger.bridge_reference_seen(crate::bridge_btc::BITCOIN_MINT_SOURCE_CHAIN, &txid),
-            "the txid is bound against replay"
-        );
-        assert!(
-            ledger.bridge_operator_set().is_none(),
-            "no operator set exists yet the deposit minted trustlessly"
-        );
-    }
-    #[test]
-    fn an_early_committee_update_teaches_the_next_committee_and_moves_nothing() {
-        use q_bls::testsign::{aggregate_sign, keypair_from_ikm, BlsKeypair};
-        use qlc_ethereum::beacon::{
-            compute_domain, compute_signing_root, finalized_root_layout,
-            next_sync_committee_layout, BeaconBlockHeader, SyncAggregate, SyncCommittee,
-            DOMAIN_SYNC_COMMITTEE,
-        };
-        use qlc_ethereum::bls::BlsPubkey;
-        use qlc_ethereum::engine::SyncCommitteeUpdate;
-        use qlc_ethereum::{config, ssz};
-
-        const PERIOD: u64 = 870;
-        const PERIOD_SLOTS: u64 = 32 * 256;
-        let cfg = config::ethereum();
-
-        let committee = |tag: u8| -> (SyncCommittee, Vec<BlsKeypair>) {
-            let mut secrets = Vec::with_capacity(512);
-            let mut pubkeys = Vec::with_capacity(512);
-            for i in 0..512u32 {
-                let mut ikm = [0u8; 32];
-                ikm[0..4].copy_from_slice(&i.to_le_bytes());
-                ikm[31] = tag;
-                let kp = keypair_from_ikm(&ikm);
-                pubkeys.push(kp.public);
-                secrets.push(kp);
-            }
-            (
-                SyncCommittee {
-                    pubkeys,
-                    aggregate_pubkey: BlsPubkey([0x11; 48]),
-                },
-                secrets,
-            )
-        };
-        let update = |period: u64, signers: &[BlsKeypair], next: &SyncCommittee| {
-            let attested_slot = period * PERIOD_SLOTS + 60;
-            let signature_slot = period * PERIOD_SLOTS + 100;
-            let electra = cfg.is_electra_at_slot(attested_slot);
-            let (index, depth) = next_sync_committee_layout(electra);
-            let (fin_index, fin_depth) = finalized_root_layout(electra);
-            let finalized_header = BeaconBlockHeader {
-                slot: period * PERIOD_SLOTS + 40,
-                proposer_index: 99,
-                parent_root: [0x01; 32],
-                state_root: [0x02; 32],
-                body_root: [0x05; 32],
-            };
-            let (state_root, finality_branch, branch) = ssz::two_leaf_tree(
-                (finalized_header.hash_tree_root(), fin_index, fin_depth),
-                (next.hash_tree_root(), index, depth),
-            );
-            let attested_header = BeaconBlockHeader {
-                slot: attested_slot,
-                proposer_index: 100,
-                parent_root: [0x03; 32],
-                state_root,
-                body_root: [0x04; 32],
-            };
-            let fork_version = cfg.fork_version_at_slot(signature_slot - 1);
-            let domain = compute_domain(
-                DOMAIN_SYNC_COMMITTEE,
-                fork_version.0,
-                &cfg.genesis_validators_root,
-            );
-            let signing_root = compute_signing_root(&attested_header.hash_tree_root(), &domain);
-            let keys: Vec<&BlsKeypair> = signers.iter().collect();
-            SyncCommitteeUpdate {
-                attested_header,
-                finalized_header,
-                finality_branch,
-                next_sync_committee: next.clone(),
-                next_sync_committee_branch: branch,
-                sync_aggregate: SyncAggregate {
-                    participation: vec![true; 512],
-                    signature: aggregate_sign(&keys, &signing_root),
-                },
-                signature_slot,
-            }
-        };
-
-        let (current, current_keys) = committee(0xA1);
-        let (next, next_keys) = committee(0xB2);
-        let (after, _) = committee(0xC3);
-        let anchor = crate::bridge_eth::EthAnchor {
-            config_selector: 0,
-            period: PERIOD,
-            sync_committee_root: current.hash_tree_root(),
-            next_sync_committee_root: [0u8; 32],
-            deposit_contract: [0x1a; 20],
-            asset_id: [0x77; 16],
-        };
-
-        let early = crate::bridge_eth::EthUpdateProof {
-            config_selector: 0,
-            current_sync_committee: current.clone(),
-            update: update(PERIOD, &current_keys, &next),
-        };
-        let learned = crate::bridge_eth::verify_eth_committee_update(&anchor, &early)
-            .expect("the current committee proves the next one");
-        assert_eq!(learned.period, PERIOD, "the anchor does not move early");
-        assert_eq!(learned.sync_committee_root, current.hash_tree_root());
-        assert_eq!(learned.next_sync_committee_root, next.hash_tree_root());
-
-        let handover = crate::bridge_eth::EthUpdateProof {
-            config_selector: 0,
-            current_sync_committee: next.clone(),
-            update: update(PERIOD + 1, &next_keys, &after),
-        };
-        let moved = crate::bridge_eth::verify_eth_committee_update(&learned, &handover)
-            .expect("the next committee has signed in its own period");
-        assert_eq!(moved.period, PERIOD + 1);
-        assert_eq!(moved.sync_committee_root, next.hash_tree_root());
-        assert_eq!(moved.next_sync_committee_root, after.hash_tree_root());
-
-        assert!(crate::bridge_eth::verify_eth_committee_update(&anchor, &handover).is_none());
-    }
-
-    #[test]
-    fn an_ethereum_beacon_proof_mints_trustlessly_with_no_operator_set() {
-        use q_bls::testsign::{aggregate_sign, keypair_from_ikm, BlsKeypair};
-        use qlc_ethereum::beacon::{
-            compute_domain, compute_signing_root, BeaconBlockHeader, SyncAggregate, SyncCommittee,
-            DOMAIN_SYNC_COMMITTEE, EXECUTION_RECEIPTS_DEPTH, EXECUTION_RECEIPTS_INDEX,
-            FINALIZED_ROOT_DEPTH, FINALIZED_ROOT_INDEX,
-        };
-        use qlc_ethereum::bls::BlsPubkey;
-        use qlc_ethereum::engine::{DepositProof, ExecutionCommit, LightClientUpdate};
-        use qlc_ethereum::mpt::builder;
-        use qlc_ethereum::receipt::fixtures::deposit_receipt;
-        use qlc_ethereum::{config, rlp, ssz};
-
-        const TEST_DEPOSIT_CONTRACT: [u8; 20] = [
-            0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x71, 0x82, 0x93, 0xa4, 0xb5, 0xc6, 0xd7, 0xe8,
-            0xf9, 0x0a, 0x1b, 0x2c, 0x3d, 0x4e,
-        ];
-        const PERIOD: u64 = 870;
-        const PERIOD_SLOTS: u64 = 32 * 256;
-        let signature_slot = PERIOD * PERIOD_SLOTS + 100;
-
-        let mut cfg = config::ethereum();
-        cfg.deposit_contract = TEST_DEPOSIT_CONTRACT;
-
-        let mut secrets: Vec<BlsKeypair> = Vec::with_capacity(512);
-        let mut pubkeys: Vec<BlsPubkey> = Vec::with_capacity(512);
-        for i in 0..512u32 {
-            let mut ikm = [0u8; 32];
-            ikm[0..4].copy_from_slice(&i.to_le_bytes());
-            ikm[31] = 0xA5;
-            let kp = keypair_from_ikm(&ikm);
-            pubkeys.push(kp.public);
-            secrets.push(kp);
-        }
-        let committee = SyncCommittee {
-            pubkeys,
-            aggregate_pubkey: BlsPubkey([0x11; 48]),
-        };
-        let committee_root = committee.hash_tree_root();
-
-        let recipient = [0x5c; 32];
-        let asset = [0x77u8; 16];
-        let amount: u128 = 250_000;
-        let receipt = deposit_receipt(&TEST_DEPOSIT_CONTRACT, &recipient, amount, &asset);
-        let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        for i in 0..6u64 {
-            let key = rlp::encode_uint(i);
-            let value = if i == 3 {
-                receipt.clone()
-            } else {
-                let mut v = b"other-receipt-payload-over-thirty-two-bytes-".to_vec();
-                v.push(i as u8);
-                v
-            };
-            entries.push((key, value));
-        }
-        let nibble_entries: Vec<(Vec<u8>, Vec<u8>)> = entries
-            .iter()
-            .map(|(k, v)| {
-                let mut nibbles = Vec::new();
-                for b in k {
-                    nibbles.push(b >> 4);
-                    nibbles.push(b & 0x0f);
-                }
-                (nibbles, v.clone())
-            })
-            .collect();
-        let trie = builder::build(nibble_entries);
-        let receipts_root = builder::root_hash(&trie);
-        let receipt_proof = builder::prove(&trie, &entries[3].0);
-
-        let execution_branch: Vec<[u8; 32]> = (0..EXECUTION_RECEIPTS_DEPTH)
-            .map(|i| [0xe0 + i as u8; 32])
-            .collect();
-        let body_root = ssz::merkle_root_from_branch(
-            &receipts_root,
-            &execution_branch,
-            EXECUTION_RECEIPTS_INDEX,
-        );
-        let finalized_header = BeaconBlockHeader {
-            slot: PERIOD * PERIOD_SLOTS + 40,
-            proposer_index: 99,
-            parent_root: [0x01; 32],
-            state_root: [0x02; 32],
-            body_root,
-        };
-        let finalized_root = finalized_header.hash_tree_root();
-        let finality_branch: Vec<[u8; 32]> = (0..FINALIZED_ROOT_DEPTH)
-            .map(|i| [0xf0 + i as u8; 32])
-            .collect();
-        let attested_state_root =
-            ssz::merkle_root_from_branch(&finalized_root, &finality_branch, FINALIZED_ROOT_INDEX);
-        let attested_header = BeaconBlockHeader {
-            slot: PERIOD * PERIOD_SLOTS + 60,
-            proposer_index: 100,
-            parent_root: [0x03; 32],
-            state_root: attested_state_root,
-            body_root: [0x04; 32],
-        };
-
-        let fork_version = cfg.fork_version_at_slot(signature_slot - 1);
-        let domain = compute_domain(
-            DOMAIN_SYNC_COMMITTEE,
-            fork_version.0,
-            &cfg.genesis_validators_root,
-        );
-        let signing_root = compute_signing_root(&attested_header.hash_tree_root(), &domain);
-        let key_refs: Vec<&BlsKeypair> = secrets.iter().collect();
-        let sync_aggregate = SyncAggregate {
-            participation: vec![true; 512],
-            signature: aggregate_sign(&key_refs, &signing_root),
-        };
-
-        let update = LightClientUpdate {
-            attested_header,
-            finalized_header,
-            finality_branch,
-            sync_aggregate,
-            signature_slot,
-            execution: ExecutionCommit {
-                receipts_root,
-                block_number: PERIOD * PERIOD_SLOTS + 40,
-                execution_branch,
-            },
-        };
-        let deposit = DepositProof {
-            ancestry: Vec::new(),
-            historical_branch: Vec::new(),
-            receipt_index: 3,
-            log_index: 0,
-            receipt_proof,
-        };
-
-        let anchor = crate::bridge_eth::EthAnchor {
-            config_selector: 0,
-            period: PERIOD,
-            sync_committee_root: committee_root,
-            next_sync_committee_root: [0u8; 32],
-            deposit_contract: TEST_DEPOSIT_CONTRACT,
-            asset_id: asset,
-        };
-        let proof = crate::bridge_eth::EthMintProof {
-            config_selector: 0,
-            sync_committee: committee,
-            update,
-            deposit,
-        };
-        assert_eq!(
-            crate::bridge_eth::EthMintProof::decode(&proof.encode()).as_ref(),
-            Some(&proof),
-            "the eth proof round-trips through its wire encoding"
-        );
-
-        let fee = FeeParams::devnet();
-        let mut ledger = Ledger::new();
-        ledger.seed_bridge_dest_chain(BRIDGE_DEST);
-        ledger.seed_bridge_pool_vault(&BRIDGE_VAULT);
-        ledger.register_bridged_asset(&asset, 10_000_000, 10_000_000, false);
-        ledger.seed_bridge_eth_anchor(&anchor);
-
-        let (source_chain, source_ref) = proof.source_key();
-        let relayer = keypair(412);
-        let tx = system_tx(
-            &relayer,
-            &crate::ledger::bridge_eth_mint_address(),
-            proof.encode(),
-            0,
-            TRANSFER_METER,
-            &fee,
-        );
-        let included = execute_ordered(&mut ledger, &[tx], &fee, 0);
-
-        assert_eq!(
-            included.len(),
-            1,
-            "the trustless ethereum mint rides in the block"
-        );
-        assert_eq!(
-            ledger.bridged_balance(&asset, &recipient),
-            amount,
-            "the beacon-proven recipient holds the proven amount with no operator involved"
-        );
-        assert_eq!(ledger.bridged_supply(&asset), amount);
-        assert!(
-            ledger.bridge_reference_seen(source_chain, &source_ref),
-            "the ethereum deposit is bound against replay"
-        );
-        assert!(
-            ledger.bridge_operator_set().is_none(),
-            "no operator set exists yet the ethereum deposit minted trustlessly"
-        );
-    }
-    #[test]
-    fn a_cosmos_tendermint_proof_mints_trustlessly_with_no_operator_set() {
-        use qlc_cosmos::chain::COSMOS_HUB;
-        use qlc_cosmos::commit::{BlockIdFlag, Commit, CommitSig, Header};
-        use qlc_cosmos::ed25519::{public_key_from_seed, sign};
-        use qlc_cosmos::proof::{
-            encode_deposit_value, wrap_store_layer, ExistenceProof, InnerOp, LeafOp,
-        };
-        use qlc_cosmos::proto::{
-            vote_sign_bytes, BlockId, CanonicalVote, Timestamp, PRECOMMIT_TYPE,
-        };
-        use qlc_cosmos::validator::{ValidatorInfo, ValidatorSet};
-
-        const GENESIS_TIME: u64 = 1_700_000_000;
-        let asset = *b"qATOM.atom\0\0\0\0\0\0";
-        let recipient = [0x51u8; 32];
-        let amount: u128 = 7_500_000u128;
-
-        let seeds: Vec<[u8; 32]> = (1..=4u8).map(|b| [b; 32]).collect();
-        let infos: Vec<ValidatorInfo> = seeds
-            .iter()
-            .map(|s| ValidatorInfo {
-                pubkey: public_key_from_seed(s),
-                voting_power: 25,
-            })
-            .collect();
-        let set = ValidatorSet::new(infos);
-
-        let iavl = ExistenceProof {
-            key: b"bridge/deposits/0x1a2b".to_vec(),
-            value: encode_deposit_value(&recipient, &asset, amount),
-            leaf: LeafOp {
-                prefix: vec![0x00, 0x02, 0x00],
-            },
-            path: vec![
-                InnerOp {
-                    prefix: vec![0x01, 0x0a],
-                    suffix: vec![0x1b, 0x2c],
-                },
-                InnerOp {
-                    prefix: vec![0x01],
-                    suffix: vec![0x33, 0x44, 0x55],
-                },
-            ],
-            store: None,
-        };
-        let (app_hash, proof) = wrap_store_layer(iavl, b"bridge");
-
-        let header = Header {
-            version_block: 11,
-            version_app: 0,
-            chain_id: COSMOS_HUB.chain_id.to_string(),
-            height: 18_500_000,
-            time: Timestamp {
-                seconds: GENESIS_TIME as i64,
-                nanos: 9,
-            },
-            last_block_id: BlockId {
-                hash: vec![0xaa; 32],
-                part_total: 1,
-                part_hash: vec![0xbb; 32],
-            },
-            last_commit_hash: vec![0x01; 32],
-            data_hash: vec![0x02; 32],
-            validators_hash: set.hash().to_vec(),
-            next_validators_hash: set.hash().to_vec(),
-            consensus_hash: vec![0x03; 32],
-            app_hash: app_hash.to_vec(),
-            last_results_hash: vec![0x05; 32],
-            evidence_hash: vec![0x06; 32],
-            proposer_address: set.validators[0].address().to_vec(),
-        };
-
-        let block_id = BlockId {
-            hash: header.hash().to_vec(),
-            part_total: 1,
-            part_hash: vec![0xcc; 32],
-        };
-        let mut signatures = Vec::new();
-        for (i, seed) in seeds.iter().enumerate() {
-            let timestamp = Timestamp {
-                seconds: GENESIS_TIME as i64 + 1,
-                nanos: i as i32,
-            };
-            let vote = CanonicalVote {
-                vote_type: PRECOMMIT_TYPE,
-                height: header.height,
-                round: 0,
-                block_id: block_id.clone(),
-                timestamp,
-                chain_id: COSMOS_HUB.chain_id.to_string(),
-            };
-            signatures.push(CommitSig {
-                flag: BlockIdFlag::Commit,
-                validator_address: set.validators[i].address(),
-                timestamp,
-                signature: sign(seed, &vote_sign_bytes(&vote)).to_vec(),
-            });
-        }
-        let commit = Commit {
-            height: header.height,
-            round: 0,
-            block_id,
-            signatures,
-        };
-
-        let anchor = crate::bridge_cosmos::CosmosAnchor {
-            config_selector: 0,
-            trusted_height: 0,
-            trusted_time: Timestamp {
-                seconds: GENESIS_TIME as i64 - 3600,
-                nanos: 0,
-            },
-            trusted_validators_hash: set.hash(),
-            asset_id: asset,
-        };
-        let mint_proof = crate::bridge_cosmos::CosmosMintProof {
-            config_selector: 0,
-            trusted_validators: set.clone(),
-            header,
-            commit,
-            signing_set: set,
-            proof,
-        };
-        assert_eq!(
-            crate::bridge_cosmos::CosmosMintProof::decode(&mint_proof.encode()).as_ref(),
-            Some(&mint_proof),
-            "the cosmos proof round-trips through its wire encoding"
-        );
-
-        let fee = FeeParams::devnet();
-        let mut ledger = Ledger::new();
-        ledger.seed_chain_genesis_time(GENESIS_TIME);
-        ledger.seed_bridge_dest_chain(BRIDGE_DEST);
-        ledger.seed_bridge_pool_vault(&BRIDGE_VAULT);
-        ledger.register_bridged_asset(&asset, 100_000_000, 100_000_000, false);
-        ledger.seed_bridge_cosmos_anchor(&anchor);
-
-        let (source_chain, source_ref) = mint_proof.source_key();
-        let relayer = keypair(413);
-        let tx = system_tx(
-            &relayer,
-            &crate::ledger::bridge_cosmos_mint_address(),
-            mint_proof.encode(),
-            0,
-            TRANSFER_METER,
-            &fee,
-        );
-        let included = execute_ordered(&mut ledger, &[tx], &fee, GENESIS_TIME + 1);
-
-        assert_eq!(
-            included.len(),
-            1,
-            "the trustless cosmos mint rides in the block"
-        );
-        assert_eq!(
-            ledger.bridged_balance(&asset, &recipient),
-            amount,
-            "the tendermint-proven recipient holds the proven amount with no operator involved"
-        );
-        assert_eq!(ledger.bridged_supply(&asset), amount);
-        assert!(
-            ledger.bridge_reference_seen(source_chain, &source_ref),
-            "the cosmos deposit is bound against replay"
-        );
-        assert!(
-            ledger.bridge_operator_set().is_none(),
-            "no operator set exists yet the cosmos deposit minted trustlessly"
-        );
-    }
-
-    #[test]
-    fn a_genesis_cosmos_anchor_seeds_the_ledger_and_an_absent_one_stays_none() {
-        use qlc_cosmos::proto::Timestamp;
-        let anchor = crate::bridge_cosmos::CosmosAnchor {
-            config_selector: 0,
-            trusted_height: 42,
-            trusted_time: Timestamp {
-                seconds: 1_700_000_000,
-                nanos: 0,
-            },
-            trusted_validators_hash: [0x5c; 32],
-            asset_id: *b"qATOM.atom\0\0\0\0\0\0",
-        };
-        let secret = crate::keys::fixture_secret(1);
-        let build = |cosmos: Option<crate::bridge_cosmos::CosmosAnchor>| Genesis {
-            fee_params: FeeParams::devnet(),
-            accounts: Vec::new(),
-            validators: vec![ValidatorSpec::from_secret(
-                1,
-                2_000,
-                true,
-                &secret,
-                crate::consensus::DEFAULT_SLOTS,
-            )],
-            genesis_time: 1_700_000_000,
-            guardians: Default::default(),
-            bridge_dest_chain: Some(BRIDGE_DEST),
-            bridge_operators: None,
-            bridged_assets: Vec::new(),
-            bridge_era: None,
-            bridge_exit_max_amount: None,
-            bridge_bitcoin_anchor: None,
-            bridge_eth_anchors: Vec::new(),
-            bridge_cosmos_anchor: cosmos,
-        };
-        let secrets: std::collections::BTreeMap<u64, [u8; 32]> =
-            std::iter::once((1u64, secret)).collect();
-
-        let seeded = Node::new(build(Some(anchor.clone())), &secrets);
-        assert_eq!(
-            seeded.ledger().bridge_cosmos_anchor(0),
-            Some(anchor),
-            "the genesis cosmos anchor is seeded so a cosmos deposit can verify against it"
-        );
-
-        let bare = Node::new(build(None), &secrets);
-        assert!(
-            bare.ledger().bridge_cosmos_anchor(0).is_none(),
-            "a genesis without a cosmos anchor still boots and seeds none"
-        );
     }
 
     #[test]

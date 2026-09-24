@@ -275,9 +275,6 @@ impl GenesisFile {
             bridged_assets: bridged,
             bridge_era: None,
             bridge_exit_max_amount,
-            bridge_bitcoin_anchor: None,
-            bridge_eth_anchors: Vec::new(),
-            bridge_cosmos_anchor: None,
         };
         let hash = genesis_hash(&chain_id, &message, slots, &genesis);
         Ok(GenesisFile {
@@ -566,27 +563,6 @@ fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) ->
 
     put_bytes(&mut buf, &genesis.bridge_era.unwrap_or([0u8; 32]));
 
-    match &genesis.bridge_bitcoin_anchor {
-        Some(anchor) => {
-            buf.push(1);
-            put_bytes(&mut buf, &anchor.encode());
-        }
-        None => buf.push(0),
-    }
-    let mut eth_anchors = genesis.bridge_eth_anchors.clone();
-    eth_anchors.sort_by_key(|a| a.config_selector);
-    buf.extend_from_slice(&(eth_anchors.len() as u64).to_le_bytes());
-    for anchor in &eth_anchors {
-        put_bytes(&mut buf, &anchor.encode());
-    }
-    match &genesis.bridge_cosmos_anchor {
-        Some(anchor) => {
-            buf.push(1);
-            put_bytes(&mut buf, &anchor.encode());
-        }
-        None => buf.push(0),
-    }
-
     sha3::sha3_256(&buf)
 }
 
@@ -631,9 +607,6 @@ mod tests {
             bridged_assets: Vec::new(),
             bridge_era: None,
             bridge_exit_max_amount: None,
-            bridge_bitcoin_anchor: None,
-            bridge_eth_anchors: Vec::new(),
-            bridge_cosmos_anchor: None,
         }
     }
 

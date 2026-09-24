@@ -280,8 +280,6 @@ pub(crate) fn is_feeless(wrapper: &Wrapper) -> bool {
         || crate::node::is_bridge_settle(wrapper)
         || crate::node::is_evidence(wrapper)
         || crate::node::is_bridge_guardian(wrapper)
-        || crate::node::is_bridge_eth_update(wrapper)
-        || crate::node::is_bridge_cosmos_update(wrapper)
 }
 
 fn is_signed_lane(wrapper: &Wrapper) -> bool {
@@ -347,14 +345,6 @@ pub fn admission_hint(wrapper: &Wrapper, ledger: &Ledger, fee_params: &FeeParams
             ledger,
             wrapper,
             fee_params.chain_id,
-        ));
-    } else if crate::node::is_bridge_eth_update(wrapper) {
-        hint.feeless_ok = Some(crate::node::bridge_eth_update_admissible(ledger, wrapper));
-    } else if crate::node::is_bridge_cosmos_update(wrapper) {
-        hint.feeless_ok = Some(crate::node::bridge_cosmos_update_admissible(
-            ledger,
-            wrapper,
-            crate::node::wall_clock_seconds(),
         ));
     }
     hint
@@ -606,10 +596,6 @@ impl Mempool {
             &mut self.evidence_attempts
         } else if crate::node::is_bridge_mint(wrapper) {
             &mut self.mint_attempts
-        } else if crate::node::is_bridge_eth_update(wrapper) {
-            &mut self.update_attempts
-        } else if crate::node::is_bridge_cosmos_update(wrapper) {
-            &mut self.cosmos_update_attempts
         } else if crate::node::is_bridge_settle(wrapper) {
             &mut self.settle_attempts
         } else {
@@ -834,28 +820,6 @@ impl Mempool {
             }) {
                 return Err(Reject::BadCall);
             }
-        } else if crate::node::is_bridge_eth_update(&wrapper) {
-            if !self.charge_feeless_attempt_for(&wrapper) {
-                return Err(Reject::RateLimited);
-            }
-            if !feeless_hint
-                .unwrap_or_else(|| crate::node::bridge_eth_update_admissible(ledger, &wrapper))
-            {
-                return Err(Reject::BadCall);
-            }
-        } else if crate::node::is_bridge_cosmos_update(&wrapper) {
-            if !self.charge_feeless_attempt_for(&wrapper) {
-                return Err(Reject::RateLimited);
-            }
-            if !feeless_hint.unwrap_or_else(|| {
-                crate::node::bridge_cosmos_update_admissible(
-                    ledger,
-                    &wrapper,
-                    crate::node::wall_clock_seconds(),
-                )
-            }) {
-                return Err(Reject::BadCall);
-            }
         } else if crate::node::is_bridge_exit(&wrapper) {
             if self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce()) {
                 return Err(Reject::SenderQueueFull);
@@ -1013,14 +977,6 @@ impl Mempool {
                 )
             } else if crate::node::is_bridge_settle(&wrapper) {
                 crate::node::bridge_settle_admissible(ledger, &wrapper, fee_params.chain_id)
-            } else if crate::node::is_bridge_eth_update(&wrapper) {
-                crate::node::bridge_eth_update_admissible(ledger, &wrapper)
-            } else if crate::node::is_bridge_cosmos_update(&wrapper) {
-                crate::node::bridge_cosmos_update_admissible(
-                    ledger,
-                    &wrapper,
-                    crate::node::wall_clock_seconds(),
-                )
             } else if crate::node::is_bridge_exit(&wrapper) {
                 !self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce())
                     && {

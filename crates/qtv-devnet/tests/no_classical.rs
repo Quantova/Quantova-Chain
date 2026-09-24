@@ -101,16 +101,25 @@ fn normal_dependents_of(crate_name: &str) -> Vec<String> {
 }
 
 #[test]
-fn only_q_bls_carries_blst_into_a_production_build() {
-    assert!(
-        LOCKFILE.contains("name = \"blst\""),
-        "blst left the graph, so this bound no longer describes the build and must be retired"
-    );
-    assert_eq!(
-        normal_dependents_of("blst"),
-        vec!["q-bls".to_string()],
-        "blst is admitted only to verify foreign Ethereum consensus proofs through q-bls. A test \
-         may reach it under dev-dependencies, but a normal dependency anywhere else ships the \
-         signing half of a classical curve into the running node"
-    );
+fn no_classical_curve_reaches_the_chain_at_all() {
+    for curve in [
+        "blst",
+        "bls12_381",
+        "secp256k1",
+        "k256",
+        "ed25519",
+        "ed25519-dalek",
+        "curve25519-dalek",
+        "p256",
+        "ring",
+    ] {
+        assert!(
+            !LOCKFILE.contains(&format!("name = \"{curve}\"")),
+            "{curve} is in the chain graph; a classical curve belongs in Q-Oracle, never here"
+        );
+        assert!(
+            normal_dependents_of(curve).is_empty(),
+            "{curve} is reachable as a normal dependency of the chain"
+        );
+    }
 }

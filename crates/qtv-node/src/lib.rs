@@ -4,9 +4,6 @@
 #![forbid(unsafe_code)]
 
 pub mod bridge;
-pub mod bridge_btc;
-pub mod bridge_cosmos;
-pub mod bridge_eth;
 pub mod consensus;
 pub mod evidence;
 pub mod execution;
