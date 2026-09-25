@@ -10,11 +10,11 @@ repository.workspace = true
 description = "The post-quantum authenticated secure channel for the Quantova stack: an ML-KEM and ML-DSA handshake, a SHAKE key schedule, and a ChaCha20-Poly1305 record layer over a standard library stream."
 
 [dependencies]
-qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "80b30f55cc563018b997eea20c6ee48b76424fa9" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "e6652598dc3847189609a282128921824d55c10b" }
 qtv-wipe = { path = "../qtv-wipe" }
 
 [dev-dependencies]
-qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "80b30f55cc563018b997eea20c6ee48b76424fa9" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "e6652598dc3847189609a282128921824d55c10b" }
 
 [lints]
 workspace = true

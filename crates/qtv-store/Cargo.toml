@@ -13,7 +13,7 @@ description = "The first file backed block and state persistence for the Quantov
 qtv-codec = { path = "../qtv-codec" }
 qtv-block = { path = "../qtv-block" }
 qtv-state = { path = "../qtv-state" }
-qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "80b30f55cc563018b997eea20c6ee48b76424fa9" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "e6652598dc3847189609a282128921824d55c10b" }
 
 [dev-dependencies]
 qtv-tx = { path = "../qtv-tx" }
