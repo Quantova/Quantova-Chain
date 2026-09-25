@@ -13,7 +13,9 @@ fn a_genesis_parent_with_a_nonzero_value_is_refused() {
     let attester = Attester::from_secret(1, &[1u8; 32], 2_000);
     let beacon = Beacon::genesis();
     let block = Block::new(1, [5u8; 32], Parent::Genesis);
-    let attestation = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block, &beacon);
+    let attestation = attester
+        .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block, &beacon)
+        .expect("the attester holds a credential for this slot");
     let bytes = Message::Attest(Box::new(attestation)).encode();
 
     let pv_start = 1 + 8 + 8 + 8 + 8 + (8 + 32) + 8 + 32 + 1;

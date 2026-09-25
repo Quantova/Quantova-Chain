@@ -86,8 +86,12 @@ fn only_a_leader_signed_proposal_is_prevoted(committee: usize, online: &[bool]) 
     let selection = nodes[0].select().expect("committee");
     let (leader, leader_idx, stranger_idx) = leader_and_stranger(&config, &nodes, committee);
 
-    let genuine = nodes[leader_idx].build_proposal(&selection);
-    let counterfeit = nodes[stranger_idx].build_proposal(&selection);
+    let genuine = nodes[leader_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
+    let counterfeit = nodes[stranger_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
 
     assert_eq!(
         header_value(&genuine.header.hash()),
@@ -189,7 +193,9 @@ fn a_replayed_justification_flood_verifies_within_the_committee_bound() {
     let l2 = leader_for(&selection, 2);
     let l2_idx = idx(&config, l2);
 
-    let proposal_x = nodes[l0_idx].build_proposal(&selection);
+    let proposal_x = nodes[l0_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     let mut prevotes: Vec<Attestation> = Vec::new();
     for i in 0..nodes.len() {
         if let Some(prevote) = prevote_of(&nodes[i].on_proposal(&selection, l0, proposal_x.clone()))
@@ -208,7 +214,9 @@ fn a_replayed_justification_flood_verifies_within_the_committee_bound() {
         if i == l2_idx {
             continue;
         }
-        let record = nodes[i].make_view_change(2);
+        let record = nodes[i]
+            .make_view_change(2)
+            .expect("a committee member can vote to change view");
         nodes[l2_idx].collect_view_change(&selection, record.clone());
         records.push(record);
     }
@@ -286,7 +294,9 @@ fn a_forged_auth_shard_does_not_stall_coded_reassembly() {
         .find(|&i| i != leader_idx)
         .expect("a distinct victim");
 
-    let genuine = nodes[leader_idx].build_proposal(&selection);
+    let genuine = nodes[leader_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     let shards = code_proposal(&genuine).expect("code the genuine proposal");
     assert!(
         shards.len() > shards[0].commitment.k,
@@ -364,7 +374,9 @@ fn coded_fixture(
     let victim = (0..nodes.len())
         .find(|&i| i != leader_idx)
         .expect("a distinct victim");
-    let genuine = nodes[leader_idx].build_proposal(&selection);
+    let genuine = nodes[leader_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     let shards = code_proposal(&genuine).expect("code the genuine proposal");
     (nodes, victim, leader, leader_idx, genuine, shards)
 }
@@ -554,7 +566,9 @@ fn a_cached_view_change_is_not_counted_once_its_signer_leaves_the_committee() {
     let l2 = leader_for(&selection, 2);
     let l2_idx = idx(&config, l2);
 
-    let proposal_x = nodes[l0_idx].build_proposal(&selection);
+    let proposal_x = nodes[l0_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     let mut prevotes: Vec<Attestation> = Vec::new();
     for i in 0..nodes.len() {
         if let Some(prevote) = prevote_of(&nodes[i].on_proposal(&selection, l0, proposal_x.clone()))
@@ -571,7 +585,9 @@ fn a_cached_view_change_is_not_counted_once_its_signer_leaves_the_committee() {
         if i == l2_idx {
             continue;
         }
-        let record = nodes[i].make_view_change(2);
+        let record = nodes[i]
+            .make_view_change(2)
+            .expect("a committee member can vote to change view");
         nodes[l2_idx].collect_view_change(&selection, record.clone());
     }
     let genuine = nodes[l2_idx]

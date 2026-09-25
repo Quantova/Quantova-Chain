@@ -52,11 +52,21 @@ fn the_leader_carries_attributed_evidence_into_the_block_it_produces() {
     let height = leader.height();
     let block_a = Block::new(height, [1u8; 32], Parent::Genesis);
     let block_b = Block::new(height, [2u8; 32], Parent::Genesis);
-    leader.on_attestation(attester.attest(chain_id, height, 1, 0, [0u8; 32], block_a, &beacon));
-    leader.on_attestation(attester.attest(chain_id, height, 1, 0, [0u8; 32], block_b, &beacon));
+    leader.on_attestation(
+        attester
+            .attest(chain_id, height, 1, 0, [0u8; 32], block_a, &beacon)
+            .expect("the attester holds a credential for this slot"),
+    );
+    leader.on_attestation(
+        attester
+            .attest(chain_id, height, 1, 0, [0u8; 32], block_b, &beacon)
+            .expect("the attester holds a credential for this slot"),
+    );
 
     let selection = leader.select().expect("a committee forms from the reveals");
-    let proposal = leader.build_proposal(&selection);
+    let proposal = leader
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
 
     let carried: usize = proposal
         .body

@@ -641,9 +641,10 @@ impl Driver {
             self.emit(message);
         }
         if view > 0 {
-            let record = self.node.make_view_change(view);
-            self.node.collect_view_change(selection, record.clone());
-            self.emit(Message::ViewChange(Box::new(record)));
+            if let Some(record) = self.node.make_view_change(view) {
+                self.node.collect_view_change(selection, record.clone());
+                self.emit(Message::ViewChange(Box::new(record)));
+            }
         }
         self.try_justified(selection);
         self.settle(selection);
@@ -651,9 +652,10 @@ impl Driver {
 
     fn on_view_timeout(&mut self, selection: &Selection) {
         let target = self.node.view().saturating_add(1);
-        let record = self.node.make_view_change(target);
-        self.node.collect_view_change(selection, record.clone());
-        self.emit(Message::ViewChange(Box::new(record)));
+        if let Some(record) = self.node.make_view_change(target) {
+            self.node.collect_view_change(selection, record.clone());
+            self.emit(Message::ViewChange(Box::new(record)));
+        }
         if let Some(sync) = self.node.view_sync_target(selection) {
             if sync > self.node.view() {
                 self.node.jump_to(sync);

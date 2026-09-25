@@ -183,6 +183,7 @@ pub enum RoundError {
     NotFinalized,
     ProposalRejected,
     NotStaged,
+    NotDrawn,
     Decode,
     StateRootMismatch {
         height: Height,
@@ -1103,11 +1104,11 @@ impl DevNode {
             .collect();
     }
 
-    pub fn build_proposal(&mut self, selection: &Selection) -> Proposal {
+    pub fn build_proposal(&mut self, selection: &Selection) -> Option<Proposal> {
         self.build_proposal_at(selection, self.view)
     }
 
-    fn build_proposal_at(&mut self, selection: &Selection, view: View) -> Proposal {
+    fn build_proposal_at(&mut self, selection: &Selection, view: View) -> Option<Proposal> {
         let height = self.height;
         let proposer = self.validator_address(leader_for(selection, view));
         let chain_id = self.fee_params.chain_id;
@@ -1176,14 +1177,14 @@ impl DevNode {
             ledger,
             justification: Vec::new(),
         });
-        let auth = self.sign_proposal(view, &header, &included, &[]);
-        Proposal {
+        let auth = self.sign_proposal(view, &header, &included, &[])?;
+        Some(Proposal {
             view,
             header,
             body: included,
             justification: Vec::new(),
             auth,
-        }
+        })
     }
 
     fn sign_proposal(
@@ -1192,7 +1193,7 @@ impl DevNode {
         header: &Header,
         body: &[Wrapper],
         justification: &[ViewChange],
-    ) -> Attestation {
+    ) -> Option<Attestation> {
         let height = header.height();
         let commitment = crate::coded::proposal_commitment(header, body, justification).unwrap_or(
             qtv_net::erasure::Commitment {
@@ -1411,14 +1412,16 @@ impl DevNode {
 
     pub fn attest(&self) -> Result<Attestation, RoundError> {
         let staged = self.staged.as_ref().ok_or(RoundError::NotStaged)?;
-        Ok(self.consensus.own_attestation(
-            self.height,
-            self.slot(),
-            staged.view,
-            self.current_committee_digest(),
-            staged.block,
-            &self.beacon,
-        ))
+        self.consensus
+            .own_attestation(
+                self.height,
+                self.slot(),
+                staged.view,
+                self.current_committee_digest(),
+                staged.block,
+                &self.beacon,
+            )
+            .ok_or(RoundError::NotDrawn)
     }
 
     pub fn finalize(
@@ -1527,18 +1530,20 @@ impl DevNode {
                 let header = staged.header.clone();
                 let body = staged.body.clone();
                 let justification = staged.justification.clone();
-                let auth = self.sign_proposal(view, &header, &body, &justification);
-                Proposal {
-                    view,
-                    header,
-                    body,
-                    justification,
-                    auth,
-                }
+                self.sign_proposal(view, &header, &body, &justification)
+                    .map(|auth| Proposal {
+                        view,
+                        header,
+                        body,
+                        justification,
+                        auth,
+                    })
             } else {
                 self.build_proposal(selection)
             };
-            messages.push(Message::Proposal(Box::new(proposal)));
+            if let Some(proposal) = proposal {
+                messages.push(Message::Proposal(Box::new(proposal)));
+            }
         }
         let stage_is_current = matches!(&self.staged, Some(staged) if staged.view == self.view);
         if stage_is_current {
@@ -1709,15 +1714,17 @@ impl DevNode {
         }
         let committee = self.current_committee_digest();
         let subject = prevote_subject(self.height, view, value);
-        self.prevoted.insert(view, value);
-        let prevote = self.consensus.own_attestation(
+        let Some(prevote) = self.consensus.own_attestation(
             self.height,
             self.slot(),
             view,
             committee,
             subject,
             &self.beacon,
-        );
+        ) else {
+            return Vec::new();
+        };
+        self.prevoted.insert(view, value);
         self.record_prevote(&prevote);
         let mut out = vec![Message::Prevote(Box::new(prevote))];
         if let Ok(selection) = self.select() {
@@ -1843,7 +1850,7 @@ impl DevNode {
         self.prevotes.push(prevote.clone());
     }
 
-    pub fn make_view_change(&mut self, target_view: View) -> ViewChange {
+    pub fn make_view_change(&mut self, target_view: View) -> Option<ViewChange> {
         let (lock_view, locked_value, has_lock, locked, polka) = match &self.lock {
             Some(lock) => (
                 lock.view,
@@ -1864,15 +1871,15 @@ impl DevNode {
             committee,
             subject,
             &self.beacon,
-        );
-        ViewChange {
+        )?;
+        Some(ViewChange {
             height: self.height,
             target_view,
             lock_view,
             locked,
             att,
             polka,
-        }
+        })
     }
 
     pub fn collect_view_change(&mut self, selection: &Selection, record: ViewChange) {
@@ -2126,7 +2133,7 @@ impl DevNode {
         let proposal = match bound {
             Some((_, locked)) => {
                 self.stage_from(&locked.header, &locked.body, view).ok()?;
-                let auth = self.sign_proposal(view, &locked.header, &locked.body, &carried);
+                let auth = self.sign_proposal(view, &locked.header, &locked.body, &carried)?;
                 Proposal {
                     view,
                     header: locked.header,
@@ -2136,9 +2143,9 @@ impl DevNode {
                 }
             }
             None => {
-                let mut proposal = self.build_proposal_at(selection, view);
+                let mut proposal = self.build_proposal_at(selection, view)?;
                 proposal.auth =
-                    self.sign_proposal(view, &proposal.header, &proposal.body, &carried);
+                    self.sign_proposal(view, &proposal.header, &proposal.body, &carried)?;
                 proposal.justification = carried.clone();
                 proposal
             }
@@ -3346,7 +3353,9 @@ mod registration_window_tests {
         let mut node = node();
         node.parent_time = qtv_node::node::wall_clock_seconds() + 10;
         let selection = node.select().expect("a committee of its own reveal");
-        let proposal = node.build_proposal(&selection);
+        let proposal = node
+            .build_proposal(&selection)
+            .expect("the leader holds a credential for the slot it leads");
         assert!(
             proposal.header.time() >= node.parent_time,
             "built below its parent, every peer would refuse the proposal"
@@ -3357,7 +3366,9 @@ mod registration_window_tests {
     fn a_proposal_stamped_far_ahead_of_this_clock_is_refused() {
         let mut node = node();
         let selection = node.select().expect("a committee of its own reveal");
-        let proposal = node.build_proposal(&selection);
+        let proposal = node
+            .build_proposal(&selection)
+            .expect("the leader holds a credential for the slot it leads");
         let built = &proposal.header;
         let ahead = Header::new(
             built.height(),
@@ -3478,7 +3489,9 @@ mod finality_gate_tests {
         let selection = nodes[0].select().expect("committee");
         let leader = leader_for(&selection, 0);
         let li = nodes.iter().position(|n| n.id == leader).expect("leader");
-        let proposal = nodes[li].build_proposal(&selection);
+        let proposal = nodes[li]
+            .build_proposal(&selection)
+            .expect("the leader holds a credential for the slot it leads");
         for (i, node) in nodes.iter_mut().enumerate() {
             if i != li {
                 let _ = node.on_proposal(&selection, leader, proposal.clone());
@@ -3494,7 +3507,9 @@ mod finality_gate_tests {
         let leader = leader_for(&selection, 0);
         let li = nodes.iter().position(|n| n.id == leader).expect("leader");
         let victim = (li + 1) % nodes.len();
-        let proposal = nodes[li].build_proposal(&selection);
+        let proposal = nodes[li]
+            .build_proposal(&selection)
+            .expect("the leader holds a credential for the slot it leads");
         let shards = crate::coded::code_proposal(&proposal).expect("the proposal codes");
         let mut assembler = crate::coded::ProposalAssembler::new();
         assembler.set_round_height(nodes[victim].height());
@@ -3549,7 +3564,9 @@ mod finality_gate_tests {
 
         for _ in 0..4 {
             let next = nodes[0].view().saturating_add(1);
-            let record = nodes[0].make_view_change(next);
+            let record = nodes[0]
+                .make_view_change(next)
+                .expect("a committee member can vote to change view");
             nodes[0].collect_view_change(&selection, record);
         }
         assert!(
@@ -3557,7 +3574,9 @@ mod finality_gate_tests {
             "the view never climbs past the ceiling"
         );
 
-        let beyond = nodes[0].make_view_change(super::View::MAX);
+        let beyond = nodes[0]
+            .make_view_change(super::View::MAX)
+            .expect("a committee member can vote to change view");
         assert!(
             !nodes[0].verify_view_change_att(&selection, &beyond),
             "a view change naming a view past the ceiling is refused"

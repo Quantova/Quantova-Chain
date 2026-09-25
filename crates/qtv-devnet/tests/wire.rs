@@ -118,7 +118,9 @@ fn an_attestation_message_round_trips_and_still_verifies() {
     let attester = Attester::from_secret(1, &[1u8; 32], 2_000);
     let beacon = Beacon::genesis();
     let block = Block::new(1, [5u8; 32], Parent::Genesis);
-    let attestation = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block, &beacon);
+    let attestation = attester
+        .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block, &beacon)
+        .expect("the attester holds a credential for this slot");
 
     let bytes = Message::Attest(Box::new(attestation.clone())).encode();
     match Message::decode(&bytes).expect("decodes") {
@@ -184,9 +186,12 @@ fn a_certificate_carrying_block_round_trips_and_still_verifies() {
     let block = Block::new(1, [9u8; 32], Parent::Genesis);
     let commitment = CommitteeCommitment::from_attesters_with_budget(0, &[&a, &b, &c, &d], 4);
     let atts = vec![
-        a.attest(CHAIN_ID, 1, 0, 0, commitment.digest(), block, &beacon),
-        b.attest(CHAIN_ID, 1, 0, 0, commitment.digest(), block, &beacon),
-        c.attest(CHAIN_ID, 1, 0, 0, commitment.digest(), block, &beacon),
+        a.attest(CHAIN_ID, 1, 0, 0, commitment.digest(), block, &beacon)
+            .expect("the attester holds a credential for this slot"),
+        b.attest(CHAIN_ID, 1, 0, 0, commitment.digest(), block, &beacon)
+            .expect("the attester holds a credential for this slot"),
+        c.attest(CHAIN_ID, 1, 0, 0, commitment.digest(), block, &beacon)
+            .expect("the attester holds a credential for this slot"),
     ];
     let cert = aggregate(CHAIN_ID, 1, 0, block, &commitment, &beacon, &atts, 3).expect("quorum");
 

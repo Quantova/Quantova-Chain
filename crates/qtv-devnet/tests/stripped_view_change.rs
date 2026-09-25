@@ -67,7 +67,9 @@ fn a_body_less_copy_does_not_hold_the_senders_view_change_slot() {
         .find(|&i| i != l0_idx && i != l1_idx)
         .expect("a member leading neither view");
 
-    let proposal = nodes[l0_idx].build_proposal(&selection);
+    let proposal = nodes[l0_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     let locked_value = header_value(&proposal.header.hash());
     let first = prevote_of(nodes[holder].on_proposal(&selection, l0, proposal.clone()))
         .expect("the holder prevotes");
@@ -91,7 +93,9 @@ fn a_body_less_copy_does_not_hold_the_senders_view_change_slot() {
     }
     assert!(precommitted, "the holder locked on the view zero proposal");
 
-    let genuine = nodes[holder].make_view_change(1);
+    let genuine = nodes[holder]
+        .make_view_change(1)
+        .expect("a committee member can vote to change view");
     assert!(
         genuine
             .locked
@@ -110,7 +114,9 @@ fn a_body_less_copy_does_not_hold_the_senders_view_change_slot() {
         if i == holder {
             continue;
         }
-        let record = nodes[i].make_view_change(1);
+        let record = nodes[i]
+            .make_view_change(1)
+            .expect("a committee member can vote to change view");
         nodes[l1_idx].collect_view_change(&selection, record);
     }
 

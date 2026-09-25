@@ -97,7 +97,9 @@ fn a_polka_locked_validator_refuses_a_conflict() {
         .find(|&i| i != l0_idx && i != l2_idx)
         .expect("a member leading neither view");
 
-    let proposal_a = nodes[l0_idx].build_proposal(&selection);
+    let proposal_a = nodes[l0_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     let value_a = header_value(&proposal_a.header.hash());
     lock_victim_on_proposal(&mut nodes, &selection, l0, victim, &proposal_a);
 
@@ -106,7 +108,11 @@ fn a_polka_locked_validator_refuses_a_conflict() {
         if i == victim {
             continue;
         }
-        records.push(nodes[i].make_view_change(2));
+        records.push(
+            nodes[i]
+                .make_view_change(2)
+                .expect("a committee member can vote to change view"),
+        );
     }
     for record in &records {
         nodes[l2_idx].collect_view_change(&selection, record.clone());
@@ -151,7 +157,11 @@ fn a_validator_without_a_lock_prevotes_a_justified_proposal() {
         if i == follower {
             continue;
         }
-        records.push(nodes[i].make_view_change(2));
+        records.push(
+            nodes[i]
+                .make_view_change(2)
+                .expect("a committee member can vote to change view"),
+        );
     }
     for record in &records {
         nodes[l2_idx].collect_view_change(&selection, record.clone());
@@ -189,12 +199,18 @@ fn a_justified_proposal_carries_one_polka_and_no_locked_bodies_and_is_bound_by_i
         .find(|&i| i != l0_idx && i != l2_idx && i != victim)
         .expect("a follower");
 
-    let proposal_a = nodes[l0_idx].build_proposal(&selection);
+    let proposal_a = nodes[l0_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     let value_a = header_value(&proposal_a.header.hash());
     lock_victim_on_proposal(&mut nodes, &selection, l0, victim, &proposal_a);
 
     let records: Vec<_> = (0..nodes.len())
-        .map(|i| nodes[i].make_view_change(2))
+        .map(|i| {
+            nodes[i]
+                .make_view_change(2)
+                .expect("a committee member can vote to change view")
+        })
         .collect();
     for record in &records {
         nodes[l2_idx].collect_view_change(&selection, record.clone());
@@ -255,12 +271,16 @@ fn a_locked_validator_keeps_its_lock_across_a_restart() {
         .find(|&i| i != l0_idx)
         .expect("a member not leading view zero");
 
-    let proposal_a = nodes[l0_idx].build_proposal(&selection);
+    let proposal_a = nodes[l0_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     let value_a = header_value(&proposal_a.header.hash());
     lock_victim_on_proposal(&mut nodes, &selection, l0, victim, &proposal_a);
 
     nodes[victim] = DevNode::open(&config.nodes[victim], &config).expect("reopen");
-    let record = nodes[victim].make_view_change(2);
+    let record = nodes[victim]
+        .make_view_change(2)
+        .expect("a committee member can vote to change view");
     let locked = record
         .locked
         .expect("the restarted node still reports its lock");
@@ -286,10 +306,14 @@ fn a_view_change_whose_locked_body_misses_its_header_is_not_collected() {
         .find(|&i| i != l0_idx && i != victim)
         .expect("an observer");
 
-    let proposal_a = nodes[l0_idx].build_proposal(&selection);
+    let proposal_a = nodes[l0_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     lock_victim_on_proposal(&mut nodes, &selection, l0, victim, &proposal_a);
 
-    let mut junk = nodes[victim].make_view_change(2);
+    let mut junk = nodes[victim]
+        .make_view_change(2)
+        .expect("a committee member can vote to change view");
     let params = qtv_node::fee::FeeParams::devnet();
     junk.locked
         .as_mut()
@@ -300,7 +324,9 @@ fn a_view_change_whose_locked_body_misses_its_header_is_not_collected() {
     nodes[observer].collect_view_change(&selection, junk);
     assert_eq!(nodes[observer].view_changes_len(), before);
 
-    let genuine = nodes[victim].make_view_change(2);
+    let genuine = nodes[victim]
+        .make_view_change(2)
+        .expect("a committee member can vote to change view");
     nodes[observer].collect_view_change(&selection, genuine);
     assert_eq!(nodes[observer].view_changes_len(), before + 1);
 }
@@ -322,7 +348,9 @@ fn a_restarted_locked_validator_refuses_an_unjustified_conflict_at_a_later_view(
         .find(|&i| i != l0_idx && i != l1_idx)
         .expect("a member leading neither view");
 
-    let proposal_a = nodes[l0_idx].build_proposal(&selection);
+    let proposal_a = nodes[l0_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     let value_a = header_value(&proposal_a.header.hash());
     lock_victim_on_proposal(&mut nodes, &selection, l0, victim, &proposal_a);
 
@@ -353,7 +381,9 @@ fn a_restarted_locked_validator_refuses_an_unjustified_conflict_at_a_later_view(
         rival.collect_reveal(note.clone());
     }
     assert!(rival.on_timeout(0), "the unstaged leader moves to view one");
-    let proposal_b = rival.build_proposal(&selection);
+    let proposal_b = rival
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     assert_eq!(proposal_b.view, 1);
     assert!(proposal_b.justification.is_empty());
     assert_ne!(header_value(&proposal_b.header.hash()), value_a);

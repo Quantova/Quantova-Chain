@@ -32,8 +32,12 @@ fn equivocation(offender_address: &str) -> Equivocation {
     let beacon = Beacon::genesis();
     let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
     let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-    let a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
-    let b = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_b, &beacon);
+    let a = attester
+        .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon)
+        .expect("the attester holds a credential for this slot");
+    let b = attester
+        .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_b, &beacon)
+        .expect("the attester holds a credential for this slot");
     Equivocation {
         offender: offender_address.to_string(),
         height: 1,
@@ -55,8 +59,12 @@ fn cross_view_re_vote(offender_address: &str) -> Equivocation {
     let beacon = Beacon::genesis();
     let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
     let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-    let a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
-    let b = attester.attest(CHAIN_ID, 1, 1, 1, [0u8; 32], block_b, &beacon);
+    let a = attester
+        .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon)
+        .expect("the attester holds a credential for this slot");
+    let b = attester
+        .attest(CHAIN_ID, 1, 1, 1, [0u8; 32], block_b, &beacon)
+        .expect("the attester holds a credential for this slot");
     Equivocation {
         offender: offender_address.to_string(),
         height: 1,

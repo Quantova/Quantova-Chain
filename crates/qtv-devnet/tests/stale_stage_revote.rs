@@ -64,7 +64,9 @@ fn a_stale_stage_is_not_reprevoted_at_a_new_view() {
         .find(|&i| i != leader0_idx && i != leader1_idx)
         .expect("a follower that leads neither driven view");
 
-    let proposal_a = nodes[leader0_idx].build_proposal(&selection);
+    let proposal_a = nodes[leader0_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     let value_a = header_value(&proposal_a.header.hash());
     let out = nodes[victim].on_proposal(&selection, leader0, proposal_a);
     let prevote_a = prevote_of(&out).expect("the victim prevotes A at view zero");
@@ -84,7 +86,9 @@ fn a_stale_stage_is_not_reprevoted_at_a_new_view() {
 
     let drivers: Vec<usize> = (0..nodes.len()).filter(|&i| i != victim).collect();
     for driver in drivers {
-        let record = nodes[driver].make_view_change(1);
+        let record = nodes[driver]
+            .make_view_change(1)
+            .expect("a committee member can vote to change view");
         nodes[leader1_idx].collect_view_change(&selection, record);
     }
     let justified_b = nodes[leader1_idx]

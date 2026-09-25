@@ -452,9 +452,10 @@ impl<S: Read + Write> Devnet<S> {
         }
         if online && self.nodes[i].view() > 0 {
             let view = self.nodes[i].view();
-            let record = self.nodes[i].make_view_change(view);
-            self.nodes[i].collect_view_change(&selection, record.clone());
-            self.originate(i, &Message::ViewChange(Box::new(record)), active)?;
+            if let Some(record) = self.nodes[i].make_view_change(view) {
+                self.nodes[i].collect_view_change(&selection, record.clone());
+                self.originate(i, &Message::ViewChange(Box::new(record)), active)?;
+            }
         }
         if online {
             self.try_justified_proposal(i, active)?;

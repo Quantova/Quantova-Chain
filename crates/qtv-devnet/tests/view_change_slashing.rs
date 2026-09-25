@@ -54,7 +54,9 @@ fn an_honest_view_change_is_not_a_slashable_equivocation() {
         .expect("a non leader member");
     let victim_id = config.nodes[victim_idx].id;
 
-    let proposal = nodes[leader0_idx].build_proposal(&selection);
+    let proposal = nodes[leader0_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     let out = nodes[victim_idx].on_proposal(&selection, leader0, proposal.clone());
     let victim_prevote = out
         .into_iter()
@@ -85,7 +87,9 @@ fn an_honest_view_change_is_not_a_slashable_equivocation() {
         "locked at view zero"
     );
 
-    let record = nodes[victim_idx].make_view_change(2);
+    let record = nodes[victim_idx]
+        .make_view_change(2)
+        .expect("a member of this committee can vote to change view");
     assert!(record.polka.is_some(), "the view change carries the polka");
     let lock_att = victim_prevote;
     let vote = record.att.clone();

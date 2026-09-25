@@ -61,7 +61,9 @@ fn a_leader_cannot_retract_a_view_the_node_has_already_prevoted() {
         .find(|&i| i != leader0_idx)
         .expect("a follower that does not lead view zero");
 
-    let first = nodes[leader0_idx].build_proposal(&selection);
+    let first = nodes[leader0_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     let value_a = header_value(&first.header.hash());
     let out = nodes[victim].on_proposal(&selection, leader0, first);
     let prevote = prevote_of(&out).expect("the victim prevotes the first proposal at view zero");
@@ -76,7 +78,9 @@ fn a_leader_cannot_retract_a_view_the_node_has_already_prevoted() {
         if driver == leader0_idx {
             continue;
         }
-        let record = nodes[driver].make_view_change(0);
+        let record = nodes[driver]
+            .make_view_change(0)
+            .expect("a committee member can vote to change view");
         nodes[leader0_idx].collect_view_change(&selection, record);
     }
     let second = nodes[leader0_idx]

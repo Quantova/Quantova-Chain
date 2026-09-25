@@ -70,7 +70,9 @@ fn a_polka_locked_validator_refuses_to_prevote_a_conflict() {
         .find(|&i| i != l0_idx && i != l2_idx)
         .expect("a member leading neither view zero nor view two");
 
-    let proposal_x = nodes[l0_idx].build_proposal(&selection);
+    let proposal_x = nodes[l0_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     let value_x = header_value(&proposal_x.header.hash());
     let victim_prevote = prevote_of(nodes[victim].on_proposal(&selection, l0, proposal_x.clone()))
         .expect("the victim prevotes X");
@@ -106,7 +108,11 @@ fn a_polka_locked_validator_refuses_to_prevote_a_conflict() {
         if i == victim {
             continue;
         }
-        records.push(nodes[i].make_view_change(2));
+        records.push(
+            nodes[i]
+                .make_view_change(2)
+                .expect("a committee member can vote to change view"),
+        );
     }
     for record in &records {
         nodes[l2_idx].collect_view_change(&selection, record.clone());

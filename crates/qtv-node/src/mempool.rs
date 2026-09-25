@@ -1610,8 +1610,12 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = AttBlock::new(1, [1u8; 32], Parent::Genesis);
         let block_b = AttBlock::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(params.chain_id, 1, 1, 0, [0u8; 32], block_a, &beacon);
-        let b = attester.attest(params.chain_id, 1, 1, 0, [0u8; 32], block_b, &beacon);
+        let a = attester
+            .attest(params.chain_id, 1, 1, 0, [0u8; 32], block_a, &beacon)
+            .expect("the attester holds a credential for this slot");
+        let b = attester
+            .attest(params.chain_id, 1, 1, 0, [0u8; 32], block_b, &beacon)
+            .expect("the attester holds a credential for this slot");
         let evidence = crate::evidence::Equivocation {
             offender: offender.clone(),
             height: 1,

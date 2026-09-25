@@ -1182,7 +1182,7 @@ mod handshake_bar {
     fn a_full_bar_table_evicts_the_soonest_to_lapse_and_refuses_no_stranger() {
         let bar = HandshakeBar::default();
         let first: IpAddr = IpAddr::V4(std::net::Ipv4Addr::from(0u32));
-        bar.bar(first, Duration::from_secs(1));
+        bar.bar(first, FAILED_HANDSHAKE_BAR / 2);
         for i in 1..MAX_BARRED as u32 {
             bar.bar(
                 IpAddr::V4(std::net::Ipv4Addr::from(i)),

@@ -1849,7 +1849,7 @@ impl Node {
             .unwrap_or([0u8; 32]);
         ids.iter()
             .filter_map(|id| self.sim_attesters.get(id))
-            .map(|attester| {
+            .filter_map(|attester| {
                 attester.attest(chain_id, height, slot, view, committee, block, &self.beacon)
             })
             .collect()
@@ -1864,7 +1864,7 @@ impl Node {
         self.sim_attesters
             .iter()
             .filter_map(|(id, attester)| {
-                let credential = attester.reveal(slot);
+                let credential = attester.reveal(slot)?;
                 if self.consensus.verify_published(
                     &self.beacon,
                     slot,
@@ -1980,7 +1980,7 @@ impl Node {
             .iter()
             .filter(|id| self.sim_online.get(id).copied().unwrap_or(false))
             .filter_map(|id| self.sim_attesters.get(id))
-            .map(|attester| {
+            .filter_map(|attester| {
                 attester.attest(
                     chain_id,
                     height,
@@ -2002,7 +2002,7 @@ impl Node {
                         header_value(&[0xEE; 32]),
                         self.parent_val,
                     );
-                    evidence.push(attester.attest(
+                    if let Some(conflicting_attestation) = attester.attest(
                         chain_id,
                         height,
                         slot,
@@ -2010,7 +2010,9 @@ impl Node {
                         selection.commitment.digest(),
                         conflicting,
                         &self.beacon,
-                    ));
+                    ) {
+                        evidence.push(conflicting_attestation);
+                    }
                 }
             }
         }
@@ -4141,8 +4143,12 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(fee.chain_id, 1, 1, 0, [0u8; 32], block_a, &beacon);
-        let b = attester.attest(fee.chain_id, 1, 1, 0, [0u8; 32], block_b, &beacon);
+        let a = attester
+            .attest(fee.chain_id, 1, 1, 0, [0u8; 32], block_a, &beacon)
+            .expect("the attester holds a credential for this slot");
+        let b = attester
+            .attest(fee.chain_id, 1, 1, 0, [0u8; 32], block_b, &beacon)
+            .expect("the attester holds a credential for this slot");
         let evidence = crate::evidence::Equivocation {
             offender: offender.clone(),
             height: 1,

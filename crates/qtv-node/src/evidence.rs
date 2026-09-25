@@ -250,8 +250,12 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
-        let b = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_b, &beacon);
+        let a = attester
+            .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon)
+            .expect("the attester holds a credential for this slot");
+        let b = attester
+            .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_b, &beacon)
+            .expect("the attester holds a credential for this slot");
         let evidence = Equivocation {
             offender: address.to_string(),
             height: 1,
@@ -277,8 +281,12 @@ mod tests {
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
         let mut pool = EvidencePool::new();
         for view in 0..MAX_HEIGHT_VIEW {
-            let a = attester.attest(CHAIN_ID, 1, 1, view, [0u8; 32], block_a, &beacon);
-            let b = attester.attest(CHAIN_ID, 1, 1, view, [0u8; 32], block_b, &beacon);
+            let a = attester
+                .attest(CHAIN_ID, 1, 1, view, [0u8; 32], block_a, &beacon)
+                .expect("the attester holds a credential for this slot");
+            let b = attester
+                .attest(CHAIN_ID, 1, 1, view, [0u8; 32], block_b, &beacon)
+                .expect("the attester holds a credential for this slot");
             pool.observe(
                 &address,
                 1,
@@ -303,8 +311,12 @@ mod tests {
             MAX_PENDING_EVIDENCE,
             "one offender signing at every view fills the pool to its bound and no further"
         );
-        let a = attester.attest(CHAIN_ID, 2, 2, 0, [0u8; 32], block_a, &beacon);
-        let b = attester.attest(CHAIN_ID, 2, 2, 0, [0u8; 32], block_b, &beacon);
+        let a = attester
+            .attest(CHAIN_ID, 2, 2, 0, [0u8; 32], block_a, &beacon)
+            .expect("the attester holds a credential for this slot");
+        let b = attester
+            .attest(CHAIN_ID, 2, 2, 0, [0u8; 32], block_b, &beacon)
+            .expect("the attester holds a credential for this slot");
         pool.observe(
             &address,
             2,
@@ -343,7 +355,9 @@ mod tests {
         let (attester, address) = attester();
         let beacon = Beacon::genesis();
         let block = Block::new(1, [1u8; 32], Parent::Genesis);
-        let a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block, &beacon);
+        let a = attester
+            .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block, &beacon)
+            .expect("the attester holds a credential for this slot");
         let evidence = Equivocation {
             offender: address,
             height: 1,
@@ -377,8 +391,12 @@ mod tests {
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
         let g1 = [0x11u8; 32];
         let g2 = [0x22u8; 32];
-        let a = attester.attest(CHAIN_ID, 1, 1, 0, g1, block_a, &beacon);
-        let b = attester.attest(CHAIN_ID, 1, 1, 0, g2, block_b, &beacon);
+        let a = attester
+            .attest(CHAIN_ID, 1, 1, 0, g1, block_a, &beacon)
+            .expect("the attester holds a credential for this slot");
+        let b = attester
+            .attest(CHAIN_ID, 1, 1, 0, g2, block_b, &beacon)
+            .expect("the attester holds a credential for this slot");
 
         let mut pool = EvidencePool::new();
         assert!(pool
@@ -402,8 +420,12 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(CHAIN_ID, 1, 1, 3, [0u8; 32], block_a, &beacon);
-        let b = attester.attest(CHAIN_ID, 1, 1, 3, [0u8; 32], block_b, &beacon);
+        let a = attester
+            .attest(CHAIN_ID, 1, 1, 3, [0u8; 32], block_a, &beacon)
+            .expect("the attester holds a credential for this slot");
+        let b = attester
+            .attest(CHAIN_ID, 1, 1, 3, [0u8; 32], block_b, &beacon)
+            .expect("the attester holds a credential for this slot");
 
         let mut pool = EvidencePool::new();
         assert!(pool
@@ -422,7 +444,9 @@ mod tests {
                 continue;
             }
             let filler = Block::new(1, [(v % 251) as u8 + 3; 32], Parent::Genesis);
-            let f = attester.attest(CHAIN_ID, 1, 1, v, [0u8; 32], filler, &beacon);
+            let f = attester
+                .attest(CHAIN_ID, 1, 1, v, [0u8; 32], filler, &beacon)
+                .expect("the attester holds a credential for this slot");
             let _ = pool.observe(
                 &address,
                 1,
@@ -454,8 +478,12 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
-        let b = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_b, &beacon);
+        let a = attester
+            .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon)
+            .expect("the attester holds a credential for this slot");
+        let b = attester
+            .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_b, &beacon)
+            .expect("the attester holds a credential for this slot");
 
         let mut pool = EvidencePool::new();
         assert!(pool
@@ -494,9 +522,15 @@ mod tests {
         let high = Block::new(1, [7u8; 32], Parent::Genesis);
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let h = attester.attest(CHAIN_ID, 1, 1, 5, [0u8; 32], high, &beacon);
-        let a = attester.attest(CHAIN_ID, 1, 1, 2, [0u8; 32], block_a, &beacon);
-        let b = attester.attest(CHAIN_ID, 1, 1, 2, [0u8; 32], block_b, &beacon);
+        let h = attester
+            .attest(CHAIN_ID, 1, 1, 5, [0u8; 32], high, &beacon)
+            .expect("the attester holds a credential for this slot");
+        let a = attester
+            .attest(CHAIN_ID, 1, 1, 2, [0u8; 32], block_a, &beacon)
+            .expect("the attester holds a credential for this slot");
+        let b = attester
+            .attest(CHAIN_ID, 1, 1, 2, [0u8; 32], block_b, &beacon)
+            .expect("the attester holds a credential for this slot");
 
         let mut pool = EvidencePool::new();
         assert!(pool
@@ -542,8 +576,12 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
-        let b = attester.attest(CHAIN_ID, 1, 1, 1, [0u8; 32], block_b, &beacon);
+        let a = attester
+            .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon)
+            .expect("the attester holds a credential for this slot");
+        let b = attester
+            .attest(CHAIN_ID, 1, 1, 1, [0u8; 32], block_b, &beacon)
+            .expect("the attester holds a credential for this slot");
 
         let mut pool = EvidencePool::new();
         assert!(pool
@@ -601,8 +639,12 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
-        let b = attester.attest(CHAIN_ID, 1, 1, 2, [0u8; 32], block_b, &beacon);
+        let a = attester
+            .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon)
+            .expect("the attester holds a credential for this slot");
+        let b = attester
+            .attest(CHAIN_ID, 1, 1, 2, [0u8; 32], block_b, &beacon)
+            .expect("the attester holds a credential for this slot");
 
         let mut pool = EvidencePool::new();
         assert!(pool
@@ -638,8 +680,12 @@ mod tests {
         let beacon = Beacon::genesis();
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
-        let a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
-        let b = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_b, &beacon);
+        let a = attester
+            .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon)
+            .expect("the attester holds a credential for this slot");
+        let b = attester
+            .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_b, &beacon)
+            .expect("the attester holds a credential for this slot");
 
         let mut pool = EvidencePool::new();
         assert!(pool
@@ -689,7 +735,9 @@ mod tests {
         let mut pool = EvidencePool::new();
 
         for height in 1..=10_000u64 {
-            let att = attester.attest(CHAIN_ID, height, 1, 0, [0u8; 32], block, &beacon);
+            let att = attester
+                .attest(CHAIN_ID, height, 1, 0, [0u8; 32], block, &beacon)
+                .expect("the attester holds a credential for this slot");
             let _ = pool.observe(
                 &address,
                 height,
@@ -720,8 +768,12 @@ mod tests {
         let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
         let block_b = Block::new(1, [2u8; 32], Parent::Genesis);
 
-        let honest_a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
-        let honest_b = attester.attest(CHAIN_ID, 1, 1, 1, [0u8; 32], block_b, &beacon);
+        let honest_a = attester
+            .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon)
+            .expect("the attester holds a credential for this slot");
+        let honest_b = attester
+            .attest(CHAIN_ID, 1, 1, 1, [0u8; 32], block_b, &beacon)
+            .expect("the attester holds a credential for this slot");
         let framed = Equivocation {
             offender: address.clone(),
             height: 1,
@@ -741,8 +793,12 @@ mod tests {
             "a forged equal view over a genuine cross view re vote no longer authenticates"
         );
 
-        let double_a = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon);
-        let double_b = attester.attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_b, &beacon);
+        let double_a = attester
+            .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_a, &beacon)
+            .expect("the attester holds a credential for this slot");
+        let double_b = attester
+            .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_b, &beacon)
+            .expect("the attester holds a credential for this slot");
         let genuine = Equivocation {
             offender: address,
             height: 1,

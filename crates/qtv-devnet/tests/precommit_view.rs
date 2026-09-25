@@ -51,7 +51,9 @@ fn a_precommit_carries_the_view_that_authorised_the_stage() {
         .find(|&i| i != leader0_idx)
         .expect("a follower that does not lead view zero");
 
-    let proposal = nodes[leader0_idx].build_proposal(&selection);
+    let proposal = nodes[leader0_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
     let _ = nodes[victim].on_proposal(&selection, leader0, proposal);
     assert_eq!(
         nodes[victim].staged_view(),

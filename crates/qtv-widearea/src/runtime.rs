@@ -212,9 +212,10 @@ impl Runtime {
             self.emit(message);
         }
         if up && view > 0 {
-            let record = self.node.make_view_change(view);
-            self.node.collect_view_change(selection, record.clone());
-            self.emit(Message::ViewChange(Box::new(record)));
+            if let Some(record) = self.node.make_view_change(view) {
+                self.node.collect_view_change(selection, record.clone());
+                self.emit(Message::ViewChange(Box::new(record)));
+            }
         }
         if up {
             self.try_justified(selection);
@@ -224,9 +225,10 @@ impl Runtime {
 
     fn on_view_timeout(&mut self, selection: &Selection) {
         let target = self.node.view() + 1;
-        let record = self.node.make_view_change(target);
-        self.node.collect_view_change(selection, record.clone());
-        self.emit(Message::ViewChange(Box::new(record)));
+        if let Some(record) = self.node.make_view_change(target) {
+            self.node.collect_view_change(selection, record.clone());
+            self.emit(Message::ViewChange(Box::new(record)));
+        }
         if let Some(sync) = self.node.view_sync_target(selection) {
             if sync > self.node.view() {
                 self.node.jump_to(sync);

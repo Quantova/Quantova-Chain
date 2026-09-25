@@ -385,12 +385,12 @@ impl Consensus {
         CommitteeView::new(self.roster.iter().map(|r| r.registration()).collect())
     }
 
-    pub fn own_reveal(&self, slot: u64) -> Credential {
+    pub fn own_reveal(&self, slot: u64) -> Option<Credential> {
         self.own.reveal(slot)
     }
 
     pub fn published_self(&self, beacon: &Beacon, slot: u64) -> Option<PublishedReveal> {
-        let credential = self.own.reveal(slot);
+        let credential = self.own.reveal(slot)?;
         if self.view().admits(beacon, slot, self.own_id, &credential) {
             Some(PublishedReveal::new(self.own_id, credential))
         } else {
@@ -474,7 +474,7 @@ impl Consensus {
         committee: CommitteeDigest,
         block: Block,
         beacon: &Beacon,
-    ) -> Attestation {
+    ) -> Option<Attestation> {
         self.own
             .attest(self.chain_id, height, slot, view, committee, block, beacon)
     }
@@ -564,7 +564,7 @@ mod tests {
             self.attesters
                 .iter()
                 .filter_map(|(id, attester)| {
-                    let credential = attester.reveal(slot);
+                    let credential = attester.reveal(slot)?;
                     if consensus.view().admits(beacon, slot, *id, &credential) {
                         Some(PublishedReveal::new(*id, credential))
                     } else {
@@ -587,7 +587,7 @@ mod tests {
                 .iter()
                 .filter(|id| self.online.get(id).copied().unwrap_or(false))
                 .filter_map(|id| self.attesters.get(id))
-                .map(|a| {
+                .filter_map(|a| {
                     a.attest(
                         CHAIN_ID,
                         height,
@@ -739,15 +739,19 @@ mod tests {
         let mk_a = || block_for(1);
         let mk_b = || Block::new(1, header_value(&[42u8; 32]), Parent::Genesis);
         let att = |id: u64, block: Block| {
-            sim.attesters.get(&id).unwrap().attest(
-                CHAIN_ID,
-                1,
-                1,
-                0,
-                selection.commitment.digest(),
-                block,
-                &beacon,
-            )
+            sim.attesters
+                .get(&id)
+                .unwrap()
+                .attest(
+                    CHAIN_ID,
+                    1,
+                    1,
+                    0,
+                    selection.commitment.digest(),
+                    block,
+                    &beacon,
+                )
+                .expect("the attester holds a credential for this slot")
         };
         let atts_a = vec![att(1, mk_a()), att(2, mk_a()), att(4, mk_a())];
         let atts_b = vec![att(3, mk_b()), att(4, mk_b())];
@@ -916,19 +920,23 @@ mod tests {
 
         let honest: Vec<Attestation> = [1u64, 2, 3, 4]
             .iter()
-            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_for(1), &beacon))
+            .filter_map(|id| {
+                sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_for(1), &beacon)
+            })
             .collect();
         assert!(equivocation_offenders(CHAIN_ID, &honest, &roster).is_empty());
 
-        let conflict = sim.attesters[&2].attest(
-            CHAIN_ID,
-            1,
-            1,
-            0,
-            [0u8; 32],
-            Block::new(1, header_value(&[9u8; 32]), Parent::Genesis),
-            &beacon,
-        );
+        let conflict = sim.attesters[&2]
+            .attest(
+                CHAIN_ID,
+                1,
+                1,
+                0,
+                [0u8; 32],
+                Block::new(1, header_value(&[9u8; 32]), Parent::Genesis),
+                &beacon,
+            )
+            .expect("the attester holds a credential for this slot");
         let mut evidence = honest.clone();
         evidence.push(conflict);
         assert_eq!(
@@ -936,17 +944,20 @@ mod tests {
             vec![2]
         );
 
-        let mut forged_a =
-            sim.attesters[&3].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_for(1), &beacon);
-        let mut forged_b = sim.attesters[&3].attest(
-            CHAIN_ID,
-            1,
-            1,
-            0,
-            [0u8; 32],
-            Block::new(1, header_value(&[7u8; 32]), Parent::Genesis),
-            &beacon,
-        );
+        let mut forged_a = sim.attesters[&3]
+            .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], block_for(1), &beacon)
+            .expect("the attester holds a credential for this slot");
+        let mut forged_b = sim.attesters[&3]
+            .attest(
+                CHAIN_ID,
+                1,
+                1,
+                0,
+                [0u8; 32],
+                Block::new(1, header_value(&[7u8; 32]), Parent::Genesis),
+                &beacon,
+            )
+            .expect("the attester holds a credential for this slot");
         forged_a.from = 1;
         forged_b.from = 1;
         assert!(
@@ -967,11 +978,18 @@ mod tests {
 
         let mut evidence: Vec<Attestation> = [1u64, 2, 3, 4]
             .iter()
-            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], value_a, &beacon))
+            .map(|id| {
+                sim.attesters[id]
+                    .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], value_a, &beacon)
+                    .expect("the attester holds a credential for this slot")
+            })
             .collect();
         for id in [2u64, 3, 4] {
-            evidence
-                .push(sim.attesters[&id].attest(CHAIN_ID, 1, 1, 1, [0u8; 32], value_b, &beacon));
+            evidence.push(
+                sim.attesters[&id]
+                    .attest(CHAIN_ID, 1, 1, 1, [0u8; 32], value_b, &beacon)
+                    .expect("the attester holds a credential for this slot"),
+            );
         }
         assert_eq!(
             double_finalize_offenders(CHAIN_ID, &evidence, &roster, 3),
@@ -981,10 +999,22 @@ mod tests {
 
         let mut honest: Vec<Attestation> = [1u64, 2, 3, 4]
             .iter()
-            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], value_a, &beacon))
+            .map(|id| {
+                sim.attesters[id]
+                    .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], value_a, &beacon)
+                    .expect("the attester holds a credential for this slot")
+            })
             .collect();
-        honest.push(sim.attesters[&2].attest(CHAIN_ID, 1, 1, 2, [0u8; 32], value_a, &beacon));
-        honest.push(sim.attesters[&3].attest(CHAIN_ID, 1, 1, 2, [0u8; 32], value_b, &beacon));
+        honest.push(
+            sim.attesters[&2]
+                .attest(CHAIN_ID, 1, 1, 2, [0u8; 32], value_a, &beacon)
+                .expect("the attester holds a credential for this slot"),
+        );
+        honest.push(
+            sim.attesters[&3]
+                .attest(CHAIN_ID, 1, 1, 2, [0u8; 32], value_b, &beacon)
+                .expect("the attester holds a credential for this slot"),
+        );
         assert!(
             double_finalize_offenders(CHAIN_ID, &honest, &roster, 3).is_empty(),
             "a lone cross view re vote below a finalizing quorum is not a double finalize"
@@ -992,12 +1022,22 @@ mod tests {
 
         let mut framed: Vec<Attestation> = [1u64, 2, 3, 4]
             .iter()
-            .map(|id| sim.attesters[id].attest(CHAIN_ID, 1, 1, 0, [0u8; 32], value_a, &beacon))
+            .map(|id| {
+                sim.attesters[id]
+                    .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], value_a, &beacon)
+                    .expect("the attester holds a credential for this slot")
+            })
             .collect();
         for id in [2u64, 3, 4] {
-            framed.push(sim.attesters[&id].attest(CHAIN_ID, 1, 1, 1, [0u8; 32], value_b, &beacon));
+            framed.push(
+                sim.attesters[&id]
+                    .attest(CHAIN_ID, 1, 1, 1, [0u8; 32], value_b, &beacon)
+                    .expect("the attester holds a credential for this slot"),
+            );
         }
-        let mut forged = sim.attesters[&2].attest(CHAIN_ID, 1, 1, 1, [0u8; 32], value_b, &beacon);
+        let mut forged = sim.attesters[&2]
+            .attest(CHAIN_ID, 1, 1, 1, [0u8; 32], value_b, &beacon)
+            .expect("the attester holds a credential for this slot");
         forged.from = 1;
         framed.push(forged);
         assert_eq!(
@@ -1031,7 +1071,12 @@ mod tests {
             .expect("committee");
         assert_eq!(selection.members, vec![1, 2, 3, 4]);
 
-        let mislabelled = PublishedReveal::new(2, peers.attesters[&3].reveal(slot));
+        let mislabelled = PublishedReveal::new(
+            2,
+            peers.attesters[&3]
+                .reveal(slot)
+                .expect("the attester holds a credential for this slot"),
+        );
         assert!(!consensus.verify_published(&beacon, slot, &mislabelled));
         let honest_but_one = vec![
             consensus.published_self(&beacon, slot).unwrap(),
@@ -1045,7 +1090,12 @@ mod tests {
 
         let only_two = vec![
             consensus.published_self(&beacon, slot).unwrap(),
-            PublishedReveal::new(3, peers.attesters[&3].reveal(slot)),
+            PublishedReveal::new(
+                3,
+                peers.attesters[&3]
+                    .reveal(slot)
+                    .expect("the attester holds a credential for this slot"),
+            ),
         ];
         let liveness = consensus
             .select(&beacon, slot, &only_two)
@@ -1093,6 +1143,7 @@ mod tests {
                     block,
                     &beacon,
                 )
+                .expect("the attester holds a credential for this slot")
             })
             .collect();
         let depth = atts[0].membership.path.siblings.len();

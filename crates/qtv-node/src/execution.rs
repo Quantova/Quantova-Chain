@@ -118,6 +118,10 @@ mod slot_charge {
         .expect("the call halts")
     }
 
+    fn generous_limit_for(bytes: &[u8]) -> u64 {
+        (bytes.len() as u64).saturating_mul(CODE_ACCESS_BYTE_METER) + 200_000
+    }
+
     #[test]
     fn the_reading_stops_when_the_caller_runs_out_of_ways_to_pay_for_it() {
         use std::cell::Cell;
@@ -175,13 +179,24 @@ mod slot_charge {
         );
 
         let access_cost = (bytes.len() as u64).saturating_mul(CODE_ACCESS_BYTE_METER);
-        let lean = access_cost + (8 * SLOT_ACCESS_METER) + 5_000;
+        let (asked_none, too_poor) = call(access_cost + 1);
+        assert!(
+            matches!(too_poor, Err(ExecError::MeterExhausted)),
+            "a call that cannot pay to enter is refused for that reason, got {too_poor:?}"
+        );
+        assert_eq!(asked_none, 0, "and it reads nothing at all");
+
+        let full_cost = generous
+            .as_ref()
+            .expect("the funded call halted")
+            .meter_used;
+        let lean = access_cost + (full_cost - access_cost) / 2;
         let (asked_lean, outcome) = call(lean);
         assert!(
             matches!(outcome, Err(ExecError::MeterExhausted)),
-            "a call that cannot pay for its reads is refused"
+            "a call that cannot pay for its reads is refused, got {outcome:?} after {asked_lean} reads"
         );
-        let affordable = (lean - access_cost) / SLOT_ACCESS_METER;
+        let affordable = lean.saturating_sub(access_cost) / SLOT_ACCESS_METER;
         assert!(
             asked_lean <= affordable,
             "the node must not read more slots than the caller could pay for: \
@@ -374,8 +389,11 @@ pub fn execute_contract_call_lazy(
     container
         .entry_offset(&selector)
         .ok_or(ExecError::BadContainer)?;
-    let interpreter = Interpreter::for_entry(&container, selector, vm_limit)
-        .map_err(|_| ExecError::BadContainer)?;
+    let interpreter =
+        Interpreter::for_entry(&container, selector, vm_limit).map_err(|fault| match fault {
+            Fault::OutOfMeter => ExecError::MeterExhausted,
+            _ => ExecError::BadContainer,
+        })?;
     let affordable_touches = vm_limit / SLOT_ACCESS_METER;
     let touches = std::cell::Cell::new(0u64);
     let beyond_budget = std::cell::Cell::new(false);
@@ -437,8 +455,11 @@ fn execute_contract_call(
     container
         .entry_offset(&selector)
         .ok_or(ExecError::BadContainer)?;
-    let interpreter = Interpreter::for_entry(&container, selector, vm_limit)
-        .map_err(|_| ExecError::BadContainer)?;
+    let interpreter =
+        Interpreter::for_entry(&container, selector, vm_limit).map_err(|fault| match fault {
+            Fault::OutOfMeter => ExecError::MeterExhausted,
+            _ => ExecError::BadContainer,
+        })?;
     let outcome = interpreter
         .with_storage(storage)
         .with_memory(memory)

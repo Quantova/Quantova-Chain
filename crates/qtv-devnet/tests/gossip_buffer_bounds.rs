@@ -44,7 +44,9 @@ fn a_flood_of_far_view_proposals_stays_bounded_in_the_future_buffer() {
     let leader0 = leader_for(&selection, 0);
     let leader0_idx = index_of(&config, leader0);
 
-    let base_proposal = nodes[leader0_idx].build_proposal(&selection);
+    let base_proposal = nodes[leader0_idx]
+        .build_proposal(&selection)
+        .expect("the leader holds a credential for the slot it leads");
 
     let victim = (0..nodes.len())
         .find(|&i| i != leader0_idx)
@@ -80,7 +82,11 @@ fn a_flood_of_distinct_target_views_stays_bounded_per_sender() {
     let flood: u64 = 1_000;
     let mut records = Vec::with_capacity(flood as usize);
     for view in 1..=flood {
-        records.push(nodes[0].make_view_change(view));
+        records.push(
+            nodes[0]
+                .make_view_change(view)
+                .expect("a committee member can vote to change view"),
+        );
     }
 
     let victim = 1usize;
