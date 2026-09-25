@@ -119,6 +119,81 @@ mod slot_charge {
     }
 
     #[test]
+    fn the_reading_stops_when_the_caller_runs_out_of_ways_to_pay_for_it() {
+        use std::cell::Cell;
+
+        let selector = [3u8, 3, 3, 3];
+        let slots: Vec<u64> = (0..64).collect();
+        let mut memory = vec![0u8; 32 * slots.len() + 64];
+        for (i, slot) in slots.iter().enumerate() {
+            let key = qtv_vm::abi::scalar_key(*slot);
+            memory[i * 32..i * 32 + 32].copy_from_slice(&key);
+        }
+        let src = {
+            let mut lines = String::new();
+            for i in 0..slots.len() {
+                lines.push_str(&format!("LDI r0, {}\nSLOAD r1, r0\n", i * 32));
+            }
+            lines.push_str("HALT");
+            lines
+        };
+        let code = qtv_vm::asm::assemble(&src).expect("assembles");
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: slots.clone(),
+                    writes: vec![],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
+            }],
+        );
+        let bytes = container.canonical_bytes();
+
+        let call = |limit: u64| {
+            let asked = Cell::new(0u64);
+            let outcome = {
+                let counting = |_k: &[u8; 32]| {
+                    asked.set(asked.get() + 1);
+                    41u64
+                };
+                execute_contract_call_lazy(&bytes, selector, &counting, &memory, limit)
+            };
+            (asked.get(), outcome)
+        };
+
+        let (asked_generous, generous) = call(4_000_000);
+        assert!(generous.is_ok(), "a funded call still runs every read");
+        assert_eq!(
+            asked_generous,
+            slots.len() as u64,
+            "a funded call reads every slot it declared"
+        );
+
+        let access_cost = (bytes.len() as u64).saturating_mul(CODE_ACCESS_BYTE_METER);
+        let lean = access_cost + (8 * SLOT_ACCESS_METER) + 5_000;
+        let (asked_lean, outcome) = call(lean);
+        assert!(
+            matches!(outcome, Err(ExecError::MeterExhausted)),
+            "a call that cannot pay for its reads is refused"
+        );
+        let affordable = (lean - access_cost) / SLOT_ACCESS_METER;
+        assert!(
+            asked_lean <= affordable,
+            "the node must not read more slots than the caller could pay for: \
+             asked {asked_lean}, affordable {affordable}"
+        );
+        assert!(
+            asked_lean < slots.len() as u64,
+            "the reading must stop short of the whole declared set"
+        );
+    }
+
+    #[test]
     fn a_read_costs_the_same_slot_charge_as_a_write() {
         let with_read = run("LDI r0, 0\nSLOAD r1, r0\nHALT", vec![0]);
         let without = run("LDI r0, 0\nHALT", vec![]);
@@ -301,8 +376,19 @@ pub fn execute_contract_call_lazy(
         .ok_or(ExecError::BadContainer)?;
     let interpreter = Interpreter::for_entry(&container, selector, vm_limit)
         .map_err(|_| ExecError::BadContainer)?;
+    let affordable_touches = vm_limit / SLOT_ACCESS_METER;
+    let touches = std::cell::Cell::new(0u64);
+    let beyond_budget = std::cell::Cell::new(false);
+    let metered_loader = |key: &[u8; 32]| -> u64 {
+        if touches.get() >= affordable_touches {
+            beyond_budget.set(true);
+            return 0;
+        }
+        touches.set(touches.get().saturating_add(1));
+        loader(key)
+    };
     let outcome = interpreter
-        .with_storage_loader(loader)
+        .with_storage_loader(&metered_loader)
         .with_memory(memory)
         .run()
         .map_err(|fault| match fault {
@@ -310,6 +396,9 @@ pub fn execute_contract_call_lazy(
             Fault::OutOfMeter => ExecError::MeterExhausted,
             other => ExecError::Vm(other),
         })?;
+    if beyond_budget.get() {
+        return Err(ExecError::MeterExhausted);
+    }
     let touched = outcome.storage.len() as u64 + outcome.fetched as u64;
     let meter_used = outcome
         .meter_used
