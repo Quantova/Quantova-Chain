@@ -614,9 +614,11 @@ fn validators(node: &DevNode) -> Json {
             continue;
         };
         let stake = ledger.staked_weight(&address);
+        let weight = ledger.consensus_weight_in_epoch(&address, ledger.current_epoch());
         list.push(object(vec![
             ("address", Json::str(&address)),
             ("stake", Json::Int(stake)),
+            ("weight", Json::Int(weight)),
         ]));
     }
     object(vec![

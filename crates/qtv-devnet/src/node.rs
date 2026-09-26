@@ -175,8 +175,6 @@ fn evict_fairly<T>(buffer: &mut Vec<T>, incoming: u64, sender_of: impl Fn(&T) ->
 
 const MAX_JUSTIFICATION_CACHE: usize = 4096;
 
-const EVIDENCE_WINDOW: Height = 256;
-
 const MAX_SERVE_BLOCKS: u64 = 256;
 
 #[derive(Debug)]
@@ -2485,11 +2483,9 @@ impl DevNode {
 
     fn settle_evidence(&mut self, included: &[String]) {
         let chain_id = self.fee_params.chain_id;
-        let height = self.height;
         let ledger = &self.ledger;
         self.evidence_pool.retain(|evidence| {
-            evidence.height.saturating_add(EVIDENCE_WINDOW) > height
-                && !ledger.is_validator_banned(&evidence.offender)
+            !ledger.is_validator_banned(&evidence.offender)
                 && !included.contains(&evidence_transaction(evidence, chain_id).id())
         });
     }
@@ -2983,6 +2979,10 @@ impl DevNode {
             .is_verified()
         {
             return Err(SyncError::UnverifiedCertificate);
+        }
+        for attestation in &certificate.attestations {
+            let offender = self.validator_address(attestation.from);
+            self.watch_for_equivocation(attestation, offender);
         }
         self.observe_finality(self.height, subject.val);
         if self.fatal.is_some() {

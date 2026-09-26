@@ -147,3 +147,56 @@ fn the_node_advances_its_checkpoint_each_epoch() {
         );
     }
 }
+
+#[test]
+fn a_synced_certificate_exposes_a_double_sign_the_node_saw_earlier() {
+    let online = [true, true, true, false];
+    let cfg = config(&unique_base("sync-equivocation"), &online, vec![]);
+    let mut net = Devnet::over_duplex(cfg.clone()).expect("devnet");
+    net.step().expect("the committee finalises height one");
+    let honest = net
+        .served_blocks(0, 1, 1)
+        .into_iter()
+        .next()
+        .expect("the height one block");
+    drop(net);
+    let certificate = qtv_devnet::wire::certificate_from_bytes(honest.certificate())
+        .expect("the served certificate decodes");
+    let signed = certificate
+        .attestations
+        .iter()
+        .find(|a| a.from == 1)
+        .expect("validator one signed the certificate");
+
+    let mut node = DevNode::open(&cfg.nodes[3], &cfg).expect("verifier node");
+    let offender = qtv_attest::Attester::from_secret_with_slots(
+        1,
+        &qtv_node::keys::fixture_secret(1),
+        VALIDATOR_STAKE,
+        qtv_devnet::config::DEFAULT_SLOTS,
+    );
+    let other = qtv_node::consensus::Block::new(1, [9u8; 32], qtv_node::consensus::Parent::Genesis);
+    node.on_attestation(
+        offender
+            .attest(
+                cfg.fee_params.chain_id,
+                1,
+                signed.slot,
+                signed.view,
+                [0u8; 32],
+                other,
+                &qtv_node::consensus::genesis_beacon(),
+            )
+            .expect("the attester holds a credential for this slot"),
+    );
+    assert!(node.pending_evidence().is_empty());
+    node.apply_synced_block(honest)
+        .expect("the honest block syncs");
+    let offender_address = qtv_node::keys::validator_address(&qtv_node::keys::fixture_secret(1));
+    assert!(
+        node.pending_evidence()
+            .iter()
+            .any(|e| e.offender == offender_address),
+        "the certificate's precommit conflicts with the one seen by gossip"
+    );
+}
