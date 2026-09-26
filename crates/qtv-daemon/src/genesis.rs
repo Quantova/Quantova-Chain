@@ -17,7 +17,9 @@ use crate::util::from_hex;
 
 const PK_BYTES: usize = qtv_crypto::ml_dsa::PUBLIC_KEY_BYTES;
 
-const MAX_GENESIS_SLOTS: u64 = 1 << 20;
+const MAX_GENESIS_SLOTS: u64 = 1 << 16;
+
+const MIN_GENESIS_SLOTS: u64 = 4;
 
 pub struct GenesisFile {
     pub chain_id: String,
@@ -221,8 +223,11 @@ impl GenesisFile {
         if validators.is_empty() {
             return Err("the genesis names no validators, so no committee can form".to_string());
         }
-        if slots == 0 {
-            return Err("the genesis slot budget is zero, so no height can finalise".to_string());
+        if slots < MIN_GENESIS_SLOTS {
+            return Err(format!(
+                "the genesis slot budget of {slots} is below {MIN_GENESIS_SLOTS}, so no epoch \
+                 leaves room to register the next one"
+            ));
         }
         if slots > MAX_GENESIS_SLOTS {
             return Err(format!(
@@ -981,6 +986,16 @@ mod tests {
         let result = GenesisFile::load(&path);
         let _ = std::fs::remove_file(&path);
         result
+    }
+
+    #[test]
+    fn a_slot_budget_outside_what_the_one_time_tree_supports_is_refused() {
+        let small = format!("slots = 2\n{}", three_validator_preamble());
+        let err = load_text("slots-small", small).err().expect("refused");
+        assert!(err.contains("below"), "{err}");
+        let large = format!("slots = 65537\n{}", three_validator_preamble());
+        let err = load_text("slots-large", large).err().expect("refused");
+        assert!(err.contains("past the ceiling"), "{err}");
     }
 
     #[test]

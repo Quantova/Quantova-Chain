@@ -397,3 +397,16 @@ fn a_restarted_locked_validator_refuses_an_unjustified_conflict_at_a_later_view(
     );
     assert_eq!(nodes[victim].staged_value(), Some(value_a));
 }
+
+#[test]
+fn a_second_node_on_one_store_is_refused_before_it_touches_the_store() {
+    let base = unique_base("store-lock");
+    let config = config(&base, &[true, true, true, true], Vec::new());
+    let first = DevNode::open(&config.nodes[0], &config).expect("the first node opens");
+    let blocks = config.nodes[0].store_dir.join("blocks.log");
+    let before = std::fs::metadata(&blocks).map(|m| m.len()).ok();
+    assert!(DevNode::open(&config.nodes[0], &config).is_err());
+    assert_eq!(std::fs::metadata(&blocks).map(|m| m.len()).ok(), before);
+    drop(first);
+    assert!(DevNode::open(&config.nodes[0], &config).is_ok());
+}

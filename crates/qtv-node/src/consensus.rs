@@ -449,8 +449,20 @@ impl Consensus {
             .collect();
         let weights = view.weights();
         let registered_weight = weights.iter().copied().fold(0u64, u64::saturating_add);
+        let absent_stake: u128 = self
+            .roster
+            .iter()
+            .filter(|reg| !members.contains(&reg.id))
+            .filter(|reg| {
+                let weight = view.effective_weight(reg.stake);
+                weight > 0
+                    && u128::from(self.budget) * u128::from(weight) >= u128::from(registered_weight)
+            })
+            .map(|reg| u128::from(reg.stake))
+            .fold(0u128, u128::saturating_add);
         let commitment = CommitteeCommitment::from_member_keys(slot, member_keys, self.budget)
-            .with_total_weight(registered_weight);
+            .with_total_weight(registered_weight)
+            .with_absent_stake(absent_stake);
         let leader = view.elect_leader(&committee, beacon, slot)?.id;
         let expected = qtv_sampler::sortition::expected_committee(&weights, self.budget);
         let tau =

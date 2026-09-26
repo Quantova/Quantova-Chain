@@ -110,6 +110,9 @@ const STAKE_VALIDATORS_TAG: &[u8] = b"qtv/stake/validators";
 const STAKE_TOTAL_TAG: &[u8] = b"qtv/stake/total";
 const STAKE_TOTAL_ACTIVE_TAG: &[u8] = b"qtv/stake/total/active";
 const STAKE_TOTAL_RAISED_TAG: &[u8] = b"qtv/stake/total/raised";
+const STAKE_EXITING_TAG: &[u8] = b"qtv/stake/exiting";
+const STAKE_EXITING_ACTIVE_TAG: &[u8] = b"qtv/stake/exiting/active";
+const STAKE_EXITING_RAISED_TAG: &[u8] = b"qtv/stake/exiting/raised";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FeeSplit {
@@ -829,6 +832,13 @@ fn u64_from_le(bytes: &[u8]) -> Option<u64> {
     bytes.try_into().ok().map(u64::from_le_bytes)
 }
 
+fn exiting_amount(bond: Option<&Bond>) -> u64 {
+    match bond {
+        Some(bond) if bond.exit_requested_at.is_some() => bond.amount,
+        _ => 0,
+    }
+}
+
 fn action_is_enactable(action: &Action) -> bool {
     match action {
         Action::Activate { feature, .. } => !feature.is_empty(),
@@ -852,11 +862,62 @@ impl Ledger {
     }
 
     pub fn set_stake_bond(&mut self, id: &[u8; 32], bond: &Bond) {
+        let before = exiting_amount(self.stake_bond(id).as_ref());
         self.write_leaf(stake_bond_key(id), to_bytes(bond));
+        self.adjust_exiting(before, exiting_amount(Some(bond)));
     }
 
     pub fn clear_stake_bond(&mut self, id: &[u8; 32]) {
+        let before = exiting_amount(self.stake_bond(id).as_ref());
         self.write_leaf(stake_bond_key(id), Vec::new());
+        self.adjust_exiting(before, 0);
+    }
+
+    fn stake_singleton(&self, tag: &[u8]) -> u64 {
+        self.trie
+            .get(&stake_singleton_key(tag))
+            .map(|bytes| from_bytes(bytes).expect("state holds a canonical stake total"))
+            .unwrap_or(0)
+    }
+
+    fn set_stake_singleton(&mut self, tag: &[u8], value: u64) {
+        self.write_leaf(stake_singleton_key(tag), to_bytes(&value));
+    }
+
+    fn matured_exiting(&self) -> u64 {
+        let total = self.stake_singleton(STAKE_EXITING_TAG);
+        if self.heights_per_epoch == 0 {
+            return total;
+        }
+        let raised_epoch = self
+            .stake_singleton(STAKE_EXITING_RAISED_TAG)
+            .checked_div(self.heights_per_epoch)
+            .unwrap_or(0);
+        if raised_epoch < self.current_epoch() {
+            total
+        } else {
+            self.stake_singleton(STAKE_EXITING_ACTIVE_TAG).min(total)
+        }
+    }
+
+    fn adjust_exiting(&mut self, before: u64, after: u64) {
+        let total = self.stake_singleton(STAKE_EXITING_TAG);
+        if after > before {
+            let active = self.matured_exiting();
+            self.set_stake_singleton(STAKE_EXITING_ACTIVE_TAG, active);
+            self.set_stake_singleton(STAKE_EXITING_RAISED_TAG, self.execution_height);
+            self.set_stake_singleton(STAKE_EXITING_TAG, total.saturating_add(after - before));
+        } else if before > after {
+            let next = total.saturating_sub(before - after);
+            let active = self.stake_singleton(STAKE_EXITING_ACTIVE_TAG).min(next);
+            self.set_stake_singleton(STAKE_EXITING_ACTIVE_TAG, active);
+            self.set_stake_singleton(STAKE_EXITING_TAG, next);
+        }
+    }
+
+    pub fn gov_electorate_now(&self) -> u64 {
+        self.matured_total_staked()
+            .saturating_sub(self.matured_exiting())
     }
 
     pub fn staked_weight(&self, address: &str) -> u64 {
@@ -3221,7 +3282,7 @@ impl Ledger {
         let referendum = Referendum::open(id, track, proposer_id.to_vec(), now, deposit);
         self.set_gov_referendum(id, &referendum);
         self.set_gov_action(id, &action);
-        self.set_gov_electorate(id, self.matured_total_staked());
+        self.set_gov_electorate(id, self.gov_electorate_now());
         self.set_gov_next_id(id + 1);
         self.record_side_event(SideEvent::GovPropose {
             referendum: id,
@@ -3304,7 +3365,7 @@ impl Ledger {
         if referendum.status != Status::Deciding {
             return Some(referendum.status);
         }
-        let live = self.matured_total_staked();
+        let live = self.gov_electorate_now();
         let electorate = u128::from(self.gov_electorate(referendum_id).unwrap_or(live).max(live));
         let status = referendum.resolve(now, electorate);
         if status == Status::Deciding {
@@ -8893,6 +8954,32 @@ mod stake_state_tests {
             "the ceiling grew with the supply, there is no fixed wall to hit"
         );
     }
+    #[test]
+    fn exiting_stake_leaves_the_electorate_from_the_next_epoch_only() {
+        let mut l = Ledger::new();
+        l.set_heights_per_epoch(100);
+        let a = gov_addr(68);
+        let b = gov_addr(69);
+        fund(&mut l, &a, 5_000 * 1_000_000);
+        fund(&mut l, &b, 5_000 * 1_000_000);
+        assert!(l.bond_with_fee(&a, 2_000 * 1_000_000, 0, 0));
+        assert!(l.bond_with_fee(&b, 2_000 * 1_000_000, 0, 0));
+        l.set_execution_height(550);
+        assert_eq!(l.gov_electorate_now(), 4_000 * 1_000_000);
+        assert!(l.request_stake_exit(&a, qtv_staking::BOND_LOCK_DAYS));
+        assert_eq!(l.gov_electorate_now(), 4_000 * 1_000_000);
+        l.set_execution_height(650);
+        assert_eq!(l.gov_electorate_now(), 2_000 * 1_000_000);
+        assert!(l.withdraw_stake(
+            &a,
+            qtv_staking::BOND_LOCK_DAYS + qtv_staking::UNBONDING_DAYS
+        ));
+        assert_eq!(l.gov_electorate_now(), 2_000 * 1_000_000);
+        assert!(l.request_stake_exit(&b, qtv_staking::BOND_LOCK_DAYS));
+        assert!(l.slash_validator(&b));
+        assert_eq!(l.gov_electorate_now(), 0);
+    }
+
     #[test]
     fn a_governance_blacklist_never_changes_consensus_weight() {
         let mut l = Ledger::new();

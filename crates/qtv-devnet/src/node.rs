@@ -147,6 +147,10 @@ fn proposal_weight(proposal: &Proposal) -> usize {
 
 const MAX_VIEW: View = 1 << 20;
 
+const ATTESTATION_VIEW_LOOKAHEAD: View = 16;
+
+const MAX_POLKA_REJECTS_PER_SENDER: u32 = 8;
+
 const MAX_VIEW_CHANGES_PER_SENDER: usize = 64;
 const MAX_ROUND_VIEW_CHANGES: usize = 8192;
 
@@ -339,6 +343,7 @@ pub struct DevNode {
     prevotes: Vec<Attestation>,
     future_props: Vec<Proposal>,
     view_changes: Vec<ViewChange>,
+    polka_rejects: HashMap<u64, u32>,
     justification_verified: HashSet<[u8; 32]>,
     silent: bool,
     selection_cache: RefCell<Option<Selection>>,
@@ -361,6 +366,7 @@ pub struct DevNode {
     pending_notes: Vec<RegisterNote>,
     sign_guard: Option<SignGuard>,
     prevote_guard: Option<PrevoteGuard>,
+    store_lock: Option<std::fs::File>,
     lock_file: LockFile,
     finality: FinalityLedger,
     guarded_height: Option<Height>,
@@ -387,6 +393,7 @@ fn genesis_supply_value(genesis: &Genesis, roster: &[ValidatorRegistration]) -> 
 impl DevNode {
     pub fn open(node: &NodeConfig, devnet: &DevnetConfig) -> Result<DevNode, RoundError> {
         std::fs::create_dir_all(&node.store_dir)?;
+        let store_lock = qtv_node::watermark::hold(&node.store_dir.join("node"))?;
         let block_store = BlockStore::open(node.store_dir.join("blocks.log"))?;
         let event_store = EventStore::open(node.store_dir.join("events.log"))?;
         let tx_index = TxIndex::open(node.store_dir.join("txindex"))?;
@@ -455,6 +462,7 @@ impl DevNode {
             prevotes: Vec::new(),
             future_props: Vec::new(),
             view_changes: Vec::new(),
+            polka_rejects: HashMap::new(),
             justification_verified: HashSet::new(),
             silent: false,
             selection_cache: RefCell::new(None),
@@ -477,6 +485,7 @@ impl DevNode {
             pending_notes: Vec::new(),
             sign_guard: Some(sign_guard),
             prevote_guard: Some(prevote_guard),
+            store_lock: Some(store_lock),
             lock_file,
             finality: FinalityLedger::new(),
             guarded_height: None,
@@ -984,10 +993,13 @@ impl DevNode {
                 selection.reveals
             }
             None if !certificate.committee_reveals.is_empty() => {
-                let signed = certificate.attesters();
                 let mut carried = certificate.committee_reveals.clone();
                 carried.sort_by_key(|r| r.id);
-                if carried.iter().any(|r| !signed.contains(&r.id)) {
+                carried.dedup_by_key(|r| r.id);
+                if carried
+                    .iter()
+                    .any(|r| !self.base_roster.iter().any(|b| b.id == r.id))
+                {
                     return Err(RoundError::Decode);
                 }
                 carried.iter().map(|r| r.credential.preimage).collect()
@@ -1356,6 +1368,7 @@ impl DevNode {
     pub fn stop_signing(&mut self) {
         self.sign_guard = None;
         self.prevote_guard = None;
+        self.store_lock = None;
     }
 
     fn guard_height(&mut self, view: View, value: &[u8; 32]) -> bool {
@@ -1510,6 +1523,7 @@ impl DevNode {
         self.prevotes.clear();
         self.future_props.clear();
         self.view_changes.clear();
+        self.polka_rejects.clear();
         self.justification_verified.clear();
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();
@@ -1913,7 +1927,7 @@ impl DevNode {
                 return;
             }
             if !self.verify_view_change_att(selection, &record)
-                || !self.verify_view_change_polka(selection, &record)
+                || !self.polka_admitted(selection, &record)
             {
                 return;
             }
@@ -1938,7 +1952,7 @@ impl DevNode {
         if !self.verify_view_change_att(selection, &record) {
             return;
         }
-        if !self.verify_view_change_polka(selection, &record) {
+        if !self.polka_admitted(selection, &record) {
             return;
         }
         let mut record = record;
@@ -2027,6 +2041,18 @@ impl DevNode {
             selection.commitment.total_weight,
             selection.commitment.budget,
         )
+    }
+
+    fn polka_admitted(&mut self, selection: &Selection, record: &ViewChange) -> bool {
+        let from = record.att.from;
+        if self.polka_rejects.get(&from).copied().unwrap_or(0) >= MAX_POLKA_REJECTS_PER_SENDER {
+            return false;
+        }
+        if self.verify_view_change_polka(selection, record) {
+            return true;
+        }
+        *self.polka_rejects.entry(from).or_insert(0) += 1;
+        false
     }
 
     fn verify_view_change_polka(&self, selection: &Selection, record: &ViewChange) -> bool {
@@ -2227,7 +2253,9 @@ impl DevNode {
     }
 
     pub fn on_attestation(&mut self, attestation: Attestation) -> bool {
-        if attestation.height != self.height {
+        if attestation.height != self.height
+            || attestation.view > self.view.saturating_add(ATTESTATION_VIEW_LOOKAHEAD)
+        {
             return false;
         }
         let digest = crate::wire::attestation_digest(&attestation);
@@ -2295,7 +2323,7 @@ impl DevNode {
         let tau = selection.tau.max(qtv_sampler::params::finality_threshold(
             commitment.len() as u64
         ));
-        let committee_stake = u128::from(commitment.committee_stake());
+        let quorum_stake = commitment.quorum_stake();
         let digest = commitment.digest();
         let mut by_view: std::collections::BTreeMap<View, std::collections::BTreeSet<u64>> =
             std::collections::BTreeMap::new();
@@ -2318,8 +2346,8 @@ impl DevNode {
                 .map(|&id| u128::from(commitment.stake_of(id)))
                 .fold(0u128, u128::saturating_add);
             seen.len() as u64 >= tau
-                && (committee_stake == 0
-                    || stake.saturating_mul(3) >= committee_stake.saturating_mul(2))
+                && quorum_stake > 0
+                && stake.saturating_mul(3) >= quorum_stake.saturating_mul(2)
         })
     }
 
@@ -2967,6 +2995,7 @@ impl DevNode {
         self.prevotes.clear();
         self.future_props.clear();
         self.view_changes.clear();
+        self.polka_rejects.clear();
         self.justification_verified.clear();
         *self.selection_cache.borrow_mut() = None;
         self.refresh_committee();

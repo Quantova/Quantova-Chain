@@ -12,7 +12,7 @@ pub struct SignGuard {
     _held: fs::File,
 }
 
-fn hold(path: &Path) -> io::Result<fs::File> {
+pub fn hold(path: &Path) -> io::Result<fs::File> {
     let mut name = path.as_os_str().to_owned();
     name.push(".lock");
     let file = fs::OpenOptions::new()

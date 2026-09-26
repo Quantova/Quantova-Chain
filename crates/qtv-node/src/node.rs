@@ -573,18 +573,8 @@ fn guardian_challenge(chain_id: u64, era: &[u8; 32], act: &GuardianAct) -> Vec<u
 }
 
 fn guardian_enact_action(act: &GuardianAct) -> Option<Action> {
-    if act.op != GUARDIAN_ENACT || !act.targets.is_empty() {
-        return None;
-    }
-    let mut decoder = Decoder::new(&act.payload);
-    let action = Action::decode(&mut decoder).ok()?;
-    if decoder.remaining() != 0 {
-        return None;
-    }
-    match action {
-        Action::BridgeAnchorSet { .. } => Some(action),
-        _ => None,
-    }
+    let _ = act;
+    None
 }
 
 pub fn guardian_enact_challenge(
@@ -1688,7 +1678,7 @@ pub fn reweigh_roster_for_epoch(
             reweighed
         })
         .collect();
-    if derived.iter().all(|r| r.stake == 0) {
+    if derived.iter().all(|r| r.stake == 0) && ledger.validator_ids().is_empty() {
         return base.to_vec();
     }
     derived
@@ -2234,6 +2224,60 @@ mod tests {
         assert_eq!(weights[0].stake, 0);
         assert_eq!(weights[1].stake, 5_000);
         assert_eq!(weights[2].stake, 0);
+    }
+
+    #[test]
+    fn no_guardian_enact_is_admitted() {
+        let action = Action::BridgeAnchorSet {
+            corridor: 1,
+            anchor: vec![7u8; 32],
+        };
+        let act = GuardianAct {
+            op: GUARDIAN_ENACT,
+            bound: 0,
+            targets: Vec::new(),
+            approvals: Vec::new(),
+            payload: qtv_codec::to_bytes(&action),
+        };
+        assert!(guardian_enact_action(&act).is_none());
+    }
+
+    #[test]
+    fn a_seeded_chain_never_hands_genesis_weight_back_to_a_slashed_roster() {
+        let base: Vec<crate::consensus::ValidatorRegistration> = (1..=3u64)
+            .map(|id| {
+                let mut reg = crate::consensus::ValidatorRegistration::from_secret(
+                    id,
+                    2_000,
+                    true,
+                    &[id as u8; 32],
+                    8,
+                );
+                reg.bond_address = validator_address(id);
+                reg
+            })
+            .collect();
+        let bare = Ledger::new();
+        assert_eq!(
+            reweigh_roster_for_epoch(&bare, &base, 0)
+                .iter()
+                .map(|r| r.stake)
+                .collect::<Vec<_>>(),
+            vec![2_000, 2_000, 2_000]
+        );
+        let mut live = Ledger::new();
+        let mut ids = Vec::new();
+        for r in &base {
+            live.seed_validator_bond(&r.bond_address, 2_000 * 1_000_000);
+            ids.push(address_bytes(&r.bond_address));
+        }
+        live.seed_validator_set(&ids);
+        for r in &base {
+            assert!(live.slash_validator(&r.bond_address));
+        }
+        assert!(reweigh_roster_for_epoch(&live, &base, 0)
+            .iter()
+            .all(|r| r.stake == 0));
     }
 
     fn fund(ledger: &mut Ledger, account: &KeyAccount, balance: u64) {

@@ -112,6 +112,16 @@ fn run(config_path: &Path) -> Result<(), String> {
         .ok_or_else(|| format!("this node's id {my_id} is not in the genesis validator set"))?;
     let idx = (my_id - 1) as usize;
 
+    if let Some(parent) = settings.keystore_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("creating the keystore folder {}: {e}", parent.display()))?;
+    }
+    let _keystore_lock = qtv_node::watermark::hold(&settings.keystore_path).map_err(|e| {
+        format!(
+            "locking the keystore {}: {e}",
+            settings.keystore_path.display()
+        )
+    })?;
     let secret = qtv_wipe::Zeroizing::new(
         qtv_node::keys::load_or_generate(&settings.keystore_path).map_err(|e| {
             format!(
