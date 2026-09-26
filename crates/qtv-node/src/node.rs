@@ -1164,6 +1164,15 @@ const VM_BLOCK_METER_BUDGET: u64 = 50_000_000;
 
 pub(crate) const BLOCK_FRESH_LEAF_CEILING: u64 = 220;
 const MAX_TX_METER: u64 = VM_BLOCK_METER_BUDGET / 4;
+const MAX_DEPLOY_METER: u64 = VM_BLOCK_METER_BUDGET;
+
+fn meter_ceiling(wrapper: &Wrapper) -> u64 {
+    if wrapper.body().call().target() == crate::ledger::vm_deploy_address() {
+        MAX_DEPLOY_METER
+    } else {
+        MAX_TX_METER
+    }
+}
 
 const MAX_REGISTRATION_BYTES: usize = 4096;
 const MAX_VM_ARGS: usize = 128 * 1024;
@@ -1204,7 +1213,7 @@ pub(crate) fn vm_admissible(
     }
     if body.nonce() != account.nonce
         || body.meter_limit() < crate::execution::TRANSFER_METER
-        || body.meter_limit() > MAX_TX_METER
+        || body.meter_limit() > meter_ceiling(wrapper)
     {
         return false;
     }
@@ -1438,7 +1447,7 @@ fn execute_ordered_across(
             }
             let sender = wrapper.body().sender().to_string();
             let sender_used = sender_vm_meter.get(&sender).copied().unwrap_or(0);
-            if sender_used.saturating_add(meter) > PER_SENDER_VM_METER {
+            if sender_used.saturating_add(meter) > PER_SENDER_VM_METER.max(meter_ceiling(wrapper)) {
                 continue;
             }
             if ledger
@@ -2652,6 +2661,40 @@ mod tests {
         );
         crate::parallel::execute_parallel(&mut parallel, &[deploy2], &fee, 8, 0);
         assert!(parallel.is_contract(&contract));
+    }
+
+    #[test]
+    fn a_deploy_may_carry_a_larger_meter_than_a_call() {
+        let fee = FeeParams::devnet();
+        let caller = keypair(142);
+        let mut ledger = Ledger::new();
+        fund(&mut ledger, &caller, 1_000_000 * 1_000_000);
+        let account = ledger.account(&caller.address());
+        let contract = qtv_idfmt::render_address(&[0x42u8; 32]).unwrap();
+        let deploy_target = crate::ledger::vm_deploy_address();
+        let heavy = MAX_TX_METER + 1_000_000;
+        let call = system_tx(&caller, &contract, vec![0u8; 8], 0, heavy, &fee);
+        assert!(
+            !vm_admissible(&call, &account, &fee, true),
+            "a call keeps the ordinary ceiling"
+        );
+        let deploy = system_tx(&caller, &deploy_target, b"QVM1".to_vec(), 0, heavy, &fee);
+        assert!(
+            vm_admissible(&deploy, &account, &fee, true),
+            "a deploy may carry up to its own ceiling"
+        );
+        let past = system_tx(
+            &caller,
+            &deploy_target,
+            b"QVM1".to_vec(),
+            0,
+            MAX_DEPLOY_METER + 1,
+            &fee,
+        );
+        assert!(
+            !vm_admissible(&past, &account, &fee, true),
+            "no deploy passes the deploy ceiling"
+        );
     }
 
     #[test]
