@@ -140,12 +140,6 @@ pub fn genesis_beacon() -> Beacon {
 
 pub const VIEW_CHANGE_SUBJECT_COST: u64 = u64::MAX;
 
-pub const PREVOTE_SUBJECT_COST: u64 = u64::MAX - 1;
-
-pub fn is_round_marker(cost: u64) -> bool {
-    cost == VIEW_CHANGE_SUBJECT_COST || cost == PREVOTE_SUBJECT_COST
-}
-
 pub fn equivocation_offenders(
     chain_id: u64,
     attestations: &[Attestation],
@@ -158,8 +152,8 @@ pub fn equivocation_offenders(
                 && first.height == second.height
                 && first.view == second.view
                 && first.block != second.block
-                && !is_round_marker(first.block.cost)
-                && !is_round_marker(second.block.cost)
+                && first.block.cost != VIEW_CHANGE_SUBJECT_COST
+                && second.block.cost != VIEW_CHANGE_SUBJECT_COST
                 && !flagged.contains(&first.from)
             {
                 if let Some(registration) = roster.iter().find(|r| r.id == first.from) {
@@ -184,7 +178,7 @@ pub fn double_finalize_offenders(
 ) -> Vec<u64> {
     let mut quorums: Vec<(u64, [u8; 32], Vec<u64>)> = Vec::new();
     for att in attestations {
-        if is_round_marker(att.block.cost) {
+        if att.block.cost == VIEW_CHANGE_SUBJECT_COST {
             continue;
         }
         let Some(registration) = roster.iter().find(|r| r.id == att.from) else {

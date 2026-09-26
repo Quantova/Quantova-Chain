@@ -110,9 +110,6 @@ const STAKE_VALIDATORS_TAG: &[u8] = b"qtv/stake/validators";
 const STAKE_TOTAL_TAG: &[u8] = b"qtv/stake/total";
 const STAKE_TOTAL_ACTIVE_TAG: &[u8] = b"qtv/stake/total/active";
 const STAKE_TOTAL_RAISED_TAG: &[u8] = b"qtv/stake/total/raised";
-const STAKE_EXITING_TAG: &[u8] = b"qtv/stake/exiting";
-const STAKE_EXITING_ACTIVE_TAG: &[u8] = b"qtv/stake/exiting/active";
-const STAKE_EXITING_RAISED_TAG: &[u8] = b"qtv/stake/exiting/raised";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FeeSplit {
@@ -195,7 +192,6 @@ pub struct QAsset {
     pub cap: u128,
     pub epoch_cap: u128,
     pub requires_stark: bool,
-    pub source_chain: u32,
 }
 
 impl Encode for QAsset {
@@ -204,7 +200,6 @@ impl Encode for QAsset {
         self.cap.encode(encoder);
         self.epoch_cap.encode(encoder);
         encoder.put_u8(self.requires_stark as u8);
-        encoder.put_u32(self.source_chain);
     }
 }
 
@@ -215,7 +210,6 @@ impl Decode for QAsset {
             cap: u128::decode(decoder)?,
             epoch_cap: u128::decode(decoder)?,
             requires_stark: decoder.get_u8()? != 0,
-            source_chain: decoder.get_u32()?,
         })
     }
 }
@@ -807,8 +801,6 @@ pub enum EnactError {
     Overflow,
 }
 
-pub const BRIDGE_FREEZE_REFUND_GRACE: u64 = 3_600;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FreezeLift {
     Refund,
@@ -835,17 +827,6 @@ fn u64_from_le(bytes: &[u8]) -> Option<u64> {
     bytes.try_into().ok().map(u64::from_le_bytes)
 }
 
-fn asset_accepts_source(asset: &QAsset, source_chain: u32) -> bool {
-    asset.source_chain == 0 || asset.source_chain == source_chain
-}
-
-fn exiting_amount(bond: Option<&Bond>) -> u64 {
-    match bond {
-        Some(bond) if bond.exit_requested_at.is_some() => bond.amount,
-        _ => 0,
-    }
-}
-
 fn action_is_enactable(action: &Action) -> bool {
     match action {
         Action::Activate { feature, .. } => !feature.is_empty(),
@@ -869,62 +850,11 @@ impl Ledger {
     }
 
     pub fn set_stake_bond(&mut self, id: &[u8; 32], bond: &Bond) {
-        let before = exiting_amount(self.stake_bond(id).as_ref());
         self.write_leaf(stake_bond_key(id), to_bytes(bond));
-        self.adjust_exiting(before, exiting_amount(Some(bond)));
     }
 
     pub fn clear_stake_bond(&mut self, id: &[u8; 32]) {
-        let before = exiting_amount(self.stake_bond(id).as_ref());
         self.write_leaf(stake_bond_key(id), Vec::new());
-        self.adjust_exiting(before, 0);
-    }
-
-    fn stake_singleton(&self, tag: &[u8]) -> u64 {
-        self.trie
-            .get(&stake_singleton_key(tag))
-            .map(|bytes| from_bytes(bytes).expect("state holds a canonical stake total"))
-            .unwrap_or(0)
-    }
-
-    fn set_stake_singleton(&mut self, tag: &[u8], value: u64) {
-        self.write_leaf(stake_singleton_key(tag), to_bytes(&value));
-    }
-
-    fn matured_exiting(&self) -> u64 {
-        let total = self.stake_singleton(STAKE_EXITING_TAG);
-        if self.heights_per_epoch == 0 {
-            return total;
-        }
-        let raised_epoch = self
-            .stake_singleton(STAKE_EXITING_RAISED_TAG)
-            .checked_div(self.heights_per_epoch)
-            .unwrap_or(0);
-        if raised_epoch < self.current_epoch() {
-            total
-        } else {
-            self.stake_singleton(STAKE_EXITING_ACTIVE_TAG).min(total)
-        }
-    }
-
-    fn adjust_exiting(&mut self, before: u64, after: u64) {
-        let total = self.stake_singleton(STAKE_EXITING_TAG);
-        if after > before {
-            let active = self.matured_exiting();
-            self.set_stake_singleton(STAKE_EXITING_ACTIVE_TAG, active);
-            self.set_stake_singleton(STAKE_EXITING_RAISED_TAG, self.execution_height);
-            self.set_stake_singleton(STAKE_EXITING_TAG, total.saturating_add(after - before));
-        } else if before > after {
-            let next = total.saturating_sub(before - after);
-            let active = self.stake_singleton(STAKE_EXITING_ACTIVE_TAG).min(next);
-            self.set_stake_singleton(STAKE_EXITING_ACTIVE_TAG, active);
-            self.set_stake_singleton(STAKE_EXITING_TAG, next);
-        }
-    }
-
-    pub fn gov_electorate_now(&self) -> u64 {
-        self.matured_total_staked()
-            .saturating_sub(self.matured_exiting())
     }
 
     pub fn staked_weight(&self, address: &str) -> u64 {
@@ -952,22 +882,6 @@ impl Ledger {
             None => return 0,
         };
         if self.is_stake_banned(&id) || self.is_gov_blacklisted(&id) {
-            return 0;
-        }
-        self.stake_bond(&id)
-            .map(|bond| {
-                bond.amount_in_epoch(epoch, self.heights_per_epoch)
-                    / qtv_staking::NATIVE_UNIT as u64
-            })
-            .unwrap_or(0)
-    }
-
-    pub fn consensus_weight_in_epoch(&self, address: &str, epoch: u64) -> u64 {
-        let id = match address_id(address) {
-            Some(id) => id,
-            None => return 0,
-        };
-        if self.is_stake_banned(&id) {
             return 0;
         }
         self.stake_bond(&id)
@@ -1681,15 +1595,7 @@ impl Ledger {
         account.nonce += 1;
         self.set_account(caller, &account);
         self.collect_fee(fee);
-        let placed = record
-            .until
-            .saturating_sub(qtv_governance::BRIDGE_FREEZE_DURATION);
-        let outcome = if now <= placed.saturating_add(BRIDGE_FREEZE_REFUND_GRACE) {
-            FreezeLift::Refund
-        } else {
-            FreezeLift::Slash
-        };
-        self.lift_bridge_freeze(now, outcome);
+        self.lift_bridge_freeze(now, FreezeLift::Refund);
         true
     }
 
@@ -1782,7 +1688,6 @@ impl Ledger {
         self.write_leaf(stake_singleton_key(BRIDGE_ASSET_LIST_TAG), bytes);
     }
 
-    #[cfg(any(test, feature = "test-fixtures"))]
     pub fn register_bridged_asset(
         &mut self,
         asset_id: &[u8; 16],
@@ -1790,24 +1695,12 @@ impl Ledger {
         epoch_cap: u128,
         requires_stark: bool,
     ) -> (Key, Vec<u8>) {
-        self.register_bridged_asset_from(asset_id, cap, epoch_cap, requires_stark, 0)
-    }
-
-    pub fn register_bridged_asset_from(
-        &mut self,
-        asset_id: &[u8; 16],
-        cap: u128,
-        epoch_cap: u128,
-        requires_stark: bool,
-        source_chain: u32,
-    ) -> (Key, Vec<u8>) {
         let supply = self.bridged_asset(asset_id).map(|a| a.supply).unwrap_or(0);
         let asset = QAsset {
             supply,
             cap,
             epoch_cap,
             requires_stark,
-            source_chain,
         };
         self.set_bridged_asset(asset_id, &asset);
         self.record_bridge_asset_id(asset_id);
@@ -2095,9 +1988,6 @@ impl Ledger {
         let Some(asset) = self.bridged_asset(&fact.asset_id) else {
             return false;
         };
-        if !asset_accepts_source(&asset, fact.source_chain) {
-            return false;
-        }
         if self.bridge_reference_seen(fact.source_chain, &fact.source_ref) {
             return false;
         }
@@ -2135,9 +2025,6 @@ impl Ledger {
             Some(asset) => asset,
             None => return false,
         };
-        if !asset_accepts_source(&asset, fact.source_chain) {
-            return false;
-        }
         if self.bridge_reference_seen(fact.source_chain, &fact.source_ref) {
             return false;
         }
@@ -3308,7 +3195,7 @@ impl Ledger {
         let referendum = Referendum::open(id, track, proposer_id.to_vec(), now, deposit);
         self.set_gov_referendum(id, &referendum);
         self.set_gov_action(id, &action);
-        self.set_gov_electorate(id, self.gov_electorate_now());
+        self.set_gov_electorate(id, self.matured_total_staked());
         self.set_gov_next_id(id + 1);
         self.record_side_event(SideEvent::GovPropose {
             referendum: id,
@@ -3365,7 +3252,7 @@ impl Ledger {
         }
         self.set_gov_lock(&voter_id, &lock);
         self.set_gov_total_locked(self.gov_total_locked() + stake as u128);
-        referendum.tally.record_ballot(aye, conviction, stake);
+        referendum.tally.record(aye, conviction.weight(stake));
         self.set_gov_referendum(referendum_id, &referendum);
         self.set_gov_ballot(
             referendum_id,
@@ -3391,7 +3278,7 @@ impl Ledger {
         if referendum.status != Status::Deciding {
             return Some(referendum.status);
         }
-        let live = self.gov_electorate_now();
+        let live = self.matured_total_staked();
         let electorate = u128::from(self.gov_electorate(referendum_id).unwrap_or(live).max(live));
         let status = referendum.resolve(now, electorate);
         if status == Status::Deciding {
@@ -3488,10 +3375,7 @@ impl Ledger {
                 let after_period = already
                     .checked_add(u128::from(*amount))
                     .ok_or(EnactError::Overflow)?;
-                let base = self
-                    .total_supply()
-                    .saturating_sub(u64::try_from(already).unwrap_or(u64::MAX));
-                if after_period > u128::from(qtv_staking::gov_mint_ceiling(base)) {
+                if after_period > u128::from(qtv_staking::gov_mint_ceiling(self.total_supply())) {
                     return Err(EnactError::BadValue);
                 }
                 let mut account = self.account(&addr);
@@ -3582,24 +3466,12 @@ impl Ledger {
                         if remaining > 0 {
                             if let Some(from_id) = id_from_slice(&seizure.from) {
                                 if self.is_frozen_id(&from_id) {
-                                    let validator = self.validator_ids().contains(&from_id);
-                                    if let Some(bond) =
-                                        self.stake_bond(&from_id).filter(|_| !validator)
-                                    {
+                                    if let Some(bond) = self.stake_bond(&from_id) {
                                         let from_bond = bond.amount.min(remaining);
                                         if from_bond > 0 {
                                             let residue = bond.amount - from_bond;
                                             self.clear_stake_bond(&from_id);
                                             self.debit_staked(bond.amount);
-                                            let forfeited =
-                                                self.stake_rewards_outstanding(&from_id);
-                                            if forfeited > 0 {
-                                                self.set_stake_treasury(
-                                                    self.stake_treasury().saturating_add(forfeited),
-                                                );
-                                            }
-                                            self.clear_stake_rewards(&from_id);
-                                            self.set_stake_banned(&from_id);
                                             if residue > 0 {
                                                 let mut holder = self.account(&from_addr);
                                                 holder.balance =
@@ -3781,26 +3653,14 @@ impl Ledger {
                 cap,
                 epoch_cap,
                 requires_stark,
-                source_chain,
             } => {
-                if *cap == 0 || *epoch_cap == 0 || *source_chain == 0 {
+                if *cap == 0 || *epoch_cap == 0 {
                     return Err(EnactError::BadValue);
                 }
                 if *requires_stark {
                     return Err(EnactError::BadValue);
                 }
-                if self.bridged_asset(asset_id).is_some_and(|held| {
-                    held.source_chain != 0 && held.source_chain != *source_chain
-                }) {
-                    return Err(EnactError::BadValue);
-                }
-                self.register_bridged_asset_from(
-                    asset_id,
-                    *cap,
-                    *epoch_cap,
-                    *requires_stark,
-                    *source_chain,
-                );
+                self.register_bridged_asset(asset_id, *cap, *epoch_cap, *requires_stark);
                 self.record_side_event(SideEvent::AssetRegister {
                     asset_id: *asset_id,
                     cap: *cap,
@@ -3896,14 +3756,7 @@ impl Ledger {
             return;
         }
         self.clear_guardian_pending_enact();
-        if let Some(mut record) = self.bridge_freeze() {
-            let pot_address = bridge_bond_address();
-            let mut pot = self.account(&pot_address);
-            pot.balance = pot.balance.saturating_sub(record.bond);
-            self.set_account(&pot_address, &pot);
-            self.set_stake_treasury(self.stake_treasury().saturating_add(record.bond));
-            record.bond = 0;
-            self.set_bridge_freeze(&record);
+        if self.bridge_freeze().is_some() {
             return;
         }
         let mut decoder = Decoder::new(&action_bytes);
@@ -4040,9 +3893,9 @@ impl Ledger {
             active_amount: 0,
             raised_at_height: 0,
         });
-        bond.raise_to(total, self.execution_height, self.heights_per_epoch);
         bond.bonded_at_day = day;
         bond.exit_requested_at = None;
+        bond.raise_to(total, self.execution_height, self.heights_per_epoch);
         self.set_stake_bond(&id, &bond);
         self.credit_staked(amount);
         true
@@ -4144,9 +3997,9 @@ impl Ledger {
             active_amount: 0,
             raised_at_height: 0,
         });
-        bond.raise_to(total, self.execution_height, self.heights_per_epoch);
         bond.bonded_at_day = day;
         bond.exit_requested_at = None;
+        bond.raise_to(total, self.execution_height, self.heights_per_epoch);
         self.set_stake_bond(&id, &bond);
         self.credit_staked(amount);
         self.record_bond_event(address, amount, fee);
@@ -4204,7 +4057,7 @@ impl Ledger {
             Some(bond) => bond,
             None => return false,
         };
-        if bond.request_exit_at(now_day, self.execution_height, self.heights_per_epoch) {
+        if bond.request_exit(now_day) {
             self.set_stake_bond(&id, &bond);
             true
         } else {
@@ -6494,7 +6347,7 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn a_recovery_cannot_seize_an_active_validators_bond() {
+    fn a_recovery_pulls_stolen_funds_back_out_of_a_validators_bond() {
         let mut l = Ledger::new();
         let proposer = gov_addr(26);
         fund(&mut l, &proposer, 300_000 * 1_000_000);
@@ -6534,11 +6387,10 @@ mod stake_state_tests {
         );
         l.gov_enact(id, 7 * 3_600 + 1, TEST_CHAIN).unwrap();
 
-        assert_eq!(
-            l.stake_bond(&[42u8; 32]).map(|b| b.amount),
-            Some(2_000 * 1_000_000)
-        );
-        assert!(!l.is_stake_banned(&[42u8; 32]));
+        assert!(l.stake_bond(&[42u8; 32]).is_none());
+        assert_eq!(l.balance(&validator), 0);
+        let victim = id_bytes_to_address(&[40u8; 32]).unwrap();
+        assert_eq!(l.balance(&victim), 3_000 * 1_000_000);
     }
 
     #[test]
@@ -7418,53 +7270,6 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn a_freeze_held_past_the_grace_and_lifted_by_its_holder_forfeits_the_bond() {
-        let mut l = Ledger::new();
-        let freezer = gov_addr(74);
-        let funded = 1_500_000 * 1_000_000;
-        fund(&mut l, &freezer, funded);
-        let bond = qtv_governance::BRIDGE_FREEZE_BOND;
-        let treasury_before = l.stake_treasury();
-        assert!(l.bridge_freeze_with_fee(&freezer, 0, 1_000));
-        let late = 1_000 + 6 * 86_400;
-        assert!(l.bridge_unfreeze_with_fee(&freezer, 0, late));
-        assert!(!l.bridge_is_frozen());
-        assert_eq!(
-            l.balance(&freezer),
-            funded - bond,
-            "no refund past the grace"
-        );
-        assert_eq!(l.stake_treasury(), treasury_before + bond);
-    }
-
-    #[test]
-    fn a_freeze_that_vetoes_a_guardian_enact_forfeits_its_bond() {
-        let mut l = Ledger::new();
-        let freezer = gov_addr(75);
-        let funded = 1_500_000 * 1_000_000;
-        fund(&mut l, &freezer, funded);
-        let bond = qtv_governance::BRIDGE_FREEZE_BOND;
-        let treasury_before = l.stake_treasury();
-        let mut pending = 100u64.to_le_bytes().to_vec();
-        pending.push(0xFF);
-        l.write_leaf(stake_singleton_key(GUARDIAN_PENDING_ENACT_TAG), pending);
-        assert!(l.bridge_freeze_with_fee(&freezer, 0, 50));
-        l.guardian_apply_due_enact(200);
-        assert!(
-            l.guardian_pending_enact().is_none(),
-            "the freeze vetoes the enact"
-        );
-        assert_eq!(l.stake_treasury(), treasury_before + bond);
-        assert!(l.bridge_unfreeze_with_fee(&freezer, 0, 60));
-        assert_eq!(
-            l.balance(&freezer),
-            funded - bond,
-            "a veto costs the bond even when lifted inside the grace"
-        );
-        assert_eq!(l.account(&bridge_bond_address()).balance, 0);
-    }
-
-    #[test]
     fn a_bridge_freeze_cooldown_blocks_an_immediate_refreeze() {
         let mut l = Ledger::new();
         let freezer = gov_addr(73);
@@ -7941,7 +7746,6 @@ mod stake_state_tests {
                     cap: 1_000_000,
                     epoch_cap: 250_000,
                     requires_stark: false,
-                    source_chain: 7,
                 },
                 5 * 86_400 + 2,
             )
@@ -7972,7 +7776,6 @@ mod stake_state_tests {
                     cap: 1_000_000,
                     epoch_cap: 250_000,
                     requires_stark: true,
-                    source_chain: 7,
                 },
                 0,
                 TEST_CHAIN,
@@ -8052,47 +7855,6 @@ mod stake_state_tests {
         assert!(
             l.bridge_is_frozen(),
             "the freeze still holds through the migration"
-        );
-    }
-
-    #[test]
-    fn an_asset_mints_only_from_the_source_chain_it_was_registered_for() {
-        let mut l = Ledger::new();
-        l.seed_bridge_pool_vault(&[0x0Au8; 32]);
-        let asset = [0xB3u8; 16];
-        l.register_bridged_asset_from(&asset, 10_000_000, 10_000_000, false, 43);
-        let fact = |source_chain: u32, source_ref: u8| crate::bridge::Fact {
-            version: crate::bridge::FACT_VERSION,
-            source_chain,
-            dest_chain: 9_000,
-            route_id: 7,
-            direction: crate::bridge::Direction::Deposit,
-            nonce: 1,
-            source_ref: [source_ref; 32],
-            asset_id: asset,
-            amount: 1_000,
-            recipient: [0xEEu8; 32],
-            finality_depth: 6,
-            observed_height: 10,
-            expiry_height: 100,
-        };
-        assert!(!l.bridge_mint_would_apply(&fact(1, 1)));
-        assert!(!l.bridge_mint(&fact(1, 1)));
-        assert!(l.bridge_mint_would_apply(&fact(43, 1)));
-        assert!(l.bridge_mint(&fact(43, 1)));
-        assert_eq!(
-            l.execute_action(
-                &qtv_governance::Action::AssetRegister {
-                    asset_id: asset,
-                    cap: 10_000_000,
-                    epoch_cap: 10_000_000,
-                    requires_stark: false,
-                    source_chain: 1,
-                },
-                0,
-                TEST_CHAIN,
-            ),
-            Err(EnactError::BadValue)
         );
     }
 
@@ -9036,74 +8798,6 @@ mod stake_state_tests {
         );
     }
     #[test]
-    fn exiting_stake_leaves_the_electorate_from_the_next_epoch_only() {
-        let mut l = Ledger::new();
-        l.set_heights_per_epoch(100);
-        let a = gov_addr(68);
-        let b = gov_addr(69);
-        fund(&mut l, &a, 5_000 * 1_000_000);
-        fund(&mut l, &b, 5_000 * 1_000_000);
-        assert!(l.bond_with_fee(&a, 2_000 * 1_000_000, 0, 0));
-        assert!(l.bond_with_fee(&b, 2_000 * 1_000_000, 0, 0));
-        l.set_execution_height(550);
-        assert_eq!(l.gov_electorate_now(), 4_000 * 1_000_000);
-        assert!(l.request_stake_exit(&a, qtv_staking::BOND_LOCK_DAYS));
-        assert_eq!(l.gov_electorate_now(), 4_000 * 1_000_000);
-        l.set_execution_height(650);
-        assert_eq!(l.gov_electorate_now(), 2_000 * 1_000_000);
-        assert!(l.withdraw_stake(
-            &a,
-            qtv_staking::BOND_LOCK_DAYS + qtv_staking::UNBONDING_DAYS
-        ));
-        assert_eq!(l.gov_electorate_now(), 2_000 * 1_000_000);
-        assert!(l.request_stake_exit(&b, qtv_staking::BOND_LOCK_DAYS));
-        assert!(l.slash_validator(&b));
-        assert_eq!(l.gov_electorate_now(), 0);
-    }
-
-    #[test]
-    fn a_governance_blacklist_never_changes_consensus_weight() {
-        let mut l = Ledger::new();
-        l.set_heights_per_epoch(100);
-        let addr = gov_addr(67);
-        fund(&mut l, &addr, 5_000 * 1_000_000);
-        assert!(l.bond_with_fee(&addr, 2_000 * 1_000_000, 0, 0));
-        l.set_execution_height(550);
-        l.execute_action(
-            &qtv_governance::Action::Blacklist {
-                target: address_id(&addr).unwrap().to_vec(),
-            },
-            0,
-            TEST_CHAIN,
-        )
-        .unwrap();
-        assert!(l.is_blacklisted(&addr));
-        assert_eq!(l.consensus_weight_in_epoch(&addr, 5), 2_000);
-        assert_eq!(l.consensus_weight_in_epoch(&addr, 6), 2_000);
-        assert_eq!(l.staked_weight_in_epoch(&addr, 5), 0);
-        assert!(l.slash_validator(&addr));
-        assert_eq!(l.consensus_weight_in_epoch(&addr, 6), 0);
-    }
-
-    #[test]
-    fn an_exiting_validator_loses_its_vote_next_epoch_and_is_still_slashed_in_full() {
-        let mut l = Ledger::new();
-        l.set_heights_per_epoch(100);
-        let addr = gov_addr(66);
-        fund(&mut l, &addr, 5_000 * 1_000_000);
-        l.credit_supply(5_000 * 1_000_000);
-        assert!(l.bond_with_fee(&addr, 2_000 * 1_000_000, 0, 0));
-        l.set_execution_height(550);
-        assert!(l.request_stake_exit(&addr, qtv_staking::BOND_LOCK_DAYS));
-        assert_eq!(l.staked_weight_in_epoch(&addr, 5), 2_000);
-        assert_eq!(l.staked_weight_in_epoch(&addr, 6), 0);
-        let supply = l.total_supply();
-        assert!(l.slash_validator(&addr));
-        assert!(l.stake_bond(&address_id(&addr).unwrap()).is_none());
-        assert_eq!(l.total_supply(), supply - 2_000 * 1_000_000);
-    }
-
-    #[test]
     fn a_bridge_anchor_referendum_is_refused_before_it_takes_a_deposit() {
         let mut l = Ledger::new();
         let proposer = gov_addr(65);
@@ -9117,33 +8811,6 @@ mod stake_state_tests {
             .gov_propose(&proposer, qtv_governance::Track::BridgeMigration, action, 0)
             .is_none());
         assert_eq!(l.balance(&proposer), deposit);
-    }
-
-    #[test]
-    fn a_second_mint_in_one_year_cannot_ride_the_first() {
-        let mut l = Ledger::new();
-        l.credit_supply(10_000_000 * 1_000_000);
-        let ceiling = qtv_staking::gov_mint_ceiling(l.total_supply());
-        l.execute_action(
-            &Action::Mint {
-                to: [63u8; 32].to_vec(),
-                amount: ceiling,
-            },
-            0,
-            TEST_CHAIN,
-        )
-        .expect("a mint at the ceiling is allowed");
-        assert_eq!(
-            l.execute_action(
-                &Action::Mint {
-                    to: [63u8; 32].to_vec(),
-                    amount: 1
-                },
-                0,
-                TEST_CHAIN,
-            ),
-            Err(EnactError::BadValue)
-        );
     }
 
     #[test]
@@ -9320,7 +8987,6 @@ mod stake_state_tests {
                 cap: supply,
                 epoch_cap: supply,
                 requires_stark: false,
-                source_chain: 0,
             },
         );
         l.set_bridged_balance(asset, holder, supply);

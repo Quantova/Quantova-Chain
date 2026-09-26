@@ -78,7 +78,6 @@ pub struct GenesisBridgedAsset {
     pub cap: u128,
     pub epoch_cap: u128,
     pub requires_stark: bool,
-    pub source_chain: u32,
 }
 
 pub struct Genesis {
@@ -1682,7 +1681,7 @@ pub fn reweigh_roster_for_epoch(
         .iter()
         .map(|r| {
             let mut reweighed = r.clone();
-            reweighed.stake = ledger.consensus_weight_in_epoch(&r.bond_address, epoch);
+            reweighed.stake = ledger.staked_weight_in_epoch(&r.bond_address, epoch);
             reweighed
         })
         .collect();
@@ -1736,12 +1735,11 @@ impl Node {
             ledger.seed_bridge_operator_set(operators);
         }
         for asset in &genesis.bridged_assets {
-            ledger.register_bridged_asset_from(
+            ledger.register_bridged_asset(
                 &asset.asset_id,
                 asset.cap,
                 asset.epoch_cap,
                 asset.requires_stark,
-                asset.source_chain,
             );
         }
 

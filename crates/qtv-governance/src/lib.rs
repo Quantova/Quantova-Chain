@@ -252,38 +252,26 @@ impl Decode for Lock {
 pub struct Tally {
     pub aye_stake: u128,
     pub nay_stake: u128,
-    pub aye_raw: u128,
-    pub nay_raw: u128,
 }
 
 impl Tally {
     pub fn record(&mut self, aye: bool, weight: u128) {
-        self.record_weighted(aye, weight, weight);
-    }
-
-    pub fn record_ballot(&mut self, aye: bool, conviction: Conviction, stake: u64) {
-        self.record_weighted(aye, conviction.weight(stake), u128::from(stake));
-    }
-
-    fn record_weighted(&mut self, aye: bool, weight: u128, raw: u128) {
         if aye {
             self.aye_stake = self.aye_stake.saturating_add(weight);
-            self.aye_raw = self.aye_raw.saturating_add(raw);
         } else {
             self.nay_stake = self.nay_stake.saturating_add(weight);
-            self.nay_raw = self.nay_raw.saturating_add(raw);
         }
     }
 
     pub fn turnout(&self) -> u128 {
-        self.aye_raw.saturating_add(self.nay_raw)
+        self.aye_stake.saturating_add(self.nay_stake)
     }
 
     pub fn approved(&self, electorate_stake: u128, threshold_bps: u128) -> bool {
         electorate_stake > 0
             && self.turnout().saturating_mul(BPS_DENOM)
                 >= electorate_stake.saturating_mul(PARTICIPATION_FLOOR_BPS)
-            && self.aye_raw.saturating_mul(BPS_DENOM)
+            && self.aye_stake.saturating_mul(BPS_DENOM)
                 >= electorate_stake.saturating_mul(threshold_bps)
             && self.aye_stake > self.nay_stake
     }
@@ -293,8 +281,6 @@ impl Encode for Tally {
     fn encode(&self, encoder: &mut Encoder) {
         encoder.put_u128(self.aye_stake);
         encoder.put_u128(self.nay_stake);
-        encoder.put_u128(self.aye_raw);
-        encoder.put_u128(self.nay_raw);
     }
 }
 
@@ -303,8 +289,6 @@ impl Decode for Tally {
         Ok(Tally {
             aye_stake: decoder.get_u128()?,
             nay_stake: decoder.get_u128()?,
-            aye_raw: decoder.get_u128()?,
-            nay_raw: decoder.get_u128()?,
         })
     }
 }
@@ -416,7 +400,6 @@ pub enum Action {
         cap: u128,
         epoch_cap: u128,
         requires_stark: bool,
-        source_chain: u32,
     },
     BridgeAnchorSet {
         corridor: u8,
@@ -518,14 +501,12 @@ impl Encode for Action {
                 cap,
                 epoch_cap,
                 requires_stark,
-                source_chain,
             } => {
                 encoder.put_u8(14);
                 encoder.put_bytes(asset_id);
                 encoder.put_u128(*cap);
                 encoder.put_u128(*epoch_cap);
                 encoder.put_u8(*requires_stark as u8);
-                encoder.put_u32(*source_chain);
             }
             Action::BridgeAnchorSet { corridor, anchor } => {
                 encoder.put_u8(17);
@@ -615,13 +596,11 @@ impl Decode for Action {
                 let cap = decoder.get_u128()?;
                 let epoch_cap = decoder.get_u128()?;
                 let requires_stark = decoder.get_u8()? != 0;
-                let source_chain = decoder.get_u32()?;
                 Ok(Action::AssetRegister {
                     asset_id,
                     cap,
                     epoch_cap,
                     requires_stark,
-                    source_chain,
                 })
             }
             15 => Ok(Action::EpochAdvance),
@@ -779,11 +758,7 @@ impl GuardianSet {
     }
 
     pub fn well_formed(&self) -> bool {
-        let mut sorted = self.members.clone();
-        sorted.sort_unstable();
-        sorted.dedup();
-        sorted.len() == self.members.len()
-            && self.threshold >= 2
+        self.threshold >= 2
             && (self.threshold as usize) <= self.members.len()
             && (self.threshold as usize).saturating_mul(2) > self.members.len()
     }
@@ -857,8 +832,6 @@ impl Status {
     }
 }
 
-pub const ENACTMENT_WINDOW_SECONDS: u64 = 30 * 86_400;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Referendum {
     pub id: u64,
@@ -901,17 +874,9 @@ impl Referendum {
     }
 
     pub fn enactable(&self, now: u64) -> bool {
-        let opens = self
+        now >= self
             .decides_at()
-            .saturating_add(self.track.enactment_delay());
-        now >= opens && now <= opens.saturating_add(ENACTMENT_WINDOW_SECONDS)
-    }
-
-    pub fn enactment_expired(&self, now: u64) -> bool {
-        let opens = self
-            .decides_at()
-            .saturating_add(self.track.enactment_delay());
-        now > opens.saturating_add(ENACTMENT_WINDOW_SECONDS)
+            .saturating_add(self.track.enactment_delay())
     }
 
     pub fn resolve(&mut self, now: u64, electorate_stake: u128) -> Status {
@@ -1090,19 +1055,6 @@ mod tests {
         let mut none = Tally::default();
         none.record(true, 700_000);
         assert!(!none.approved(0, t));
-    }
-
-    #[test]
-    fn conviction_cannot_lift_a_stake_minority_over_the_threshold() {
-        let t = Track::Mint.threshold_bps();
-        let mut tally = Tally::default();
-        tally.record_ballot(true, Conviction::TwoYear, 267_000);
-        assert!(tally.aye_stake * 10_000 >= 1_000_000 * t);
-        assert!(!tally.approved(1_000_000, t));
-        let mut majority = Tally::default();
-        majority.record_ballot(true, Conviction::Liquid, 700_000);
-        majority.record_ballot(false, Conviction::TwoYear, 250_000);
-        assert!(majority.approved(1_000_000, t));
     }
 
     #[test]
@@ -1404,7 +1356,6 @@ mod tests {
                 cap: 1_000_000,
                 epoch_cap: 250_000,
                 requires_stark: true,
-                source_chain: 7,
             },
             Action::EpochAdvance,
             Action::OperatorRevoke { operator_id: 7 },
@@ -1479,12 +1430,6 @@ mod tests {
             !short.well_formed(),
             "a threshold above the membership is not well formed"
         );
-
-        let repeated = GuardianSet::new(vec![[1u8; 32], [1u8; 32], [1u8; 32], [2u8; 32]], 3);
-        assert!(
-            !repeated.well_formed(),
-            "a member listed twice would leave the threshold out of reach"
-        );
     }
 
     #[test]
@@ -1530,7 +1475,6 @@ mod tests {
                 cap: 1,
                 epoch_cap: 1,
                 requires_stark: false,
-                source_chain: 7,
             },
             Action::EpochAdvance,
             Action::OperatorRevoke { operator_id: 3 },
@@ -1657,8 +1601,6 @@ mod approval_boundary_tests {
             let exact = Tally {
                 aye_stake: needed,
                 nay_stake: 0,
-                aye_raw: needed,
-                nay_raw: 0,
             };
             assert!(
                 exact.approved(electorate, bps),
@@ -1668,8 +1610,6 @@ mod approval_boundary_tests {
             let under = Tally {
                 aye_stake: needed - 1,
                 nay_stake: 0,
-                aye_raw: needed - 1,
-                nay_raw: 0,
             };
             assert!(
                 !under.approved(electorate, bps),
@@ -1687,8 +1627,6 @@ mod approval_boundary_tests {
         let unanimous_but_quiet = Tally {
             aye_stake: floor - 1,
             nay_stake: 0,
-            aye_raw: floor - 1,
-            nay_raw: 0,
         };
         assert!(
             !unanimous_but_quiet.approved(electorate, track.threshold_bps()),
@@ -1705,8 +1643,6 @@ mod approval_boundary_tests {
         let tied = Tally {
             aye_stake: half,
             nay_stake: half,
-            aye_raw: half,
-            nay_raw: half,
         };
         assert!(
             !tied.approved(electorate, track.threshold_bps()),
@@ -1720,8 +1656,6 @@ mod approval_boundary_tests {
             let any = Tally {
                 aye_stake: u128::MAX,
                 nay_stake: 0,
-                aye_raw: u128::MAX,
-                nay_raw: 0,
             };
             assert!(
                 !any.approved(0, track.threshold_bps()),

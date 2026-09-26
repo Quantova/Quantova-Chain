@@ -175,6 +175,8 @@ fn evict_fairly<T>(buffer: &mut Vec<T>, incoming: u64, sender_of: impl Fn(&T) ->
 
 const MAX_JUSTIFICATION_CACHE: usize = 4096;
 
+const EVIDENCE_WINDOW: Height = 256;
+
 const MAX_SERVE_BLOCKS: u64 = 256;
 
 #[derive(Debug)]
@@ -596,12 +598,11 @@ impl DevNode {
             }
         }
         for asset in &genesis.bridged_assets {
-            let (asset_key, asset_value) = self.ledger.register_bridged_asset_from(
+            let (asset_key, asset_value) = self.ledger.register_bridged_asset(
                 &asset.asset_id,
                 asset.cap,
                 asset.epoch_cap,
                 asset.requires_stark,
-                asset.source_chain,
             );
             self.state_store.put_account(asset_key, asset_value)?;
         }
@@ -1813,8 +1814,6 @@ impl DevNode {
             return Vec::new();
         }
         if self.verify_attestation(selection, &prevote) {
-            let offender = self.validator_address(prevote.from);
-            self.watch_for_equivocation(&prevote, offender);
             self.record_prevote(&prevote);
         }
         self.form_polka_and_precommit(selection)
@@ -1892,7 +1891,7 @@ impl DevNode {
     }
 
     fn record_prevote(&mut self, prevote: &Attestation) {
-        if prevote.block.cost != qtv_node::consensus::PREVOTE_SUBJECT_COST {
+        if prevote.block.cost != qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST {
             return;
         }
         let seen = self
@@ -2324,7 +2323,7 @@ impl DevNode {
                 self.seen_atts.insert(digest);
             }
             if let Some(member) = selection.commitment.member(attestation.from) {
-                if !qtv_node::consensus::is_round_marker(attestation.block.cost)
+                if attestation.block.cost != qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST
                     && attestation.slot == self.consensus.slot_for(self.height)
                     && attestation.is_entitled(
                         &member.root,
@@ -2338,7 +2337,7 @@ impl DevNode {
                 }
             }
         }
-        if qtv_node::consensus::is_round_marker(attestation.block.cost) {
+        if attestation.block.cost == qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST {
             return false;
         }
         let slot = (attestation.from, attestation.view);
@@ -2483,9 +2482,11 @@ impl DevNode {
 
     fn settle_evidence(&mut self, included: &[String]) {
         let chain_id = self.fee_params.chain_id;
+        let height = self.height;
         let ledger = &self.ledger;
         self.evidence_pool.retain(|evidence| {
-            !ledger.is_validator_banned(&evidence.offender)
+            evidence.height.saturating_add(EVIDENCE_WINDOW) > height
+                && !ledger.is_validator_banned(&evidence.offender)
                 && !included.contains(&evidence_transaction(evidence, chain_id).id())
         });
     }
@@ -2980,10 +2981,6 @@ impl DevNode {
         {
             return Err(SyncError::UnverifiedCertificate);
         }
-        for attestation in &certificate.attestations {
-            let offender = self.validator_address(attestation.from);
-            self.watch_for_equivocation(attestation, offender);
-        }
         self.observe_finality(self.height, subject.val);
         if self.fatal.is_some() {
             return Err(SyncError::FinalityViolation);
@@ -3161,7 +3158,7 @@ fn prevote_subject(height: Height, view: View, value: [u8; 32]) -> ConsensusBloc
         height,
         commitment,
         Parent::Genesis,
-        qtv_node::consensus::PREVOTE_SUBJECT_COST,
+        qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST,
     )
 }
 
@@ -3368,9 +3365,11 @@ mod registration_window_tests {
     const SLOTS: u64 = 8;
 
     fn node() -> DevNode {
+        static RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let base = std::env::temp_dir().join(format!(
-            "qtv-reg-window-unit-{}-{}",
+            "qtv-reg-window-unit-{}-{}-{}",
             std::process::id(),
+            RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
@@ -3533,9 +3532,11 @@ mod finality_gate_tests {
     use qtv_node::fee::FeeParams;
 
     fn nodes() -> Vec<DevNode> {
+        static RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let base = std::env::temp_dir().join(format!(
-            "qtv-finality-gate-unit-{}-{}",
+            "qtv-finality-gate-unit-{}-{}-{}",
             std::process::id(),
+            RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
