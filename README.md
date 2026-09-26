@@ -17,7 +17,7 @@ Nothing here is borrowed. The addresses are Q1 Bech32m, never a twenty byte hex 
 - **qtv-block** is the header, the body, the SHA3-256 Merkle transaction root, and the block event root.
 - **qtv-state** is the 256 level SHA3-256 sparse Merkle state trie, with proofs of presence and absence in one shape.
 - **qtv-staking** is stake accounting, bonds, reward sessions and vesting, and slashing.
-- **qtv-governance** is referenda over conviction voting, seven tracks each with its own thresholds, and a constitutional gate that checks an action before it can enact.
+- **qtv-governance** is referenda over conviction voting, five tracks each with its own deposit, voting period, enactment delay, and pass threshold under a 25 percent turnout floor, and a constitutional gate that checks an action before it can enact.
 - **qtv-store** is file backed block and state persistence, an append log with in memory indexes rebuilt on open and a torn tail truncated on recovery.
 
 ## The node
