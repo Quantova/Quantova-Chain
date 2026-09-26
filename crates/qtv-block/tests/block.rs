@@ -57,6 +57,22 @@ fn header_decode_rejects_trailing_bytes() {
 }
 
 #[test]
+fn header_decode_rejects_an_oversized_proposer() {
+    let body: Vec<Wrapper> = Vec::new();
+    let header = Header::new(
+        1,
+        pattern(3),
+        pattern(5),
+        transaction_root(&body),
+        pattern(7),
+        pattern(11),
+        "q".repeat(qtv_block::MAX_PROPOSER + 1),
+        1,
+    );
+    assert!(header_from_bytes(&to_bytes(&header)).is_err());
+}
+
+#[test]
 fn transaction_root_is_deterministic() {
     let body = vec![
         wrapper_with_nonce(1),

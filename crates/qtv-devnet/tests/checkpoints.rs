@@ -85,6 +85,7 @@ fn a_fork_before_the_checkpoint_is_refused() {
         "the fork carries a different value at the checkpoint height"
     );
 
+    drop(honest_net);
     let mut node = DevNode::open(&cfg_a.nodes[3], &cfg_a).expect("verifier node");
     node.set_checkpoint(Checkpoint {
         height: 1,

@@ -26,12 +26,53 @@ fn urandom(n: usize) -> Vec<u8> {
     b
 }
 
+fn push_hex(out: &mut String, b: &[u8]) {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    for x in b {
+        out.push(DIGITS[(x >> 4) as usize] as char);
+        out.push(DIGITS[(x & 15) as usize] as char);
+    }
+}
+
 fn hexs(b: &[u8]) -> String {
     let mut s = String::with_capacity(b.len() * 2);
-    for x in b {
-        s.push_str(&format!("{x:02x}"));
-    }
+    push_hex(&mut s, b);
     s
+}
+
+fn write_private(path: &str, contents: &[u8]) {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .expect("create the secret file, owner only; an existing file is never overwritten");
+        file.write_all(contents).expect("write the secret file");
+    }
+    #[cfg(not(unix))]
+    fs::write(path, contents).expect("write the secret file");
+}
+
+fn fact_from(a: &[String]) -> Fact {
+    Fact {
+        version: FACT_VERSION,
+        source_chain: a[0].parse().expect("source_chain"),
+        dest_chain: a[1].parse().expect("dest_chain"),
+        route_id: a[2].parse().expect("route_id"),
+        direction: Direction::Deposit,
+        nonce: a[3].parse().expect("nonce"),
+        source_ref: unhex(&a[4]).try_into().expect("source_ref 32 bytes"),
+        asset_id: unhex(&a[5]).try_into().expect("asset 16 bytes"),
+        amount: a[6].parse().expect("amount"),
+        recipient: unhex(&a[7]).try_into().expect("recipient 32 bytes"),
+        finality_depth: 0,
+        observed_height: a[9].parse().expect("observed"),
+        expiry_height: a[8].parse().expect("expiry"),
+    }
 }
 
 fn unhex(s: &str) -> Vec<u8> {
@@ -101,8 +142,6 @@ fn keygen(a: &[String]) {
     if threshold * 2 <= n {
         fail("the threshold must be more than half the operators, otherwise two quorums can disagree");
     }
-    let mut secrets = String::with_capacity(64 + (n as usize) * (2 * SECRET_KEY_BYTES + 16));
-    secrets.push_str(&format!("{n} {threshold} {chain_id}\n"));
     let mut committee = format!("{threshold}\n");
     for id in 0..n {
         let mut seed = [0u8; 32];
@@ -115,89 +154,72 @@ fn keygen(a: &[String]) {
             &[0u8; 32],
         )
         .expect("pop");
-        let mut rendered = hexs(&sk);
-        secrets.push_str(&format!("{id} {rendered}\n"));
-        rendered.zeroize();
+        let mut secret = Zeroizing::new(String::with_capacity(2 * SECRET_KEY_BYTES + 32));
+        secret.push_str(&format!("{id} {chain_id} "));
+        push_hex(&mut secret, &sk);
+        secret.push('\n');
+        write_private(&format!("{prefix}.{id}.secret"), secret.as_bytes());
         sk.zeroize();
         seed.zeroize();
         committee.push_str(&format!("{id} {} {}\n", hexs(&pk), hexs(&pop)));
     }
-    let secrets_path = format!("{prefix}.secrets");
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&secrets_path)
-            .expect("create the secrets file, owner only; an existing file is never overwritten");
-        file.write_all(secrets.as_bytes()).expect("write secrets");
-    }
-    #[cfg(not(unix))]
-    fs::write(&secrets_path, &secrets).expect("write secrets");
-    secrets.zeroize();
     fs::write(format!("{prefix}.committee"), committee).expect("write committee");
-    eprintln!("wrote {prefix}.secrets + {prefix}.committee ({n} operators, threshold {threshold}, chain {chain_id})");
+    eprintln!("wrote {prefix}.<id>.secret for each of {n} operators + {prefix}.committee (threshold {threshold}, chain {chain_id})");
+}
+
+fn attest(a: &[String]) {
+    if a.len() != 13 {
+        fail("attest <operator_secret> <chain_id> <source_chain> <dest_chain> <route_id> <nonce> <source_ref_hex> <asset_hex> <amount> <recipient_hex> <expiry> <observed> <era_hex>");
+    }
+    let secret = read_private(&a[0]);
+    let parts: Vec<&str> = secret.split_whitespace().collect();
+    if parts.len() != 3 {
+        fail("an operator secret file holds an operator id, a chain id and one secret key");
+    }
+    let id: u32 = parts[0].parse().expect("operator id");
+    let key_chain: u64 = parts[1].parse().expect("key chain id");
+    let chain_id: u64 = a[1].parse().expect("chain_id");
+    if key_chain != chain_id {
+        fail("this operator key was made for another chain");
+    }
+    let fact = fact_from(&a[2..12]);
+    let era: [u8; 32] = unhex(&a[12]).try_into().expect("era 32 bytes");
+    let mut sk: [u8; SECRET_KEY_BYTES] = unhex(parts[2]).try_into().expect("secret key length");
+    let sig = ml_dsa::sign(
+        &sk,
+        &fact.attest_preimage(chain_id),
+        &attest_context(&era),
+        &[0u8; 32],
+    )
+    .expect("attest sign");
+    sk.zeroize();
+    println!("{id} {}", hexs(&sig));
 }
 
 fn mint(a: &[String]) {
     if a.len() != 18 {
-        fail("mint <secrets> <chain_id> <source_chain> <dest_chain> <route_id> <nonce> <source_ref_hex> <asset_hex> <amount> <recipient_hex> <expiry> <observed> <relayer_seed_file> <relayer_index> <fee> <era_hex> <tx_nonce> <valid_until>");
+        fail("mint <signatures> <chain_id> <source_chain> <dest_chain> <route_id> <nonce> <source_ref_hex> <asset_hex> <amount> <recipient_hex> <expiry> <observed> <relayer_seed_file> <relayer_index> <fee> <era_hex> <tx_nonce> <valid_until>");
     }
-    let secrets = read_private(&a[0]);
+    let collected = fs::read_to_string(&a[0]).expect("read the collected signatures");
     let chain_id: u64 = a[1].parse().expect("chain_id");
-    let source_chain: u32 = a[2].parse().expect("source_chain");
-    let dest_chain: u32 = a[3].parse().expect("dest_chain");
-    let route_id: u32 = a[4].parse().expect("route_id");
-    let nonce: u64 = a[5].parse().expect("nonce");
-    let source_ref: [u8; 32] = unhex(&a[6]).try_into().expect("source_ref 32 bytes");
-    let asset_id: [u8; 16] = unhex(&a[7]).try_into().expect("asset 16 bytes");
-    let amount: u128 = a[8].parse().expect("amount");
-    let recipient: [u8; 32] = unhex(&a[9]).try_into().expect("recipient 32 bytes");
-    let expiry: u64 = a[10].parse().expect("expiry");
-    let observed: u64 = a[11].parse().expect("observed");
+    let fact = fact_from(&a[2..12]);
     let relayer_seed: [u8; 32] = read_seed(&a[12]);
     let relayer_index: u64 = a[13].parse().expect("relayer_index");
     let fee: u128 = a[14].parse().expect("fee");
-    let era: [u8; 32] = unhex(&a[15]).try_into().expect("era 32 bytes");
     let tx_nonce: u64 = a[16].parse().expect("tx_nonce");
     let valid_until: u64 = a[17].parse().expect("valid_until");
-
-    let fact = Fact {
-        version: FACT_VERSION,
-        source_chain,
-        dest_chain,
-        route_id,
-        direction: Direction::Deposit,
-        nonce,
-        source_ref,
-        asset_id,
-        amount,
-        recipient,
-        finality_depth: 0,
-        observed_height: observed,
-        expiry_height: expiry,
-    };
-    let preimage = fact.attest_preimage(chain_id);
     let mut signatures = Vec::new();
-    for (i, line) in secrets.lines().enumerate() {
-        if i == 0 {
-            continue;
-        }
+    for line in collected.lines() {
         let p: Vec<&str> = line.split_whitespace().collect();
-        if p.len() < 2 {
+        if p.is_empty() {
             continue;
         }
-        let id: u32 = p[0].parse().expect("operator id");
-        let mut sk: [u8; SECRET_KEY_BYTES] = unhex(p[1]).try_into().expect("secret key length");
-        let sig =
-            ml_dsa::sign(&sk, &preimage, &attest_context(&era), &[0u8; 32]).expect("attest sign");
-        sk.zeroize();
+        if p.len() != 2 {
+            fail("each signature line is an operator id and a signature");
+        }
         signatures.push(SignerSig {
-            operator_id: id,
-            signature: sig.to_vec(),
+            operator_id: p[0].parse().expect("operator id"),
+            signature: unhex(p[1]),
         });
     }
     let artifact = MintArtifact {
@@ -268,25 +290,12 @@ fn guardian_keygen(a: &[String]) {
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&urandom(32));
     let (pk, mut sk) = ml_dsa::keygen(&seed);
-    let mut rendered = format!("{} {}\n", hexs(&pk), hexs(&sk));
-    let gsecret_path = format!("{prefix}.gsecret");
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&gsecret_path)
-            .expect(
-                "create the guardian secret, owner only; an existing file is never overwritten",
-            );
-        file.write_all(rendered.as_bytes()).expect("write gsecret");
-    }
-    #[cfg(not(unix))]
-    fs::write(&gsecret_path, &rendered).expect("write gsecret");
-    rendered.zeroize();
+    let mut rendered = Zeroizing::new(String::with_capacity(2 * (pk.len() + sk.len()) + 2));
+    push_hex(&mut rendered, &pk);
+    rendered.push(' ');
+    push_hex(&mut rendered, &sk);
+    rendered.push('\n');
+    write_private(&format!("{prefix}.gsecret"), rendered.as_bytes());
     sk.zeroize();
     seed.zeroize();
     let mid = guardian_member_id_hex(&pk);
@@ -298,36 +307,58 @@ fn guardian_keygen(a: &[String]) {
     eprintln!("wrote {prefix}.gsecret + {prefix}.gpub  (member_id {mid})");
 }
 
-fn guardian_enact_anchor(a: &[String]) {
-    if a.len() != 9 {
-        fail("guardian-enact-anchor <gsecrets_comma_sep> <chain_id> <enact_nonce> <corridor 0|1|2> <anchor_hex> <relayer_seed_file> <relayer_index> <fee> <era_hex32>");
-    }
-    let chain_id: u64 = a[1].parse().expect("chain_id");
-    let enact_nonce: u64 = a[2].parse().expect("enact_nonce");
-    let corridor: u8 = a[3].parse().expect("corridor");
+fn anchor_action(corridor: &str, anchor_hex: &str) -> Action {
+    let corridor: u8 = corridor.parse().expect("corridor");
     if corridor > 2 {
         fail("the corridor is 0 for bitcoin, 1 for ethereum or 2 for cosmos");
     }
-    let anchor = unhex(&a[4]);
+    Action::BridgeAnchorSet {
+        corridor,
+        anchor: unhex(anchor_hex),
+    }
+}
+
+fn guardian_sign(a: &[String]) {
+    if a.len() != 6 {
+        fail("guardian-sign <gsecret> <chain_id> <enact_nonce> <corridor 0|1|2> <anchor_hex> <era_hex32>");
+    }
+    let gsecret = read_private(&a[0]);
+    let parts: Vec<&str> = gsecret.split_whitespace().collect();
+    if parts.len() != 2 {
+        fail("a guardian secret file holds a public key and a secret key");
+    }
+    let chain_id: u64 = a[1].parse().expect("chain_id");
+    let enact_nonce: u64 = a[2].parse().expect("enact_nonce");
+    let action = anchor_action(&a[3], &a[4]);
+    let era: [u8; 32] = unhex(&a[5]).try_into().expect("era 32 bytes");
+    let challenge = guardian_enact_challenge(chain_id, &era, enact_nonce, &action);
+    let mut sk: [u8; SECRET_KEY_BYTES] = unhex(parts[1]).try_into().expect("secret key length");
+    let sig = ml_dsa::sign(&sk, &challenge, GUARDIAN_DOMAIN, &[0u8; 32]).expect("guardian sign");
+    sk.zeroize();
+    println!("{} {}", parts[0], hexs(&sig));
+}
+
+fn guardian_enact_anchor(a: &[String]) {
+    if a.len() != 9 {
+        fail("guardian-enact-anchor <approvals> <chain_id> <enact_nonce> <corridor 0|1|2> <anchor_hex> <relayer_seed_file> <relayer_index> <fee> <era_hex32>");
+    }
+    let collected = fs::read_to_string(&a[0]).expect("read the collected approvals");
+    let chain_id: u64 = a[1].parse().expect("chain_id");
+    let enact_nonce: u64 = a[2].parse().expect("enact_nonce");
+    let action = anchor_action(&a[3], &a[4]);
     let relayer_seed: [u8; 32] = read_seed(&a[5]);
     let relayer_index: u64 = a[6].parse().expect("relayer_index");
     let fee: u128 = a[7].parse().expect("fee");
-    let era: [u8; 32] = unhex(&a[8]).try_into().expect("era 32 bytes");
-    let action = Action::BridgeAnchorSet { corridor, anchor };
-    let challenge = guardian_enact_challenge(chain_id, &era, enact_nonce, &action);
     let mut approvals: Vec<(u8, Vec<u8>, Vec<u8>)> = Vec::new();
-    for path in a[0].split(',') {
-        let gsecret = read_private(path.trim());
-        let parts: Vec<&str> = gsecret.split_whitespace().collect();
-        if parts.len() != 2 {
-            fail("a guardian secret file holds a public key and a secret key");
+    for line in collected.lines() {
+        let p: Vec<&str> = line.split_whitespace().collect();
+        if p.is_empty() {
+            continue;
         }
-        let pk = unhex(parts[0]);
-        let mut sk: [u8; SECRET_KEY_BYTES] = unhex(parts[1]).try_into().expect("secret key length");
-        let sig =
-            ml_dsa::sign(&sk, &challenge, GUARDIAN_DOMAIN, &[0u8; 32]).expect("guardian sign");
-        sk.zeroize();
-        approvals.push((1, pk, sig.to_vec()));
+        if p.len() != 2 {
+            fail("each approval line is a guardian public key and a signature");
+        }
+        approvals.push((1, unhex(p[0]), unhex(p[1])));
     }
     let relayer = derive(&relayer_seed, relayer_index);
     let tx = build_guardian_enact_tx(
@@ -347,9 +378,11 @@ fn main() {
     let argv: Vec<String> = env::args().skip(1).collect();
     match argv.first().map(String::as_str) {
         Some("keygen") => keygen(&argv[1..]),
+        Some("attest") => attest(&argv[1..]),
         Some("mint") => mint(&argv[1..]),
         Some("check") => check(&argv[1..]),
         Some("guardian-keygen") => guardian_keygen(&argv[1..]),
+        Some("guardian-sign") => guardian_sign(&argv[1..]),
         Some("guardian-enact-anchor") => guardian_enact_anchor(&argv[1..]),
         _ => {
             fail("usage: qtv-oracle <keygen|mint|check|guardian-keygen|guardian-enact-anchor> ...")

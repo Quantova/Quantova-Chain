@@ -78,6 +78,7 @@ fn the_leader_carries_attributed_evidence_into_the_block_it_produces() {
         "the produced block carries the attributed evidence"
     );
 
+    drop(leader);
     let fresh = open()
         .into_iter()
         .next()

@@ -277,6 +277,7 @@ fn a_locked_validator_keeps_its_lock_across_a_restart() {
     let value_a = header_value(&proposal_a.header.hash());
     lock_victim_on_proposal(&mut nodes, &selection, l0, victim, &proposal_a);
 
+    nodes[victim].stop_signing();
     nodes[victim] = DevNode::open(&config.nodes[victim], &config).expect("reopen");
     let record = nodes[victim]
         .make_view_change(2)
@@ -358,6 +359,7 @@ fn a_restarted_locked_validator_refuses_an_unjustified_conflict_at_a_later_view(
         .iter()
         .filter_map(|node| node.own_reveal_note())
         .collect();
+    nodes[victim].stop_signing();
     nodes[victim] = DevNode::open(&config.nodes[victim], &config).expect("reopen");
     for note in &notes {
         nodes[victim].collect_reveal(note.clone());

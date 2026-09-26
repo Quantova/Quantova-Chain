@@ -1302,10 +1302,9 @@ fn dispatch_vm(
                 vec![0u8; crate::ledger::CONTRACT_CONTEXT_BYTES + params.len()];
             genesis_memory[crate::ledger::CONTRACT_CONTEXT_BYTES..].copy_from_slice(params);
             let genesis_ok = ledger.apply_atomic(|l| {
-                l.call_contract(
+                l.run_genesis(
                     &sender,
                     &contract,
-                    genesis,
                     &genesis_memory,
                     now_seconds,
                     meter.saturating_sub(deploy_cost),

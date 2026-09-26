@@ -13,6 +13,8 @@ pub const ROOT_LEN: usize = 32;
 
 pub const MAX_EXTRA_DATA: usize = 32;
 
+pub const MAX_PROPOSER: usize = 128;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Codec(qtv_codec::Error),
@@ -150,6 +152,9 @@ impl Header {
         let event_root = get_root(decoder)?;
         let beacon_seed = get_root(decoder)?;
         let proposer_bytes = decoder.get_bytes()?;
+        if proposer_bytes.len() > MAX_PROPOSER {
+            return Err(Error::Proposer);
+        }
         let proposer = String::from_utf8(proposer_bytes.to_vec()).map_err(|_| Error::Proposer)?;
         let time = u64::decode(decoder)?;
         let extra_data = decoder.get_bytes()?.to_vec();

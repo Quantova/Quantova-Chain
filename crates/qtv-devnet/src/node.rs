@@ -359,8 +359,8 @@ pub struct DevNode {
     next_conflicted: std::collections::BTreeSet<u64>,
     next_for: u64,
     pending_notes: Vec<RegisterNote>,
-    sign_guard: SignGuard,
-    prevote_guard: PrevoteGuard,
+    sign_guard: Option<SignGuard>,
+    prevote_guard: Option<PrevoteGuard>,
     lock_file: LockFile,
     finality: FinalityLedger,
     guarded_height: Option<Height>,
@@ -475,8 +475,8 @@ impl DevNode {
             next_conflicted: std::collections::BTreeSet::new(),
             next_for: 1,
             pending_notes: Vec::new(),
-            sign_guard,
-            prevote_guard,
+            sign_guard: Some(sign_guard),
+            prevote_guard: Some(prevote_guard),
             lock_file,
             finality: FinalityLedger::new(),
             guarded_height: None,
@@ -998,7 +998,7 @@ impl DevNode {
             .beacon
             .advance_from_reveals(self.consensus.slot_for(head), &reveals);
         self.height = head + 1;
-        if let Some((height, view)) = self.sign_guard.mark() {
+        if let Some((height, view)) = self.sign_guard.as_ref().and_then(SignGuard::mark) {
             if height == self.height {
                 self.view = view;
             }
@@ -1353,11 +1353,19 @@ impl DevNode {
         Ok(())
     }
 
+    pub fn stop_signing(&mut self) {
+        self.sign_guard = None;
+        self.prevote_guard = None;
+    }
+
     fn guard_height(&mut self, view: View, value: &[u8; 32]) -> bool {
         if self.fatal.is_some() {
             return false;
         }
-        match self.sign_guard.try_sign(self.height, view, value) {
+        let Some(guard) = self.sign_guard.as_mut() else {
+            return false;
+        };
+        match guard.try_sign(self.height, view, value) {
             Ok(true) => {
                 self.guarded_height = Some(self.height);
                 true
@@ -1708,7 +1716,10 @@ impl DevNode {
                 return Vec::new();
             }
         }
-        match self.prevote_guard.try_prevote(self.height, view, &value) {
+        let Some(guard) = self.prevote_guard.as_mut() else {
+            return Vec::new();
+        };
+        match guard.try_prevote(self.height, view, &value) {
             Ok(true) => {}
             Ok(false) | Err(_) => return Vec::new(),
         }

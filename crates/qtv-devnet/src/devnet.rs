@@ -778,6 +778,7 @@ impl<S: Read + Write> Devnet<S> {
     }
 
     pub fn restart_node(&mut self, index: usize) -> Result<(), RoundError> {
+        self.nodes[index].stop_signing();
         self.nodes[index] = DevNode::open(&self.config.nodes[index], &self.config)?;
         self.exchange_reveals();
         Ok(())

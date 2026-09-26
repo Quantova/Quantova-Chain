@@ -9,11 +9,31 @@ use std::path::{Path, PathBuf};
 pub struct SignGuard {
     path: PathBuf,
     mark: Option<(u64, u64, Option<[u8; 32]>)>,
+    _held: fs::File,
+}
+
+fn hold(path: &Path) -> io::Result<fs::File> {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(PathBuf::from(name))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::WouldBlock) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "another process already holds this watermark; refusing to sign from two processes with one key",
+        )),
+        Err(fs::TryLockError::Error(err)) => Err(err),
+    }
 }
 
 impl SignGuard {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
+        let held = hold(&path)?;
         let mark = match fs::read(&path) {
             Ok(bytes) => match decode_mark(&bytes) {
                 Some(mark) => Some(mark),
@@ -28,7 +48,11 @@ impl SignGuard {
             Err(err) if err.kind() == io::ErrorKind::NotFound => None,
             Err(err) => return Err(err),
         };
-        Ok(SignGuard { path, mark })
+        Ok(SignGuard {
+            path,
+            mark,
+            _held: held,
+        })
     }
 
     pub fn mark(&self) -> Option<(u64, u64)> {
@@ -108,11 +132,13 @@ fn decode_mark(bytes: &[u8]) -> Option<(u64, u64, Option<[u8; 32]>)> {
 pub struct PrevoteGuard {
     path: PathBuf,
     mark: Option<(u64, u64, [u8; 32])>,
+    _held: fs::File,
 }
 
 impl PrevoteGuard {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
+        let held = hold(&path)?;
         let mark = match fs::read(&path) {
             Ok(bytes) => match decode_prevote(&bytes) {
                 Some(mark) => Some(mark),
@@ -127,7 +153,11 @@ impl PrevoteGuard {
             Err(err) if err.kind() == io::ErrorKind::NotFound => None,
             Err(err) => return Err(err),
         };
-        Ok(PrevoteGuard { path, mark })
+        Ok(PrevoteGuard {
+            path,
+            mark,
+            _held: held,
+        })
     }
 
     pub fn mark(&self) -> Option<(u64, u64)> {
@@ -459,6 +489,7 @@ mod tests {
             "and still refuses what it already signed"
         );
         assert!(guard.try_sign(8, 0, &[1u8; 32]).unwrap());
+        drop(guard);
 
         let reopened = SignGuard::open(&path).unwrap();
         assert_eq!(
@@ -484,5 +515,33 @@ mod tests {
         assert!(!guard.try_sign(1, 5, &[1u8; 32]).unwrap());
         assert!(guard.try_sign(2, 1, &[1u8; 32]).unwrap());
         cleanup(&path);
+    }
+}
+
+#[cfg(test)]
+mod exclusive {
+    use super::*;
+
+    #[test]
+    fn a_second_holder_of_one_watermark_is_refused() {
+        let dir = std::env::temp_dir().join(format!("qtv-wm-excl-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let sign = dir.join("sign");
+        let prevote = dir.join("prevote");
+
+        let first = SignGuard::open(&sign).unwrap();
+        let err = SignGuard::open(&sign).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        drop(first);
+        assert!(SignGuard::open(&sign).is_ok());
+
+        let first = PrevoteGuard::open(&prevote).unwrap();
+        assert_eq!(
+            PrevoteGuard::open(&prevote).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(first);
+        assert!(PrevoteGuard::open(&prevote).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

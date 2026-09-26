@@ -266,6 +266,8 @@ impl StakeLedger {
             return match existing.amount.checked_add(amount) {
                 Some(total) => {
                     existing.amount = total;
+                    existing.bonded_at_day = day;
+                    existing.exit_requested_at = None;
                     true
                 }
                 None => false,

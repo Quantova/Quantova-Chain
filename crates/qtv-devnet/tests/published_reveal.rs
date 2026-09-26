@@ -37,6 +37,7 @@ fn a_node_forms_the_committee_from_published_reveals_and_verifies_them() {
         })
         .collect();
     assert_eq!(notes.len(), 4);
+    drop(nodes);
 
     let mut node1 = open_nodes(&cfg).into_iter().next().expect("node one");
     for note in &notes {
@@ -45,6 +46,7 @@ fn a_node_forms_the_committee_from_published_reveals_and_verifies_them() {
     let full = node1.select().expect("committee");
     assert_eq!(full.members, vec![1, 2, 3, 4]);
 
+    drop(node1);
     let mut mislabeller = open_nodes(&cfg).into_iter().next().expect("node one");
     let three = notes.iter().find(|n| n.id == 3).unwrap().clone();
     let two_note = notes.iter().find(|n| n.id == 2).unwrap();
@@ -61,6 +63,7 @@ fn a_node_forms_the_committee_from_published_reveals_and_verifies_them() {
     assert!(after.members.contains(&1));
     assert!(!after.members.contains(&2));
 
+    drop(mislabeller);
     let mut liveness = open_nodes(&cfg).into_iter().next().expect("node one");
     for note in notes.iter().filter(|n| n.id != 2) {
         liveness.collect_reveal(note.clone());
@@ -133,6 +136,7 @@ fn a_fresh_reveal_forwards_once_and_a_duplicate_or_forgery_does_not() {
                 .expect("a selected validator publishes")
         })
         .collect();
+    drop(nodes);
 
     let mut node1 = open_nodes(&cfg).into_iter().next().expect("node one");
     let peer = notes.iter().find(|n| n.id == 2).unwrap().clone();
@@ -171,6 +175,7 @@ fn a_reveal_arriving_after_the_committee_is_frozen_does_not_move_its_digest() {
                 .expect("a selected validator publishes")
         })
         .collect();
+    drop(nodes);
 
     let mut node1 = open_nodes(&cfg).into_iter().next().expect("node one");
     for note in notes.iter().filter(|n| n.id != 4) {

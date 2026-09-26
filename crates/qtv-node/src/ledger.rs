@@ -2757,6 +2757,58 @@ impl Ledger {
         in_asset: Option<[u8; 32]>,
         chain_id: u64,
     ) -> bool {
+        if selector == qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE) {
+            return false;
+        }
+        self.run_contract(
+            caller,
+            contract,
+            selector,
+            user_memory,
+            now_seconds,
+            meter,
+            value,
+            in_asset,
+            chain_id,
+        )
+    }
+
+    pub(crate) fn run_genesis(
+        &mut self,
+        deployer: &str,
+        contract: &str,
+        user_memory: &[u8],
+        now_seconds: u64,
+        meter: u64,
+        value: u64,
+        in_asset: Option<[u8; 32]>,
+        chain_id: u64,
+    ) -> bool {
+        self.run_contract(
+            deployer,
+            contract,
+            qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE),
+            user_memory,
+            now_seconds,
+            meter,
+            value,
+            in_asset,
+            chain_id,
+        )
+    }
+
+    fn run_contract(
+        &mut self,
+        caller: &str,
+        contract: &str,
+        selector: [u8; 4],
+        user_memory: &[u8],
+        now_seconds: u64,
+        meter: u64,
+        value: u64,
+        in_asset: Option<[u8; 32]>,
+        chain_id: u64,
+    ) -> bool {
         let contract_id = match address_id(contract) {
             Some(id) => id,
             None => return false,
@@ -3423,7 +3475,10 @@ impl Ledger {
                         if remaining > 0 {
                             if let Some(from_id) = id_from_slice(&seizure.from) {
                                 if self.is_frozen_id(&from_id) {
-                                    if let Some(bond) = self.stake_bond(&from_id) {
+                                    let validator = self.validator_ids().contains(&from_id);
+                                    if let Some(bond) =
+                                        self.stake_bond(&from_id).filter(|_| !validator)
+                                    {
                                         let from_bond = bond.amount.min(remaining);
                                         if from_bond > 0 {
                                             let residue = bond.amount - from_bond;
@@ -3993,10 +4048,16 @@ impl Ledger {
             Some(bond) => bond,
             None => return 0,
         };
-        let taken = qtv_staking::slash(bond.amount, fault);
+        let taken = qtv_staking::slash(bond.amount, fault).min(bond.amount);
         let treasury = self.stake_treasury().saturating_add(taken);
         self.set_stake_treasury(treasury);
         self.debit_staked(bond.amount);
+        let residue = bond.amount - taken;
+        if residue > 0 {
+            let mut account = self.account(address);
+            account.balance = account.balance.saturating_add(residue);
+            self.set_account(address, &account);
+        }
         if taken > 0 {
             self.record_slash_event(address, taken);
             self.record_side_event(SideEvent::Slash {
@@ -4674,6 +4735,42 @@ mod stake_state_tests {
             );
         }
         assert_eq!(word!(4), ARG, "the arguments are still the caller's own");
+    }
+
+    #[test]
+    fn an_ordinary_call_can_never_reach_genesis() {
+        let code =
+            qtv_vm::asm::assemble("LDI r1, 0\nMLOAD r0, r1\nLDI r2, 1024\nSSTORE r2, r0\nHALT")
+                .expect("the program assembles");
+        let genesis = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
+        let container = qtv_vm::container::Container::new(
+            code,
+            vec![],
+            vec![qtv_vm::container::Entry {
+                selector: genesis,
+                offset: 0,
+                access: qtv_vm::container::StateAccess {
+                    reads: vec![],
+                    writes: vec![0],
+                    keyed_reads: vec![],
+                    keyed_writes: vec![],
+                },
+            }],
+        );
+        let mut l = Ledger::new();
+        let contract = qtv_idfmt::render_address(&[72u8; 32]).unwrap();
+        let contract_id = [72u8; 32];
+        l.set_contract_code(&contract_id, &container.canonical_bytes());
+        let stranger = qtv_idfmt::render_address(&[5u8; 32]).unwrap();
+        assert!(!l.call_contract(&stranger, &contract, genesis, &[], 0, 100_000, 0, None, 0));
+        assert!(l.contract_storage(&contract_id).is_empty());
+        let deployer = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
+        assert!(l.run_genesis(&deployer, &contract, &[], 0, 100_000, 0, None, 0));
+        assert_eq!(
+            l.contract_storage(&contract_id)
+                .get(&qtv_vm::abi::scalar_key(0)),
+            Some(&u64::from_be_bytes([9u8; 8]))
+        );
     }
 
     #[test]
@@ -6275,6 +6372,54 @@ mod stake_state_tests {
             supply_before,
             "the recovery moves value between buckets and conserves supply"
         );
+    }
+
+    #[test]
+    fn a_recovery_cannot_seize_an_active_validators_bond() {
+        let mut l = Ledger::new();
+        let proposer = gov_addr(26);
+        fund(&mut l, &proposer, 300_000 * 1_000_000);
+        let validator = gov_addr(42);
+        l.seed_validator_bond(&validator, 2_000 * 1_000_000);
+        l.seed_validator_set(&[[42u8; 32]]);
+        fund(&mut l, &validator, 1_000 * 1_000_000);
+        l.set_frozen(&[42u8; 32]);
+
+        let seizures = vec![qtv_governance::Seizure {
+            from: [42u8; 32].to_vec(),
+            amount: 3_000 * 1_000_000,
+        }];
+        let scope = sha3::sha3_256(&qtv_governance::Action::recovery_scope_preimage(
+            TEST_CHAIN,
+            &[40u8; 32],
+            &seizures,
+        ));
+        let action = qtv_governance::Action::FreezeRecovery {
+            scope,
+            victim: [40u8; 32].to_vec(),
+            seizures,
+        };
+        let id = l
+            .gov_propose(&proposer, qtv_governance::Track::FreezeRecovery, action, 0)
+            .unwrap();
+        let voter = gov_addr(27);
+        fund(&mut l, &voter, 10_000 * 1_000_000);
+        l.seed_validator_bond(&voter, 8_000 * 1_000_000);
+        l.gov_vote(
+            &voter,
+            id,
+            true,
+            qtv_governance::Conviction::Liquid,
+            8_000 * 1_000_000,
+            0,
+        );
+        l.gov_enact(id, 7 * 3_600 + 1, TEST_CHAIN).unwrap();
+
+        assert_eq!(
+            l.stake_bond(&[42u8; 32]).map(|b| b.amount),
+            Some(2_000 * 1_000_000)
+        );
+        assert!(!l.is_stake_banned(&[42u8; 32]));
     }
 
     #[test]
