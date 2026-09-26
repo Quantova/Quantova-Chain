@@ -1681,7 +1681,11 @@ pub fn reweigh_roster_for_epoch(
         .iter()
         .map(|r| {
             let mut reweighed = r.clone();
-            reweighed.stake = ledger.staked_weight_in_epoch(&r.bond_address, epoch);
+            reweighed.stake = if ledger.is_frozen(&r.bond_address) {
+                0
+            } else {
+                ledger.staked_weight_in_epoch(&r.bond_address, epoch)
+            };
             reweighed
         })
         .collect();
@@ -1697,7 +1701,11 @@ pub fn committee_weights(ledger: &Ledger, base: &[ConsensusValidator]) -> Vec<Co
         .iter()
         .map(|v| ConsensusValidator {
             id: v.id,
-            stake: ledger.staked_weight(&v.bond_address),
+            stake: if ledger.is_frozen(&v.bond_address) {
+                0
+            } else {
+                ledger.staked_weight(&v.bond_address)
+            },
             online: v.online,
             secret: v.secret,
             bond_address: v.bond_address.clone(),
@@ -2247,6 +2255,50 @@ mod tests {
             payload: qtv_codec::to_bytes(&action),
         };
         assert!(guardian_enact_action(&act).is_none());
+    }
+
+    #[test]
+    fn a_frozen_validator_drops_out_of_the_consensus_roster() {
+        let base: Vec<crate::consensus::ValidatorRegistration> = (1..=3u64)
+            .map(|id| {
+                let mut reg = crate::consensus::ValidatorRegistration::from_secret(
+                    id,
+                    2_000,
+                    true,
+                    &[id as u8; 32],
+                    8,
+                );
+                reg.bond_address = validator_address(id);
+                reg
+            })
+            .collect();
+        let mut live = Ledger::new();
+        let mut ids = Vec::new();
+        for r in &base {
+            live.seed_validator_bond(&r.bond_address, 2_000 * 1_000_000);
+            ids.push(address_bytes(&r.bond_address));
+        }
+        live.seed_validator_set(&ids);
+        let g1 = keypair(160);
+        let g2 = keypair(161);
+        live.set_guardian_set(&qtv_governance::GuardianSet::new(
+            vec![address_bytes(&g1.address()), address_bytes(&g2.address())],
+            2,
+        ));
+        assert!(live.guardian_freeze(
+            0,
+            &[address_bytes(&base[0].bond_address)],
+            &[address_bytes(&g1.address()), address_bytes(&g2.address())],
+            0,
+        ));
+        assert_eq!(
+            reweigh_roster_for_epoch(&live, &base, 0)
+                .iter()
+                .map(|r| r.stake)
+                .collect::<Vec<_>>(),
+            vec![0, 2_000, 2_000]
+        );
+        assert_eq!(live.staked_weight(&base[0].bond_address), 2_000);
     }
 
     #[test]
