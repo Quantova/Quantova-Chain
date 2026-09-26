@@ -832,6 +832,7 @@ fn u64_from_le(bytes: &[u8]) -> Option<u64> {
 fn action_is_enactable(action: &Action) -> bool {
     match action {
         Action::Activate { feature, .. } => !feature.is_empty(),
+        Action::BridgeAnchorSet { .. } => false,
         _ => true,
     }
 }
@@ -3384,7 +3385,10 @@ impl Ledger {
                 let after_period = already
                     .checked_add(u128::from(*amount))
                     .ok_or(EnactError::Overflow)?;
-                if after_period > u128::from(qtv_staking::gov_mint_ceiling(self.total_supply())) {
+                let base = self
+                    .total_supply()
+                    .saturating_sub(u64::try_from(already).unwrap_or(u64::MAX));
+                if after_period > u128::from(qtv_staking::gov_mint_ceiling(base)) {
                     return Err(EnactError::BadValue);
                 }
                 let mut account = self.account(&addr);
@@ -3921,9 +3925,9 @@ impl Ledger {
             active_amount: 0,
             raised_at_height: 0,
         });
+        bond.raise_to(total, self.execution_height, self.heights_per_epoch);
         bond.bonded_at_day = day;
         bond.exit_requested_at = None;
-        bond.raise_to(total, self.execution_height, self.heights_per_epoch);
         self.set_stake_bond(&id, &bond);
         self.credit_staked(amount);
         true
@@ -4025,9 +4029,9 @@ impl Ledger {
             active_amount: 0,
             raised_at_height: 0,
         });
+        bond.raise_to(total, self.execution_height, self.heights_per_epoch);
         bond.bonded_at_day = day;
         bond.exit_requested_at = None;
-        bond.raise_to(total, self.execution_height, self.heights_per_epoch);
         self.set_stake_bond(&id, &bond);
         self.credit_staked(amount);
         self.record_bond_event(address, amount, fee);
@@ -4085,7 +4089,7 @@ impl Ledger {
             Some(bond) => bond,
             None => return false,
         };
-        if bond.request_exit(now_day) {
+        if bond.request_exit_at(now_day, self.execution_height, self.heights_per_epoch) {
             self.set_stake_bond(&id, &bond);
             true
         } else {
@@ -8873,6 +8877,67 @@ mod stake_state_tests {
             "the ceiling grew with the supply, there is no fixed wall to hit"
         );
     }
+    #[test]
+    fn an_exiting_validator_loses_its_vote_next_epoch_and_is_still_slashed_in_full() {
+        let mut l = Ledger::new();
+        l.set_heights_per_epoch(100);
+        let addr = gov_addr(66);
+        fund(&mut l, &addr, 5_000 * 1_000_000);
+        l.credit_supply(5_000 * 1_000_000);
+        assert!(l.bond_with_fee(&addr, 2_000 * 1_000_000, 0, 0));
+        l.set_execution_height(550);
+        assert!(l.request_stake_exit(&addr, qtv_staking::BOND_LOCK_DAYS));
+        assert_eq!(l.staked_weight_in_epoch(&addr, 5), 2_000);
+        assert_eq!(l.staked_weight_in_epoch(&addr, 6), 0);
+        let supply = l.total_supply();
+        assert!(l.slash_validator(&addr));
+        assert!(l.stake_bond(&address_id(&addr).unwrap()).is_none());
+        assert_eq!(l.total_supply(), supply - 2_000 * 1_000_000);
+    }
+
+    #[test]
+    fn a_bridge_anchor_referendum_is_refused_before_it_takes_a_deposit() {
+        let mut l = Ledger::new();
+        let proposer = gov_addr(65);
+        let deposit = qtv_governance::Track::BridgeMigration.deposit();
+        fund(&mut l, &proposer, deposit);
+        let action = qtv_governance::Action::BridgeAnchorSet {
+            corridor: 1,
+            anchor: vec![7u8; 32],
+        };
+        assert!(l
+            .gov_propose(&proposer, qtv_governance::Track::BridgeMigration, action, 0)
+            .is_none());
+        assert_eq!(l.balance(&proposer), deposit);
+    }
+
+    #[test]
+    fn a_second_mint_in_one_year_cannot_ride_the_first() {
+        let mut l = Ledger::new();
+        l.credit_supply(10_000_000 * 1_000_000);
+        let ceiling = qtv_staking::gov_mint_ceiling(l.total_supply());
+        l.execute_action(
+            &Action::Mint {
+                to: [63u8; 32].to_vec(),
+                amount: ceiling,
+            },
+            0,
+            TEST_CHAIN,
+        )
+        .expect("a mint at the ceiling is allowed");
+        assert_eq!(
+            l.execute_action(
+                &Action::Mint {
+                    to: [63u8; 32].to_vec(),
+                    amount: 1
+                },
+                0,
+                TEST_CHAIN,
+            ),
+            Err(EnactError::BadValue)
+        );
+    }
+
     #[test]
     fn a_reward_accrual_records_a_native_reward_event() {
         let mut l = Ledger::new();

@@ -124,7 +124,11 @@ impl Bond {
             return self.amount;
         }
         if self.raised_at_height / heights_per_epoch < epoch {
-            self.amount
+            if self.exit_requested_at.is_some() {
+                0
+            } else {
+                self.amount
+            }
         } else {
             self.active_amount.min(self.amount)
         }
@@ -144,6 +148,17 @@ impl Bond {
         } else {
             false
         }
+    }
+
+    pub fn request_exit_at(&mut self, now_day: u64, height: u64, heights_per_epoch: u64) -> bool {
+        if self.exit_requested_at.is_some() || !self.can_request_exit(now_day) {
+            return false;
+        }
+        let epoch = height.checked_div(heights_per_epoch).unwrap_or(0);
+        self.active_amount = self.amount_in_epoch(epoch, heights_per_epoch);
+        self.raised_at_height = height;
+        self.exit_requested_at = Some(now_day);
+        true
     }
 
     pub fn can_withdraw(&self, now_day: u64) -> bool {
@@ -518,6 +533,28 @@ mod tests {
         assert_eq!(released(earned, 364), 0);
         assert_eq!(released(earned, 365), 100 * QTOV);
         assert_eq!(released(earned, 5_000), 100 * QTOV);
+    }
+
+    #[test]
+    fn an_exiting_bond_stops_voting_after_its_epoch_but_stays_slashable() {
+        let hpe = 100;
+        let mut bond = Bond::new(2_000 * QTOV, 0).unwrap();
+        assert!(bond.request_exit_at(BOND_LOCK_DAYS, 550, hpe));
+        assert_eq!(bond.amount_in_epoch(5, hpe), 2_000 * QTOV);
+        assert_eq!(bond.amount_in_epoch(6, hpe), 0);
+        assert_eq!(slash(bond.amount, Fault::Attributable), 2_000 * QTOV);
+        assert!(!bond.request_exit_at(BOND_LOCK_DAYS, 560, hpe));
+    }
+
+    #[test]
+    fn a_rebond_after_exit_waits_for_the_next_epoch() {
+        let hpe = 100;
+        let mut bond = Bond::new(2_000 * QTOV, 0).unwrap();
+        assert!(bond.request_exit_at(BOND_LOCK_DAYS, 550, hpe));
+        bond.raise_to(3_000 * QTOV, 720, hpe);
+        bond.exit_requested_at = None;
+        assert_eq!(bond.amount_in_epoch(7, hpe), 0);
+        assert_eq!(bond.amount_in_epoch(8, hpe), 3_000 * QTOV);
     }
 
     #[test]
