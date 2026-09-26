@@ -140,6 +140,12 @@ pub fn genesis_beacon() -> Beacon {
 
 pub const VIEW_CHANGE_SUBJECT_COST: u64 = u64::MAX;
 
+pub const PREVOTE_SUBJECT_COST: u64 = u64::MAX - 1;
+
+pub fn is_round_marker(cost: u64) -> bool {
+    cost == VIEW_CHANGE_SUBJECT_COST || cost == PREVOTE_SUBJECT_COST
+}
+
 pub fn equivocation_offenders(
     chain_id: u64,
     attestations: &[Attestation],
@@ -152,8 +158,8 @@ pub fn equivocation_offenders(
                 && first.height == second.height
                 && first.view == second.view
                 && first.block != second.block
-                && first.block.cost != VIEW_CHANGE_SUBJECT_COST
-                && second.block.cost != VIEW_CHANGE_SUBJECT_COST
+                && !is_round_marker(first.block.cost)
+                && !is_round_marker(second.block.cost)
                 && !flagged.contains(&first.from)
             {
                 if let Some(registration) = roster.iter().find(|r| r.id == first.from) {
@@ -178,7 +184,7 @@ pub fn double_finalize_offenders(
 ) -> Vec<u64> {
     let mut quorums: Vec<(u64, [u8; 32], Vec<u64>)> = Vec::new();
     for att in attestations {
-        if att.block.cost == VIEW_CHANGE_SUBJECT_COST {
+        if is_round_marker(att.block.cost) {
             continue;
         }
         let Some(registration) = roster.iter().find(|r| r.id == att.from) else {
@@ -362,10 +368,19 @@ impl Consensus {
     }
 
     pub fn rotate_to_epoch(&mut self, epoch: u64, roster: Vec<ValidatorRegistration>) {
-        if epoch != self.epoch {
-            self.own = self.own.at_epoch(epoch);
-            self.epoch = epoch;
+        self.rotate_to_epoch_with_tree(epoch, epoch, roster);
+    }
+
+    pub fn rotate_to_epoch_with_tree(
+        &mut self,
+        epoch: u64,
+        tree_epoch: u64,
+        roster: Vec<ValidatorRegistration>,
+    ) {
+        if self.own.epoch() != tree_epoch {
+            self.own = self.own.at_epoch(tree_epoch);
         }
+        self.epoch = epoch;
         self.reweight(roster);
     }
 

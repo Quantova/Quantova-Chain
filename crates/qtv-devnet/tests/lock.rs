@@ -410,3 +410,126 @@ fn a_second_node_on_one_store_is_refused_before_it_touches_the_store() {
     drop(first);
     assert!(DevNode::open(&config.nodes[0], &config).is_ok());
 }
+
+#[test]
+fn nodes_that_froze_different_committees_converge_after_a_view_timeout() {
+    let base = unique_base("refreeze");
+    let config = config(&base, &[true, true, true, true], Vec::new());
+    let mut nodes: Vec<DevNode> = config
+        .nodes
+        .iter()
+        .map(|node| DevNode::open(node, &config).expect("node opens"))
+        .collect();
+    let notes: Vec<_> = nodes
+        .iter()
+        .filter_map(|node| node.own_reveal_note())
+        .collect();
+    let late = notes
+        .iter()
+        .find(|note| note.id == nodes[1].id())
+        .cloned()
+        .expect("node 1 publishes a reveal");
+    for (index, node) in nodes.iter_mut().enumerate() {
+        for note in &notes {
+            if index >= 2 && note.id == late.id {
+                continue;
+            }
+            node.collect_reveal(note.clone());
+        }
+    }
+    let early = nodes[0].freeze_committee().expect("committee");
+    let split = nodes[2].freeze_committee().expect("committee");
+    assert_ne!(early.commitment.digest(), split.commitment.digest());
+    assert!(nodes[2].collect_reveal(late.clone()));
+    assert_eq!(
+        nodes[2].select().expect("committee").commitment.digest(),
+        split.commitment.digest()
+    );
+    let rejoined = nodes[2].refreeze_committee().expect("committee");
+    assert_eq!(rejoined.commitment.digest(), early.commitment.digest());
+    assert_eq!(
+        nodes[0]
+            .refreeze_committee()
+            .expect("committee")
+            .commitment
+            .digest(),
+        early.commitment.digest()
+    );
+}
+
+#[test]
+fn a_lock_formed_before_a_refreeze_still_binds_the_next_proposal() {
+    let base = unique_base("refreeze-lock");
+    let alice = user(0);
+    let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
+    let config = config(&base, &[true; 7], accounts);
+    let mut nodes: Vec<DevNode> = config
+        .nodes
+        .iter()
+        .map(|node| DevNode::open(node, &config).expect("node opens"))
+        .collect();
+    let notes: Vec<_> = nodes
+        .iter()
+        .filter_map(|node| node.own_reveal_note())
+        .collect();
+    let late_id = nodes[6].id();
+    let late = notes
+        .iter()
+        .find(|note| note.id == late_id)
+        .cloned()
+        .expect("the late validator publishes");
+    for node in nodes.iter_mut() {
+        for note in &notes {
+            if note.id != late_id {
+                node.collect_reveal(note.clone());
+            }
+        }
+    }
+    let early: Vec<_> = nodes
+        .iter_mut()
+        .map(|node| node.freeze_committee().expect("committee"))
+        .collect();
+    let selection = early[0].clone();
+    assert!(early[..6]
+        .iter()
+        .all(|s| s.commitment.digest() == selection.commitment.digest()));
+    let l0 = leader_for(&selection, 0);
+    let l0_idx = index_of(&config, l0);
+    let future_leader = index_of(&config, leader_for(&early[6], 2));
+    let victim = (0..6)
+        .find(|&i| i != l0_idx && i != future_leader)
+        .expect("a victim that leads neither view");
+    let proposal_a = nodes[l0_idx]
+        .build_proposal(&selection)
+        .expect("the leader proposes");
+    let value_a = header_value(&proposal_a.header.hash());
+    lock_victim_on_proposal(&mut nodes[..6], &selection, l0, victim, &proposal_a);
+
+    for node in nodes.iter_mut() {
+        node.collect_reveal(late.clone());
+    }
+    let rejoined: Vec<_> = nodes
+        .iter_mut()
+        .map(|node| node.refreeze_committee().expect("committee"))
+        .collect();
+    let next = rejoined[0].clone();
+    assert_ne!(next.commitment.digest(), selection.commitment.digest());
+    assert!(rejoined
+        .iter()
+        .all(|s| s.commitment.digest() == next.commitment.digest()));
+
+    let l2 = leader_for(&next, 2);
+    let l2_idx = index_of(&config, l2);
+    assert_eq!(l2_idx, future_leader);
+    assert_ne!(l2_idx, victim);
+    let records: Vec<_> = (0..nodes.len())
+        .filter_map(|i| nodes[i].make_view_change(2))
+        .collect();
+    for record in &records {
+        nodes[l2_idx].collect_view_change(&next, record.clone());
+    }
+    let proposal = nodes[l2_idx]
+        .build_justified_proposal(&next, 2)
+        .expect("a quorum justifies a proposal under the rejoined committee");
+    assert_eq!(header_value(&proposal.header.hash()), value_a);
+}

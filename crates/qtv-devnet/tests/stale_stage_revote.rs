@@ -72,7 +72,7 @@ fn a_stale_stage_is_not_reprevoted_at_a_new_view() {
     let prevote_a = prevote_of(&out).expect("the victim prevotes A at view zero");
     assert_eq!(
         (prevote_a.view, prevote_a.block.cost),
-        (0, u64::MAX),
+        (0, qtv_node::consensus::PREVOTE_SUBJECT_COST),
         "a prevote is a control plane vote"
     );
     assert_eq!(nodes[victim].staged_view(), Some(0));

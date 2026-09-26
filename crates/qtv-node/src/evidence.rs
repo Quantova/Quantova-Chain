@@ -8,9 +8,21 @@ use qtv_crypto::ml_dsa::{self, PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
 
 use qtv_attest::params::ATTEST_CONTEXT;
 
-fn subject_is_view_change(block_bytes: &[u8]) -> bool {
+fn subject_cost(block_bytes: &[u8]) -> Option<u64> {
     let len = block_bytes.len();
-    len >= 8 && block_bytes[len - 8..] == crate::consensus::VIEW_CHANGE_SUBJECT_COST.to_le_bytes()
+    let tail: [u8; 8] = block_bytes.get(len.checked_sub(8)?..)?.try_into().ok()?;
+    Some(u64::from_le_bytes(tail))
+}
+
+fn subject_is_view_change(block_bytes: &[u8]) -> bool {
+    subject_cost(block_bytes) == Some(crate::consensus::VIEW_CHANGE_SUBJECT_COST)
+}
+
+fn subject_kind(block_bytes: &[u8]) -> u64 {
+    match subject_cost(block_bytes) {
+        Some(crate::consensus::PREVOTE_SUBJECT_COST) => 1,
+        _ => 0,
+    }
 }
 
 fn attestation_message(
@@ -56,6 +68,9 @@ impl Equivocation {
             return false;
         }
         if subject_is_view_change(&self.block_a) || subject_is_view_change(&self.block_b) {
+            return false;
+        }
+        if subject_kind(&self.block_a) != subject_kind(&self.block_b) {
             return false;
         }
         let pk: [u8; PUBLIC_KEY_BYTES] = match attest_pk.try_into() {
@@ -147,9 +162,9 @@ pub const MAX_WATCHED_ATTESTATIONS: usize = 4_096;
 
 #[derive(Default)]
 pub struct EvidencePool {
-    seen: HashMap<(String, u64, u64), (u64, [u8; 32], Vec<u8>, Vec<u8>)>,
+    seen: HashMap<(String, u64, u64, u64), (u64, [u8; 32], Vec<u8>, Vec<u8>)>,
     pending: Vec<Equivocation>,
-    flagged: HashSet<(String, u64, u64)>,
+    flagged: HashSet<(String, u64, u64, u64)>,
     floor: u64,
 }
 
@@ -173,10 +188,15 @@ impl EvidencePool {
         }
         if height > self.floor {
             self.floor = height;
-            self.seen.retain(|(_, h, _), _| *h >= height);
-            self.flagged.retain(|(_, h, _)| *h >= height);
+            self.seen.retain(|(_, h, _, _), _| *h >= height);
+            self.flagged.retain(|(_, h, _, _)| *h >= height);
         }
-        let key = (offender.to_string(), height, view);
+        let key = (
+            offender.to_string(),
+            height,
+            view,
+            subject_kind(&block_bytes),
+        );
         match self.seen.get(&key) {
             Some((prev_slot, prev_committee, prev_block, prev_sig)) => {
                 if *prev_block == block_bytes {
@@ -271,6 +291,56 @@ mod tests {
             sig_b: b.sig.to_vec(),
         };
         (evidence, attester.attest_public_key().to_vec())
+    }
+
+    fn signed_pair(attester: &Attester, address: &str, a: Block, b: Block) -> Equivocation {
+        let beacon = Beacon::genesis();
+        let sa = attester
+            .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], a, &beacon)
+            .expect("the attester holds a credential for this slot");
+        let sb = attester
+            .attest(CHAIN_ID, 1, 1, 0, [0u8; 32], b, &beacon)
+            .expect("the attester holds a credential for this slot");
+        Equivocation {
+            offender: address.to_string(),
+            height: 1,
+            view_a: 0,
+            view_b: 0,
+            slot_a: 1,
+            slot_b: 1,
+            committee_a: [0u8; 32],
+            committee_b: [0u8; 32],
+            block_a: a.to_bytes(),
+            sig_a: sa.sig.to_vec(),
+            block_b: b.to_bytes(),
+            sig_b: sb.sig.to_vec(),
+        }
+    }
+
+    #[test]
+    fn two_prevotes_for_different_blocks_at_one_view_are_slashable() {
+        let (attester, address) = attester();
+        let pk = attester.attest_public_key().to_vec();
+        let prevote = crate::consensus::PREVOTE_SUBJECT_COST;
+        let a = Block::with_cost(1, [1u8; 32], Parent::Genesis, prevote);
+        let b = Block::with_cost(1, [2u8; 32], Parent::Genesis, prevote);
+        assert!(signed_pair(&attester, &address, a, b).attributes(CHAIN_ID, &pk));
+        let precommit = Block::new(1, [3u8; 32], Parent::Genesis);
+        assert!(!signed_pair(&attester, &address, a, precommit).attributes(CHAIN_ID, &pk));
+        let change = crate::consensus::VIEW_CHANGE_SUBJECT_COST;
+        let c = Block::with_cost(1, [4u8; 32], Parent::Genesis, change);
+        let d = Block::with_cost(1, [5u8; 32], Parent::Genesis, change);
+        assert!(!signed_pair(&attester, &address, c, d).attributes(CHAIN_ID, &pk));
+        let mut pool = EvidencePool::new();
+        assert!(pool
+            .observe(&address, 1, 1, 0, [0u8; 32], a.to_bytes(), vec![1])
+            .is_none());
+        assert!(pool
+            .observe(&address, 1, 1, 0, [0u8; 32], precommit.to_bytes(), vec![2])
+            .is_none());
+        assert!(pool
+            .observe(&address, 1, 1, 0, [0u8; 32], b.to_bytes(), vec![3])
+            .is_some());
     }
 
     #[test]

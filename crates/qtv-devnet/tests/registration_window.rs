@@ -84,14 +84,10 @@ fn roots_registered_inside_the_window_seat_the_next_epoch_on_every_node() {
 }
 
 #[test]
-fn a_validator_offline_through_the_window_sits_out_one_epoch_on_every_node_then_returns() {
+fn a_validator_offline_through_the_window_keeps_its_genesis_root_on_every_node_then_rotates() {
     let mut devnet = Devnet::over_duplex(config(&unique_base("reg-window-miss"))).expect("devnet");
     let late = 3usize;
     let late_id = late as u64 + 1;
-    let unseated = qtv_sampler::onetime::Root {
-        digest: [0u8; 32],
-        slots: 0,
-    };
 
     devnet.set_active(late, false);
     step_to(
@@ -107,15 +103,24 @@ fn a_validator_offline_through_the_window_sits_out_one_epoch_on_every_node_then_
     );
 
     step_to(&mut devnet, SLOTS + 1, "into epoch one");
-    assert_eq!(agreed_root(&devnet, late_id), unseated);
+    assert_eq!(
+        agreed_root(&devnet, late_id),
+        devnet.node(late).own_rotated_root(0),
+        "a validator that missed the window keeps its genesis root rather than dropping out"
+    );
     for j in 0..late {
         let id = j as u64 + 1;
         assert_eq!(agreed_root(&devnet, id), devnet.node(j).own_rotated_root(1));
     }
-    let selection = devnet.node(0).select().expect("the other three are drawn");
+    step_to(
+        &mut devnet,
+        SLOTS + 3,
+        "through epoch one with every validator seated",
+    );
+    let selection = devnet.node(0).select().expect("a committee forms");
     assert!(
-        !selection.members.contains(&late_id),
-        "an unseated validator is never drawn"
+        selection.members.contains(&late_id),
+        "the late validator reveals from its genesis tree and is drawn"
     );
 
     step_to(&mut devnet, 2 * SLOTS + 1, "into epoch two");

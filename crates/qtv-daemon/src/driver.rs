@@ -102,6 +102,8 @@ use crate::mesh::Mesh;
 use crate::util::{hex, log};
 
 const TICK: Duration = Duration::from_millis(20);
+
+const GRACE_DIVISOR: u32 = 8;
 const MAX_GOSSIP_PER_TICK: usize = 256;
 
 const MAX_BUFFERED_FRAMES: usize = 8192;
@@ -479,7 +481,7 @@ impl Driver {
         if self.node.height() != start_height {
             return Ok(());
         }
-        let selection = match self.node.freeze_committee() {
+        let mut selection = match self.node.freeze_committee() {
             Ok(selection) => selection,
             Err(e) => {
                 let reason = match self.node.saturation_shortfall() {
@@ -535,6 +537,9 @@ impl Driver {
             }
 
             if entered_view == Some(view) && Instant::now() >= view_deadline {
+                if let Ok(next) = self.node.refreeze_committee() {
+                    selection = next;
+                }
                 self.on_view_timeout(&selection);
                 self.request_catch_up();
                 view_deadline = Instant::now() + view_timeout;
@@ -569,7 +574,7 @@ impl Driver {
             .filter(|&q| q != self.idx && self.up.get(q).copied().unwrap_or(false))
             .map(|q| q as u64 + 1)
             .collect();
-        let deadline = Instant::now() + window;
+        let deadline = Instant::now() + window / GRACE_DIVISOR;
         while Instant::now() < deadline {
             let have = self.node.collected_registration_ids();
             if expected.iter().all(|id| have.contains(id)) {
@@ -614,9 +619,16 @@ impl Driver {
             .map(|q| q as u64 + 1)
             .collect();
         let deadline = Instant::now() + window;
+        let mut quorum_at: Option<Instant> = None;
         while Instant::now() < deadline {
             let have = self.node.collected_reveal_ids();
             if expected.iter().all(|id| have.contains(id)) {
+                break;
+            }
+            if quorum_at.is_none() && self.node.reveal_quorum_reached() {
+                quorum_at = Some(Instant::now());
+            }
+            if quorum_at.is_some_and(|at| at.elapsed() >= window / GRACE_DIVISOR) {
                 break;
             }
             match self.inbound.recv_timeout(TICK) {

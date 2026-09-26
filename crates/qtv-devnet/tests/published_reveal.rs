@@ -184,10 +184,34 @@ fn a_reveal_arriving_after_the_committee_is_frozen_does_not_move_its_digest() {
     let frozen = node1.freeze_committee().expect("committee");
     let late = notes.iter().find(|n| n.id == 4).unwrap().clone();
     assert!(
-        !node1.collect_reveal(late),
-        "a late reveal is not collected"
+        node1.collect_reveal(late),
+        "a late reveal is kept and relayed for the next selection"
     );
     let after = node1.select().expect("committee");
     assert_eq!(after.commitment.digest(), frozen.commitment.digest());
     assert_eq!(after.members, frozen.members);
+    let rejoined = node1.refreeze_committee().expect("committee");
+    assert!(rejoined.members.contains(&4));
+    assert_ne!(rejoined.commitment.digest(), frozen.commitment.digest());
+}
+
+#[test]
+fn the_reveal_wait_ends_once_the_reveals_already_make_a_finality_quorum() {
+    let base = unique_base("reveal-quorum");
+    let cfg = config(&base, &[true, true, true, true], Vec::new());
+    let nodes = open_nodes(&cfg);
+    let notes: Vec<RevealNote> = nodes
+        .iter()
+        .map(|node| {
+            node.own_reveal_note()
+                .expect("a selected validator publishes")
+        })
+        .collect();
+    drop(nodes);
+    let mut node1 = open_nodes(&cfg).into_iter().next().expect("node one");
+    let others: Vec<_> = notes.iter().filter(|n| n.id != 1).cloned().collect();
+    node1.collect_reveal(others[0].clone());
+    assert!(!node1.reveal_quorum_reached());
+    node1.collect_reveal(others[1].clone());
+    assert!(node1.reveal_quorum_reached());
 }

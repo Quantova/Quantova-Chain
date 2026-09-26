@@ -638,6 +638,19 @@ impl DevNode {
         self.consensus.slot_for(self.height)
     }
 
+    fn rotate_consensus(&mut self, epoch: u64, roster: Vec<ValidatorRegistration>) {
+        let tree_epoch = if epoch == 0
+            || self.epoch_roots.contains_key(&self.id)
+            || self.epoch_conflicted.contains(&self.id)
+        {
+            epoch
+        } else {
+            0
+        };
+        self.consensus
+            .rotate_to_epoch_with_tree(epoch, tree_epoch, roster);
+    }
+
     fn epoch_roster(&self) -> Vec<ValidatorRegistration> {
         self.epoch_roster_for(self.consensus.epoch_for(self.height))
     }
@@ -647,11 +660,11 @@ impl DevNode {
             .into_iter()
             .map(|mut r| {
                 if epoch != 0 {
-                    r.root = self
-                        .epoch_roots
-                        .get(&r.id)
-                        .copied()
-                        .unwrap_or(UNSEATED_ROOT);
+                    r.root = match self.epoch_roots.get(&r.id) {
+                        Some(root) => *root,
+                        None if self.epoch_conflicted.contains(&r.id) => UNSEATED_ROOT,
+                        None => r.root,
+                    };
                 }
                 r
             })
@@ -733,7 +746,7 @@ impl DevNode {
             self.promote_registrations(epoch);
         }
         let roster = self.epoch_roster();
-        self.consensus.rotate_to_epoch(epoch, roster);
+        self.rotate_consensus(epoch, roster);
         self.reveals.clear();
         *self.selection_cache.borrow_mut() = None;
         self.record_own_reveal();
@@ -803,7 +816,7 @@ impl DevNode {
         }
         let epoch = self.consensus.epoch_for(self.height);
         let roster = self.epoch_roster();
-        self.consensus.rotate_to_epoch(epoch, roster);
+        self.rotate_consensus(epoch, roster);
         *self.selection_cache.borrow_mut() = None;
         self.record_own_reveal();
     }
@@ -903,7 +916,7 @@ impl DevNode {
     }
 
     pub fn collect_reveal(&mut self, note: RevealNote) -> bool {
-        if note.height != self.height || self.committee_frozen() {
+        if note.height != self.height {
             return false;
         }
         let reveal = PublishedReveal::new(note.id, note.credential);
@@ -917,7 +930,9 @@ impl DevNode {
             return false;
         }
         self.reveals.push(reveal);
-        *self.selection_cache.borrow_mut() = None;
+        if !self.committee_frozen() {
+            *self.selection_cache.borrow_mut() = None;
+        }
         true
     }
 
@@ -978,7 +993,7 @@ impl DevNode {
         let head_epoch = self.consensus.epoch_for(head);
         self.rebuild_epoch_registrations(head);
         let roster = self.epoch_roster_for(head_epoch);
-        self.consensus.rotate_to_epoch(head_epoch, roster);
+        self.rotate_consensus(head_epoch, roster);
         *self.selection_cache.borrow_mut() = None;
         let reveals = match self.committee_for_certificate(head, &certificate) {
             Some(selection) => {
@@ -1091,6 +1106,41 @@ impl DevNode {
         let selection = self.select()?;
         self.frozen_for = Some(self.height);
         Ok(selection)
+    }
+
+    pub fn reveal_quorum_reached(&self) -> bool {
+        let Ok(selection) = self.select() else {
+            return false;
+        };
+        let commitment = &selection.commitment;
+        let tau = selection.tau.max(qtv_sampler::params::finality_threshold(
+            commitment.len() as u64
+        ));
+        commitment.len() as u64 >= tau
+            && commitment.committee_stake().saturating_mul(3)
+                >= commitment.quorum_stake().saturating_mul(2)
+    }
+
+    pub fn refreeze_committee(&mut self) -> Result<Selection, RoundError> {
+        let held = self.selection_cache.borrow_mut().take();
+        match self.select() {
+            Ok(selection) => {
+                self.frozen_for = Some(self.height);
+                Ok(selection)
+            }
+            Err(error) => {
+                *self.selection_cache.borrow_mut() = held;
+                Err(error)
+            }
+        }
+    }
+
+    fn committee_reveals(&self, selection: &Selection) -> Vec<PublishedReveal> {
+        self.reveals
+            .iter()
+            .filter(|r| selection.commitment.contains(r.id))
+            .cloned()
+            .collect()
     }
 
     pub fn select(&self) -> Result<Selection, RoundError> {
@@ -1462,15 +1512,7 @@ impl DevNode {
                 attestations,
             )
             .ok_or(RoundError::NotFinalized)?;
-        let member_ids: std::collections::HashSet<_> =
-            selection.commitment.members.iter().map(|m| m.id).collect();
-        let committee_reveals: Vec<_> = self
-            .reveals
-            .iter()
-            .filter(|r| member_ids.contains(&r.id))
-            .cloned()
-            .collect();
-        let certificate = certificate.with_committee_reveals(committee_reveals);
+        let certificate = certificate.with_committee_reveals(self.committee_reveals(selection));
         let staged = self.staged.take().expect("the staged block is present");
         self.observe_finality(self.height, block.val);
         if self.fatal.is_some() {
@@ -1711,9 +1753,18 @@ impl DevNode {
     ) -> bool {
         let value = header_value(&block.header.hash());
         let subject = prevote_subject(self.height, lock_view, value);
-        polka.envelope.block == subject
-            && polka.attestations.iter().all(|att| att.view == lock_view)
-            && self.consensus.verify(polka, selection, &self.beacon)
+        if polka.envelope.block != subject
+            || !polka.attestations.iter().all(|att| att.view == lock_view)
+        {
+            return false;
+        }
+        if polka.envelope.committee == selection.commitment.digest() {
+            return self.consensus.verify(polka, selection, &self.beacon);
+        }
+        match self.committee_for_certificate(self.height, polka) {
+            Some(own) => self.consensus.verify(polka, &own, &self.beacon),
+            None => false,
+        }
     }
 
     pub fn prevote_staged(&mut self) -> Vec<Message> {
@@ -1763,6 +1814,8 @@ impl DevNode {
             return Vec::new();
         }
         if self.verify_attestation(selection, &prevote) {
+            let offender = self.validator_address(prevote.from);
+            self.watch_for_equivocation(&prevote, offender);
             self.record_prevote(&prevote);
         }
         self.form_polka_and_precommit(selection)
@@ -1803,6 +1856,7 @@ impl DevNode {
         ) else {
             return Vec::new();
         };
+        let polka = polka.with_committee_reveals(self.committee_reveals(selection));
         if self
             .lock_file
             .store(self.height, &lock_to_bytes(view, &value, &block, &polka))
@@ -1839,7 +1893,7 @@ impl DevNode {
     }
 
     fn record_prevote(&mut self, prevote: &Attestation) {
-        if prevote.block.cost != qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST {
+        if prevote.block.cost != qtv_node::consensus::PREVOTE_SUBJECT_COST {
             return;
         }
         let seen = self
@@ -2271,7 +2325,7 @@ impl DevNode {
                 self.seen_atts.insert(digest);
             }
             if let Some(member) = selection.commitment.member(attestation.from) {
-                if attestation.block.cost != qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST
+                if !qtv_node::consensus::is_round_marker(attestation.block.cost)
                     && attestation.slot == self.consensus.slot_for(self.height)
                     && attestation.is_entitled(
                         &member.root,
@@ -2285,7 +2339,7 @@ impl DevNode {
                 }
             }
         }
-        if attestation.block.cost == qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST {
+        if qtv_node::consensus::is_round_marker(attestation.block.cost) {
             return false;
         }
         let slot = (attestation.from, attestation.view);
@@ -3106,7 +3160,7 @@ fn prevote_subject(height: Height, view: View, value: [u8; 32]) -> ConsensusBloc
         height,
         commitment,
         Parent::Genesis,
-        qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST,
+        qtv_node::consensus::PREVOTE_SUBJECT_COST,
     )
 }
 
