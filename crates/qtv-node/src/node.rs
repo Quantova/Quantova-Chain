@@ -947,6 +947,13 @@ pub(crate) fn bridge_mint_admissible(
     if ledger.bridge_reference_seen(source_chain, &source_ref) {
         return false;
     }
+    let claimed = match crate::bridge::MintArtifact::decode(wrapper.body().call().args()) {
+        Some(artifact) => artifact.attestation.fact,
+        None => return false,
+    };
+    if !ledger.bridge_mint_would_apply(&claimed) {
+        return false;
+    }
     let fact = match bridge_mint_fact(ledger, wrapper, chain_id, now_seconds) {
         Some(fact) => fact,
         None => return false,
@@ -5342,6 +5349,25 @@ mod tests {
             Ok(crate::mempool::Admitted::Fresh),
             "junk spoofing the relayer's address cannot starve the relayer within the global window"
         );
+    }
+
+    #[test]
+    fn a_mint_for_an_unregistered_asset_is_refused_before_any_signature_check() {
+        let fee = FeeParams::devnet();
+        let mut ledger = Ledger::new();
+        let (sk0, sk1) = seed_committee(&mut ledger);
+        let relayer = keypair(406);
+        let recipient_id = address_bytes(&keypair(407).address());
+        let fact = deposit_fact(recipient_id, [0x5Eu8; 16], 1_000, [0x34; 32]);
+        let artifact = signed_artifact(&fact, &sk0, &sk1);
+        crate::bridge::VERIFY_CALLS.with(|c| c.set(0));
+        assert!(!bridge_mint_admissible(
+            &ledger,
+            &mint_tx(&relayer, &artifact, &fee),
+            BRIDGE_CHAIN_ID,
+            0
+        ));
+        assert_eq!(crate::bridge::VERIFY_CALLS.with(|c| c.get()), 0);
     }
 
     #[test]
