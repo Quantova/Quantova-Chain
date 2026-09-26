@@ -559,11 +559,12 @@ fn chain_params(node: &DevNode) -> Json {
             object(vec![
                 ("code", Json::Int(u64::from(track.code()))),
                 ("deposit", Json::Int(ledger.gov_track_deposit(*track))),
-                (
-                    "threshold_bps",
-                    Json::Int(qtv_governance::THRESHOLD_BPS as u64),
-                ),
+                ("threshold_bps", Json::Int(track.threshold_bps() as u64)),
                 ("period_seconds", Json::Int(track.period_seconds())),
+                (
+                    "enactment_delay_seconds",
+                    Json::Int(track.enactment_delay()),
+                ),
             ])
         })
         .collect();
@@ -597,6 +598,10 @@ fn chain_params(node: &DevNode) -> Json {
                 (
                     "conviction_max_x10",
                     Json::Int(qtv_governance::Conviction::TwoYear.factor_x10() as u64),
+                ),
+                (
+                    "participation_bps",
+                    Json::Int(qtv_governance::PARTICIPATION_FLOOR_BPS as u64),
                 ),
                 ("tracks", Json::Array(tracks)),
             ]),
