@@ -20,6 +20,7 @@ pub struct Channel<S> {
     binding: [u8; 32],
     sealer: Sealer,
     opener: Opener,
+    partial: Vec<u8>,
 }
 
 impl<S> Channel<S> {
@@ -34,6 +35,7 @@ impl<S> Channel<S> {
             binding: keys.exporter,
             sealer: Sealer::new(send.key, send.iv),
             opener: Opener::new(receive.key, receive.iv),
+            partial: Vec::new(),
         }
     }
 
@@ -80,18 +82,21 @@ impl<S: Read + Write> Channel<S> {
     }
 
     pub fn recv(&mut self) -> Result<Vec<u8>> {
-        let mut message: Vec<u8> = Vec::new();
         loop {
             let record = self.opener.open(&mut self.stream)?;
             let (&flag, payload) = record.split_first().ok_or(crate::Error::BadFragment)?;
-            if message.len() + payload.len() > MAX_MESSAGE {
+            if self.partial.len() + payload.len() > MAX_MESSAGE {
+                self.partial = Vec::new();
                 return Err(crate::Error::MessageTooLarge);
             }
-            message.extend_from_slice(payload);
+            self.partial.extend_from_slice(payload);
             match flag {
-                FRAGMENT_FINAL => return Ok(message),
+                FRAGMENT_FINAL => return Ok(std::mem::take(&mut self.partial)),
                 FRAGMENT_MORE if !payload.is_empty() => {}
-                _ => return Err(crate::Error::BadFragment),
+                _ => {
+                    self.partial = Vec::new();
+                    return Err(crate::Error::BadFragment);
+                }
             }
         }
     }
