@@ -195,6 +195,7 @@ pub struct QAsset {
     pub cap: u128,
     pub epoch_cap: u128,
     pub requires_stark: bool,
+    pub source_chain: u32,
 }
 
 impl Encode for QAsset {
@@ -203,6 +204,7 @@ impl Encode for QAsset {
         self.cap.encode(encoder);
         self.epoch_cap.encode(encoder);
         encoder.put_u8(self.requires_stark as u8);
+        encoder.put_u32(self.source_chain);
     }
 }
 
@@ -213,6 +215,7 @@ impl Decode for QAsset {
             cap: u128::decode(decoder)?,
             epoch_cap: u128::decode(decoder)?,
             requires_stark: decoder.get_u8()? != 0,
+            source_chain: decoder.get_u32()?,
         })
     }
 }
@@ -830,6 +833,10 @@ fn id_from_slice(id: &[u8]) -> Option<[u8; 32]> {
 
 fn u64_from_le(bytes: &[u8]) -> Option<u64> {
     bytes.try_into().ok().map(u64::from_le_bytes)
+}
+
+fn asset_accepts_source(asset: &QAsset, source_chain: u32) -> bool {
+    asset.source_chain == 0 || asset.source_chain == source_chain
 }
 
 fn exiting_amount(bond: Option<&Bond>) -> u64 {
@@ -1775,6 +1782,7 @@ impl Ledger {
         self.write_leaf(stake_singleton_key(BRIDGE_ASSET_LIST_TAG), bytes);
     }
 
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub fn register_bridged_asset(
         &mut self,
         asset_id: &[u8; 16],
@@ -1782,12 +1790,24 @@ impl Ledger {
         epoch_cap: u128,
         requires_stark: bool,
     ) -> (Key, Vec<u8>) {
+        self.register_bridged_asset_from(asset_id, cap, epoch_cap, requires_stark, 0)
+    }
+
+    pub fn register_bridged_asset_from(
+        &mut self,
+        asset_id: &[u8; 16],
+        cap: u128,
+        epoch_cap: u128,
+        requires_stark: bool,
+        source_chain: u32,
+    ) -> (Key, Vec<u8>) {
         let supply = self.bridged_asset(asset_id).map(|a| a.supply).unwrap_or(0);
         let asset = QAsset {
             supply,
             cap,
             epoch_cap,
             requires_stark,
+            source_chain,
         };
         self.set_bridged_asset(asset_id, &asset);
         self.record_bridge_asset_id(asset_id);
@@ -2075,6 +2095,9 @@ impl Ledger {
         let Some(asset) = self.bridged_asset(&fact.asset_id) else {
             return false;
         };
+        if !asset_accepts_source(&asset, fact.source_chain) {
+            return false;
+        }
         if self.bridge_reference_seen(fact.source_chain, &fact.source_ref) {
             return false;
         }
@@ -2112,6 +2135,9 @@ impl Ledger {
             Some(asset) => asset,
             None => return false,
         };
+        if !asset_accepts_source(&asset, fact.source_chain) {
+            return false;
+        }
         if self.bridge_reference_seen(fact.source_chain, &fact.source_ref) {
             return false;
         }
@@ -3755,14 +3781,26 @@ impl Ledger {
                 cap,
                 epoch_cap,
                 requires_stark,
+                source_chain,
             } => {
-                if *cap == 0 || *epoch_cap == 0 {
+                if *cap == 0 || *epoch_cap == 0 || *source_chain == 0 {
                     return Err(EnactError::BadValue);
                 }
                 if *requires_stark {
                     return Err(EnactError::BadValue);
                 }
-                self.register_bridged_asset(asset_id, *cap, *epoch_cap, *requires_stark);
+                if self.bridged_asset(asset_id).is_some_and(|held| {
+                    held.source_chain != 0 && held.source_chain != *source_chain
+                }) {
+                    return Err(EnactError::BadValue);
+                }
+                self.register_bridged_asset_from(
+                    asset_id,
+                    *cap,
+                    *epoch_cap,
+                    *requires_stark,
+                    *source_chain,
+                );
                 self.record_side_event(SideEvent::AssetRegister {
                     asset_id: *asset_id,
                     cap: *cap,
@@ -7903,6 +7941,7 @@ mod stake_state_tests {
                     cap: 1_000_000,
                     epoch_cap: 250_000,
                     requires_stark: false,
+                    source_chain: 7,
                 },
                 5 * 86_400 + 2,
             )
@@ -7933,6 +7972,7 @@ mod stake_state_tests {
                     cap: 1_000_000,
                     epoch_cap: 250_000,
                     requires_stark: true,
+                    source_chain: 7,
                 },
                 0,
                 TEST_CHAIN,
@@ -8012,6 +8052,47 @@ mod stake_state_tests {
         assert!(
             l.bridge_is_frozen(),
             "the freeze still holds through the migration"
+        );
+    }
+
+    #[test]
+    fn an_asset_mints_only_from_the_source_chain_it_was_registered_for() {
+        let mut l = Ledger::new();
+        l.seed_bridge_pool_vault(&[0x0Au8; 32]);
+        let asset = [0xB3u8; 16];
+        l.register_bridged_asset_from(&asset, 10_000_000, 10_000_000, false, 43);
+        let fact = |source_chain: u32, source_ref: u8| crate::bridge::Fact {
+            version: crate::bridge::FACT_VERSION,
+            source_chain,
+            dest_chain: 9_000,
+            route_id: 7,
+            direction: crate::bridge::Direction::Deposit,
+            nonce: 1,
+            source_ref: [source_ref; 32],
+            asset_id: asset,
+            amount: 1_000,
+            recipient: [0xEEu8; 32],
+            finality_depth: 6,
+            observed_height: 10,
+            expiry_height: 100,
+        };
+        assert!(!l.bridge_mint_would_apply(&fact(1, 1)));
+        assert!(!l.bridge_mint(&fact(1, 1)));
+        assert!(l.bridge_mint_would_apply(&fact(43, 1)));
+        assert!(l.bridge_mint(&fact(43, 1)));
+        assert_eq!(
+            l.execute_action(
+                &qtv_governance::Action::AssetRegister {
+                    asset_id: asset,
+                    cap: 10_000_000,
+                    epoch_cap: 10_000_000,
+                    requires_stark: false,
+                    source_chain: 1,
+                },
+                0,
+                TEST_CHAIN,
+            ),
+            Err(EnactError::BadValue)
         );
     }
 
@@ -9239,6 +9320,7 @@ mod stake_state_tests {
                 cap: supply,
                 epoch_cap: supply,
                 requires_stark: false,
+                source_chain: 0,
             },
         );
         l.set_bridged_balance(asset, holder, supply);

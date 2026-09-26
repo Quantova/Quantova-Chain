@@ -121,7 +121,7 @@ impl GenesisFile {
                     let mut parts = field.value.split_whitespace();
                     let asset_id: [u8; 16] = parts.next().and_then(|s| from_hex(s).ok())
                         .and_then(|b| b.try_into().ok())
-                        .ok_or_else(|| field.error("bridged_asset expects '<asset_hex16> <cap> <epoch_cap> <stark 0|1>'"))?;
+                        .ok_or_else(|| field.error("bridged_asset expects '<asset_hex16> <cap> <epoch_cap> <stark 0|1> <source_chain>'"))?;
                     let cap: u128 = parts
                         .next()
                         .and_then(|s| s.parse().ok())
@@ -137,6 +137,14 @@ impl GenesisFile {
                             "bridged_asset expects a fourth field of exactly 0, 1, true or false",
                         )),
                     };
+                    let source_chain: u32 = parts
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .filter(|chain| *chain != 0)
+                        .ok_or_else(|| field.error("bridged_asset expects a fifth field naming its nonzero source chain"))?;
+                    if parts.next().is_some() {
+                        return Err(field.error("bridged_asset has more than five fields"));
+                    }
                     if cap == 0 || epoch_cap == 0 {
                         return Err(field.error("bridged_asset cap and epoch_cap must be nonzero"));
                     }
@@ -148,6 +156,7 @@ impl GenesisFile {
                         cap,
                         epoch_cap,
                         requires_stark,
+                        source_chain,
                     });
                 }
                 other => {
@@ -585,6 +594,7 @@ fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) ->
         buf.extend_from_slice(&a.cap.to_le_bytes());
         buf.extend_from_slice(&a.epoch_cap.to_le_bytes());
         buf.push(a.requires_stark as u8);
+        buf.extend_from_slice(&a.source_chain.to_le_bytes());
     }
 
     put_bytes(&mut buf, &genesis.bridge_era.unwrap_or([0u8; 32]));
@@ -744,6 +754,7 @@ mod tests {
             cap: 1_000_000,
             epoch_cap: 100_000,
             requires_stark: false,
+            source_chain: 7,
         }];
         let a_hash = genesis_hash("Q-test-net-1", "genesis", 64, &a);
         assert_ne!(base, a_hash, "an asset cap must bind into the genesis hash");
@@ -754,6 +765,7 @@ mod tests {
             cap: 2_000_000,
             epoch_cap: 100_000,
             requires_stark: false,
+            source_chain: 7,
         }];
         assert_ne!(
             a_hash,
@@ -1021,11 +1033,23 @@ mod tests {
     #[test]
     fn a_bridged_asset_with_a_plain_false_still_loads() {
         let text = format!(
-            "{}bridged_asset = {} 1000000 100000 0\n",
+            "{}bridged_asset = {} 1000000 100000 0 43\n",
             three_validator_preamble(),
             "5a".repeat(16)
         );
         let outcome = load_text("starkzero", text);
         assert!(outcome.is_ok(), "{:?}", outcome.err());
+    }
+
+    #[test]
+    fn a_bridged_asset_must_name_one_nonzero_source_chain() {
+        for (tag, tail) in [("nosource", ""), ("zerosource", " 0"), ("extra", " 43 9")] {
+            let text = format!(
+                "{}bridged_asset = {} 1000000 100000 0{tail}\n",
+                three_validator_preamble(),
+                "5a".repeat(16)
+            );
+            assert!(load_text(tag, text).is_err(), "{tag}");
+        }
     }
 }

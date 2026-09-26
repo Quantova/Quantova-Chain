@@ -416,6 +416,7 @@ pub enum Action {
         cap: u128,
         epoch_cap: u128,
         requires_stark: bool,
+        source_chain: u32,
     },
     BridgeAnchorSet {
         corridor: u8,
@@ -517,12 +518,14 @@ impl Encode for Action {
                 cap,
                 epoch_cap,
                 requires_stark,
+                source_chain,
             } => {
                 encoder.put_u8(14);
                 encoder.put_bytes(asset_id);
                 encoder.put_u128(*cap);
                 encoder.put_u128(*epoch_cap);
                 encoder.put_u8(*requires_stark as u8);
+                encoder.put_u32(*source_chain);
             }
             Action::BridgeAnchorSet { corridor, anchor } => {
                 encoder.put_u8(17);
@@ -612,11 +615,13 @@ impl Decode for Action {
                 let cap = decoder.get_u128()?;
                 let epoch_cap = decoder.get_u128()?;
                 let requires_stark = decoder.get_u8()? != 0;
+                let source_chain = decoder.get_u32()?;
                 Ok(Action::AssetRegister {
                     asset_id,
                     cap,
                     epoch_cap,
                     requires_stark,
+                    source_chain,
                 })
             }
             15 => Ok(Action::EpochAdvance),
@@ -1399,6 +1404,7 @@ mod tests {
                 cap: 1_000_000,
                 epoch_cap: 250_000,
                 requires_stark: true,
+                source_chain: 7,
             },
             Action::EpochAdvance,
             Action::OperatorRevoke { operator_id: 7 },
@@ -1524,6 +1530,7 @@ mod tests {
                 cap: 1,
                 epoch_cap: 1,
                 requires_stark: false,
+                source_chain: 7,
             },
             Action::EpochAdvance,
             Action::OperatorRevoke { operator_id: 3 },

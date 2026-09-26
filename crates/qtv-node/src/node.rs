@@ -78,6 +78,7 @@ pub struct GenesisBridgedAsset {
     pub cap: u128,
     pub epoch_cap: u128,
     pub requires_stark: bool,
+    pub source_chain: u32,
 }
 
 pub struct Genesis {
@@ -1728,11 +1729,12 @@ impl Node {
             ledger.seed_bridge_operator_set(operators);
         }
         for asset in &genesis.bridged_assets {
-            ledger.register_bridged_asset(
+            ledger.register_bridged_asset_from(
                 &asset.asset_id,
                 asset.cap,
                 asset.epoch_cap,
                 asset.requires_stark,
+                asset.source_chain,
             );
         }
 

@@ -598,11 +598,12 @@ impl DevNode {
             }
         }
         for asset in &genesis.bridged_assets {
-            let (asset_key, asset_value) = self.ledger.register_bridged_asset(
+            let (asset_key, asset_value) = self.ledger.register_bridged_asset_from(
                 &asset.asset_id,
                 asset.cap,
                 asset.epoch_cap,
                 asset.requires_stark,
+                asset.source_chain,
             );
             self.state_store.put_account(asset_key, asset_value)?;
         }
