@@ -894,6 +894,22 @@ impl Ledger {
             .unwrap_or(0)
     }
 
+    pub fn consensus_weight_in_epoch(&self, address: &str, epoch: u64) -> u64 {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return 0,
+        };
+        if self.is_stake_banned(&id) {
+            return 0;
+        }
+        self.stake_bond(&id)
+            .map(|bond| {
+                bond.amount_in_epoch(epoch, self.heights_per_epoch)
+                    / qtv_staking::NATIVE_UNIT as u64
+            })
+            .unwrap_or(0)
+    }
+
     pub fn seed_validator_bond(&mut self, address: &str, amount: u64) -> Option<(Key, Vec<u8>)> {
         self.seed_validator_bond_at(address, amount, 0)
     }
@@ -8877,6 +8893,30 @@ mod stake_state_tests {
             "the ceiling grew with the supply, there is no fixed wall to hit"
         );
     }
+    #[test]
+    fn a_governance_blacklist_never_changes_consensus_weight() {
+        let mut l = Ledger::new();
+        l.set_heights_per_epoch(100);
+        let addr = gov_addr(67);
+        fund(&mut l, &addr, 5_000 * 1_000_000);
+        assert!(l.bond_with_fee(&addr, 2_000 * 1_000_000, 0, 0));
+        l.set_execution_height(550);
+        l.execute_action(
+            &qtv_governance::Action::Blacklist {
+                target: address_id(&addr).unwrap().to_vec(),
+            },
+            0,
+            TEST_CHAIN,
+        )
+        .unwrap();
+        assert!(l.is_blacklisted(&addr));
+        assert_eq!(l.consensus_weight_in_epoch(&addr, 5), 2_000);
+        assert_eq!(l.consensus_weight_in_epoch(&addr, 6), 2_000);
+        assert_eq!(l.staked_weight_in_epoch(&addr, 5), 0);
+        assert!(l.slash_validator(&addr));
+        assert_eq!(l.consensus_weight_in_epoch(&addr, 6), 0);
+    }
+
     #[test]
     fn an_exiting_validator_loses_its_vote_next_epoch_and_is_still_slashed_in_full() {
         let mut l = Ledger::new();

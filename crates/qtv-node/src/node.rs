@@ -1684,7 +1684,7 @@ pub fn reweigh_roster_for_epoch(
         .iter()
         .map(|r| {
             let mut reweighed = r.clone();
-            reweighed.stake = ledger.staked_weight_in_epoch(&r.bond_address, epoch);
+            reweighed.stake = ledger.consensus_weight_in_epoch(&r.bond_address, epoch);
             reweighed
         })
         .collect();
