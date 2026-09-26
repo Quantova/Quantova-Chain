@@ -1082,46 +1082,61 @@ mod tests {
     #[test]
     fn a_padded_artifact_runs_at_most_one_verify_per_operator() {
         let fact = sample_fact();
-        let (pk0, sk0) = operator(10);
-        let (pk1, _sk1) = operator(11);
-        let set = OperatorSet::new(vec![(0, pk0.to_vec()), (1, pk1.to_vec())], 2);
-        let mut signatures = Vec::new();
-        for _ in 0..500 {
-            signatures.push(SignerSig {
+        let keys: Vec<_> = (0..8u64).map(|i| operator(10 + i)).collect();
+        let set = OperatorSet::new(
+            keys.iter()
+                .enumerate()
+                .map(|(i, (pk, _))| (i as u32, pk.to_vec()))
+                .collect(),
+            2,
+        );
+        let bad = |operator_id: u32| SignerSig {
+            operator_id,
+            signature: vec![7u8; SIGNATURE_BYTES],
+        };
+        let padded = vec![
+            bad(0),
+            bad(0),
+            bad(1),
+            bad(1),
+            bad(9),
+            bad(9),
+            bad(2),
+            SignerSig {
                 operator_id: 0,
-                signature: vec![0u8; SIGNATURE_BYTES],
-            });
-            signatures.push(SignerSig {
-                operator_id: 1,
-                signature: vec![7u8; SIGNATURE_BYTES],
-            });
-            signatures.push(SignerSig {
-                operator_id: 9,
-                signature: vec![3u8; SIGNATURE_BYTES],
-            });
-        }
-        signatures.push(SignerSig {
-            operator_id: 0,
-            signature: sign_fact(&sk0, &fact),
-        });
+                signature: sign_fact(&keys[0].1, &fact),
+            },
+        ];
+        assert_eq!(padded.len(), set.operators.len());
         let attestation = Attestation {
             fact: fact.clone(),
-            signatures,
+            signatures: padded,
         };
         VERIFY_CALLS.with(|c| c.set(0));
-        let _ = quorum_attests(
+        assert!(!quorum_attests(
             &set,
             &attestation,
             fact.dest_chain,
             TEST_CHAIN_ID,
             &TEST_ERA,
-        );
-        let calls = VERIFY_CALLS.with(|c| c.get());
-        assert!(
-            calls <= set.operators.len(),
-            "ran {calls} verifies for a committee of {} operators",
-            set.operators.len()
-        );
+        ));
+        assert_eq!(VERIFY_CALLS.with(|c| c.get()), 3);
+
+        let mut oversized = attestation.signatures.clone();
+        oversized.push(bad(3));
+        let attestation = Attestation {
+            fact: fact.clone(),
+            signatures: oversized,
+        };
+        VERIFY_CALLS.with(|c| c.set(0));
+        assert!(!quorum_attests(
+            &set,
+            &attestation,
+            fact.dest_chain,
+            TEST_CHAIN_ID,
+            &TEST_ERA,
+        ));
+        assert_eq!(VERIFY_CALLS.with(|c| c.get()), 0);
     }
 
     #[test]
