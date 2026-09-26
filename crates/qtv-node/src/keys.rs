@@ -130,6 +130,7 @@ pub fn validator_account_seed(secret: &[u8; SECRET_LEN]) -> [u8; SECRET_LEN] {
     buf[D..].copy_from_slice(secret);
     let mut out = [0u8; SECRET_LEN];
     shake256(&buf, &mut out);
+    wipe(&mut buf);
     out
 }
 
@@ -148,6 +149,7 @@ pub fn p2p_identity_seed(secret: &[u8; SECRET_LEN]) -> [u8; SECRET_LEN] {
     buf[D..].copy_from_slice(secret);
     let mut out = [0u8; SECRET_LEN];
     shake256(&buf, &mut out);
+    wipe(&mut buf);
     out
 }
 
