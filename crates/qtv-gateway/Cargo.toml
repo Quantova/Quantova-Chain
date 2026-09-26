@@ -19,7 +19,7 @@ qtv-codec = { path = "../qtv-codec" }
 qtv-block = { path = "../qtv-block" }
 qtv-idfmt = { path = "../qtv-idfmt" }
 
-qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "fce9a5a09f8df641102976b7a6a255585f91e75e" }
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "2c994fde582d09cb78d4e2d56f154960491a6d5e" }
 
 [dev-dependencies]
 qtv-devnet = { path = "../qtv-devnet", features = ["test-fixtures"] }
