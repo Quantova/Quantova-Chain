@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: Quantova/QCore.rs
-          ref: 38d67c84986278cc77b01c26cfa4ba0b2e94d2cd
+          ref: 2c12040388dd6e6156fc690c47cf3003a356cb61
           path: QCore.rs
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
