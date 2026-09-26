@@ -115,7 +115,16 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
         "chain_params" => Ok(Request::ChainParams),
         "staking_state" => Ok(Request::StakingState),
         "get_account" => Ok(Request::Account(string_field(body, "address")?)),
-        "get_transaction" => Ok(Request::Transaction(string_field(body, "tx_id")?)),
+        "get_transaction" => {
+            let tx_id = string_field(body, "tx_id")?;
+            if tx_id.len() > MAX_TX_ID_CHARS {
+                return Err(ClientError::bad(
+                    "bad_request",
+                    "the tx_id is too long".to_string(),
+                ));
+            }
+            Ok(Request::Transaction(tx_id))
+        }
         "submit_transaction" => {
             let hex = string_field(body, "tx")?;
             let bytes = crate::json::from_hex(&hex).map_err(|e| {
@@ -212,6 +221,8 @@ fn string_field(body: &Json, key: &str) -> Result<String, ClientError> {
 }
 
 const MAX_STORAGE_KEYS: usize = 64;
+
+const MAX_TX_ID_CHARS: usize = 128;
 
 const MAX_TX_BYTES: usize = 256 * 1024;
 

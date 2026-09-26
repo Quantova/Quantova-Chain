@@ -642,6 +642,15 @@ fn handle_connection(
         );
     }
 
+    let Some(method) = path.strip_prefix("/v1/") else {
+        return write_error(
+            &mut stream,
+            404,
+            "unknown_method",
+            "methods live under /v1/",
+        );
+    };
+
     let mut body_guard = BodyGuard {
         limiter: limiter.clone(),
         held: 0,
@@ -681,15 +690,6 @@ fn handle_connection(
             400,
             "bad_request",
             "the request body is not valid UTF-8",
-        );
-    };
-
-    let Some(method) = path.strip_prefix("/v1/") else {
-        return write_error(
-            &mut stream,
-            404,
-            "unknown_method",
-            "methods live under /v1/",
         );
     };
 
