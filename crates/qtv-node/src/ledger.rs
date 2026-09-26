@@ -6196,14 +6196,14 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn a_recovery_reaches_a_frozen_thiefs_governance_vote_lock() {
+    fn a_recovery_reaches_a_frozen_holders_governance_vote_lock() {
         let mut l = Ledger::new();
         let proposer = gov_addr(26);
         fund(&mut l, &proposer, 800_000 * 1_000_000);
 
-        let thief = gov_addr(41);
-        l.seed_validator_bond(&thief, 5_000 * 1_000_000);
-        fund(&mut l, &thief, 6_000 * 1_000_000);
+        let holder = gov_addr(41);
+        l.seed_validator_bond(&holder, 5_000 * 1_000_000);
+        fund(&mut l, &holder, 6_000 * 1_000_000);
         let shelter = l
             .gov_propose(
                 &proposer,
@@ -6216,7 +6216,7 @@ mod stake_state_tests {
             )
             .unwrap();
         assert!(l.gov_vote(
-            &thief,
+            &holder,
             shelter,
             true,
             qtv_governance::Conviction::Liquid,
@@ -6227,7 +6227,7 @@ mod stake_state_tests {
             l.gov_lock(&[41u8; 32]).map(|lock| lock.amount),
             Some(4_000 * 1_000_000)
         );
-        assert_eq!(l.balance(&thief), 2_000 * 1_000_000);
+        assert_eq!(l.balance(&holder), 2_000 * 1_000_000);
 
         l.set_frozen(&[41u8; 32]);
         let victim = gov_addr(40);
@@ -6264,7 +6264,7 @@ mod stake_state_tests {
 
         assert!(
             l.gov_lock(&[41u8; 32]).is_none(),
-            "the thief's governance vote lock is emptied by the recovery"
+            "the holder's governance vote lock is emptied by the recovery"
         );
         assert_eq!(
             l.balance(&victim),
@@ -6272,20 +6272,20 @@ mod stake_state_tests {
             "the victim is made whole from free balance, bond, and the vote lock"
         );
         assert_eq!(
-            l.balance(&thief),
+            l.balance(&holder),
             0,
-            "nothing the thief held is left sheltered"
+            "nothing the holder held is left sheltered"
         );
     }
 
     #[test]
-    fn a_recovery_reaches_a_thiefs_free_balance_and_its_staked_bond() {
+    fn a_recovery_reaches_a_holders_free_balance_and_its_staked_bond() {
         let mut l = Ledger::new();
         let proposer = gov_addr(26);
         fund(&mut l, &proposer, 300_000 * 1_000_000);
-        let thief = gov_addr(41);
-        l.seed_validator_bond(&thief, 2_000 * 1_000_000);
-        fund(&mut l, &thief, 5_000 * 1_000_000);
+        let holder = gov_addr(41);
+        l.seed_validator_bond(&holder, 2_000 * 1_000_000);
+        fund(&mut l, &holder, 5_000 * 1_000_000);
         l.set_frozen(&[41u8; 32]);
         let victim = gov_addr(40);
         let supply_before = l.total_supply();
@@ -6321,9 +6321,9 @@ mod stake_state_tests {
         l.gov_enact(id, 7 * 3_600 + 1, TEST_CHAIN).unwrap();
 
         assert_eq!(
-            l.balance(&thief),
+            l.balance(&holder),
             0,
-            "the thief's free balance is recovered"
+            "the holder's free balance is recovered"
         );
         assert!(
             l.stake_bond(&[41u8; 32]).is_none(),
@@ -6347,7 +6347,7 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn a_recovery_pulls_stolen_funds_back_out_of_a_validators_bond() {
+    fn a_recovery_pulls_funds_back_out_of_a_validators_bond() {
         let mut l = Ledger::new();
         let proposer = gov_addr(26);
         fund(&mut l, &proposer, 300_000 * 1_000_000);
@@ -6491,9 +6491,9 @@ mod stake_state_tests {
         let mut l = Ledger::new();
         let proposer = gov_addr(26);
         fund(&mut l, &proposer, 300_000 * 1_000_000);
-        let thief = gov_addr(41);
-        l.seed_validator_bond(&thief, 2_000 * 1_000_000);
-        fund(&mut l, &thief, 5_000 * 1_000_000);
+        let holder = gov_addr(41);
+        l.seed_validator_bond(&holder, 2_000 * 1_000_000);
+        fund(&mut l, &holder, 5_000 * 1_000_000);
         l.set_frozen(&[41u8; 32]);
         let victim = gov_addr(40);
         let supply_before = l.total_supply();
@@ -6538,7 +6538,7 @@ mod stake_state_tests {
             "the victim gets the free balance plus the seized bond part"
         );
         assert_eq!(
-            l.balance(&thief),
+            l.balance(&holder),
             1_500 * 1_000_000,
             "the unseized bond residue returns to the holder free balance"
         );
