@@ -18,6 +18,7 @@ pub enum Reject {
     BadNonce { expected: u64, got: u64 },
     BadCall,
     SelfTransfer,
+    ZeroTransfer,
     MeterLimitTooLow,
     FeeTooLow,
     InsufficientFunds,
@@ -112,6 +113,22 @@ pub fn plan_verified(
     plan_from_account_checks(wrapper, account, fee_params)
 }
 
+fn zero_value_target(recipient: &str) -> bool {
+    #[cfg(test)]
+    if recipient == crate::ledger::fault_probe_address() {
+        return true;
+    }
+    [
+        crate::ledger::stake_claim_address(),
+        crate::ledger::stake_exit_address(),
+        crate::ledger::stake_withdraw_address(),
+        crate::ledger::bridge_freeze_address(),
+        crate::ledger::bridge_unfreeze_address(),
+    ]
+    .iter()
+    .any(|system| system == recipient)
+}
+
 fn canonical_address(address: &str) -> bool {
     match qtv_idfmt::parse_address(address) {
         Ok(payload) if payload.len() == qtv_idfmt::DIGEST_LEN => {
@@ -157,6 +174,9 @@ fn plan_from_account_checks(
     }
     if crate::ledger::state_key(&sender) == crate::ledger::state_key(&recipient) {
         return Err(Reject::SelfTransfer);
+    }
+    if amount == 0 && !zero_value_target(&recipient) {
+        return Err(Reject::ZeroTransfer);
     }
     if body.meter_limit() < TRANSFER_METER {
         return Err(Reject::MeterLimitTooLow);
@@ -1385,6 +1405,27 @@ mod tests {
             "a fee above the ceiling wins no priority it never pays for"
         );
         assert_eq!(pool.pending_len(), 1, "the ceiling fee transaction stays");
+    }
+
+    #[test]
+    fn a_zero_value_transfer_to_an_account_is_refused_but_a_stake_exit_is_not() {
+        let params = FeeParams::devnet();
+        let fee = u128::from(params.transfer_fee());
+        let mut ledger = Ledger::new();
+        let mut pool = Mempool::with_limits(8, 100, 0);
+        let alice = keypair(1);
+        fund(&mut ledger, &alice, 1_000_000_000);
+        fund(&mut ledger, &keypair(9), 1_000);
+        let dust = signed_transfer(&alice, &keypair(9).address(), 0, 0, fee);
+        assert_eq!(
+            pool.admit(dust, &ledger, &params, None),
+            Err(Reject::ZeroTransfer)
+        );
+        let exit = signed_transfer(&alice, &crate::ledger::stake_exit_address(), 0, 0, fee);
+        assert_ne!(
+            pool.admit(exit, &ledger, &params, None),
+            Err(Reject::ZeroTransfer)
+        );
     }
 
     #[test]

@@ -1288,6 +1288,7 @@ fn reason_code(reject: &Reject) -> &'static str {
         Reject::BadNonce { .. } => "bad_nonce",
         Reject::BadCall => "bad_call",
         Reject::SelfTransfer => "self_transfer",
+        Reject::ZeroTransfer => "zero_transfer",
         Reject::MeterLimitTooLow => "meter_limit_too_low",
         Reject::FeeTooLow => "fee_too_low",
         Reject::InsufficientFunds => "insufficient_funds",

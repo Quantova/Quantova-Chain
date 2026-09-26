@@ -87,7 +87,7 @@ fn run_task_inner(
     let sender = account_at(leaves, &sender_key);
     let plan = plan_from_account(task.wrapper, &sender, fee_params).ok()?;
     let recipient_key = state_key(&task.recipient_address);
-    if plan.amount == 0 && !leaves.contains_key(&recipient_key) {
+    if plan.amount == 0 {
         return None;
     }
     let recipient = account_at(leaves, &recipient_key);

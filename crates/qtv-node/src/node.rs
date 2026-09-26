@@ -1574,7 +1574,7 @@ fn execute_ordered_across(
             continue;
         }
         let applied = ledger.apply_atomic(|l| {
-            if plan.amount == 0 && !l.account_exists(&plan.recipient) {
+            if plan.amount == 0 {
                 return false;
             }
             let mut sender = l.account(&plan.sender);
