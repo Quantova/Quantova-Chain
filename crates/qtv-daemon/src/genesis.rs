@@ -205,13 +205,14 @@ impl GenesisFile {
                         ));
                     }
                 }
-                None if chain_id.starts_with("Q-main-net") => {
+                None if chain_id.starts_with("Q-test-net") || chain_id.starts_with("Q-dev-net") => {
+                }
+                None => {
                     return Err(format!(
-                        "genesis validator {} carries no proof of possession, which a mainnet genesis requires; produce it with quantovad register --chain {chain_id}",
+                        "genesis validator {} carries no proof of possession, which every genesis outside a test or dev net requires; produce it with quantovad register --chain {chain_id}",
                         spec.id
                     ));
                 }
-                None => {}
             }
         }
         let fee_params = FeeParams {
