@@ -68,6 +68,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "qtv-account",
+ "qtv-attest",
  "qtv-block",
  "qtv-crypto",
  "qtv-devnet",

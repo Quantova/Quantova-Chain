@@ -16,6 +16,15 @@ use crate::config::{parse_kv, Field};
 use crate::util::from_hex;
 
 const PK_BYTES: usize = qtv_crypto::ml_dsa::PUBLIC_KEY_BYTES;
+const SIG_BYTES: usize = qtv_crypto::ml_dsa::SIGNATURE_BYTES;
+
+pub(crate) fn chain_binding(chain_id: &str) -> u64 {
+    u64::from_be_bytes(
+        sha3::sha3_256(chain_id.as_bytes())[..8]
+            .try_into()
+            .expect("eight bytes"),
+    )
+}
 
 pub(crate) const MAX_GENESIS_SLOTS: u64 = 1 << 16;
 
@@ -156,9 +165,12 @@ impl GenesisFile {
             }
         }
 
+        let mut proofs: Vec<Option<[u8; SIG_BYTES]>> = Vec::new();
         for field in &fields {
             if field.key == "validator" {
-                validators.push(parse_validator(field, slots)?);
+                let (spec, proof) = parse_validator(field, slots)?;
+                validators.push(spec);
+                proofs.push(proof);
             }
         }
 
@@ -175,11 +187,33 @@ impl GenesisFile {
 
         let chain_id = chain_id.ok_or("the genesis is missing 'chain_id'")?;
         let genesis_time = genesis_time.ok_or("the genesis is missing 'genesis_time'")?;
-        let chain_binding = u64::from_be_bytes(
-            sha3::sha3_256(chain_id.as_bytes())[..8]
-                .try_into()
-                .expect("eight bytes"),
-        );
+        let chain_binding = chain_binding(&chain_id);
+        for (spec, proof) in validators.iter().zip(&proofs) {
+            match proof {
+                Some(sig) => {
+                    if !qtv_attest::epoch_registration_verifies(
+                        &spec.attest_pk,
+                        chain_binding,
+                        spec.id,
+                        0,
+                        &spec.root,
+                        sig,
+                    ) {
+                        return Err(format!(
+                            "genesis validator {} carries a proof of possession that does not verify for {chain_id}",
+                            spec.id
+                        ));
+                    }
+                }
+                None if chain_id.starts_with("Q-main-net") => {
+                    return Err(format!(
+                        "genesis validator {} carries no proof of possession, which a mainnet genesis requires; produce it with quantovad register --chain {chain_id}",
+                        spec.id
+                    ));
+                }
+                None => {}
+            }
+        }
         let fee_params = FeeParams {
             transfer_micro_usd: transfer_micro_usd
                 .ok_or("the genesis is missing 'fee_transfer_micro_usd'")?,
@@ -415,13 +449,16 @@ fn enforce_no_capture(
     Ok(())
 }
 
-fn parse_validator(field: &Field, slots: u64) -> Result<ValidatorSpec, String> {
+fn parse_validator(
+    field: &Field,
+    slots: u64,
+) -> Result<(ValidatorSpec, Option<[u8; SIG_BYTES]>), String> {
     let parts: Vec<&str> = field.value.split_whitespace().collect();
-    if parts.len() != 7 {
+    if parts.len() != 7 && parts.len() != 8 {
         return Err(field.error(
             "a validator is '<id> <stake> <online|offline> <bond_address> \
-             <sortition_root_hex> <attest_pk_hex> <p2p_public_hex>', each field the \
-             operator's own published registration",
+             <sortition_root_hex> <attest_pk_hex> <p2p_public_hex> [<proof_hex>]', each field \
+             the operator's own published registration",
         ));
     }
     let id: u64 = parts[0]
@@ -445,15 +482,26 @@ fn parse_validator(field: &Field, slots: u64) -> Result<ValidatorSpec, String> {
     let digest = fixed_hex::<32>(parts[4], field, "the sortition root")?;
     let attest_pk = fixed_hex::<PK_BYTES>(parts[5], field, "the attestation public key")?;
     let p2p_public = fixed_hex::<PK_BYTES>(parts[6], field, "the peer identity public key")?;
-    Ok(ValidatorSpec {
-        id,
-        stake,
-        online,
-        bond_address,
-        root: Root { digest, slots },
-        attest_pk,
-        p2p_public,
-    })
+    let proof = match parts.get(7) {
+        Some(hex) => Some(fixed_hex::<SIG_BYTES>(
+            hex,
+            field,
+            "the proof of possession",
+        )?),
+        None => None,
+    };
+    Ok((
+        ValidatorSpec {
+            id,
+            stake,
+            online,
+            bond_address,
+            root: Root { digest, slots },
+            attest_pk,
+            p2p_public,
+        },
+        proof,
+    ))
 }
 
 fn fixed_hex<const N: usize>(s: &str, field: &Field, what: &str) -> Result<[u8; N], String> {

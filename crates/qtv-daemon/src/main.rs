@@ -313,8 +313,18 @@ fn register(args: RegisterArgs) -> Result<(), String> {
         .map_err(|e| format!("reading the keystore {}: {e}", args.keystore.display()))?;
     let spec = ValidatorSpec::from_secret(args.id, args.stake, args.online, &secret, args.slots);
     let online = if spec.online { "online" } else { "offline" };
+    let proof = match &args.chain {
+        Some(name) => {
+            let attester = qtv_attest::Attester::from_secret_with_slots(
+                args.id, &secret, args.stake, args.slots,
+            );
+            let (_, sig) = attester.epoch_registration(genesis::chain_binding(name), 0);
+            format!(" {}", util::hex(&sig))
+        }
+        None => String::new(),
+    };
     println!(
-        "validator = {} {} {} {} {} {} {}",
+        "validator = {} {} {} {} {} {} {}{}",
         spec.id,
         spec.stake,
         online,
@@ -322,6 +332,7 @@ fn register(args: RegisterArgs) -> Result<(), String> {
         util::hex(&spec.root.digest),
         util::hex(&spec.attest_pk),
         util::hex(&spec.p2p_public),
+        proof,
     );
     Ok(())
 }
@@ -449,11 +460,12 @@ struct RegisterArgs {
     stake: u64,
     online: bool,
     slots: u64,
+    chain: Option<String>,
 }
 
 const USAGE: &str =
     "usage: quantovad --config <path>\n       quantovad register --keystore <path> \
-                     --id <id> --stake <stake> [--online|--offline] --slots <slots>";
+                     --id <id> --stake <stake> [--online|--offline] --slots <slots> [--chain <name>]";
 
 impl Command {
     fn parse() -> Result<Command, String> {
@@ -493,6 +505,7 @@ impl RegisterArgs {
         let mut stake: Option<u64> = None;
         let mut online = true;
         let mut slots: Option<u64> = None;
+        let mut chain: Option<String> = None;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--keystore" => keystore = Some(PathBuf::from(need(&mut args, "--keystore")?)),
@@ -501,6 +514,7 @@ impl RegisterArgs {
                 "--slots" => slots = Some(parse_u64(&mut args, "--slots")?),
                 "--online" => online = true,
                 "--offline" => online = false,
+                "--chain" => chain = Some(need(&mut args, "--chain")?),
                 other => return Err(format!("unknown register argument '{other}'. {USAGE}")),
             }
         }
@@ -510,6 +524,7 @@ impl RegisterArgs {
             stake: stake.ok_or("register needs --stake <stake>")?,
             online,
             slots: slots.ok_or("register needs --slots <slots>")?,
+            chain,
         })
     }
 }
