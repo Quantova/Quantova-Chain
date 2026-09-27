@@ -846,14 +846,10 @@ fn transaction_found(node: &DevNode, tx_id: &str) -> Json {
         }
         object(fields)
     } else if node.is_pending(tx_id) {
-        let mut fields = vec![
+        object(vec![
             ("tx_id", Json::str(tx_id)),
             ("status", Json::str("pending")),
-        ];
-        if let Some(wrapper) = node.pending_transaction(tx_id) {
-            fields.extend(tx_fields(node, &wrapper));
-        }
-        object(fields)
+        ])
     } else {
         object(vec![
             ("tx_id", Json::str(tx_id)),
@@ -872,9 +868,7 @@ fn pending(node: &DevNode) -> Json {
     let mut items: Vec<Json> = Vec::new();
     let mut budget = MAX_LIST_RESPONSE_BYTES;
     for wrapper in &top {
-        let mut fields = vec![("tx_id", Json::str(wrapper.id()))];
-        fields.extend(tx_fields(node, wrapper));
-        let item = object(fields);
+        let item = object(vec![("tx_id", Json::str(wrapper.id()))]);
         let size = item.render().len();
         if size > budget && !items.is_empty() {
             break;
