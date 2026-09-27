@@ -301,6 +301,14 @@ fn build_devnet(genesis_file: &genesis::GenesisFile) -> DevnetConfig {
 }
 
 fn register(args: RegisterArgs) -> Result<(), String> {
+    if !(genesis::MIN_GENESIS_SLOTS..=genesis::MAX_GENESIS_SLOTS).contains(&args.slots) {
+        return Err(format!(
+            "the slot budget {} is outside {} to {}, the range a genesis accepts",
+            args.slots,
+            genesis::MIN_GENESIS_SLOTS,
+            genesis::MAX_GENESIS_SLOTS
+        ));
+    }
     let secret = qtv_node::keys::load_or_generate(&args.keystore)
         .map_err(|e| format!("reading the keystore {}: {e}", args.keystore.display()))?;
     let spec = ValidatorSpec::from_secret(args.id, args.stake, args.online, &secret, args.slots);

@@ -17,9 +17,9 @@ use crate::util::from_hex;
 
 const PK_BYTES: usize = qtv_crypto::ml_dsa::PUBLIC_KEY_BYTES;
 
-const MAX_GENESIS_SLOTS: u64 = 1 << 16;
+pub(crate) const MAX_GENESIS_SLOTS: u64 = 1 << 16;
 
-const MIN_GENESIS_SLOTS: u64 = 4;
+pub(crate) const MIN_GENESIS_SLOTS: u64 = 4;
 
 pub struct GenesisFile {
     pub chain_id: String,
