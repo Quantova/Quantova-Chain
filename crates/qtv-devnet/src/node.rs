@@ -353,6 +353,7 @@ pub struct DevNode {
     served_saturated: std::cell::Cell<bool>,
     chain: Vec<FinalizedBlock>,
     slashed: Vec<u64>,
+    finalized_attesters: std::collections::BTreeMap<(Height, [u8; 32]), Vec<u64>>,
     tx_index: TxIndex,
     prevoted: std::collections::BTreeMap<View, [u8; 32]>,
     events_by_height: HashMap<Height, Vec<BlockEvent>>,
@@ -472,6 +473,7 @@ impl DevNode {
             served_saturated: std::cell::Cell::new(false),
             chain: Vec::new(),
             slashed: Vec::new(),
+            finalized_attesters: std::collections::BTreeMap::new(),
             tx_index,
             prevoted: std::collections::BTreeMap::new(),
             events_by_height: HashMap::new(),
@@ -1451,18 +1453,57 @@ impl DevNode {
         self.events_by_height.retain(|&height, _| height >= floor);
     }
 
-    fn observe_finality(&mut self, height: Height, value: [u8; 32]) {
-        if let FinalityStatus::Violation {
-            height,
-            finalized,
-            conflicting,
-        } = self.finality.observe(height, value)
-        {
-            self.fatal = Some(Fatal::FinalityViolation {
+    fn observe_finality(&mut self, height: Height, value: [u8; 32], attesters: &[u64]) {
+        match self.finality.observe(height, value) {
+            FinalityStatus::Violation {
                 height,
                 finalized,
                 conflicting,
-            });
+            } => {
+                self.slash_double_finalizers(height, finalized, attesters);
+                self.fatal = Some(Fatal::FinalityViolation {
+                    height,
+                    finalized,
+                    conflicting,
+                });
+            }
+            _ => {
+                self.finalized_attesters
+                    .insert((height, value), attesters.to_vec());
+                let floor = height.saturating_sub(FINALIZED_RETAINED as u64);
+                self.finalized_attesters.retain(|(h, _), _| *h >= floor);
+            }
+        }
+    }
+
+    fn slash_double_finalizers(
+        &mut self,
+        height: Height,
+        finalized: [u8; 32],
+        conflicting_attesters: &[u64],
+    ) {
+        let prior = match self.finalized_attesters.get(&(height, finalized)) {
+            Some(ids) => ids.clone(),
+            None => return,
+        };
+        let offenders: Vec<u64> = conflicting_attesters
+            .iter()
+            .copied()
+            .filter(|id| prior.contains(id))
+            .collect();
+        if offenders.is_empty() {
+            return;
+        }
+        let roster = self.epoch_roster_for(self.consensus.epoch_for(height));
+        for id in offenders {
+            if self.slashed.contains(&id) {
+                continue;
+            }
+            if let Some(reg) = roster.iter().find(|r| r.id == id) {
+                if self.ledger.slash_validator(&reg.bond_address) {
+                    self.slashed.push(id);
+                }
+            }
         }
     }
 
@@ -1471,7 +1512,7 @@ impl DevNode {
     }
 
     pub fn observe_certificate(&mut self, height: Height, value: [u8; 32]) -> Option<Fatal> {
-        self.observe_finality(height, value);
+        self.observe_finality(height, value, &[]);
         self.fatal
     }
 
@@ -1514,7 +1555,7 @@ impl DevNode {
             .ok_or(RoundError::NotFinalized)?;
         let certificate = certificate.with_committee_reveals(self.committee_reveals(selection));
         let staged = self.staged.take().expect("the staged block is present");
-        self.observe_finality(self.height, block.val);
+        self.observe_finality(self.height, block.val, &certificate.attesters());
         if self.fatal.is_some() {
             return Err(RoundError::NotFinalized);
         }
@@ -2981,7 +3022,7 @@ impl DevNode {
         {
             return Err(SyncError::UnverifiedCertificate);
         }
-        self.observe_finality(self.height, subject.val);
+        self.observe_finality(self.height, subject.val, &certificate.attesters());
         if self.fatal.is_some() {
             return Err(SyncError::FinalityViolation);
         }
