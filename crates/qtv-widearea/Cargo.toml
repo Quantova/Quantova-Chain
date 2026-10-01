@@ -16,6 +16,10 @@ path = "src/bin/qtv-widearea.rs"
 [[bin]]
 name = "qtv-validator-wide"
 path = "src/bin/qtv-validator-wide.rs"
+required-features = ["harness"]
+
+[features]
+harness = []
 
 [dependencies]
 qtv-account = { path = "../qtv-account" }
