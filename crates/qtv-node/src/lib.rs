@@ -13,4 +13,5 @@ pub mod ledger;
 pub mod mempool;
 pub mod node;
 pub mod parallel;
+pub mod provenance;
 pub mod watermark;

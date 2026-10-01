@@ -2687,12 +2687,10 @@ impl Ledger {
     pub fn deploy_contract(&mut self, deployer: &str, nonce: u64, code: &[u8]) -> Option<String> {
         let container = crate::execution::decode_container(code)?;
         container.verify().ok()?;
-        if container.canonical_bytes().as_slice() != code {
-            return None;
-        }
+        let canonical = self.provenance.admit(code, &container)?;
         let contract = contract_address(deployer, nonce)?;
         let id = address_id(&contract)?;
-        self.set_contract_code(&id, code);
+        self.set_contract_code(&id, &canonical);
         Some(contract)
     }
 
@@ -9870,6 +9868,7 @@ pub struct Ledger {
     last_vm_meter_used: u64,
     last_vm_call_cost: Option<u64>,
     vm_deploy_armed: bool,
+    provenance: crate::provenance::ProvenanceVerifier,
 }
 
 impl Ledger {
@@ -9888,6 +9887,7 @@ impl Ledger {
             last_vm_meter_used: 0,
             last_vm_call_cost: None,
             vm_deploy_armed: false,
+            provenance: crate::provenance::ProvenanceVerifier::default(),
         }
     }
 
@@ -9907,6 +9907,7 @@ impl Ledger {
             last_vm_meter_used: 0,
             last_vm_call_cost: None,
             vm_deploy_armed: false,
+            provenance: crate::provenance::ProvenanceVerifier::default(),
         }
     }
 
