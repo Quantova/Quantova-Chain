@@ -235,9 +235,14 @@ impl InboundBudget {
         else {
             return;
         };
-        self.total.fetch_sub(len, Ordering::Relaxed);
-        bytes.fetch_sub(len, Ordering::Relaxed);
-        frames.fetch_sub(1, Ordering::Relaxed);
+        let sub = |cell: &std::sync::atomic::AtomicUsize, by: usize| {
+            let _ = cell.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(by))
+            });
+        };
+        sub(&self.total, len);
+        sub(bytes, len);
+        sub(frames, 1);
     }
 }
 

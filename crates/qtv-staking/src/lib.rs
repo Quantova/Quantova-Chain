@@ -255,7 +255,10 @@ impl StakeLedger {
     }
 
     pub fn total_staked(&self) -> u64 {
-        self.bonds.values().map(|b| b.amount).sum()
+        self.bonds
+            .values()
+            .map(|b| b.amount)
+            .fold(0u64, u64::saturating_add)
     }
 
     pub fn bond(&mut self, id: [u8; 32], amount: u64, day: u64) -> bool {
@@ -312,16 +315,16 @@ impl StakeLedger {
                     released(t.amount, now_day.saturating_sub(t.earned_day))
                         .saturating_sub(t.claimed)
                 })
-                .sum()
+                .fold(0u64, u64::saturating_add)
         })
     }
 
     pub fn claim(&mut self, id: &[u8; 32], now_day: u64) -> u64 {
-        let mut total = 0;
+        let mut total = 0u64;
         if let Some(tranches) = self.rewards.get_mut(id) {
             for t in tranches.iter_mut() {
                 let unlocked = released(t.amount, now_day.saturating_sub(t.earned_day));
-                total += unlocked.saturating_sub(t.claimed);
+                total = total.saturating_add(unlocked.saturating_sub(t.claimed));
                 t.claimed = unlocked;
             }
         }
@@ -337,7 +340,7 @@ impl StakeLedger {
             }
             None => return 0,
         };
-        self.treasury += taken;
+        self.treasury = self.treasury.saturating_add(taken);
         self.bonds.remove(id);
         self.banned.insert(*id);
         taken

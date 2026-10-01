@@ -150,7 +150,9 @@ impl Link {
         thread::spawn(move || {
             while let Ok(bytes) = frames.recv() {
                 let sent = channel.send(&bytes);
-                held.fetch_sub(bytes.len(), Ordering::Relaxed);
+                let _ = held.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    Some(v.saturating_sub(bytes.len()))
+                });
                 match sent {
                     Ok(()) | Err(qtv_net::Error::MessageTooLarge) => {}
                     Err(_) => {
@@ -171,7 +173,9 @@ impl Link {
         match self.queue.try_send(Arc::clone(bytes)) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
-                self.queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+                let _ = self.queued.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    Some(v.saturating_sub(bytes.len()))
+                });
                 true
             }
             Err(TrySendError::Disconnected(_)) => false,
