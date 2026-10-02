@@ -773,7 +773,7 @@ fn tx_kind(
     ("transfer", None)
 }
 
-fn tx_fields(node: &DevNode, wrapper: &Wrapper) -> Vec<(&'static str, Json)> {
+fn tx_fields(node: &DevNode, wrapper: &Wrapper, include_raw: bool) -> Vec<(&'static str, Json)> {
     let body = wrapper.body();
     let target = body.call().target();
     let (kind, contract) = tx_kind(
@@ -792,15 +792,17 @@ fn tx_fields(node: &DevNode, wrapper: &Wrapper) -> Vec<(&'static str, Json)> {
         ("nonce", Json::Int(body.nonce())),
         ("meter_limit", Json::Int(body.meter_limit())),
         ("scheme", Json::Int(u64::from(wrapper.scheme()))),
-        (
+    ];
+    if include_raw {
+        fields.push((
             "signature",
             Json::str(crate::json::to_hex(wrapper.signature())),
-        ),
-        (
+        ));
+        fields.push((
             "raw",
             Json::str(crate::json::to_hex(&qtv_codec::to_bytes(wrapper))),
-        ),
-    ];
+        ));
+    }
     if let Some(contract) = contract {
         fields.push(("contract", Json::str(contract)));
     }
@@ -841,7 +843,7 @@ fn transaction_found(node: &DevNode, tx_id: &str) -> Json {
                 .and_then(|at| served.block.body().get(at))
                 .filter(|wrapper| position.is_none() || wrapper.id() == tx_id);
             if let Some(wrapper) = wrapper {
-                fields.extend(tx_fields(node, wrapper));
+                fields.extend(tx_fields(node, wrapper, true));
             }
         }
         object(fields)
@@ -851,7 +853,7 @@ fn transaction_found(node: &DevNode, tx_id: &str) -> Json {
             ("status", Json::str("pending")),
         ];
         if let Some(wrapper) = node.pending_transaction(tx_id) {
-            fields.extend(tx_fields(node, &wrapper));
+            fields.extend(tx_fields(node, &wrapper, false));
         }
         object(fields)
     } else {
@@ -873,7 +875,7 @@ fn pending(node: &DevNode) -> Json {
     let mut budget = MAX_LIST_RESPONSE_BYTES;
     for wrapper in &top {
         let mut fields = vec![("tx_id", Json::str(wrapper.id()))];
-        fields.extend(tx_fields(node, wrapper));
+        fields.extend(tx_fields(node, wrapper, false));
         let item = object(fields);
         let size = item.render().len();
         if size > budget && !items.is_empty() {
