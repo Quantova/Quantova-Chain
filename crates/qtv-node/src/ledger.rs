@@ -2695,7 +2695,15 @@ impl Ledger {
     pub fn deploy_contract(&mut self, deployer: &str, nonce: u64, code: &[u8]) -> Option<String> {
         let container = crate::execution::decode_container(code)?;
         container.verify().ok()?;
-        let canonical = self.provenance.admit(code, &container)?;
+        let canonical = if self.execution_height >= crate::provenance::PROVENANCE_ACTIVATION_HEIGHT {
+            self.provenance.admit(code, &container)?
+        } else {
+            let canon = container.canonical_bytes();
+            if canon.as_slice() != code {
+                return None;
+            }
+            canon
+        };
         let contract = contract_address(deployer, nonce)?;
         let id = address_id(&contract)?;
         self.set_contract_code(&id, &canonical);

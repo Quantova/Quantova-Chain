@@ -4,6 +4,8 @@
 use qtv_crypto::ml_dsa::{self, PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
 use qtv_vm::container::Container;
 
+pub const PROVENANCE_ACTIVATION_HEIGHT: u64 = 600_000;
+
 pub const PROVENANCE_TAG: [u8; 4] = *b"QPRV";
 
 pub const PROVENANCE_DOMAIN: &[u8] = b"QUANTOVA/QVM/PROVENANCE/v1";
