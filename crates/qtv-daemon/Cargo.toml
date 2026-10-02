@@ -19,7 +19,7 @@ qtv-account = { path = "../qtv-account" }
 qtv-idfmt = { path = "../qtv-idfmt" }
 
 qtv-node = { path = "../qtv-node" }
-qtv-attest = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "c9f308aae186b84764fc24d6df225b6f95f24a79" }
+qtv-attest = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "817ae56c663e8537fe7a7903ecafa930ff8ead7c" }
 qtv-tx = { path = "../qtv-tx" }
 qtv-governance = { path = "../qtv-governance" }
 
