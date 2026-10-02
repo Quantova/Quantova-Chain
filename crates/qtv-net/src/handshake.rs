@@ -4,6 +4,7 @@
 use qtv_wipe::Zeroize;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -208,12 +209,40 @@ fn respond<S: Read + Write>(
     respond_known(stream, identity, expected, None)
 }
 
+static UNPINNED_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+const MAX_UNPINNED_INFLIGHT: usize = 64;
+
+struct InflightGuard;
+
+impl InflightGuard {
+    fn acquire() -> Result<InflightGuard> {
+        if UNPINNED_INFLIGHT.fetch_add(1, Ordering::AcqRel) >= MAX_UNPINNED_INFLIGHT {
+            UNPINNED_INFLIGHT.fetch_sub(1, Ordering::AcqRel);
+            return Err(Error::Handshake(
+                "too many unauthenticated handshakes in flight",
+            ));
+        }
+        Ok(InflightGuard)
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        UNPINNED_INFLIGHT.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 fn respond_known<S: Read + Write>(
     mut stream: S,
     identity: &Identity,
     expected: Option<&PeerId>,
     known: Option<&[PeerId]>,
 ) -> Result<Channel<S>> {
+    let _inflight = if expected.is_none() && known.is_none() {
+        Some(InflightGuard::acquire()?)
+    } else {
+        None
+    };
     let initiator_public: ml_dsa::PublicKey = read_array(&mut stream)?;
     let client_random: [u8; 32] = read_array(&mut stream)?;
 
