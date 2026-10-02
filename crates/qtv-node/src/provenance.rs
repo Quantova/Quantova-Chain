@@ -33,7 +33,7 @@ const fn nibble(c: u8) -> u8 {
 #[derive(Debug, Clone)]
 pub struct ProvenanceVerifier {
     key: [u8; PUBLIC_KEY_BYTES],
-    #[cfg(feature = "test-fixtures")]
+    #[cfg(all(feature = "test-fixtures", debug_assertions))]
     accept_unsigned: bool,
 }
 
@@ -41,7 +41,7 @@ impl Default for ProvenanceVerifier {
     fn default() -> Self {
         ProvenanceVerifier {
             key: production_key(),
-            #[cfg(feature = "test-fixtures")]
+            #[cfg(all(feature = "test-fixtures", debug_assertions))]
             accept_unsigned: true,
         }
     }
@@ -51,14 +51,14 @@ impl ProvenanceVerifier {
     pub fn with_key(key: [u8; PUBLIC_KEY_BYTES]) -> Self {
         ProvenanceVerifier {
             key,
-            #[cfg(feature = "test-fixtures")]
+            #[cfg(all(feature = "test-fixtures", debug_assertions))]
             accept_unsigned: false,
         }
     }
 
     pub fn admit(&self, artifact: &[u8], container: &Container) -> Option<Vec<u8>> {
         let canonical = container.canonical_bytes();
-        #[cfg(feature = "test-fixtures")]
+        #[cfg(all(feature = "test-fixtures", debug_assertions))]
         if self.accept_unsigned && artifact == canonical.as_slice() {
             return Some(canonical);
         }
