@@ -510,7 +510,8 @@ pub fn build_mesh(
     up: &[bool],
     identity: &Identity,
 ) -> MeshChannels {
-    let (inbound_tx, inbound_rx) = mpsc::channel::<(usize, Vec<u8>)>();
+    const INBOUND_FRAME_CAP: usize = 1024;
+    let (inbound_tx, inbound_rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_FRAME_CAP);
     let (accepted_tx, accepted_rx) = mpsc::channel::<(usize, Channel<TcpStream>)>();
 
     let up_peers = (0..n)

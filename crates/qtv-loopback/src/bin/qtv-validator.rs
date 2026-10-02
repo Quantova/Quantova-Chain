@@ -323,7 +323,8 @@ fn build_mesh(
     n: usize,
     identity: &Identity,
 ) -> (Vec<Option<Channel<TcpStream>>>, Receiver<(usize, Vec<u8>)>) {
-    let (inbound_tx, inbound_rx) = mpsc::channel::<(usize, Vec<u8>)>();
+    const INBOUND_FRAME_CAP: usize = 1024;
+    let (inbound_tx, inbound_rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_FRAME_CAP);
     let (accepted_tx, accepted_rx) = mpsc::channel::<(usize, Channel<TcpStream>)>();
 
     let identity_acc = identity.clone();
