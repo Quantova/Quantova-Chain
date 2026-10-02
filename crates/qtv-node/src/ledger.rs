@@ -2477,6 +2477,14 @@ impl Ledger {
             Some(bond) => bond.amount_in_epoch(self.current_epoch(), self.heights_per_epoch),
             None => return 0,
         };
+        if self
+            .stake_rewards(id)
+            .tranches
+            .iter()
+            .any(|t| t.earned_day == now_day)
+        {
+            return 0;
+        }
         let paid = qtv_staking::session_reward(stake, denom, self.total_supply());
         if paid == 0 {
             return 0;
