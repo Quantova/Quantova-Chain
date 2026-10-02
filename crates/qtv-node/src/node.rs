@@ -1874,18 +1874,14 @@ impl Node {
     }
 
     fn published_reveals(&self, slot: u64) -> Vec<qtv_sampler::committee::PublishedReveal> {
+        let view = self.consensus.committee_view();
         self.sim_attesters
             .iter()
             .filter_map(|(id, attester)| {
                 let credential = attester.reveal(slot)?;
-                if self.consensus.verify_published(
-                    &self.beacon,
-                    slot,
-                    &qtv_sampler::committee::PublishedReveal::new(*id, credential.clone()),
-                ) {
-                    Some(qtv_sampler::committee::PublishedReveal::new(
-                        *id, credential,
-                    ))
+                let reveal = qtv_sampler::committee::PublishedReveal::new(*id, credential);
+                if crate::consensus::Consensus::view_admits(&view, &self.beacon, slot, &reveal) {
+                    Some(reveal)
                 } else {
                     None
                 }

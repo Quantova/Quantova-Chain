@@ -394,6 +394,19 @@ impl Consensus {
         CommitteeView::new(self.roster.iter().map(|r| r.registration()).collect())
     }
 
+    pub fn committee_view(&self) -> CommitteeView {
+        self.view()
+    }
+
+    pub fn view_admits(
+        view: &CommitteeView,
+        beacon: &Beacon,
+        slot: u64,
+        reveal: &PublishedReveal,
+    ) -> bool {
+        view.admits(beacon, slot, reveal.id, &reveal.credential)
+    }
+
     pub fn own_reveal(&self, slot: u64) -> Option<Credential> {
         self.own.reveal(slot)
     }
