@@ -69,8 +69,8 @@ fn an_address_is_the_full_width_and_holds_the_floor() {
 #[test]
 fn two_schemes_differ_only_in_scheme_yet_hide_it() {
     let seed = master();
-    let lattice = derive_with_scheme(&seed, SCHEME_LATTICE, 0);
-    let hash = derive_with_scheme(&seed, SCHEME_HASH, 0);
+    let lattice = derive_with_scheme(&seed, SCHEME_LATTICE, 0).unwrap();
+    let hash = derive_with_scheme(&seed, SCHEME_HASH, 0).unwrap();
     assert_eq!(lattice.scheme(), SCHEME_LATTICE);
     assert_eq!(hash.scheme(), SCHEME_HASH);
     assert_ne!(lattice.address(), hash.address());
@@ -87,7 +87,7 @@ fn the_default_derive_takes_the_lattice_scheme() {
     let seed = master();
     assert_eq!(
         derive(&seed, 0).address(),
-        derive_with_scheme(&seed, SCHEME_LATTICE, 0).address()
+        derive_with_scheme(&seed, SCHEME_LATTICE, 0).unwrap().address()
     );
 }
 

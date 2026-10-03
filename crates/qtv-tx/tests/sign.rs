@@ -93,8 +93,8 @@ fn an_unknown_scheme_is_rejected() {
 #[test]
 fn hash_scheme_signs_and_verifies() {
     let seed = master();
-    let account = derive_with_scheme(&seed, SCHEME_HASH, 0);
-    let target = derive_with_scheme(&seed, SCHEME_HASH, 1);
+    let account = derive_with_scheme(&seed, SCHEME_HASH, 0).unwrap();
+    let target = derive_with_scheme(&seed, SCHEME_HASH, 1).unwrap();
     let call = Call::new(target.address(), vec![1, 2, 3, 4, 5]);
     let body = Body::new(account.address(), 7, 21_000, 1_000_000, call);
     let wrapper = sign(&account, &body);

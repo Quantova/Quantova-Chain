@@ -379,15 +379,10 @@ mod fail_closed_tests {
     }
 
     #[test]
-    fn signing_under_an_unknown_scheme_yields_an_unverifiable_wrapper_not_a_panic() {
-        let account = qtv_account::derive_with_scheme(&[7u8; 32], 0xEE, 0);
-        let target = derive(&[7u8; 32], 1).address();
-        let call = Call::new(target, vec![1, 2, 3]);
-        let body = Body::new(account.address(), 0, 1_210, 500, call);
-        let wrapper = sign(&account, &body);
+    fn an_unknown_scheme_is_refused_at_derivation() {
         assert!(
-            !verify(&wrapper, account.public_key()),
-            "an unknown scheme produces an unverifiable wrapper rather than panicking"
+            qtv_account::derive_with_scheme(&[7u8; 32], 0xEE, 0).is_none(),
+            "an unsupported scheme has no spendable key and is refused rather than deriving a burn address"
         );
     }
 

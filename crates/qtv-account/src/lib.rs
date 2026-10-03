@@ -115,9 +115,14 @@ impl Account {
 
 pub fn derive(master_seed: &[u8; MASTER_SEED_LEN], index: u64) -> Account {
     derive_with_scheme(master_seed, SCHEME_LATTICE, index)
+        .expect("the lattice scheme always derives a spendable account")
 }
 
-pub fn derive_with_scheme(master_seed: &[u8; MASTER_SEED_LEN], scheme: u8, index: u64) -> Account {
+pub fn derive_with_scheme(
+    master_seed: &[u8; MASTER_SEED_LEN],
+    scheme: u8,
+    index: u64,
+) -> Option<Account> {
     let seed = account_seed(master_seed, scheme, index);
     let public_key = match scheme {
         SCHEME_LATTICE => {
@@ -130,21 +135,14 @@ pub fn derive_with_scheme(master_seed: &[u8; MASTER_SEED_LEN], scheme: u8, index
             secret.zeroize();
             public_key.to_vec()
         }
-        _ => {
-            let mut input = Vec::with_capacity(22 + SEED_LEN);
-            input.extend_from_slice(b"qtv-account/keyless/v1");
-            input.extend_from_slice(&seed);
-            let placeholder = sha3::sha3_256(&input).to_vec();
-            input.zeroize();
-            placeholder
-        }
+        _ => return None,
     };
-    Account {
+    Some(Account {
         scheme,
         index,
         seed,
         public_key,
-    }
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,10 +205,9 @@ mod redaction_tests {
     }
 
     #[test]
-    fn a_keyless_scheme_never_publishes_its_seed() {
-        let first = derive_with_scheme(&[7u8; MASTER_SEED_LEN], 9, 0);
-        let second = derive_with_scheme(&[7u8; MASTER_SEED_LEN], 9, 1);
-        assert_ne!(first.public_key(), first.seed().as_slice());
-        assert_ne!(first.address(), second.address());
+    fn an_unsupported_scheme_is_refused() {
+        assert!(derive_with_scheme(&[7u8; MASTER_SEED_LEN], 9, 0).is_none());
+        assert!(derive_with_scheme(&[7u8; MASTER_SEED_LEN], 3, 0).is_none());
+        assert!(derive_with_scheme(&[7u8; MASTER_SEED_LEN], SCHEME_LATTICE, 0).is_some());
     }
 }
