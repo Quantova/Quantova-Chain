@@ -1494,15 +1494,9 @@ impl DevNode {
         if offenders.is_empty() {
             return;
         }
-        let roster = self.epoch_roster_for(self.consensus.epoch_for(height));
         for id in offenders {
-            if self.slashed.contains(&id) {
-                continue;
-            }
-            if let Some(reg) = roster.iter().find(|r| r.id == id) {
-                if self.ledger.slash_validator(&reg.bond_address) {
-                    self.slashed.push(id);
-                }
+            if !self.slashed.contains(&id) {
+                self.slashed.push(id);
             }
         }
     }
