@@ -25,6 +25,11 @@ impl<const N: usize> Zeroize for [u8; N] {
 impl Zeroize for Vec<u8> {
     fn zeroize(&mut self) {
         self.as_mut_slice().zeroize();
+        for slot in self.spare_capacity_mut() {
+            unsafe {
+                core::ptr::write_volatile(slot.as_mut_ptr(), 0u8);
+            }
+        }
     }
 }
 
