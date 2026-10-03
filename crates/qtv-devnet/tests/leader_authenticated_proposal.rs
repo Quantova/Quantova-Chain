@@ -77,6 +77,7 @@ fn leader_and_stranger(
 }
 
 fn only_a_leader_signed_proposal_is_prevoted(committee: usize, online: &[bool]) {
+    qtv_node::node::pin_block_time(1_735_689_600);
     let base = unique_base(&format!("leader_auth_{committee}"));
     let alice = user(0);
     let accounts = vec![GenesisAccount::from_account(&alice, 1_000_000)];
