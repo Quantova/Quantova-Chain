@@ -2695,15 +2695,7 @@ impl Ledger {
     pub fn deploy_contract(&mut self, deployer: &str, nonce: u64, code: &[u8]) -> Option<String> {
         let container = crate::execution::decode_container(code)?;
         container.verify().ok()?;
-        let canonical = if self.execution_height >= crate::provenance::PROVENANCE_ACTIVATION_HEIGHT {
-            self.provenance.admit(code, &container)?
-        } else {
-            let canon = container.canonical_bytes();
-            if canon.as_slice() != code {
-                return None;
-            }
-            canon
-        };
+        let canonical = self.provenance.admit(code, &container)?;
         let contract = contract_address(deployer, nonce)?;
         let id = address_id(&contract)?;
         self.set_contract_code(&id, &canonical);
@@ -3266,7 +3258,7 @@ impl Ledger {
         }
         self.set_gov_lock(&voter_id, &lock);
         self.set_gov_total_locked(self.gov_total_locked() + stake as u128);
-        referendum.tally.record(aye, conviction.weight(stake));
+        referendum.tally.record(aye, stake as u128);
         self.set_gov_referendum(referendum_id, &referendum);
         self.set_gov_ballot(
             referendum_id,
