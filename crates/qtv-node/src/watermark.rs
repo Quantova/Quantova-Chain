@@ -119,11 +119,6 @@ fn decode_mark(bytes: &[u8]) -> Option<(u64, u64, Option<[u8; 32]>)> {
             let view = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
             Some((height, view, None))
         }
-        16 => {
-            let height = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
-            let view = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
-            Some((height, view, None))
-        }
         _ => None,
     }
 }
@@ -475,19 +470,26 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_sixteen_byte_watermark_is_accepted_and_upgraded() {
+    fn a_legacy_sixteen_byte_watermark_is_refused() {
         let path = temp_path("legacy");
         let mut legacy = [0u8; 16];
         legacy[0..8].copy_from_slice(&7u64.to_le_bytes());
         legacy[8..16].copy_from_slice(&3u64.to_le_bytes());
         std::fs::write(&path, legacy).unwrap();
 
+        match SignGuard::open(&path) {
+            Err(_) => {}
+            Ok(guard) => assert!(
+                guard.mark().is_none(),
+                "a legacy sixteen byte watermark without a checksum is not trusted"
+            ),
+        }
+    }
+
+    #[test]
+    fn a_checksummed_watermark_round_trips() {
+        let path = temp_path("roundtrip");
         let mut guard = SignGuard::open(&path).unwrap();
-        assert_eq!(guard.mark(), Some((7, 3)), "a legacy mark loads");
-        assert!(
-            !guard.try_sign(7, 3, &[1u8; 32]).unwrap(),
-            "and still refuses what it already signed"
-        );
         assert!(guard.try_sign(8, 0, &[1u8; 32]).unwrap());
         drop(guard);
 
@@ -495,7 +497,7 @@ mod tests {
         assert_eq!(
             reopened.mark(),
             Some((8, 0)),
-            "the upgraded checksummed mark round trips"
+            "the checksummed mark round trips"
         );
         assert_eq!(
             std::fs::read(&path).unwrap().len(),

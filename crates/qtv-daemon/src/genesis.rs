@@ -205,8 +205,7 @@ impl GenesisFile {
                         ));
                     }
                 }
-                None if chain_id.starts_with("Q-test-net") || chain_id.starts_with("Q-dev-net") => {
-                }
+                None if chain_id.starts_with("Q-dev-net") => {}
                 None => {
                     return Err(format!(
                         "genesis validator {} carries no proof of possession, which every genesis outside a test or dev net requires; produce it with quantovad register --chain {chain_id}",
@@ -973,7 +972,7 @@ mod tests {
         let b = validator(5, 2_000);
         let c = validator(3, 2_000);
         let text = format!(
-            "chain_id = Q-test-net-9\ngenesis_time = 1\nfee_transfer_micro_usd = 500\n\
+            "chain_id = Q-dev-net-9\ngenesis_time = 1\nfee_transfer_micro_usd = 500\n\
              fee_rate_micro_usd_per_qtov = 1000000\nfee_native_unit = 1000000\n\
              fee_max_native = 1000\nvalidator = {}\nvalidator = {}\nvalidator = {}\n",
             validator_line(&a, &a.bond_address),
@@ -995,7 +994,7 @@ mod tests {
         let b = validator(2, 2_000);
         let c = validator(3, 2_000);
         let text = format!(
-            "chain_id = Q-test-net-9\ngenesis_time = 1\nfee_transfer_micro_usd = 500\n\
+            "chain_id = Q-dev-net-9\ngenesis_time = 1\nfee_transfer_micro_usd = 500\n\
              fee_rate_micro_usd_per_qtov = 1000000\nfee_native_unit = 1000000\n\
              fee_max_native = 1000\nvalidator = {}\nvalidator = {}\nvalidator = {}\n\
              account = 1 {} 100\naccount = 1 {} 100\n",
@@ -1015,7 +1014,7 @@ mod tests {
 
     fn three_validator_preamble() -> String {
         let mut text = String::from(
-            "chain_id = Q-test-net-9\ngenesis_time = 1\nfee_transfer_micro_usd = 500\n\
+            "chain_id = Q-dev-net-9\ngenesis_time = 1\nfee_transfer_micro_usd = 500\n\
              fee_rate_micro_usd_per_qtov = 1000000\nfee_native_unit = 1000000\n\
              fee_max_native = 1000\n",
         );
