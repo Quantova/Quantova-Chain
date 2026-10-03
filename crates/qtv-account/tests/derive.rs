@@ -87,7 +87,9 @@ fn the_default_derive_takes_the_lattice_scheme() {
     let seed = master();
     assert_eq!(
         derive(&seed, 0).address(),
-        derive_with_scheme(&seed, SCHEME_LATTICE, 0).unwrap().address()
+        derive_with_scheme(&seed, SCHEME_LATTICE, 0)
+            .unwrap()
+            .address()
     );
 }
 

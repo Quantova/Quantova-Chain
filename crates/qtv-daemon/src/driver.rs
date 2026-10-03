@@ -173,9 +173,11 @@ impl Link {
         match self.queue.try_send(Arc::clone(bytes)) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
-                let _ = self.queued.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                    Some(v.saturating_sub(bytes.len()))
-                });
+                let _ = self
+                    .queued
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                        Some(v.saturating_sub(bytes.len()))
+                    });
                 true
             }
             Err(TrySendError::Disconnected(_)) => false,

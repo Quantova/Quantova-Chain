@@ -137,7 +137,10 @@ mod tests {
         let (pk, _) = ml_dsa::keygen(&seed);
         let verifier = ProvenanceVerifier::with_key(pk);
         let container = sample();
-        assert_eq!(verifier.admit(&container.canonical_bytes(), &container), None);
+        assert_eq!(
+            verifier.admit(&container.canonical_bytes(), &container),
+            None
+        );
     }
 
     #[test]
