@@ -275,6 +275,15 @@ fn body_digest(body: &Body) -> [u8; 32] {
     sha3::sha3_256(&to_bytes(body))
 }
 
+pub fn try_sign(account: &Account, body: &Body) -> Option<Wrapper> {
+    if qtv_idfmt::parse_address(body.sender()).is_err()
+        || qtv_idfmt::parse_address(body.call().target()).is_err()
+    {
+        return None;
+    }
+    Some(sign(account, body))
+}
+
 pub fn sign(account: &Account, body: &Body) -> Wrapper {
     assert!(
         qtv_idfmt::parse_address(body.sender()).is_ok(),
