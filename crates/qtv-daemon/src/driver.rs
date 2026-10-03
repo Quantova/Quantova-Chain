@@ -844,6 +844,9 @@ impl Driver {
         if leader_for(selection, coded.view) != source + 1 {
             return;
         }
+        if !coded.commitment.verify_shard(&coded.shard, &coded.proof) {
+            return;
+        }
         let key = (coded.view, coded.commitment.root, coded.shard.index);
         if self.relayed.len() >= MAX_BUFFERED_FRAMES || !self.relayed.insert(key) {
             return;
