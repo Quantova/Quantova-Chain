@@ -238,11 +238,7 @@ fn respond_known<S: Read + Write>(
     expected: Option<&PeerId>,
     known: Option<&[PeerId]>,
 ) -> Result<Channel<S>> {
-    let _inflight = if expected.is_none() && known.is_none() {
-        Some(InflightGuard::acquire()?)
-    } else {
-        None
-    };
+    let _inflight = InflightGuard::acquire()?;
     let initiator_public: ml_dsa::PublicKey = read_array(&mut stream)?;
     let client_random: [u8; 32] = read_array(&mut stream)?;
 

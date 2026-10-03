@@ -2814,7 +2814,10 @@ impl Ledger {
             Some(code) => code,
             None => return false,
         };
-        let caller_id = address_id(caller).unwrap_or([0u8; 32]);
+        let caller_id = match address_id(caller) {
+            Some(id) => id,
+            None => return false,
+        };
         let in_asset_id = in_asset.map(|issuer| asset_id_of(&issuer));
         if value > 0 {
             match in_asset_id {
