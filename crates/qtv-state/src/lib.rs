@@ -66,6 +66,18 @@ fn with_bit(key: &Key, level: usize) -> Key {
     out
 }
 
+fn prefix_at(key: &Key, level: usize) -> Key {
+    let byte = level >> 3;
+    let mut out = *key;
+    if byte < KEY_LEN {
+        out[byte] &= !(255u8 >> (level & 7));
+        for slot in out.iter_mut().skip(byte + 1) {
+            *slot = 0;
+        }
+    }
+    out
+}
+
 fn subtree_end(prefix: &Key, level: usize) -> Key {
     let byte = level >> 3;
     if byte >= KEY_LEN {
@@ -284,6 +296,23 @@ fn recompute(
             None => defaults[DEPTH],
         };
     }
+    if let [key] = changed {
+        let end = subtree_end(&prefix, level);
+        let mut range = leaves.range(prefix..=end);
+        let only = range.next();
+        if range.next().is_none() {
+            for below in level..DEPTH {
+                let id = (below as u16, prefix_at(key, below));
+                if nodes.get(&id).is_some() {
+                    updates.push((id, None));
+                }
+            }
+            return match only {
+                Some((leaf_key, value)) => chain_hash(defaults, leaf_key, leaf_hash(value), level),
+                None => defaults[level],
+            };
+        }
+    }
     let split = changed.partition_point(|key| key_bit(key, level) == 0);
     let (changed_left, changed_right) = changed.split_at(split);
     let right_prefix = with_bit(&prefix, level);
@@ -347,7 +376,11 @@ fn recompute(
     let end = subtree_end(&prefix, level);
     let branch = leaves.range(prefix..=end).take(2).count() >= 2;
     let id = (level as u16, prefix);
-    updates.push((id, branch.then_some(hash)));
+    if branch {
+        updates.push((id, Some(hash)));
+    } else if nodes.get(&id).is_some() {
+        updates.push((id, None));
+    }
     hash
 }
 

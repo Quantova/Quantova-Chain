@@ -55,6 +55,7 @@ pub struct Log {
     file: File,
     reader: Mutex<File>,
     salt: Salt,
+    dirty: bool,
 }
 
 fn a_well_formed_frame_follows(
@@ -176,7 +177,15 @@ impl Log {
             sync_parent_dir(path);
         }
         let reader = Mutex::new(OpenOptions::new().read(true).open(path)?);
-        Ok((Log { file, reader, salt }, frames))
+        Ok((
+            Log {
+                file,
+                reader,
+                salt,
+                dirty: true,
+            },
+            frames,
+        ))
     }
 
     pub fn open_scanned<F>(path: impl AsRef<Path>, visit: F) -> io::Result<Self>
@@ -313,7 +322,12 @@ impl Log {
             sync_parent_dir(path);
         }
         let reader = Mutex::new(OpenOptions::new().read(true).open(path)?);
-        Ok(Log { file, reader, salt })
+        Ok(Log {
+            file,
+            reader,
+            salt,
+            dirty: true,
+        })
     }
 
     pub fn read_payload(&self, payload_start: u64, payload_len: u64) -> io::Result<Vec<u8>> {
@@ -331,13 +345,29 @@ impl Log {
         Ok(self.file.metadata()?.len() + LENGTH_WIDTH as u64)
     }
 
-    pub fn append(&mut self, payload: &[u8]) -> io::Result<()> {
+    fn frame(&self, payload: &[u8], out: &mut Vec<u8>) {
         let mut encoder = Encoder::new();
         encoder.put_bytes(payload);
-        let mut framed = encoder.into_bytes();
+        let framed = encoder.into_bytes();
         let checksum = checksum_parts(&[&self.salt, &framed]);
-        framed.extend_from_slice(&checksum.to_le_bytes());
+        out.extend_from_slice(&framed);
+        out.extend_from_slice(&checksum.to_le_bytes());
+    }
+
+    pub fn append(&mut self, payload: &[u8]) -> io::Result<()> {
+        self.append_all(std::slice::from_ref(&payload))
+    }
+
+    pub fn append_all<P: AsRef<[u8]>>(&mut self, payloads: &[P]) -> io::Result<()> {
+        if payloads.is_empty() {
+            return Ok(());
+        }
+        let mut framed = Vec::new();
+        for payload in payloads {
+            self.frame(payload.as_ref(), &mut framed);
+        }
         let before = self.file.metadata()?.len();
+        self.dirty = true;
         if let Err(err) = self.file.write_all(&framed) {
             let _ = self.truncate(before);
             return Err(err);
@@ -346,7 +376,12 @@ impl Log {
     }
 
     pub fn sync(&mut self) -> io::Result<()> {
-        self.file.sync_data()
+        if !self.dirty {
+            return Ok(());
+        }
+        self.file.sync_data()?;
+        self.dirty = false;
+        Ok(())
     }
 
     pub fn len(&self) -> io::Result<u64> {
@@ -358,9 +393,11 @@ impl Log {
     }
 
     pub fn truncate(&mut self, len: u64) -> io::Result<()> {
+        self.dirty = true;
         self.file.set_len(len.max(HEADER_LEN))?;
         self.file.seek(SeekFrom::End(0))?;
         self.file.sync_data()?;
+        self.dirty = false;
         Ok(())
     }
 }

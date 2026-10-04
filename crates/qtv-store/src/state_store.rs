@@ -85,6 +85,8 @@ const COMPACT_FLOOR_BYTES: u64 = 64 * 1024 * 1024;
 
 const COMPACT_RATIO: u64 = 4;
 
+const COMPACT_BATCH: usize = 4096;
+
 #[derive(Debug)]
 pub struct StateStore {
     log: Log,
@@ -280,13 +282,18 @@ impl StateStore {
             std::fs::remove_file(&temp)?;
         }
         let (mut fresh, _) = Log::open(&temp)?;
+        let mut batch: Vec<Vec<u8>> = Vec::with_capacity(COMPACT_BATCH);
         for (key, value) in &self.entries {
-            let record = StateRecord::Entry {
+            batch.push(to_bytes(&StateRecord::Entry {
                 key: *key,
                 value: value.clone(),
-            };
-            fresh.append(&to_bytes(&record))?;
+            }));
+            if batch.len() >= COMPACT_BATCH {
+                fresh.append_all(&batch)?;
+                batch.clear();
+            }
         }
+        fresh.append_all(&batch)?;
         fresh.append(&to_bytes(&StateRecord::Commit { height, root }))?;
         fresh.sync()?;
         std::fs::rename(&temp, &self.path)?;
@@ -302,6 +309,31 @@ impl StateStore {
         };
         self.log.append(&to_bytes(&record))?;
         self.entries.insert(key, value);
+        Ok(())
+    }
+
+    pub fn apply_accounts(&mut self, changes: Vec<(Key, Option<Vec<u8>>)>) -> io::Result<()> {
+        let records: Vec<Vec<u8>> = changes
+            .iter()
+            .map(|(key, value)| match value {
+                Some(value) => to_bytes(&StateRecord::Entry {
+                    key: *key,
+                    value: value.clone(),
+                }),
+                None => to_bytes(&StateRecord::Delete { key: *key }),
+            })
+            .collect();
+        self.log.append_all(&records)?;
+        for (key, value) in changes {
+            match value {
+                Some(value) => {
+                    self.entries.insert(key, value);
+                }
+                None => {
+                    self.entries.remove(&key);
+                }
+            }
+        }
         Ok(())
     }
 

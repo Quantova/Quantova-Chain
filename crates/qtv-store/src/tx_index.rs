@@ -38,6 +38,7 @@ pub struct TxIndex {
     sorted_len: usize,
     tail_len: usize,
     tail_mem: Vec<([u8; 32], u64)>,
+    unsynced: bool,
 }
 
 #[derive(Debug)]
@@ -128,15 +129,31 @@ impl TxIndex {
             sorted_len,
             tail_len,
             tail_mem,
+            unsynced: true,
         })
     }
 
     pub fn insert(&mut self, id: &[u8; 32], height: u64) -> io::Result<()> {
-        self.tail.write_all(&record_bytes(id, height))?;
-        self.tail_len += 1;
-        self.tail_mem.push((*id, height));
-        if self.tail_len >= TAIL_MERGE_AT {
-            self.merge()?;
+        self.insert_all(&[(*id, height)])
+    }
+
+    pub fn insert_all(&mut self, records: &[([u8; 32], u64)]) -> io::Result<()> {
+        let mut at = 0;
+        while at < records.len() {
+            let room = TAIL_MERGE_AT.saturating_sub(self.tail_len).max(1);
+            let chunk = &records[at..records.len().min(at + room)];
+            let mut bytes = Vec::with_capacity(chunk.len() * RECORD);
+            for (id, height) in chunk {
+                bytes.extend_from_slice(&record_bytes(id, *height));
+            }
+            self.unsynced = true;
+            self.tail.write_all(&bytes)?;
+            self.tail_len += chunk.len();
+            self.tail_mem.extend_from_slice(chunk);
+            if self.tail_len >= TAIL_MERGE_AT {
+                self.merge()?;
+            }
+            at += chunk.len();
         }
         Ok(())
     }
@@ -279,8 +296,13 @@ impl TxIndex {
     }
 
     pub fn sync(&mut self) -> io::Result<()> {
+        if !self.unsynced {
+            return Ok(());
+        }
         self.tail.flush()?;
-        self.tail.sync_all()
+        self.tail.sync_all()?;
+        self.unsynced = false;
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
