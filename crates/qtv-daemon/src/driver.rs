@@ -112,6 +112,10 @@ const MAX_BUFFERED_BYTES: usize = 32 * 1024 * 1024;
 
 const CATCH_UP_SPAN: u64 = 64;
 
+const CATCH_UP_AFTER: Duration = Duration::from_millis(300);
+
+const CATCH_UP_RETRY: Duration = Duration::from_millis(250);
+
 const FUTURE_WINDOW: u64 = 4;
 
 const MAX_LINK_QUEUE_BYTES: usize = 64 * 1024 * 1024;
@@ -263,6 +267,7 @@ pub struct Driver {
     buffered: FrameBuffer,
     ahead: std::collections::BTreeSet<u64>,
     catch_up_turn: usize,
+    caught_up_at: Option<Instant>,
     solicited: Solicited,
     relayed: std::collections::HashSet<(u64, [u8; 32], usize)>,
     budget: u64,
@@ -307,6 +312,7 @@ impl Driver {
             buffered: FrameBuffer::default(),
             ahead: std::collections::BTreeSet::new(),
             catch_up_turn: 0,
+            caught_up_at: None,
             solicited: Solicited::default(),
             relayed: std::collections::HashSet::new(),
             budget: u64::MAX,
@@ -540,6 +546,16 @@ impl Driver {
                 self.enter_current_view(&selection, view);
                 entered_view = Some(view);
                 view_deadline = Instant::now() + view_timeout;
+            }
+
+            if !self.ahead.is_empty()
+                && height_start.elapsed() >= CATCH_UP_AFTER
+                && self
+                    .caught_up_at
+                    .is_none_or(|at| at.elapsed() >= CATCH_UP_RETRY)
+            {
+                self.request_catch_up();
+                self.caught_up_at = Some(Instant::now());
             }
 
             if entered_view == Some(view) && Instant::now() >= view_deadline {
