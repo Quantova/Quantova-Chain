@@ -158,6 +158,17 @@ fn touch_holder(path: &Path) {
 }
 
 impl StateStore {
+    pub fn release(&mut self) {
+        let holder = holder_path(&self.path);
+        let ours = std::fs::read_to_string(&holder)
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            == Some(std::process::id());
+        if ours {
+            let _ = std::fs::remove_file(holder);
+        }
+    }
+
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         Self::open_with_floor(path, None)
     }

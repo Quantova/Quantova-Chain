@@ -1420,6 +1420,10 @@ impl DevNode {
         Ok(())
     }
 
+    pub fn release_store(&mut self) {
+        self.state_store.release();
+    }
+
     pub fn stop_signing(&mut self) {
         self.sign_guard = None;
         self.prevote_guard = None;

@@ -462,6 +462,7 @@ impl Driver {
             }
             self.drive_one_height(block_interval, view_timeout, stopped)?;
         }
+        self.node.release_store();
         Ok(())
     }
 
