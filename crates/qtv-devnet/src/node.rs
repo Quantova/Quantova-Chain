@@ -952,6 +952,7 @@ impl DevNode {
     fn reload(&mut self) -> Result<(), RoundError> {
         self.refuse_state_behind_blocks()?;
         self.ledger = Ledger::from_trie(self.state_store.load_trie());
+        self.ledger.compact_state();
         self.ledger
             .set_heights_per_epoch(self.consensus.epoch_len());
         if let (Some(head), Some(committed)) = (
@@ -1555,6 +1556,7 @@ impl DevNode {
         }
 
         self.ledger = staged.ledger;
+        self.ledger.compact_state();
         let block_events = self.ledger.block_events().to_vec();
         if !block_events.is_empty() {
             self.events_by_height.insert(self.height, block_events);
@@ -3039,6 +3041,7 @@ impl DevNode {
         }
 
         self.ledger = ledger;
+        self.ledger.compact_state();
         let block_events = self.ledger.block_events().to_vec();
         if !block_events.is_empty() {
             self.events_by_height.insert(self.height, block_events);

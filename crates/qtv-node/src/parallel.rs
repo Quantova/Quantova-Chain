@@ -1,7 +1,7 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
@@ -60,7 +60,7 @@ struct Write {
     amount: u64,
 }
 
-fn account_at(leaves: &BTreeMap<Key, Vec<u8>>, key: &Key) -> Account {
+fn account_at(leaves: qtv_state::Leaves<'_>, key: &Key) -> Account {
     match leaves.get(key) {
         Some(bytes) => from_bytes(bytes).unwrap_or_default(),
         None => Account::default(),
@@ -69,7 +69,7 @@ fn account_at(leaves: &BTreeMap<Key, Vec<u8>>, key: &Key) -> Account {
 
 fn run_task(
     task: &Task<'_>,
-    leaves: &BTreeMap<Key, Vec<u8>>,
+    leaves: qtv_state::Leaves<'_>,
     fee_params: &FeeParams,
 ) -> Option<Write> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -80,7 +80,7 @@ fn run_task(
 
 fn run_task_inner(
     task: &Task<'_>,
-    leaves: &BTreeMap<Key, Vec<u8>>,
+    leaves: qtv_state::Leaves<'_>,
     fee_params: &FeeParams,
 ) -> Option<Write> {
     let sender_key = state_key(&task.sender_address);
@@ -121,7 +121,7 @@ fn run_task_inner(
 
 fn run_layer(
     tasks: &[Task<'_>],
-    leaves: &BTreeMap<Key, Vec<u8>>,
+    leaves: qtv_state::Leaves<'_>,
     fee_params: &FeeParams,
     threads: usize,
 ) -> Vec<Write> {

@@ -81,6 +81,139 @@ fn subtree_end(prefix: &Key, level: usize) -> Key {
 
 type NodeId = (u16, Key);
 
+const FOLD_FLOOR: usize = 4096;
+
+#[derive(Clone, Copy)]
+pub struct Leaves<'a> {
+    base: &'a BTreeMap<Key, Vec<u8>>,
+    delta: &'a BTreeMap<Key, Option<Vec<u8>>>,
+}
+
+impl<'a> Leaves<'a> {
+    pub fn get(&self, key: &Key) -> Option<&'a Vec<u8>> {
+        match self.delta.get(key) {
+            Some(entry) => entry.as_ref(),
+            None => self.base.get(key),
+        }
+    }
+
+    pub fn contains_key(&self, key: &Key) -> bool {
+        self.get(key).is_some()
+    }
+
+    pub fn range<R>(&self, range: R) -> LeafRange<'a>
+    where
+        R: std::ops::RangeBounds<Key> + Clone,
+    {
+        LeafRange {
+            base: self.base.range(range.clone()).peekable(),
+            delta: self.delta.range(range).peekable(),
+        }
+    }
+
+    pub fn iter(&self) -> LeafRange<'a> {
+        self.range::<std::ops::RangeFull>(..)
+    }
+}
+
+pub struct LeafRange<'a> {
+    base: std::iter::Peekable<std::collections::btree_map::Range<'a, Key, Vec<u8>>>,
+    delta: std::iter::Peekable<std::collections::btree_map::Range<'a, Key, Option<Vec<u8>>>>,
+}
+
+impl<'a> Iterator for LeafRange<'a> {
+    type Item = (&'a Key, &'a Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let from_delta = match (self.base.peek(), self.delta.peek()) {
+                (None, None) => return None,
+                (Some(_), None) => false,
+                (None, Some(_)) => true,
+                (Some((base_key, _)), Some((delta_key, _))) => {
+                    if delta_key == base_key {
+                        self.base.next();
+                        true
+                    } else {
+                        delta_key < base_key
+                    }
+                }
+            };
+            if !from_delta {
+                return self.base.next();
+            }
+            if let Some((key, Some(value))) = self.delta.next() {
+                return Some((key, value));
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Nodes<'a> {
+    base: &'a HashMap<NodeId, Hash>,
+    delta: &'a HashMap<NodeId, Option<Hash>>,
+}
+
+impl Nodes<'_> {
+    fn get(&self, id: &NodeId) -> Option<&Hash> {
+        match self.delta.get(id) {
+            Some(entry) => entry.as_ref(),
+            None => self.base.get(id),
+        }
+    }
+}
+
+fn fold_into<K: Ord + Clone, V: Clone>(
+    base: &mut Arc<BTreeMap<K, V>>,
+    delta: &mut Arc<BTreeMap<K, Option<V>>>,
+) {
+    if delta.is_empty() {
+        return;
+    }
+    let unique = Arc::get_mut(base).is_some();
+    if !unique && delta.len() <= base.len() / 8 + FOLD_FLOOR {
+        return;
+    }
+    let changes = std::mem::take(Arc::make_mut(delta));
+    let target = Arc::make_mut(base);
+    for (key, entry) in changes {
+        match entry {
+            Some(value) => {
+                target.insert(key, value);
+            }
+            None => {
+                target.remove(&key);
+            }
+        }
+    }
+}
+
+fn fold_nodes(
+    base: &mut Arc<HashMap<NodeId, Hash>>,
+    delta: &mut Arc<HashMap<NodeId, Option<Hash>>>,
+) {
+    if delta.is_empty() {
+        return;
+    }
+    let unique = Arc::get_mut(base).is_some();
+    if !unique && delta.len() <= base.len() / 8 + FOLD_FLOOR {
+        return;
+    }
+    let changes = std::mem::take(Arc::make_mut(delta));
+    let target = Arc::make_mut(base);
+    for (id, entry) in changes {
+        match entry {
+            Some(hash) => {
+                target.insert(id, hash);
+            }
+            None => {
+                target.remove(&id);
+            }
+        }
+    }
+}
+
 fn chain_hash(defaults: &[Hash], key: &Key, leaf: Hash, from_level: usize) -> Hash {
     let mut hash = leaf;
     let mut level = DEPTH;
@@ -97,9 +230,9 @@ fn chain_hash(defaults: &[Hash], key: &Key, leaf: Hash, from_level: usize) -> Ha
 }
 
 fn clean_hash(
-    leaves: &BTreeMap<Key, Vec<u8>>,
+    leaves: Leaves<'_>,
     defaults: &[Hash],
-    nodes: &HashMap<NodeId, Hash>,
+    nodes: Nodes<'_>,
     level: usize,
     prefix: Key,
 ) -> Hash {
@@ -121,9 +254,9 @@ const PARALLEL_MIN_CHANGED: usize = 32;
 type NodeUpdate = (NodeId, Option<Hash>);
 
 fn side(
-    leaves: &BTreeMap<Key, Vec<u8>>,
+    leaves: Leaves<'_>,
     defaults: &[Hash],
-    nodes: &HashMap<NodeId, Hash>,
+    nodes: Nodes<'_>,
     level: usize,
     prefix: Key,
     changed: &[Key],
@@ -137,9 +270,9 @@ fn side(
 }
 
 fn recompute(
-    leaves: &BTreeMap<Key, Vec<u8>>,
+    leaves: Leaves<'_>,
     defaults: &[Hash],
-    nodes: &HashMap<NodeId, Hash>,
+    nodes: Nodes<'_>,
     level: usize,
     prefix: Key,
     changed: &[Key],
@@ -279,6 +412,7 @@ impl Decode for Proof {
 #[derive(Debug, Clone)]
 struct RootCache {
     nodes: Arc<HashMap<NodeId, Hash>>,
+    node_delta: Arc<HashMap<NodeId, Option<Hash>>>,
     root: Hash,
     changed: BTreeSet<Key>,
 }
@@ -286,6 +420,7 @@ struct RootCache {
 #[derive(Debug)]
 pub struct Trie {
     leaves: Arc<BTreeMap<Key, Vec<u8>>>,
+    delta: Arc<BTreeMap<Key, Option<Vec<u8>>>>,
     defaults: Vec<Hash>,
     cache: Mutex<RootCache>,
     persist_dirty: BTreeSet<Key>,
@@ -295,6 +430,7 @@ impl Clone for Trie {
     fn clone(&self) -> Self {
         Trie {
             leaves: Arc::clone(&self.leaves),
+            delta: Arc::clone(&self.delta),
             defaults: self.defaults.clone(),
             cache: Mutex::new(
                 self.cache
@@ -318,11 +454,13 @@ impl Trie {
         let defaults = default_hashes();
         let cache = RootCache {
             nodes: Arc::new(HashMap::new()),
+            node_delta: Arc::new(HashMap::new()),
             root: defaults[0],
             changed: BTreeSet::new(),
         };
         Trie {
             leaves: Arc::new(BTreeMap::new()),
+            delta: Arc::new(BTreeMap::new()),
             defaults,
             cache: Mutex::new(cache),
             persist_dirty: BTreeSet::new(),
@@ -340,7 +478,14 @@ impl Trie {
     }
 
     pub fn insert(&mut self, key: Key, value: Vec<u8>) {
-        Arc::make_mut(&mut self.leaves).insert(key, value);
+        match Arc::get_mut(&mut self.leaves).filter(|_| self.delta.is_empty()) {
+            Some(base) => {
+                base.insert(key, value);
+            }
+            None => {
+                Arc::make_mut(&mut self.delta).insert(key, Some(value));
+            }
+        }
         self.cache
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -350,8 +495,16 @@ impl Trie {
     }
 
     pub fn remove(&mut self, key: &Key) -> bool {
-        let existed = Arc::make_mut(&mut self.leaves).remove(key).is_some();
+        let existed = self.leaves().contains_key(key);
         if existed {
+            match Arc::get_mut(&mut self.leaves).filter(|_| self.delta.is_empty()) {
+                Some(base) => {
+                    base.remove(key);
+                }
+                None => {
+                    Arc::make_mut(&mut self.delta).insert(*key, None);
+                }
+            }
             self.cache
                 .get_mut()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -363,11 +516,23 @@ impl Trie {
     }
 
     pub fn get(&self, key: &Key) -> Option<&[u8]> {
-        self.leaves.get(key).map(|value| value.as_slice())
+        self.leaves().get(key).map(|value| value.as_slice())
     }
 
-    pub fn leaves(&self) -> &BTreeMap<Key, Vec<u8>> {
-        &self.leaves
+    pub fn leaves(&self) -> Leaves<'_> {
+        Leaves {
+            base: &self.leaves,
+            delta: &self.delta,
+        }
+    }
+
+    pub fn compact(&mut self) {
+        fold_into(&mut self.leaves, &mut self.delta);
+        let cache = self
+            .cache
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        fold_nodes(&mut cache.nodes, &mut cache.node_delta);
     }
 
     pub fn root(&self) -> Hash {
@@ -381,22 +546,35 @@ impl Trie {
         let changed: Vec<Key> = cache.changed.iter().copied().collect();
         let mut updates = Vec::new();
         let root = recompute(
-            &self.leaves,
+            self.leaves(),
             &self.defaults,
-            &cache.nodes,
+            Nodes {
+                base: &cache.nodes,
+                delta: &cache.node_delta,
+            },
             0,
             [0u8; KEY_LEN],
             &changed,
             &mut updates,
         );
-        let nodes = Arc::make_mut(&mut cache.nodes);
-        for (id, hash) in updates {
-            match hash {
-                Some(hash) => {
-                    nodes.insert(id, hash);
+        let cache = &mut *cache;
+        match Arc::get_mut(&mut cache.nodes).filter(|_| cache.node_delta.is_empty()) {
+            Some(base) => {
+                for (id, hash) in updates {
+                    match hash {
+                        Some(hash) => {
+                            base.insert(id, hash);
+                        }
+                        None => {
+                            base.remove(&id);
+                        }
+                    }
                 }
-                None => {
-                    nodes.remove(&id);
+            }
+            None => {
+                let delta = Arc::make_mut(&mut cache.node_delta);
+                for (id, hash) in updates {
+                    delta.insert(id, hash);
                 }
             }
         }
@@ -420,12 +598,12 @@ impl Trie {
                 slice = right;
             }
         }
-        let value = self.leaves.get(key).cloned();
+        let value = self.leaves().get(key).cloned();
         Proof { value, siblings }
     }
 
     fn entries(&self) -> Vec<(Key, Hash)> {
-        self.leaves
+        self.leaves()
             .iter()
             .map(|(key, value)| (*key, leaf_hash(value)))
             .collect()
@@ -599,7 +777,7 @@ mod incremental {
         assert_eq!(node_hashes(), 0);
 
         let (key, value) = {
-            let (key, value) = trie.leaves.iter().next().unwrap();
+            let (key, value) = trie.leaves().iter().next().unwrap();
             (*key, value.clone())
         };
         trie.insert(key, value);

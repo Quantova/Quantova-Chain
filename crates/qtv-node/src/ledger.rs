@@ -10191,8 +10191,12 @@ impl Ledger {
         self.write_leaf(state_key(address), to_bytes(account));
     }
 
-    pub(crate) fn leaves(&self) -> &std::collections::BTreeMap<Key, Vec<u8>> {
+    pub(crate) fn leaves(&self) -> qtv_state::Leaves<'_> {
         self.trie.leaves()
+    }
+
+    pub fn compact_state(&mut self) {
+        self.trie.compact();
     }
 
     pub(crate) fn insert_raw(&mut self, key: Key, bytes: Vec<u8>) {
