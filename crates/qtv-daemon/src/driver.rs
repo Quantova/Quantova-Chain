@@ -103,6 +103,15 @@ use crate::util::{hex, log};
 
 const TICK: Duration = Duration::from_millis(20);
 
+const VIEW_BACKOFF_CAP: u32 = 3;
+
+fn view_timeout_for(base: Duration, view: u64) -> Duration {
+    let doublings = u32::try_from(view)
+        .unwrap_or(u32::MAX)
+        .min(VIEW_BACKOFF_CAP);
+    base.saturating_mul(1 << doublings)
+}
+
 const GRACE_DIVISOR: u32 = 8;
 const MAX_GOSSIP_PER_TICK: usize = 256;
 
@@ -516,7 +525,7 @@ impl Driver {
 
         let height_start = Instant::now();
         let mut entered_view: Option<u64> = None;
-        let mut view_deadline = Instant::now() + view_timeout;
+        let mut view_deadline = Instant::now() + view_timeout_for(view_timeout, self.node.view());
 
         self.assembler.tick();
         self.replay_buffered(start_height, &selection);
@@ -546,7 +555,7 @@ impl Driver {
             if ready {
                 self.enter_current_view(&selection, view);
                 entered_view = Some(view);
-                view_deadline = Instant::now() + view_timeout;
+                view_deadline = Instant::now() + view_timeout_for(view_timeout, view);
             }
 
             if !self.ahead.is_empty()
@@ -565,7 +574,8 @@ impl Driver {
                 }
                 self.on_view_timeout(&selection);
                 self.request_catch_up();
-                view_deadline = Instant::now() + view_timeout;
+                view_deadline = Instant::now()
+                    + view_timeout_for(view_timeout, self.node.view().saturating_add(1));
             }
 
             match self.inbound.recv_timeout(TICK) {

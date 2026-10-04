@@ -119,6 +119,8 @@ const MAX_FUTURE_PROPOSALS: usize = 256;
 const MAX_OUTBOX: usize = 4096;
 const MAX_BLOCK_TIME_AHEAD_SECS: u64 = 15;
 const MAX_BLOCK_BODY_BYTES: usize = 6 * 1024 * 1024;
+
+const PROPOSAL_TARGET_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SERVE_BYTES: usize = 12 * 1024 * 1024;
 
 fn locked_body_fits(block: &LockedBlock) -> bool {
@@ -1191,7 +1193,7 @@ impl DevNode {
             }
         }
         candidates.extend(self.mempool.candidates());
-        let mut room = 2 * MAX_BLOCK_BODY_BYTES;
+        let mut room = 2 * PROPOSAL_TARGET_BYTES;
         candidates.retain(|wrapper| {
             let size = to_bytes(wrapper).len();
             if size > room {
@@ -1211,7 +1213,7 @@ impl DevNode {
             &candidates,
             &self.fee_params,
             block_time,
-            MAX_BLOCK_BODY_BYTES,
+            PROPOSAL_TARGET_BYTES,
         );
         self.mempool.evict(&outcome.refused_feeless);
         let included = outcome.included;
@@ -1357,6 +1359,14 @@ impl DevNode {
         if !self.proposal_auth_ok(selection, proposal) {
             return Err(RoundError::ProposalRejected);
         }
+        self.accept_authed_proposal(selection, proposal)
+    }
+
+    fn accept_authed_proposal(
+        &mut self,
+        selection: &Selection,
+        proposal: &Proposal,
+    ) -> Result<(), RoundError> {
         let header = &proposal.header;
         if proposal.view != self.view
             || *header.proposer() != self.validator_address(leader_for(selection, proposal.view))
@@ -1684,7 +1694,7 @@ impl DevNode {
         if self.staged.is_some() {
             return Vec::new();
         }
-        if self.accept_proposal(selection, &proposal).is_err() {
+        if self.accept_authed_proposal(selection, &proposal).is_err() {
             return Vec::new();
         }
         self.prevote_staged()
@@ -2588,19 +2598,21 @@ impl DevNode {
 
     fn persist(&mut self, block: &ChainBlock) -> Result<(), RoundError> {
         let height = block.header().height();
-        for (position, wrapper) in block.body().iter().enumerate() {
-            let position = (position as u64).min(TX_POSITION_UNKNOWN);
-            self.tx_index.insert(
-                &tx_key(&wrapper.id()),
-                (height << TX_POSITION_BITS) | position,
-            )?;
-        }
-        for (key, value) in self.ledger.take_dirty_entries() {
-            match value {
-                Some(value) => self.state_store.put_account(key, value)?,
-                None => self.state_store.delete_account(key)?,
-            }
-        }
+        let records: Vec<([u8; 32], u64)> = block
+            .body()
+            .iter()
+            .enumerate()
+            .map(|(position, wrapper)| {
+                let position = (position as u64).min(TX_POSITION_UNKNOWN);
+                (
+                    tx_key(&wrapper.id()),
+                    (height << TX_POSITION_BITS) | position,
+                )
+            })
+            .collect();
+        self.tx_index.insert_all(&records)?;
+        self.state_store
+            .apply_accounts(self.ledger.take_dirty_entries())?;
         let leaves: Vec<Vec<u8>> = self
             .events_by_height
             .get(&height)
@@ -2614,10 +2626,25 @@ impl DevNode {
         self.event_store.put_events(height, &leaves)?;
         self.side_event_store.put_events(height, &side_leaves)?;
         self.block_store.put_block(block)?;
-        self.block_store.sync()?;
-        self.event_store.sync()?;
-        self.side_event_store.sync()?;
-        self.tx_index.sync()?;
+        let block_store = &mut self.block_store;
+        let event_store = &mut self.event_store;
+        let side_event_store = &mut self.side_event_store;
+        let tx_index = &mut self.tx_index;
+        let synced = std::thread::scope(|scope| {
+            let events = scope.spawn(|| event_store.sync());
+            let side = scope.spawn(|| side_event_store.sync());
+            let index = scope.spawn(|| tx_index.sync());
+            let blocks = block_store.sync();
+            let joined = |handle: std::thread::ScopedJoinHandle<'_, io::Result<()>>| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err(io::Error::other("a store sync panicked")))
+            };
+            [blocks, joined(events), joined(side), joined(index)]
+        });
+        for result in synced {
+            result?;
+        }
         self.archive_burn_block(block)?;
         self.state_store.commit(height, self.ledger.q_root())?;
         self.record_registrations(block);
