@@ -3,6 +3,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(all(feature = "test-fixtures", not(any(test, debug_assertions))))]
+compile_error!("the test-fixtures feature exposes deterministic account secrets and must never be enabled in a release build");
+
 pub mod bridge;
 pub mod consensus;
 pub mod evidence;
