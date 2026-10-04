@@ -114,13 +114,36 @@ fn clean_hash(
     }
 }
 
-fn recompute(
+const PARALLEL_LEVELS: usize = 4;
+
+const PARALLEL_MIN_CHANGED: usize = 32;
+
+type NodeUpdate = (NodeId, Option<Hash>);
+
+fn side(
     leaves: &BTreeMap<Key, Vec<u8>>,
     defaults: &[Hash],
-    nodes: &mut HashMap<NodeId, Hash>,
+    nodes: &HashMap<NodeId, Hash>,
     level: usize,
     prefix: Key,
     changed: &[Key],
+    updates: &mut Vec<NodeUpdate>,
+) -> Hash {
+    if changed.is_empty() {
+        clean_hash(leaves, defaults, nodes, level, prefix)
+    } else {
+        recompute(leaves, defaults, nodes, level, prefix, changed, updates)
+    }
+}
+
+fn recompute(
+    leaves: &BTreeMap<Key, Vec<u8>>,
+    defaults: &[Hash],
+    nodes: &HashMap<NodeId, Hash>,
+    level: usize,
+    prefix: Key,
+    changed: &[Key],
+    updates: &mut Vec<NodeUpdate>,
 ) -> Hash {
     if level == DEPTH {
         return match leaves.get(&prefix) {
@@ -131,32 +154,67 @@ fn recompute(
     let split = changed.partition_point(|key| key_bit(key, level) == 0);
     let (changed_left, changed_right) = changed.split_at(split);
     let right_prefix = with_bit(&prefix, level);
-    let left = if changed_left.is_empty() {
-        clean_hash(leaves, defaults, nodes, level + 1, prefix)
+    let parallel = level < PARALLEL_LEVELS
+        && changed.len() >= PARALLEL_MIN_CHANGED
+        && !changed_left.is_empty()
+        && !changed_right.is_empty();
+    let (left, right) = if parallel {
+        let (pair, right_updates) = std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let mut local = Vec::new();
+                let hash = side(
+                    leaves,
+                    defaults,
+                    nodes,
+                    level + 1,
+                    right_prefix,
+                    changed_right,
+                    &mut local,
+                );
+                (hash, local)
+            });
+            let left = side(
+                leaves,
+                defaults,
+                nodes,
+                level + 1,
+                prefix,
+                changed_left,
+                updates,
+            );
+            let (right, local) = handle
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            ((left, right), local)
+        });
+        updates.extend(right_updates);
+        pair
     } else {
-        recompute(leaves, defaults, nodes, level + 1, prefix, changed_left)
-    };
-    let right = if changed_right.is_empty() {
-        clean_hash(leaves, defaults, nodes, level + 1, right_prefix)
-    } else {
-        recompute(
+        let left = side(
+            leaves,
+            defaults,
+            nodes,
+            level + 1,
+            prefix,
+            changed_left,
+            updates,
+        );
+        let right = side(
             leaves,
             defaults,
             nodes,
             level + 1,
             right_prefix,
             changed_right,
-        )
+            updates,
+        );
+        (left, right)
     };
     let hash = node_hash(&left, &right);
     let end = subtree_end(&prefix, level);
     let branch = leaves.range(prefix..=end).take(2).count() >= 2;
     let id = (level as u16, prefix);
-    if branch {
-        nodes.insert(id, hash);
-    } else {
-        nodes.remove(&id);
-    }
+    updates.push((id, branch.then_some(hash)));
     hash
 }
 
@@ -321,14 +379,27 @@ impl Trie {
             return cache.root;
         }
         let changed: Vec<Key> = cache.changed.iter().copied().collect();
+        let mut updates = Vec::new();
         let root = recompute(
             &self.leaves,
             &self.defaults,
-            Arc::make_mut(&mut cache.nodes),
+            &cache.nodes,
             0,
             [0u8; KEY_LEN],
             &changed,
+            &mut updates,
         );
+        let nodes = Arc::make_mut(&mut cache.nodes);
+        for (id, hash) in updates {
+            match hash {
+                Some(hash) => {
+                    nodes.insert(id, hash);
+                }
+                None => {
+                    nodes.remove(&id);
+                }
+            }
+        }
         cache.root = root;
         cache.changed.clear();
         root
