@@ -350,6 +350,7 @@ pub struct DevNode {
     frozen_for: Option<Height>,
     served_blocks: RefCell<std::collections::VecDeque<(Height, std::sync::Arc<ServedBlock>)>>,
     served_budget: std::cell::Cell<(std::time::Instant, usize)>,
+    peer_served_budget: std::cell::Cell<(std::time::Instant, usize)>,
     served_saturated: std::cell::Cell<bool>,
     chain: Vec<FinalizedBlock>,
     slashed: Vec<u64>,
@@ -470,6 +471,7 @@ impl DevNode {
             frozen_for: None,
             served_blocks: RefCell::new(std::collections::VecDeque::new()),
             served_budget: std::cell::Cell::new((std::time::Instant::now(), 0)),
+            peer_served_budget: std::cell::Cell::new((std::time::Instant::now(), 0)),
             served_saturated: std::cell::Cell::new(false),
             chain: Vec::new(),
             slashed: Vec::new(),
@@ -2817,8 +2819,20 @@ impl DevNode {
     }
 
     fn charge_served(&self, bytes: usize) -> bool {
+        self.charge_budget(&self.served_budget, bytes)
+    }
+
+    fn charge_peer_served(&self, bytes: usize) -> bool {
+        self.charge_budget(&self.peer_served_budget, bytes)
+    }
+
+    fn charge_budget(
+        &self,
+        budget: &std::cell::Cell<(std::time::Instant, usize)>,
+        bytes: usize,
+    ) -> bool {
         let now = std::time::Instant::now();
-        let (mut since, mut spent) = self.served_budget.get();
+        let (mut since, mut spent) = budget.get();
         if now.duration_since(since) >= std::time::Duration::from_secs(1) {
             since = now;
             spent = 0;
@@ -2827,7 +2841,7 @@ impl DevNode {
             self.served_saturated.set(true);
             return false;
         }
-        self.served_budget.set((since, spent.saturating_add(bytes)));
+        budget.set((since, spent.saturating_add(bytes)));
         true
     }
 
@@ -2964,7 +2978,7 @@ impl DevNode {
             if !blocks.is_empty() && served.saturating_add(bytes.len()) > MAX_SERVE_BYTES {
                 break;
             }
-            if !self.charge_served(bytes.len()) {
+            if !self.charge_peer_served(bytes.len()) {
                 break;
             }
             match crate::wire::chain_block_from_bytes(&bytes) {
