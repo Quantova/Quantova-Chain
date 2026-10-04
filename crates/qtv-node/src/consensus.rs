@@ -289,6 +289,7 @@ pub struct Consensus {
     slots: u64,
     epoch: u64,
     epoch_len: u64,
+    registration: std::cell::RefCell<Option<(u64, Root, qtv_crypto::ml_dsa::Signature)>>,
 }
 
 impl Consensus {
@@ -324,6 +325,7 @@ impl Consensus {
             slots,
             epoch: 0,
             epoch_len: slots,
+            registration: std::cell::RefCell::new(None),
         }
     }
 
@@ -346,11 +348,18 @@ impl Consensus {
     }
 
     pub fn own_epoch_root(&self, epoch: u64) -> Root {
-        self.own.at_epoch(epoch).root()
+        self.own_epoch_registration(epoch).0
     }
 
     pub fn own_epoch_registration(&self, epoch: u64) -> (Root, qtv_crypto::ml_dsa::Signature) {
-        self.own.epoch_registration(self.chain_id, epoch)
+        if let Some((cached, root, sig)) = *self.registration.borrow() {
+            if cached == epoch {
+                return (root, sig);
+            }
+        }
+        let (root, sig) = self.own.epoch_registration(self.chain_id, epoch);
+        *self.registration.borrow_mut() = Some((epoch, root, sig));
+        (root, sig)
     }
 
     pub fn epoch_for(&self, height: u64) -> u64 {
