@@ -685,6 +685,9 @@ impl Driver {
     }
 
     fn on_view_timeout(&mut self, selection: &Selection) {
+        if let Some(note) = self.node.own_reveal_note() {
+            self.broadcast(&Message::Reveal(Box::new(note)).encode());
+        }
         let target = self.node.view().saturating_add(1);
         if let Some(record) = self.node.make_view_change(target) {
             self.node.collect_view_change(selection, record.clone());
