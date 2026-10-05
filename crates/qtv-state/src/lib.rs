@@ -227,8 +227,18 @@ fn fold_nodes(
 }
 
 fn chain_hash(defaults: &[Hash], key: &Key, leaf: Hash, from_level: usize) -> Hash {
-    let mut hash = leaf;
-    let mut level = DEPTH;
+    chain_between(defaults, key, leaf, DEPTH, from_level)
+}
+
+fn chain_between(
+    defaults: &[Hash],
+    key: &Key,
+    start: Hash,
+    start_level: usize,
+    from_level: usize,
+) -> Hash {
+    let mut hash = start;
+    let mut level = start_level;
     while level > from_level {
         level -= 1;
         let default = defaults[level + 1];
@@ -239,6 +249,52 @@ fn chain_hash(defaults: &[Hash], key: &Key, leaf: Hash, from_level: usize) -> Ha
         };
     }
     hash
+}
+
+const ANCHOR_LEVEL: usize = 64;
+
+const ANCHOR_GENERATION: usize = 262_144;
+
+#[derive(Default)]
+struct Anchors {
+    current: HashMap<Key, (Hash, Hash)>,
+    previous: HashMap<Key, (Hash, Hash)>,
+}
+
+fn anchors() -> std::sync::MutexGuard<'static, Anchors> {
+    static ANCHORS: std::sync::OnceLock<Mutex<Anchors>> = std::sync::OnceLock::new();
+    ANCHORS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn single_leaf_hash(defaults: &[Hash], key: &Key, value: &[u8], level: usize) -> Hash {
+    let leaf = leaf_hash(value);
+    if level > ANCHOR_LEVEL {
+        return chain_hash(defaults, key, leaf, level);
+    }
+    let known = {
+        let memo = anchors();
+        memo.current
+            .get(key)
+            .or_else(|| memo.previous.get(key))
+            .filter(|(stored_leaf, _)| *stored_leaf == leaf)
+            .map(|(_, anchor)| *anchor)
+    };
+    let anchor = match known {
+        Some(anchor) => anchor,
+        None => {
+            let anchor = chain_hash(defaults, key, leaf, ANCHOR_LEVEL);
+            let mut memo = anchors();
+            if memo.current.len() >= ANCHOR_GENERATION {
+                memo.previous = std::mem::take(&mut memo.current);
+            }
+            memo.current.insert(*key, (leaf, anchor));
+            anchor
+        }
+    };
+    chain_between(defaults, key, anchor, ANCHOR_LEVEL, level)
 }
 
 fn clean_hash(
@@ -252,7 +308,7 @@ fn clean_hash(
     let mut range = leaves.range(prefix..=end);
     match (range.next(), range.next()) {
         (None, _) => defaults[level],
-        (Some((key, value)), None) => chain_hash(defaults, key, leaf_hash(value), level),
+        (Some((key, value)), None) => single_leaf_hash(defaults, key, value, level),
         (Some(_), Some(_)) => *nodes
             .get(&(level as u16, prefix))
             .expect("a subtree with two or more leaves is a cached node"),
@@ -308,7 +364,7 @@ fn recompute(
                 }
             }
             return match only {
-                Some((leaf_key, value)) => chain_hash(defaults, leaf_key, leaf_hash(value), level),
+                Some((leaf_key, value)) => single_leaf_hash(defaults, leaf_key, value, level),
                 None => defaults[level],
             };
         }
