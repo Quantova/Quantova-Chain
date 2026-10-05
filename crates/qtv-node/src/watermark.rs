@@ -278,14 +278,29 @@ impl LockFile {
     }
 }
 
+const CRC_TABLE: [u32; 256] = crc_table();
+
+const fn crc_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut index = 0;
+    while index < 256 {
+        let mut crc = index as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            bit += 1;
+        }
+        table[index] = crc;
+        index += 1;
+    }
+    table
+}
+
 fn crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
+        crc = (crc >> 8) ^ CRC_TABLE[((crc ^ byte as u32) & 0xFF) as usize];
     }
     !crc
 }
