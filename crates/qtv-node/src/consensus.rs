@@ -132,7 +132,27 @@ pub struct Selection {
     pub tau: u64,
     pub expected: u64,
     pub reveals: Vec<[u8; qtv_sampler::onetime::PREIMAGE_BYTES]>,
+    pub reveal_holders: Vec<u64>,
+    pub bound: bool,
 }
+
+impl Selection {
+    pub fn next_beacon(&self, beacon: &Beacon, slot: u64) -> Beacon {
+        if self.bound {
+            let pairs: Vec<(u64, [u8; qtv_sampler::onetime::PREIMAGE_BYTES])> = self
+                .reveal_holders
+                .iter()
+                .copied()
+                .zip(self.reveals.iter().copied())
+                .collect();
+            beacon.advance_from_bound_reveals(slot, &pairs)
+        } else {
+            beacon.advance_from_reveals(slot, &self.reveals)
+        }
+    }
+}
+
+pub const TESTNET_BOUND_DRAW_FROM_EPOCH: u64 = 11;
 
 pub fn genesis_beacon() -> Beacon {
     Beacon::genesis()
@@ -399,8 +419,13 @@ impl Consensus {
         self.slots
     }
 
+    pub fn bound_draw(&self) -> bool {
+        self.chain_id != qtv_tx::TESTNET_CHAIN_ID || self.epoch >= TESTNET_BOUND_DRAW_FROM_EPOCH
+    }
+
     fn view(&self) -> CommitteeView {
         CommitteeView::new(self.roster.iter().map(|r| r.registration()).collect())
+            .with_bound_draw(self.bound_draw())
     }
 
     pub fn committee_view(&self) -> CommitteeView {
@@ -511,6 +536,7 @@ impl Consensus {
         let tau =
             qtv_sampler::params::finality_threshold_for_draw(expected, committee.len() as u64);
         let reveals = committee.reveals();
+        let reveal_holders = committee.ids();
         Some(Selection {
             commitment,
             members,
@@ -518,6 +544,8 @@ impl Consensus {
             tau,
             expected,
             reveals,
+            reveal_holders,
+            bound: view.bound_draw(),
         })
     }
 

@@ -60,6 +60,36 @@ pub fn node_peer_id(id: u64) -> PeerId {
     p2p_peer_id(&qtv_node::keys::fixture_secret(id))
 }
 
+trait EntitledWith {
+    fn is_entitled_with(
+        &self,
+        bound: bool,
+        root: &Root,
+        beacon: &qtv_sampler::beacon::Beacon,
+        weight: u64,
+        total: u64,
+        budget: u64,
+    ) -> bool;
+}
+
+impl EntitledWith for Attestation {
+    fn is_entitled_with(
+        &self,
+        bound: bool,
+        root: &Root,
+        beacon: &qtv_sampler::beacon::Beacon,
+        weight: u64,
+        total: u64,
+        budget: u64,
+    ) -> bool {
+        if bound {
+            self.is_entitled_bound(root, beacon, weight, total, budget)
+        } else {
+            self.is_entitled(root, beacon, weight, total, budget)
+        }
+    }
+}
+
 pub fn leader_for(selection: &Selection, view: View) -> u64 {
     let members = &selection.members;
     if members.is_empty() {
@@ -1002,7 +1032,9 @@ impl DevNode {
         let roster = self.epoch_roster_for(head_epoch);
         self.rotate_consensus(head_epoch, roster);
         *self.selection_cache.borrow_mut() = None;
-        let reveals = match self.committee_for_certificate(head, &certificate) {
+        let pairs: Vec<(u64, [u8; qtv_sampler::onetime::PREIMAGE_BYTES])> = match self
+            .committee_for_certificate(head, &certificate)
+        {
             Some(selection) => {
                 if !certificate.committee_reveals.is_empty() {
                     let mut carried = certificate.committee_reveals.clone();
@@ -1012,7 +1044,12 @@ impl DevNode {
                         return Err(RoundError::Decode);
                     }
                 }
-                selection.reveals
+                selection
+                    .reveal_holders
+                    .iter()
+                    .copied()
+                    .zip(selection.reveals.iter().copied())
+                    .collect()
             }
             None if !certificate.committee_reveals.is_empty() => {
                 let mut carried = certificate.committee_reveals.clone();
@@ -1024,13 +1061,20 @@ impl DevNode {
                 {
                     return Err(RoundError::Decode);
                 }
-                carried.iter().map(|r| r.credential.preimage).collect()
+                carried
+                    .iter()
+                    .map(|r| (r.id, r.credential.preimage))
+                    .collect()
             }
             None => return Err(RoundError::Decode),
         };
-        self.beacon = self
-            .beacon
-            .advance_from_reveals(self.consensus.slot_for(head), &reveals);
+        let slot = self.consensus.slot_for(head);
+        self.beacon = if self.consensus.bound_draw() {
+            self.beacon.advance_from_bound_reveals(slot, &pairs)
+        } else {
+            let reveals: Vec<_> = pairs.iter().map(|(_, preimage)| *preimage).collect();
+            self.beacon.advance_from_reveals(slot, &reveals)
+        };
         self.height = head + 1;
         if let Some((height, view)) = self.sign_guard.as_ref().and_then(SignGuard::mark) {
             if height == self.height {
@@ -1594,9 +1638,7 @@ impl DevNode {
             return Err(err);
         }
 
-        self.beacon = self
-            .beacon
-            .advance_from_reveals(self.slot(), &selection.reveals);
+        self.beacon = selection.next_beacon(&self.beacon, self.slot());
         self.parent_header_hash = chain_block.header_hash();
         self.parent_time = chain_block.header().time();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));
@@ -2089,7 +2131,8 @@ impl DevNode {
         if !att.signature_verifies(self.consensus.chain_id(), &member.attest_pk) {
             return false;
         }
-        att.is_entitled(
+        att.is_entitled_with(
+            self.consensus.bound_draw(),
             &member.root,
             &self.beacon,
             member.weight,
@@ -2139,7 +2182,8 @@ impl DevNode {
         {
             return false;
         }
-        record.att.is_entitled(
+        record.att.is_entitled_with(
+            self.consensus.bound_draw(),
             &member.root,
             &self.beacon,
             member.weight,
@@ -2378,7 +2422,8 @@ impl DevNode {
             if let Some(member) = selection.commitment.member(attestation.from) {
                 if attestation.block.cost != qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST
                     && attestation.slot == self.consensus.slot_for(self.height)
-                    && attestation.is_entitled(
+                    && attestation.is_entitled_with(
+                        self.consensus.bound_draw(),
                         &member.root,
                         &self.beacon,
                         member.weight,
@@ -3112,9 +3157,7 @@ impl DevNode {
             .unwrap_or(selection.leader);
         let attesters = certificate.attesters();
         let included_ids: Vec<String> = block.body().iter().map(Wrapper::id).collect();
-        self.beacon = self
-            .beacon
-            .advance_from_reveals(self.slot(), &selection.reveals);
+        self.beacon = selection.next_beacon(&self.beacon, self.slot());
         self.parent_header_hash = block.header_hash();
         self.parent_time = block.header().time();
         self.parent_val = Parent::Value(header_value(&self.parent_header_hash));

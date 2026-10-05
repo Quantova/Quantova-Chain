@@ -1293,6 +1293,10 @@ fn dispatch_vm(
     charged_account.balance -= charged;
     charged_account.nonce += 1;
     ledger.set_account(&sender, &charged_account);
+    let legacy = legacy_vm_rules(ledger, fee_params);
+    if legacy {
+        ledger.collect_fee(charged);
+    }
     run_vm(
         ledger,
         &sender,
@@ -1304,7 +1308,11 @@ fn dispatch_vm(
         in_asset,
         fee_params,
         now_seconds,
+        legacy,
     );
+    if legacy {
+        return true;
+    }
     let used_fee = vm_meter_fee(ledger.vm_meter_charge().min(meter), fee_params).min(charged);
     let refund = charged - used_fee;
     if refund > 0 {
@@ -1314,6 +1322,13 @@ fn dispatch_vm(
     }
     ledger.collect_fee(used_fee);
     true
+}
+
+const TESTNET_GAS_METERED_FROM: u64 = 472_850;
+
+fn legacy_vm_rules(ledger: &Ledger, fee_params: &FeeParams) -> bool {
+    fee_params.chain_id == qtv_tx::TESTNET_CHAIN_ID
+        && ledger.execution_height() < TESTNET_GAS_METERED_FROM
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1328,6 +1343,7 @@ fn run_vm(
     in_asset: Option<[u8; 32]>,
     fee_params: &FeeParams,
     now_seconds: u64,
+    legacy: bool,
 ) {
     let sender = sender.to_string();
     let target = target.to_string();
@@ -1340,7 +1356,7 @@ fn run_vm(
             return;
         }
         ledger.arm_vm_meter_deploy(deploy_cost);
-        if let Some(contract) = ledger.deploy_contract(&sender, nonce, container) {
+        if let Some(contract) = ledger.deploy_contract_under(&sender, nonce, container, legacy) {
             let genesis = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
             let mut genesis_memory =
                 vec![0u8; crate::ledger::CONTRACT_CONTEXT_BYTES + params.len()];
@@ -2099,7 +2115,7 @@ impl Node {
             attesters,
         };
 
-        self.beacon = self.beacon.advance_from_reveals(slot, &selection.reveals);
+        self.beacon = selection.next_beacon(&self.beacon, slot);
         self.parent_header_hash = header_hash;
         self.parent_val = Parent::Value(value);
         self.height += 1;
