@@ -1293,13 +1293,51 @@ fn dispatch_vm(
     charged_account.balance -= charged;
     charged_account.nonce += 1;
     ledger.set_account(&sender, &charged_account);
-    ledger.collect_fee(charged);
+    run_vm(
+        ledger,
+        &sender,
+        &target,
+        &args,
+        nonce,
+        meter,
+        value,
+        in_asset,
+        fee_params,
+        now_seconds,
+    );
+    let used_fee = vm_meter_fee(ledger.vm_meter_charge().min(meter), fee_params).min(charged);
+    let refund = charged - used_fee;
+    if refund > 0 {
+        let mut settled = ledger.account(&sender);
+        settled.balance = settled.balance.saturating_add(refund);
+        ledger.set_account(&sender, &settled);
+    }
+    ledger.collect_fee(used_fee);
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_vm(
+    ledger: &mut Ledger,
+    sender: &str,
+    target: &str,
+    args: &[u8],
+    nonce: u64,
+    meter: u64,
+    value: u64,
+    in_asset: Option<[u8; 32]>,
+    fee_params: &FeeParams,
+    now_seconds: u64,
+) {
+    let sender = sender.to_string();
+    let target = target.to_string();
+    let args = args.to_vec();
     if target == crate::ledger::vm_deploy_address() {
         let (container, params) = split_deploy_args(&args);
         let deploy_cost = crate::execution::deploy_meter_cost(container.len());
         if deploy_cost > meter {
             ledger.arm_vm_meter(meter);
-            return true;
+            return;
         }
         ledger.arm_vm_meter_deploy(deploy_cost);
         if let Some(contract) = ledger.deploy_contract(&sender, nonce, container) {
@@ -1345,7 +1383,6 @@ fn dispatch_vm(
             });
         }
     }
-    true
 }
 
 struct Attempt {
@@ -2957,10 +2994,10 @@ mod tests {
             deposit_value,
             "the contract took custody of the native value it was sent"
         );
-        assert_eq!(
-            ledger.balance(&deployer.address()),
-            deployer_start - 2 * charged - deposit_value,
-            "the depositor paid two fees and parted with the value it sent"
+        let deployer_paid = deployer_start - ledger.balance(&deployer.address()) - deposit_value;
+        assert!(
+            deployer_paid > 0 && deployer_paid <= 2 * charged,
+            "the depositor paid two metered fees and parted with the value it sent"
         );
 
         let supply_before = ledger.balance(&contract) + ledger.balance(&payee.address());
@@ -2973,14 +3010,14 @@ mod tests {
             deposit_value - payout,
             "the contract paid the amount out of its own balance"
         );
-        assert_eq!(
-            ledger.balance(&payee.address()),
-            payee_start - charged + payout,
-            "the caller received the native funds the contract sent"
+        let pull_fee = payee_start + payout - ledger.balance(&payee.address());
+        assert!(
+            pull_fee > 0 && pull_fee <= charged,
+            "the caller received the native funds the contract sent and paid a metered fee"
         );
         let supply_after = ledger.balance(&contract) + ledger.balance(&payee.address());
         assert_eq!(
-            supply_after + charged,
+            supply_after + pull_fee,
             supply_before,
             "the only change beyond the paid fee is a conserved move from the contract to the caller"
         );
@@ -3035,10 +3072,10 @@ mod tests {
             1_000,
             "an overdrawn send moves nothing out of the contract"
         );
-        assert_eq!(
-            ledger.balance(&payee.address()),
-            payee_before - vm_meter_fee(100_000, &fee),
-            "the caller minted no funds and only paid the fee"
+        let payee_paid = payee_before - ledger.balance(&payee.address());
+        assert!(
+            payee_paid > 0 && payee_paid <= vm_meter_fee(100_000, &fee),
+            "the caller minted no funds and only paid the metered fee"
         );
     }
 
