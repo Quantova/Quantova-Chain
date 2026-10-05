@@ -257,14 +257,17 @@ pub fn encode(data: &[u8], k: usize, n: usize) -> Result<Coded, Error> {
     }
 
     let parity = parity_coefficients(k, n)?;
-    for coeffs in &parity {
-        shard_bytes.push(combine(coeffs, &shard_bytes[..k], shard_len));
-    }
+    let work = k.saturating_mul(shard_len);
+    let parity_shards = map_ordered(&parity, work.saturating_mul(parity.len()), |coeffs| {
+        combine(coeffs, &shard_bytes[..k], shard_len)
+    });
+    shard_bytes.extend(parity_shards);
 
-    let leaves: Vec<[u8; DIGEST_LEN]> = shard_bytes
-        .iter()
-        .map(|b| leaf_hash(shard_len, b))
-        .collect();
+    let leaves: Vec<[u8; DIGEST_LEN]> = map_ordered(
+        &shard_bytes,
+        shard_len.saturating_mul(shard_bytes.len()),
+        |b| leaf_hash(shard_len, b),
+    );
     let tree = merkle_tree(leaves);
     let root = root_hash(
         &tree.last().expect("the tree has a root")[0],
@@ -321,9 +324,15 @@ pub fn reconstruct(commitment: &Commitment, shards: &[Shard]) -> Result<Vec<u8>,
     let inverse = invert(matrix, k)?;
 
     let shard_len = commitment.shard_len;
+    let out_rows = &inverse[..k.min(inverse.len())];
+    let pieces = map_ordered(
+        out_rows,
+        k.saturating_mul(k).saturating_mul(shard_len),
+        |out_row| combine(out_row, &rows, shard_len),
+    );
     let mut data = Vec::with_capacity(k.saturating_mul(shard_len));
-    for out_row in inverse.iter().take(k) {
-        data.extend_from_slice(&combine(out_row, &rows, shard_len));
+    for piece in &pieces {
+        data.extend_from_slice(piece);
     }
     data.truncate(commitment.data_len);
     Ok(data)
@@ -337,12 +346,41 @@ fn combine<T: AsRef<[u8]>>(coeffs: &[u8], shards: &[T], shard_len: usize) -> Vec
         if coeff == 0 {
             continue;
         }
+        let row: [u8; 256] = std::array::from_fn(|byte| f.mul(coeff, byte as u8));
         let bytes = shard.as_ref();
         for (slot, &byte) in out.iter_mut().zip(bytes.iter()) {
-            *slot ^= f.mul(coeff, byte);
+            *slot ^= row[byte as usize];
         }
     }
     out
+}
+
+const PARALLEL_WORK: usize = 1 << 20;
+
+fn map_ordered<T: Sync, R: Send>(items: &[T], work: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(items.len());
+    if cores <= 1 || work < PARALLEL_WORK {
+        return items.iter().map(f).collect();
+    }
+    let chunk = items.len().div_ceil(cores);
+    let f = &f;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = items
+            .chunks(chunk)
+            .map(|part| scope.spawn(move || part.iter().map(f).collect::<Vec<R>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
 }
 
 fn parity_coefficients(k: usize, n: usize) -> Result<Vec<Vec<u8>>, Error> {
