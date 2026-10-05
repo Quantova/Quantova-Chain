@@ -120,7 +120,7 @@ const MAX_OUTBOX: usize = 4096;
 const MAX_BLOCK_TIME_AHEAD_SECS: u64 = 15;
 const MAX_BLOCK_BODY_BYTES: usize = 6 * 1024 * 1024;
 
-const PROPOSAL_TARGET_BYTES: usize = 2 * 1024 * 1024;
+const PROPOSAL_TARGET_BYTES: usize = 6 * 1024 * 1024;
 const MAX_SERVE_BYTES: usize = 12 * 1024 * 1024;
 
 fn locked_body_fits(block: &LockedBlock) -> bool {

@@ -17,4 +17,5 @@ pub mod mempool;
 pub mod node;
 pub mod parallel;
 pub mod provenance;
+mod sigcache;
 pub mod watermark;

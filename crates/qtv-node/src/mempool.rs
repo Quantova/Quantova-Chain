@@ -58,7 +58,7 @@ fn verified(wrapper: &Wrapper, public_key: &[u8], hint: Option<&VerifyHint>) -> 
             return hint.ok;
         }
     }
-    qtv_tx::verify(wrapper, public_key)
+    crate::sigcache::verify(wrapper, public_key)
 }
 
 pub fn validate(
@@ -92,7 +92,7 @@ pub fn plan_from_account(
         return Err(Reject::UnsupportedScheme);
     }
     let plan = plan_from_account_checks(wrapper, account, fee_params)?;
-    if !qtv_tx::verify(wrapper, &account.public_key) {
+    if !crate::sigcache::verify(wrapper, &account.public_key) {
         return Err(Reject::BadSignature);
     }
     Ok(plan)
@@ -236,7 +236,7 @@ fn verify_signatures(ledger: &Ledger, batch: &[Wrapper], verify_cores: usize) ->
 
     if cores <= 1 || batch.len() < PARALLEL_VERIFY_THRESHOLD {
         for (verdict, (wrapper, key)) in verdicts.iter_mut().zip(batch.iter().zip(&keys)) {
-            *verdict = qtv_tx::verify(wrapper, key);
+            *verdict = crate::sigcache::verify(wrapper, key);
         }
         return verdicts;
     }
@@ -253,7 +253,7 @@ fn verify_signatures(ledger: &Ledger, batch: &[Wrapper], verify_cores: usize) ->
                     .iter_mut()
                     .zip(wrapper_chunk.iter().zip(key_chunk))
                 {
-                    *verdict = qtv_tx::verify(wrapper, key);
+                    *verdict = crate::sigcache::verify(wrapper, key);
                 }
             });
         }
@@ -341,7 +341,7 @@ pub fn admission_hint(wrapper: &Wrapper, ledger: &Ledger, fee_params: &FeeParams
         let key = ledger.account(wrapper.body().sender()).public_key;
         if !key.is_empty() && funding_gate_passes(wrapper, ledger, fee_params) {
             hint.signature = Some(VerifyHint {
-                ok: qtv_tx::verify(wrapper, &key),
+                ok: crate::sigcache::verify(wrapper, &key),
                 public_key: key,
             });
         }

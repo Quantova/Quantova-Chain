@@ -329,7 +329,7 @@ pub(crate) fn key_register_admissible(
     if account.balance < charged {
         return None;
     }
-    let verified = signature_ok.unwrap_or_else(|| qtv_tx::verify(wrapper, &public_key));
+    let verified = signature_ok.unwrap_or_else(|| crate::sigcache::verify(wrapper, &public_key));
     if !verified {
         return None;
     }
@@ -343,7 +343,7 @@ pub(crate) fn key_register_signature(wrapper: &Wrapper) -> bool {
     {
         return false;
     }
-    qtv_tx::verify(wrapper, &public_key)
+    crate::sigcache::verify(wrapper, &public_key)
 }
 
 fn dispatch_governance(
@@ -1630,7 +1630,7 @@ fn verify_signatures(ledger: &Ledger, candidates: &[Wrapper], verify_cores: usiz
 
     if cores <= 1 || candidates.len() < PARALLEL_VERIFY_THRESHOLD {
         for (verdict, (wrapper, key)) in verdicts.iter_mut().zip(candidates.iter().zip(&keys)) {
-            *verdict = qtv_tx::verify(wrapper, key);
+            *verdict = crate::sigcache::verify(wrapper, key);
         }
         return verdicts;
     }
@@ -1647,7 +1647,7 @@ fn verify_signatures(ledger: &Ledger, candidates: &[Wrapper], verify_cores: usiz
                     .iter_mut()
                     .zip(wrapper_chunk.iter().zip(key_chunk))
                 {
-                    *verdict = qtv_tx::verify(wrapper, key);
+                    *verdict = crate::sigcache::verify(wrapper, key);
                 }
             });
         }
