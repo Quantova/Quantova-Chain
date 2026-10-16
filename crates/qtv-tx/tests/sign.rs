@@ -1,6 +1,8 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+#![allow(deprecated)]
+
 use qtv_account::{derive, derive_with_scheme};
 use qtv_tx::{sign, verify, Body, Call, Wrapper, SCHEME_FALCON, SCHEME_HASH, SCHEME_LATTICE};
 

@@ -23,7 +23,7 @@ impl Drop for DirKey {
 pub struct SessionKeys {
     pub initiator_to_responder: DirKey,
     pub responder_to_initiator: DirKey,
-    pub exporter: [u8; 32],
+    pub exporter: qtv_wipe::Zeroizing<[u8; 32]>,
 }
 
 pub fn derive(shared_secret: &[u8; 32], transcript_hash: &[u8; 32]) -> SessionKeys {
@@ -47,7 +47,7 @@ pub fn derive(shared_secret: &[u8; 32], transcript_hash: &[u8; 32]) -> SessionKe
     let mut r2i_iv = [0u8; NONCE_BYTES];
     r2i_iv.copy_from_slice(&stream[iv_base + NONCE_BYTES..iv_base + 2 * NONCE_BYTES]);
 
-    let mut exporter = [0u8; 32];
+    let mut exporter = qtv_wipe::Zeroizing::new([0u8; 32]);
     exporter.copy_from_slice(&stream[iv_base + 2 * NONCE_BYTES..]);
     stream.zeroize();
 

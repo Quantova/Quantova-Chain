@@ -1,6 +1,8 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+#![allow(deprecated)]
+
 use qtv_block::{empty_transaction_root, header_from_bytes, transaction_root, Block, Header};
 use qtv_codec::to_bytes;
 use qtv_crypto::ml_dsa;

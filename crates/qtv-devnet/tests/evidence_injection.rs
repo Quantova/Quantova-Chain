@@ -46,7 +46,8 @@ fn the_leader_carries_attributed_evidence_into_the_block_it_produces() {
 
     let secret = qtv_node::keys::fixture_secret(offender_id);
     let attester =
-        Attester::from_secret_with_slots(offender_id, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+        Attester::from_secret_with_slots(offender_id, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS)
+            .expect("a valid slot count");
     let beacon = genesis_beacon();
     let chain_id = cfg.fee_params.chain_id;
     let height = leader.height();

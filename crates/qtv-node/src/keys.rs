@@ -14,10 +14,10 @@ const VALIDATOR_ACCOUNT_DOMAIN: &[u8] = b"QORUS/validator-keying/v1/ledger-bond-
 
 const P2P_IDENTITY_DOMAIN: &[u8] = b"QORUS/validator-keying/v1/p2p-identity";
 
-pub fn generate() -> [u8; SECRET_LEN] {
-    let mut secret = [0u8; SECRET_LEN];
-    fill_random(&mut secret).expect("the operating system CSPRNG is available");
-    secret
+pub fn generate() -> io::Result<qtv_wipe::Zeroizing<[u8; SECRET_LEN]>> {
+    let mut secret = qtv_wipe::Zeroizing::new([0u8; SECRET_LEN]);
+    fill_random(&mut secret[..])?;
+    Ok(secret)
 }
 
 fn wipe(bytes: &mut [u8]) {
@@ -28,7 +28,7 @@ fn wipe(bytes: &mut [u8]) {
     let _ = core::hint::black_box(&*bytes);
 }
 
-pub fn load_or_generate(path: &Path) -> io::Result<[u8; SECRET_LEN]> {
+pub fn load_or_generate(path: &Path) -> io::Result<qtv_wipe::Zeroizing<[u8; SECRET_LEN]>> {
     match fs::read(path) {
         Ok(mut raw) => {
             if let Err(error) = refuse_shared(path) {
@@ -37,7 +37,8 @@ pub fn load_or_generate(path: &Path) -> io::Result<[u8; SECRET_LEN]> {
             }
             let parsed = std::str::from_utf8(&raw)
                 .ok()
-                .and_then(|text| parse_hex32(text.trim()));
+                .and_then(|text| parse_hex32(text.trim()))
+                .map(qtv_wipe::Zeroizing::new);
             wipe(&mut raw);
             parsed.ok_or_else(|| {
                 io::Error::new(
@@ -50,7 +51,7 @@ pub fn load_or_generate(path: &Path) -> io::Result<[u8; SECRET_LEN]> {
             })
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let secret = generate();
+            let secret = generate()?;
             write_keystore(path, &secret)?;
             Ok(secret)
         }
@@ -119,7 +120,7 @@ fn open_private(path: &Path) -> io::Result<File> {
 }
 
 fn fill_random(buf: &mut [u8]) -> io::Result<()> {
-    qtv_crypto::rng::fill_random(buf);
+    qtv_crypto::rng::try_fill_random(buf)?;
     Ok(())
 }
 
@@ -199,9 +200,9 @@ mod tests {
 
     #[test]
     fn a_generated_secret_is_not_all_zero_and_two_draws_differ() {
-        let a = generate();
-        let b = generate();
-        assert_ne!(a, [0u8; SECRET_LEN], "the CSPRNG returned all zero");
+        let a = generate().expect("the operating system CSPRNG is available");
+        let b = generate().expect("the operating system CSPRNG is available");
+        assert_ne!(*a, [0u8; SECRET_LEN], "the CSPRNG returned all zero");
         assert_ne!(a, b, "two independent draws collided");
     }
 

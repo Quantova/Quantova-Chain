@@ -1,7 +1,11 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+#![cfg_attr(test, allow(deprecated))]
 #![forbid(unsafe_code)]
+
+#[cfg(all(feature = "test-fixtures", not(any(test, debug_assertions))))]
+compile_error!("the test-fixtures feature exposes deterministic validator identities and must never be enabled in a release build");
 
 pub mod clock;
 pub mod coded;

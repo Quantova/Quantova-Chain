@@ -377,6 +377,7 @@ impl Driver {
 
     fn serve_rpc(&mut self) {
         const RPC_CALLS_PER_TICK: usize = 128;
+        const RPC_TICK_BUDGET: Duration = Duration::from_millis(20);
         self.ensure_verify_pool();
         let completed: Vec<VerifyDone> = self
             .verify_done
@@ -401,28 +402,27 @@ impl Driver {
             let _ = reply.send(Ok(qtv_gateway::submit_reply(result, &done.tx_id)));
         }
 
-        let calls: Vec<GatewayCall> = match self.rpc_requests.as_ref() {
-            Some(requests) => std::iter::from_fn(|| requests.try_recv().ok())
-                .take(RPC_CALLS_PER_TICK)
-                .collect(),
-            None => return,
-        };
         if self.rpc_context.is_none() {
             return;
         }
-
+        let started = Instant::now();
         let fee_params = self.node.fee_params();
-        let snapshot = if calls
-            .iter()
-            .any(|call| matches!(call.request, Request::Submit(_)))
-        {
-            Some(self.fresh_snapshot())
-        } else {
-            None
-        };
-
-        for call in calls {
+        let mut snapshot: Option<Arc<qtv_node::ledger::Ledger>> = None;
+        for _ in 0..RPC_CALLS_PER_TICK {
+            if started.elapsed() >= RPC_TICK_BUDGET {
+                break;
+            }
+            let Some(call) = self
+                .rpc_requests
+                .as_ref()
+                .and_then(|requests| requests.try_recv().ok())
+            else {
+                break;
+            };
             if let Request::Submit(bytes) = &call.request {
+                if snapshot.is_none() {
+                    snapshot = Some(self.fresh_snapshot());
+                }
                 if let (Some(ledger), Some(jobs)) = (snapshot.as_ref(), self.verify_jobs.as_ref()) {
                     if let Ok(wrapper) = wrapper_from_bytes(bytes) {
                         let job = VerifyJob {
@@ -437,7 +437,9 @@ impl Driver {
                     }
                 }
             }
-            let context = self.rpc_context.as_ref().unwrap();
+            let Some(context) = self.rpc_context.as_ref() else {
+                return;
+            };
             let request = call.request;
             let node = &mut self.node;
             let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -483,6 +485,12 @@ impl Driver {
                      finalise another height"
                 );
                 log(&reason);
+                for evidence in self.node.double_finality_evidence() {
+                    log(&format!(
+                        "double finality evidence transaction {}",
+                        hex(&qtv_devnet::wire::wrapper_to_bytes(&evidence))
+                    ));
+                }
                 Err(reason)
             }
             None => Ok(()),
@@ -732,13 +740,19 @@ impl Driver {
     fn dispatch(&mut self, message: Message, selection: &Selection, source: u64) {
         match message {
             Message::CodedProposal(coded) => {
-                self.relay_shard(&coded, selection, source);
+                let relay = (*coded).clone();
                 self.assembler.set_round_height(self.node.height());
                 let outcome = {
                     let node = &self.node;
                     self.assembler
                         .admit(*coded, source, |c| node.coded_auth_ok(selection, c))
                 };
+                if self
+                    .assembler
+                    .is_pinned(relay.header.height(), relay.view, &relay.commitment)
+                {
+                    self.relay_shard(&relay, selection, source);
+                }
                 if let Some(Ok(proposal)) = outcome {
                     let proposer = leader_for(selection, proposal.view);
                     let out = self.node.on_proposal(selection, proposer, proposal);

@@ -76,13 +76,24 @@ impl<T: Zeroize + Clone> Clone for Zeroizing<T> {
     }
 }
 
-impl<T: Zeroize + PartialEq> PartialEq for Zeroizing<T> {
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= core::hint::black_box(x ^ y);
+    }
+    core::hint::black_box(diff) == 0
+}
+
+impl<T: Zeroize + AsRef<[u8]>> PartialEq for Zeroizing<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.value == other.value
+        constant_time_eq(self.value.as_ref(), other.value.as_ref())
     }
 }
 
-impl<T: Zeroize + Eq> Eq for Zeroizing<T> {}
+impl<T: Zeroize + AsRef<[u8]>> Eq for Zeroizing<T> {}
 
 impl<T: Zeroize> core::fmt::Debug for Zeroizing<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

@@ -29,7 +29,7 @@ pub enum Reject {
 }
 
 pub fn chain_ok(wrapper: &Wrapper, fee_params: &FeeParams) -> bool {
-    wrapper.body().chain_id() == fee_params.chain_id
+    wrapper.body().chain_id() == fee_params.chain_id && qtv_tx::addresses_parse(wrapper.body())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

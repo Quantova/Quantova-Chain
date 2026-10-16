@@ -203,6 +203,7 @@ pub fn execute_parallel(
             || ledger.is_blacklisted(target)
             || ledger.is_frozen(sender)
             || crate::node::is_vm_op(ledger, wrapper)
+            || !qtv_tx::addresses_parse(wrapper.body())
     }) {
         return crate::node::execute_ordered(ledger, candidates, fee_params, now_seconds);
     }

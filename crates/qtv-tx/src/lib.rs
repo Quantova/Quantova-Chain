@@ -1,6 +1,7 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+#![cfg_attr(test, allow(deprecated))]
 #![forbid(unsafe_code)]
 
 use qtv_account::Account;
@@ -94,6 +95,7 @@ pub struct Body {
 }
 
 impl Body {
+    #[deprecated(note = "binds the local development chain id, use Body::with_context")]
     pub fn new(sender: String, nonce: u64, meter_limit: u64, fee: u128, call: Call) -> Self {
         Body::with_context(sender, nonce, meter_limit, fee, call, 0, LOCAL_CHAIN_ID)
     }
@@ -281,9 +283,11 @@ pub fn try_sign(account: &Account, body: &Body) -> Option<Wrapper> {
     {
         return None;
     }
+    #[allow(deprecated)]
     Some(sign(account, body))
 }
 
+#[deprecated(note = "panics on an address that does not parse, use try_sign")]
 pub fn sign(account: &Account, body: &Body) -> Wrapper {
     assert!(
         qtv_idfmt::parse_address(body.sender()).is_ok(),
@@ -317,6 +321,11 @@ pub fn sign(account: &Account, body: &Body) -> Wrapper {
 
 pub fn scheme_supported(scheme: u8) -> bool {
     matches!(scheme, SCHEME_LATTICE | SCHEME_HASH)
+}
+
+pub fn addresses_parse(body: &Body) -> bool {
+    qtv_idfmt::parse_address(body.sender()).is_ok()
+        && qtv_idfmt::parse_address(body.call().target()).is_ok()
 }
 
 pub fn verify(wrapper: &Wrapper, public_key: &[u8]) -> bool {

@@ -68,6 +68,5 @@ impl From<std::io::Error> for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) fn fill_random(out: &mut [u8]) -> std::io::Result<()> {
-    qtv_crypto::rng::fill_random(out);
-    Ok(())
+    qtv_crypto::rng::try_fill_random(out)
 }

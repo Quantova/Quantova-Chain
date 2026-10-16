@@ -24,7 +24,7 @@ fn prepare_header(file: &mut File) -> io::Result<Salt> {
     let len = file.metadata()?.len();
     if len < HEADER_LEN {
         let mut salt = [0u8; SALT_LEN];
-        qtv_crypto::rng::fill_random(&mut salt);
+        qtv_crypto::rng::try_fill_random(&mut salt)?;
         file.set_len(0)?;
         file.seek(SeekFrom::Start(0))?;
         file.write_all(MAGIC)?;

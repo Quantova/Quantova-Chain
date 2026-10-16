@@ -4,7 +4,10 @@ use qtv_crypto::{ml_dsa, sha3};
 
 fn urandom(n: usize) -> Vec<u8> {
     let mut b = vec![0u8; n];
-    qtv_crypto::rng::fill_random(&mut b);
+    if qtv_crypto::rng::try_fill_random(&mut b).is_err() {
+        eprintln!("the operating system random source is unavailable");
+        std::process::exit(1);
+    }
     b
 }
 

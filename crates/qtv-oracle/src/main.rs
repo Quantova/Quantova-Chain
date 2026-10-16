@@ -12,14 +12,16 @@ use qtv_node::bridge::{
     Direction, Fact, MintArtifact, OperatorSet, SignerSig, FACT_VERSION, POP_DOMAIN,
 };
 use qtv_node::ledger::bridge_mint_address;
-use qtv_tx::{sign, Body, Call};
+use qtv_tx::{try_sign, Body, Call};
 use qtv_wipe::Zeroizing;
 
 const MINT_METER: u64 = 5_000_000;
 
 fn urandom32() -> Zeroizing<[u8; 32]> {
     let mut b = Zeroizing::new([0u8; 32]);
-    qtv_crypto::rng::fill_random(&mut b[..]);
+    if qtv_crypto::rng::try_fill_random(&mut b[..]).is_err() {
+        fail("the operating system random source is unavailable");
+    }
     b
 }
 
@@ -432,7 +434,9 @@ fn mint(a: &[String]) {
         chain_id,
     )
     .valid_until(valid_until);
-    let wrapper = sign(&relayer, &body);
+    let Some(wrapper) = try_sign(&relayer, &body) else {
+        fail("the relayer or target address does not parse");
+    };
     println!("{}", hexs(&to_bytes(&wrapper)));
 }
 

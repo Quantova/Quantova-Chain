@@ -1,6 +1,8 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+#![allow(deprecated)]
+
 use qtv_account::{derive, Account as KeyAccount};
 use qtv_attest::{Attester, Beacon, Block, Parent};
 use qtv_node::evidence::Equivocation;

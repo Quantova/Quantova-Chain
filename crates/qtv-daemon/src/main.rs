@@ -70,6 +70,10 @@ fn raise_descriptor_limit() {
 fn raise_descriptor_limit() {}
 
 fn main() {
+    if qtv_node::TEST_FIXTURES_LINKED {
+        util::log("quantovad refuses to start, this build links the test fixtures, which accept unsigned deploys and fixed identities");
+        std::process::exit(2);
+    }
     let outcome = match Command::parse() {
         Ok(Command::Run { config }) => run(&config),
         Ok(Command::Register(args)) => register(args),
@@ -124,14 +128,12 @@ fn run(config_path: &Path) -> Result<(), String> {
             settings.keystore_path.display()
         )
     })?;
-    let secret = qtv_wipe::Zeroizing::new(
-        qtv_node::keys::load_or_generate(&settings.keystore_path).map_err(|e| {
-            format!(
-                "reading the keystore {}: {e}",
-                settings.keystore_path.display()
-            )
-        })?,
-    );
+    let secret = qtv_node::keys::load_or_generate(&settings.keystore_path).map_err(|e| {
+        format!(
+            "reading the keystore {}: {e}",
+            settings.keystore_path.display()
+        )
+    })?;
 
     let own = ValidatorSpec::from_secret(
         my_id,
@@ -319,7 +321,8 @@ fn register(args: RegisterArgs) -> Result<(), String> {
         Some(name) => {
             let attester = qtv_attest::Attester::from_secret_with_slots(
                 args.id, &secret, args.stake, args.slots,
-            );
+            )
+            .expect("genesis bounds the slot count");
             let (_, sig) = attester.epoch_registration(genesis::chain_binding(name), 0);
             format!(" {}", util::hex(&sig))
         }

@@ -17,7 +17,7 @@ pub(crate) enum Role {
 pub struct Channel<S> {
     stream: S,
     peer: PeerId,
-    binding: [u8; 32],
+    binding: qtv_wipe::Zeroizing<[u8; 32]>,
     sealer: Sealer,
     opener: Opener,
     partial: Vec<u8>,

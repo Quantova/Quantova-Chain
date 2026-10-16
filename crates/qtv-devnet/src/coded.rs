@@ -297,6 +297,12 @@ impl ProposalAssembler {
         self.round_height = height;
     }
 
+    pub fn is_pinned(&self, height: u64, view: u64, commitment: &Commitment) -> bool {
+        self.pinned
+            .get(&(height, view))
+            .is_some_and(|pinned| pinned == commitment)
+    }
+
     pub fn admit(
         &mut self,
         coded: CodedProposal,

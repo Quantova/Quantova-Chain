@@ -19,7 +19,7 @@ fn a_genesis_of_independent_registrations_finalises_and_reproduces_no_peer_secre
     let secrets: Vec<[u8; 32]> = (1..=n as u64)
         .map(|id| {
             let keystore = base.join(format!("node-{id}")).join("keystore");
-            qtv_node::keys::load_or_generate(&keystore).expect("each node draws its own secret")
+            *qtv_node::keys::load_or_generate(&keystore).expect("each node draws its own secret")
         })
         .collect();
 

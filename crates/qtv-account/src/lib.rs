@@ -16,13 +16,17 @@ pub const MASTER_SEED_LEN: usize = 32;
 pub const SEED_LEN: usize = 32;
 pub const CANONICAL_LEN: usize = 32;
 
-pub fn account_seed(master_seed: &[u8; MASTER_SEED_LEN], scheme: u8, index: u64) -> [u8; SEED_LEN] {
+pub fn account_seed(
+    master_seed: &[u8; MASTER_SEED_LEN],
+    scheme: u8,
+    index: u64,
+) -> qtv_wipe::Zeroizing<[u8; SEED_LEN]> {
     let mut input = Vec::with_capacity(MASTER_SEED_LEN + 1 + 8);
     input.extend_from_slice(master_seed);
     input.push(scheme);
     input.extend_from_slice(&index.to_le_bytes());
-    let mut seed = [0u8; SEED_LEN];
-    sha3::shake256(&input, &mut seed);
+    let mut seed = qtv_wipe::Zeroizing::new([0u8; SEED_LEN]);
+    sha3::shake256(&input, &mut seed[..]);
     input.zeroize();
     seed
 }
@@ -108,8 +112,10 @@ impl Account {
         address_for_key(self.scheme, &self.public_key)
     }
 
-    pub fn secret_export(&self) -> String {
-        qtv_idfmt::render_secret(&self.seed).expect("an account seed reaches the key floor")
+    pub fn secret_export(&self) -> qtv_wipe::Zeroizing<String> {
+        qtv_wipe::Zeroizing::new(
+            qtv_idfmt::render_secret(&self.seed).expect("an account seed reaches the key floor"),
+        )
     }
 }
 
@@ -140,7 +146,7 @@ pub fn derive_with_scheme(
     Some(Account {
         scheme,
         index,
-        seed,
+        seed: *seed,
         public_key,
     })
 }

@@ -1,6 +1,8 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+#![allow(deprecated)]
+
 use std::hint::black_box;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};

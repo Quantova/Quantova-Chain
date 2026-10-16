@@ -20,7 +20,8 @@ fn a_running_node_attributes_an_equivocation_from_conflicting_attestations() {
 
     let secret = qtv_node::keys::fixture_secret(offender_id);
     let offender =
-        Attester::from_secret_with_slots(offender_id, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+        Attester::from_secret_with_slots(offender_id, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS)
+            .expect("a valid slot count");
     let chain_id = cfg.fee_params.chain_id;
     let beacon = genesis_beacon();
     let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
@@ -63,7 +64,8 @@ fn a_running_node_does_not_attribute_an_honest_cross_view_re_vote() {
     let offender_id = 2u64;
     let secret = qtv_node::keys::fixture_secret(offender_id);
     let offender =
-        Attester::from_secret_with_slots(offender_id, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+        Attester::from_secret_with_slots(offender_id, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS)
+            .expect("a valid slot count");
     let chain_id = cfg.fee_params.chain_id;
     let beacon = genesis_beacon();
     let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
@@ -94,7 +96,8 @@ fn both_halves_of_a_same_view_double_sign_relay_and_a_duplicate_does_not() {
     let offender_id = 2u64;
     let secret = qtv_node::keys::fixture_secret(offender_id);
     let offender =
-        Attester::from_secret_with_slots(offender_id, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+        Attester::from_secret_with_slots(offender_id, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS)
+            .expect("a valid slot count");
     let chain_id = cfg.fee_params.chain_id;
     let beacon = genesis_beacon();
     let block_a = Block::new(1, [1u8; 32], Parent::Genesis);
@@ -119,7 +122,8 @@ fn a_third_block_at_one_view_slot_is_not_relayed() {
     let mut node = DevNode::open(&cfg.nodes[0], &cfg).expect("open");
 
     let secret = qtv_node::keys::fixture_secret(2);
-    let offender = Attester::from_secret_with_slots(2, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+    let offender = Attester::from_secret_with_slots(2, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS)
+        .expect("a valid slot count");
     let chain_id = cfg.fee_params.chain_id;
     let beacon = genesis_beacon();
     let a = offender
@@ -171,7 +175,8 @@ fn flooding_other_view_slots_does_not_suppress_an_equivocation_relay() {
 
     let flood_secret = qtv_node::keys::fixture_secret(3);
     let flooder =
-        Attester::from_secret_with_slots(3, &flood_secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+        Attester::from_secret_with_slots(3, &flood_secret, VALIDATOR_STAKE, DEFAULT_SLOTS)
+            .expect("a valid slot count");
     for v in 0..250u64 {
         let blk = Block::new(1, [(v % 251) as u8 + 4; 32], Parent::Genesis);
         node.on_attestation(
@@ -182,7 +187,8 @@ fn flooding_other_view_slots_does_not_suppress_an_equivocation_relay() {
     }
 
     let secret = qtv_node::keys::fixture_secret(2);
-    let offender = Attester::from_secret_with_slots(2, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+    let offender = Attester::from_secret_with_slots(2, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS)
+        .expect("a valid slot count");
     let a = offender
         .attest(
             chain_id,
@@ -219,7 +225,8 @@ fn view_change_subject_filler_cannot_starve_a_genuine_equivocation_relay() {
     let beacon = genesis_beacon();
 
     let secret = qtv_node::keys::fixture_secret(2);
-    let offender = Attester::from_secret_with_slots(2, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS);
+    let offender = Attester::from_secret_with_slots(2, &secret, VALIDATOR_STAKE, DEFAULT_SLOTS)
+        .expect("a valid slot count");
     let vc = qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST;
     let filler_a = Block::with_cost(1, [7u8; 32], Parent::Genesis, vc);
     let filler_b = Block::with_cost(1, [8u8; 32], Parent::Genesis, vc);

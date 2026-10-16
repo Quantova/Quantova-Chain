@@ -28,7 +28,7 @@ fn a_devnet_of_keystore_backed_nodes_stands_up_and_finalizes() {
                 store_dir,
                 bootstrap,
                 address: format!("mem://{id}"),
-                secret,
+                secret: *secret,
             }
         })
         .collect();

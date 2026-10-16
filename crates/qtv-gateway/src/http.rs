@@ -17,9 +17,18 @@ static CORS_ORIGIN: OnceLock<Option<String>> = OnceLock::new();
 
 pub const TRUSTED_LOCAL_ENV: &str = "QTV_RPC_TRUSTED_LOCAL";
 
+pub const LOCAL_DIRECT_UNLIMITED_ENV: &str = "QTV_RPC_LOCAL_DIRECT_UNLIMITED";
+
 fn trusted_local() -> bool {
     static TRUSTED_LOCAL: OnceLock<bool> = OnceLock::new();
     *TRUSTED_LOCAL.get_or_init(|| std::env::var(TRUSTED_LOCAL_ENV).as_deref() == Ok("1"))
+}
+
+fn local_direct_unlimited() -> bool {
+    static UNLIMITED: OnceLock<bool> = OnceLock::new();
+    *UNLIMITED.get_or_init(|| {
+        std::env::var(LOCAL_DIRECT_UNLIMITED_ENV).as_deref() == Ok("1")
+    })
 }
 
 fn cors_origin() -> Option<&'static str> {
@@ -305,6 +314,15 @@ pub fn serve(
         .local_addr()
         .map(|addr| addr.ip().is_loopback())
         .unwrap_or(false);
+    eprintln!(
+        "rpc limiter {}",
+        match (loopback_only, trusted_local()) {
+            (true, true) if local_direct_unlimited() => "behind a local proxy, clients keyed by the rightmost x-forwarded-for entry the proxy appends, direct loopback callers unlimited",
+            (true, true) => "behind a local proxy, clients keyed by the rightmost x-forwarded-for entry the proxy appends, callers without it limited as one client",
+            (true, false) => "on loopback, every caller limited as one client, x-forwarded-for ignored",
+            (false, _) => "public, clients keyed by their own address, x-forwarded-for ignored",
+        }
+    );
     thread::spawn(move || {
         let limiter = Arc::new(Limiter::default());
         for stream in listener.incoming() {
@@ -585,7 +603,7 @@ fn handle_connection(
         } else {
             None
         };
-        let direct = forwarded.is_none() && trusted_local();
+        let direct = forwarded.is_none() && trusted_local() && local_direct_unlimited();
         let client = limiter_key(forwarded.unwrap_or(peer));
         match limiter.admit_client(client, direct, MAX_CONNECTIONS_PER_IP, Instant::now()) {
             Admit::Untracked => {}
