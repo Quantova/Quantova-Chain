@@ -857,6 +857,19 @@ impl Ledger {
         self.write_leaf(stake_bond_key(id), Vec::new());
     }
 
+    pub fn bonded_stake(&self, address: &str) -> u128 {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return 0,
+        };
+        if self.is_stake_banned(&id) || self.is_gov_blacklisted(&id) {
+            return 0;
+        }
+        self.stake_bond(&id)
+            .map(|bond| u128::from(bond.amount))
+            .unwrap_or(0)
+    }
+
     pub fn staked_weight(&self, address: &str) -> u64 {
         let id = match address_id(address) {
             Some(id) => id,
@@ -2870,7 +2883,10 @@ impl Ledger {
                     None => 0,
                 }
             };
-            crate::execution::execute_contract_call_lazy(&code, selector, &loader, &memory, meter)
+            let strict = crate::upgrades::for_chain(chain_id).hardened(self.execution_height);
+            crate::execution::execute_contract_call_lazy(
+                &code, selector, &loader, &memory, meter, strict,
+            )
         };
         match executed {
             Ok(outcome) => {

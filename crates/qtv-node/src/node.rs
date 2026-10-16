@@ -40,7 +40,8 @@ pub struct ValidatorSpec {
 
 impl ValidatorSpec {
     pub fn from_secret(id: u64, stake: u64, online: bool, secret: &[u8; 32], slots: u64) -> Self {
-        let attester = qtv_attest::Attester::from_secret_with_slots(id, secret, stake, slots);
+        let attester = qtv_attest::Attester::from_secret_with_slots(id, secret, stake, slots)
+            .expect("genesis bounds the slot count");
         ValidatorSpec {
             id,
             stake,
@@ -437,8 +438,33 @@ pub(crate) fn is_registration(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::registration_address()
 }
 
+fn double_finality_live(chain_id: u64, ledger: &Ledger) -> bool {
+    crate::upgrades::for_chain(chain_id).hardened(ledger.execution_height())
+}
+
+fn double_finality_offenders(
+    chain_id: u64,
+    evidence: &crate::evidence::DoubleFinality,
+    ledger: &Ledger,
+) -> Option<Vec<String>> {
+    evidence.offenders(
+        chain_id,
+        |address| ledger.validator_attest_key(address),
+        |address| ledger.bonded_stake(address),
+        u128::from(ledger.total_staked()),
+    )
+}
+
 pub(crate) fn evidence_admissible(chain_id: u64, wrapper: &Wrapper, ledger: &Ledger) -> bool {
-    let evidence = match crate::evidence::Equivocation::decode(wrapper.body().call().args()) {
+    let args = wrapper.body().call().args();
+    if let Some(evidence) = crate::evidence::DoubleFinality::decode(args) {
+        if !double_finality_live(chain_id, ledger) {
+            return false;
+        }
+        return double_finality_offenders(chain_id, &evidence, ledger)
+            .is_some_and(|offenders| offenders.iter().any(|o| !ledger.is_validator_banned(o)));
+    }
+    let evidence = match crate::evidence::Equivocation::decode(args) {
         Some(evidence) => evidence,
         None => return false,
     };
@@ -452,14 +478,35 @@ pub(crate) fn evidence_admissible(chain_id: u64, wrapper: &Wrapper, ledger: &Led
 }
 
 pub(crate) fn evidence_offender_is_slashable(wrapper: &Wrapper, ledger: &Ledger) -> bool {
-    match crate::evidence::Equivocation::decode(wrapper.body().call().args()) {
+    let args = wrapper.body().call().args();
+    if let Some(evidence) = crate::evidence::DoubleFinality::decode(args) {
+        return evidence
+            .votes_a
+            .iter()
+            .any(|vote| !ledger.is_validator_banned(&vote.signer));
+    }
+    match crate::evidence::Equivocation::decode(args) {
         Some(evidence) => !ledger.is_validator_banned(&evidence.offender),
         None => false,
     }
 }
 
 fn dispatch_evidence(chain_id: u64, ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
-    let evidence = match crate::evidence::Equivocation::decode(wrapper.body().call().args()) {
+    let args = wrapper.body().call().args();
+    if let Some(evidence) = crate::evidence::DoubleFinality::decode(args) {
+        if !double_finality_live(chain_id, ledger) {
+            return false;
+        }
+        let Some(offenders) = double_finality_offenders(chain_id, &evidence, ledger) else {
+            return false;
+        };
+        let mut slashed = false;
+        for offender in offenders {
+            slashed |= ledger.slash_validator(&offender);
+        }
+        return slashed;
+    }
+    let evidence = match crate::evidence::Equivocation::decode(args) {
         Some(evidence) => evidence,
         None => return false,
     };
@@ -603,7 +650,7 @@ pub fn build_guardian_enact_tx(
     nonce: u64,
     meter: u64,
     fee: u128,
-) -> Wrapper {
+) -> Option<Wrapper> {
     let act = GuardianAct {
         op: GUARDIAN_ENACT,
         bound: enact_nonce,
@@ -620,7 +667,7 @@ pub fn build_guardian_enact_tx(
     };
     let call = qtv_tx::Call::new(crate::ledger::bridge_guardian_address(), act.encode());
     let body = qtv_tx::Body::with_context(relayer.address(), nonce, meter, fee, call, 0, chain_id);
-    qtv_tx::sign(relayer, &body)
+    qtv_tx::try_sign(relayer, &body)
 }
 
 fn guardian_member_id(scheme: u8, public_key: &[u8]) -> Option<[u8; 32]> {
@@ -824,7 +871,8 @@ pub(crate) fn transfer_dispatchable(
 pub(crate) fn feeless_decodes(wrapper: &Wrapper) -> bool {
     let args = wrapper.body().call().args();
     if is_evidence(wrapper) {
-        crate::evidence::Equivocation::decode(args).is_some()
+        crate::evidence::DoubleFinality::decode(args).is_some()
+            || crate::evidence::Equivocation::decode(args).is_some()
     } else if is_bridge_guardian(wrapper) {
         GuardianAct::decode(args).is_some()
     } else if is_bridge_mint(wrapper) {
@@ -1324,11 +1372,8 @@ fn dispatch_vm(
     true
 }
 
-const TESTNET_GAS_METERED_FROM: u64 = 472_850;
-
 fn legacy_vm_rules(ledger: &Ledger, fee_params: &FeeParams) -> bool {
-    fee_params.chain_id == qtv_tx::TESTNET_CHAIN_ID
-        && ledger.execution_height() < TESTNET_GAS_METERED_FROM
+    !crate::upgrades::for_chain(fee_params.chain_id).gas_metered(ledger.execution_height())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1457,6 +1502,8 @@ fn execute_ordered_across(
     let mut room = max_bytes;
     let mut refused = Vec::new();
     let mut attempt: Option<Attempt> = None;
+    let hardened =
+        crate::upgrades::for_chain(fee_params.chain_id).hardened(ledger.execution_height());
     for (index, wrapper) in candidates.iter().enumerate() {
         settle_attempt(attempt.take(), included.len(), &mut room, &mut refused);
         let size = if max_bytes == usize::MAX {
@@ -1474,6 +1521,9 @@ fn execute_ordered_across(
             index,
         });
         if wrapper.body().chain_id() != fee_params.chain_id {
+            continue;
+        }
+        if hardened && !qtv_tx::addresses_parse(wrapper.body()) {
             continue;
         }
         let valid_until = wrapper.body().valid_until_height();
@@ -1852,7 +1902,8 @@ impl Node {
             .map(|v| {
                 (
                     v.id,
-                    qtv_attest::Attester::from_secret_with_slots(v.id, &v.secret, v.stake, slots),
+                    qtv_attest::Attester::from_secret_with_slots(v.id, &v.secret, v.stake, slots)
+                        .expect("a valid slot count"),
                 )
             })
             .collect();

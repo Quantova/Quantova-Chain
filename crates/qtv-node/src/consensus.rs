@@ -7,7 +7,7 @@ use qtv_attest::{Attestation, Attester, Certificate, CommitteeCommitment, Commit
 use qtv_crypto::ml_dsa::PublicKey;
 use qtv_sampler::committee::{CommitteeView, PublishedReveal};
 use qtv_sampler::onetime::Root;
-use qtv_sampler::sortition::Credential;
+use qtv_sampler::sortition::{Credential, DrawMode};
 use qtv_sampler::validator::Registration;
 
 pub use qtv_attest::{Beacon, Block, Parent};
@@ -66,7 +66,8 @@ pub struct ValidatorRegistration {
 
 impl ValidatorRegistration {
     pub fn from_secret(id: u64, stake: u64, online: bool, secret: &[u8; 32], slots: u64) -> Self {
-        let attester = Attester::from_secret_with_slots(id, secret, stake, slots);
+        let attester = Attester::from_secret_with_slots(id, secret, stake, slots)
+            .expect("genesis bounds the slot count");
         ValidatorRegistration {
             id,
             stake,
@@ -134,10 +135,14 @@ pub struct Selection {
     pub reveals: Vec<[u8; qtv_sampler::onetime::PREIMAGE_BYTES]>,
     pub reveal_holders: Vec<u64>,
     pub bound: bool,
+    pub mode: DrawMode,
 }
 
 impl Selection {
     pub fn next_beacon(&self, beacon: &Beacon, slot: u64) -> Beacon {
+        if self.mode == DrawMode::Full {
+            return beacon.advance_fixed(slot);
+        }
         if self.bound {
             let pairs: Vec<(u64, [u8; qtv_sampler::onetime::PREIMAGE_BYTES])> = self
                 .reveal_holders
@@ -152,7 +157,7 @@ impl Selection {
     }
 }
 
-pub const TESTNET_BOUND_DRAW_FROM_EPOCH: u64 = 11;
+pub const TESTNET_BOUND_DRAW_FROM_EPOCH: u64 = crate::upgrades::TESTNET.bound_draw_from_epoch;
 
 pub fn genesis_beacon() -> Beacon {
     Beacon::genesis()
@@ -335,7 +340,8 @@ impl Consensus {
             .find(|r| r.id == own_id)
             .map(|r| r.stake)
             .unwrap_or(0);
-        let own = Attester::from_secret_with_slots(own_id, own_secret, own_stake, slots);
+        let own = Attester::from_secret_with_slots(own_id, own_secret, own_stake, slots)
+            .expect("genesis bounds the slot count");
         Consensus {
             chain_id,
             own,
@@ -420,12 +426,26 @@ impl Consensus {
     }
 
     pub fn bound_draw(&self) -> bool {
-        self.chain_id != qtv_tx::TESTNET_CHAIN_ID || self.epoch >= TESTNET_BOUND_DRAW_FROM_EPOCH
+        crate::upgrades::for_chain(self.chain_id).bound_draw(self.epoch)
+    }
+
+    pub fn full_committee(&self) -> bool {
+        crate::upgrades::for_chain(self.chain_id).full_committee(self.epoch, self.epoch_len)
+    }
+
+    pub fn draw_mode(&self) -> DrawMode {
+        if self.full_committee() {
+            DrawMode::Full
+        } else if self.bound_draw() {
+            DrawMode::Bound
+        } else {
+            DrawMode::Unbound
+        }
     }
 
     fn view(&self) -> CommitteeView {
         CommitteeView::new(self.roster.iter().map(|r| r.registration()).collect())
-            .with_bound_draw(self.bound_draw())
+            .with_mode(self.draw_mode())
     }
 
     pub fn committee_view(&self) -> CommitteeView {
@@ -459,7 +479,19 @@ impl Consensus {
             .admits(beacon, slot, reveal.id, &reveal.credential)
     }
 
+    pub fn carried_reveals_valid(
+        &self,
+        beacon: &Beacon,
+        slot: u64,
+        reveals: &[PublishedReveal],
+    ) -> bool {
+        self.view().form_committee(beacon, slot, reveals).len() == reveals.len()
+    }
+
     pub fn saturation_shortfall(&self) -> Option<(usize, u64, u128, u128)> {
+        if self.full_committee() {
+            return None;
+        }
         let weights = self.view().weights();
         let total: u128 = weights
             .iter()
@@ -489,6 +521,9 @@ impl Consensus {
         published: &[PublishedReveal],
     ) -> Option<Selection> {
         let view = self.view();
+        if view.mode() == DrawMode::Full {
+            return self.select_full(&view, beacon, slot, published);
+        }
         let committee = view.form_committee(beacon, slot, published);
         if committee.is_empty() {
             return None;
@@ -546,6 +581,38 @@ impl Consensus {
             reveals,
             reveal_holders,
             bound: view.bound_draw(),
+            mode: view.mode(),
+        })
+    }
+
+    fn select_full(
+        &self,
+        view: &CommitteeView,
+        beacon: &Beacon,
+        slot: u64,
+        published: &[PublishedReveal],
+    ) -> Option<Selection> {
+        let committee = view.form_committee(beacon, slot, published);
+        let commitment = CommitteeCommitment::from_view(slot, view, &committee, |id| {
+            self.roster.iter().find(|r| r.id == id).map(|r| r.attest_pk)
+        })?;
+        if commitment.is_empty() {
+            return None;
+        }
+        let members: Vec<u64> = commitment.members.iter().map(|m| m.id).collect();
+        let leader = view.rotation_leader(self.epoch, slot)?;
+        let expected = members.len() as u64;
+        let tau = qtv_sampler::params::finality_threshold(expected);
+        Some(Selection {
+            commitment,
+            members,
+            leader,
+            tau,
+            expected,
+            reveals: committee.reveals(),
+            reveal_holders: committee.ids(),
+            bound: false,
+            mode: DrawMode::Full,
         })
     }
 
@@ -630,7 +697,8 @@ mod tests {
                 .map(|v| {
                     (
                         v.id,
-                        Attester::from_secret_with_slots(v.id, &v.secret, v.stake, SLOTS),
+                        Attester::from_secret_with_slots(v.id, &v.secret, v.stake, SLOTS)
+                            .expect("a valid slot count"),
                     )
                 })
                 .collect();
@@ -758,10 +826,14 @@ mod tests {
         let minority: Vec<PublishedReveal> =
             all.into_iter().filter(|r| r.id == 1 || r.id == 2).collect();
         let selection = consensus.select(&beacon, 1, &minority).expect("committee");
-        assert_eq!(selection.members, vec![1, 2]);
+        assert_eq!(selection.members, vec![1, 2, 3, 4]);
         assert_eq!(selection.expected, 4);
         assert_eq!(selection.tau, 3);
-        let atts = sim.attestations(&selection, 1, 1, block_for(1), &beacon);
+        let atts: Vec<Attestation> = sim
+            .attestations(&selection, 1, 1, block_for(1), &beacon)
+            .into_iter()
+            .filter(|att| att.from == 1 || att.from == 2)
+            .collect();
         assert_eq!(atts.len(), 2);
         assert!(consensus
             .finalize(&selection, 1, 1, block_for(1), &beacon, &atts)
@@ -1168,8 +1240,8 @@ mod tests {
         let partial = consensus
             .select(&beacon, slot, &honest_but_one)
             .expect("committee of the ones that authenticate");
-        assert!(partial.members.contains(&1));
-        assert!(!partial.members.contains(&2));
+        assert_eq!(partial.members, vec![1, 2, 3, 4]);
+        assert!(!consensus.carried_reveals_valid(&beacon, slot, &honest_but_one));
 
         let only_two = vec![
             consensus.published_self(&beacon, slot).unwrap(),
@@ -1183,11 +1255,7 @@ mod tests {
         let liveness = consensus
             .select(&beacon, slot, &only_two)
             .expect("committee");
-        assert!(liveness.members.contains(&1) && liveness.members.contains(&3));
-        assert!(
-            !liveness.members.contains(&4),
-            "a silent validator was admitted"
-        );
+        assert_eq!(liveness.members, vec![1, 2, 3, 4]);
     }
 
     #[test]

@@ -864,6 +864,10 @@ pub fn chain_block_from_bytes(bytes: &[u8]) -> Result<ChainBlock, DecodeError> {
     Ok(block)
 }
 
+pub fn wrapper_to_bytes(wrapper: &Wrapper) -> Vec<u8> {
+    qtv_codec::to_bytes(wrapper)
+}
+
 pub fn wrapper_from_bytes(bytes: &[u8]) -> Result<Wrapper, DecodeError> {
     let mut decoder = Decoder::new(bytes);
     let wrapper = decode_wrapper(&mut decoder)?;

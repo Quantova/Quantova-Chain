@@ -14,7 +14,7 @@ use qtv_node::consensus::{
     genesis_beacon, header_value, Beacon, Block as ConsensusBlock, Consensus, FinalityLedger,
     FinalityStatus, Parent, Selection, ValidatorRegistration,
 };
-use qtv_node::evidence::{Equivocation, EvidencePool};
+use qtv_node::evidence::{DoubleFinality, Equivocation, EvidencePool, FinalityVote};
 use qtv_node::fee::FeeParams;
 use qtv_node::ledger::{
     account_key, evidence_address, registration_address, Account, BlockEvent, Ledger, SideEvent,
@@ -58,36 +58,6 @@ pub fn node_identity(id: u64) -> Identity {
 #[cfg(any(test, feature = "test-fixtures"))]
 pub fn node_peer_id(id: u64) -> PeerId {
     p2p_peer_id(&qtv_node::keys::fixture_secret(id))
-}
-
-trait EntitledWith {
-    fn is_entitled_with(
-        &self,
-        bound: bool,
-        root: &Root,
-        beacon: &qtv_sampler::beacon::Beacon,
-        weight: u64,
-        total: u64,
-        budget: u64,
-    ) -> bool;
-}
-
-impl EntitledWith for Attestation {
-    fn is_entitled_with(
-        &self,
-        bound: bool,
-        root: &Root,
-        beacon: &qtv_sampler::beacon::Beacon,
-        weight: u64,
-        total: u64,
-        budget: u64,
-    ) -> bool {
-        if bound {
-            self.is_entitled_bound(root, beacon, weight, total, budget)
-        } else {
-            self.is_entitled(root, beacon, weight, total, budget)
-        }
-    }
 }
 
 pub fn leader_for(selection: &Selection, view: View) -> u64 {
@@ -386,7 +356,8 @@ pub struct DevNode {
     served_saturated: std::cell::Cell<bool>,
     chain: Vec<FinalizedBlock>,
     slashed: Vec<u64>,
-    finalized_attesters: std::collections::BTreeMap<(Height, [u8; 32]), Vec<u64>>,
+    finalized_votes: std::collections::BTreeMap<(Height, [u8; 32]), Vec<Attestation>>,
+    double_finality: Vec<DoubleFinality>,
     tx_index: TxIndex,
     prevoted: std::collections::BTreeMap<View, [u8; 32]>,
     events_by_height: HashMap<Height, Vec<BlockEvent>>,
@@ -507,7 +478,8 @@ impl DevNode {
             served_saturated: std::cell::Cell::new(false),
             chain: Vec::new(),
             slashed: Vec::new(),
-            finalized_attesters: std::collections::BTreeMap::new(),
+            finalized_votes: std::collections::BTreeMap::new(),
+            double_finality: Vec::new(),
             tx_index,
             prevoted: std::collections::BTreeMap::new(),
             events_by_height: HashMap::new(),
@@ -708,9 +680,7 @@ impl DevNode {
     }
 
     fn registration_open(&self, height: Height) -> bool {
-        let len = self.consensus.epoch_len();
-        let lead = (len / 4).max(1);
-        len > lead && self.consensus.slot_for(height) < len - lead
+        qtv_sampler::epoch::registration_open(height, self.consensus.epoch_len())
     }
 
     fn record_registrations(&mut self, block: &ChainBlock) {
@@ -1069,7 +1039,9 @@ impl DevNode {
             None => return Err(RoundError::Decode),
         };
         let slot = self.consensus.slot_for(head);
-        self.beacon = if self.consensus.bound_draw() {
+        self.beacon = if self.consensus.full_committee() {
+            self.beacon.advance_fixed(slot)
+        } else if self.consensus.bound_draw() {
             self.beacon.advance_from_bound_reveals(slot, &pairs)
         } else {
             let reveals: Vec<_> = pairs.iter().map(|(_, preimage)| *preimage).collect();
@@ -1231,6 +1203,7 @@ impl DevNode {
             .iter()
             .map(|evidence| evidence_transaction(evidence, chain_id))
             .collect();
+        candidates.extend(self.double_finality_evidence());
         if self.registration_open(height) {
             for note in self.epoch_registration_notes() {
                 candidates.push(registration_transaction(&note, chain_id));
@@ -1514,14 +1487,14 @@ impl DevNode {
         self.events_by_height.retain(|&height, _| height >= floor);
     }
 
-    fn observe_finality(&mut self, height: Height, value: [u8; 32], attesters: &[u64]) {
+    fn observe_finality(&mut self, height: Height, value: [u8; 32], votes: &[Attestation]) {
         match self.finality.observe(height, value) {
             FinalityStatus::Violation {
                 height,
                 finalized,
                 conflicting,
             } => {
-                self.slash_double_finalizers(height, finalized, attesters);
+                self.slash_double_finalizers(height, finalized, votes);
                 self.fatal = Some(Fatal::FinalityViolation {
                     height,
                     finalized,
@@ -1529,28 +1502,51 @@ impl DevNode {
                 });
             }
             _ => {
-                self.finalized_attesters
-                    .insert((height, value), attesters.to_vec());
+                self.finalized_votes.insert((height, value), votes.to_vec());
                 let floor = height.saturating_sub(FINALIZED_RETAINED as u64);
-                self.finalized_attesters.retain(|(h, _), _| *h >= floor);
+                self.finalized_votes.retain(|(h, _), _| *h >= floor);
             }
         }
+    }
+
+    fn finality_votes(&self, votes: &[Attestation]) -> Option<(Vec<u8>, Vec<FinalityVote>)> {
+        let block = votes.first()?.block;
+        let mut out: Vec<FinalityVote> = Vec::with_capacity(votes.len());
+        for att in votes {
+            if att.block != block || out.len() >= qtv_node::evidence::MAX_FINALITY_VOTES {
+                continue;
+            }
+            let Some(reg) = self.base_roster.iter().find(|r| r.id == att.from) else {
+                continue;
+            };
+            if out.iter().any(|vote| vote.signer == reg.bond_address) {
+                continue;
+            }
+            out.push(FinalityVote {
+                signer: reg.bond_address.clone(),
+                view: att.view,
+                slot: att.slot,
+                committee: att.committee,
+                sig: att.sig.to_vec(),
+            });
+        }
+        (!out.is_empty()).then(|| (block.to_bytes(), out))
     }
 
     fn slash_double_finalizers(
         &mut self,
         height: Height,
         finalized: [u8; 32],
-        conflicting_attesters: &[u64],
+        conflicting: &[Attestation],
     ) {
-        let prior = match self.finalized_attesters.get(&(height, finalized)) {
-            Some(ids) => ids.clone(),
+        let prior = match self.finalized_votes.get(&(height, finalized)) {
+            Some(votes) => votes.clone(),
             None => return,
         };
-        let offenders: Vec<u64> = conflicting_attesters
+        let offenders: Vec<u64> = conflicting
             .iter()
-            .copied()
-            .filter(|id| prior.contains(id))
+            .map(|att| att.from)
+            .filter(|id| prior.iter().any(|att| att.from == *id))
             .collect();
         if offenders.is_empty() {
             return;
@@ -1560,6 +1556,26 @@ impl DevNode {
                 self.slashed.push(id);
             }
         }
+        if let (Some((block_a, votes_a)), Some((block_b, votes_b))) = (
+            self.finality_votes(&prior),
+            self.finality_votes(conflicting),
+        ) {
+            self.double_finality.push(DoubleFinality {
+                height,
+                block_a,
+                votes_a,
+                block_b,
+                votes_b,
+            });
+        }
+    }
+
+    pub fn double_finality_evidence(&self) -> Vec<Wrapper> {
+        let chain_id = self.fee_params.chain_id;
+        self.double_finality
+            .iter()
+            .map(|evidence| evidence_call(evidence.encode(), chain_id))
+            .collect()
     }
 
     pub fn fatal(&self) -> Option<Fatal> {
@@ -1610,7 +1626,7 @@ impl DevNode {
             .ok_or(RoundError::NotFinalized)?;
         let certificate = certificate.with_committee_reveals(self.committee_reveals(selection));
         let staged = self.staged.take().expect("the staged block is present");
-        self.observe_finality(self.height, block.val, &certificate.attesters());
+        self.observe_finality(self.height, block.val, &certificate.attestations);
         if self.fatal.is_some() {
             return Err(RoundError::NotFinalized);
         }
@@ -2131,8 +2147,8 @@ impl DevNode {
         if !att.signature_verifies(self.consensus.chain_id(), &member.attest_pk) {
             return false;
         }
-        att.is_entitled_with(
-            self.consensus.bound_draw(),
+        att.is_entitled_in(
+            self.consensus.draw_mode(),
             &member.root,
             &self.beacon,
             member.weight,
@@ -2182,8 +2198,8 @@ impl DevNode {
         {
             return false;
         }
-        record.att.is_entitled_with(
-            self.consensus.bound_draw(),
+        record.att.is_entitled_in(
+            self.consensus.draw_mode(),
             &member.root,
             &self.beacon,
             member.weight,
@@ -2422,8 +2438,8 @@ impl DevNode {
             if let Some(member) = selection.commitment.member(attestation.from) {
                 if attestation.block.cost != qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST
                     && attestation.slot == self.consensus.slot_for(self.height)
-                    && attestation.is_entitled_with(
-                        self.consensus.bound_draw(),
+                    && attestation.is_entitled_in(
+                        self.consensus.draw_mode(),
                         &member.root,
                         &self.beacon,
                         member.weight,
@@ -2586,6 +2602,14 @@ impl DevNode {
             evidence.height.saturating_add(EVIDENCE_WINDOW) > height
                 && !ledger.is_validator_banned(&evidence.offender)
                 && !included.contains(&evidence_transaction(evidence, chain_id).id())
+        });
+        self.double_finality.retain(|evidence| {
+            evidence.height.saturating_add(EVIDENCE_WINDOW) > height
+                && evidence
+                    .votes_a
+                    .iter()
+                    .any(|vote| !ledger.is_validator_banned(&vote.signer))
+                && !included.contains(&evidence_call(evidence.encode(), chain_id).id())
         });
     }
 
@@ -2777,6 +2801,13 @@ impl DevNode {
         } else {
             certificate.committee_reveals.clone()
         };
+        if self.consensus.full_committee()
+            && !self
+                .consensus
+                .carried_reveals_valid(&self.beacon, slot, &reveals)
+        {
+            return None;
+        }
         if let Some(selection) = self.consensus.select(&self.beacon, slot, &reveals) {
             if selection.commitment.digest() == target {
                 return Some(selection);
@@ -3108,7 +3139,7 @@ impl DevNode {
         {
             return Err(SyncError::UnverifiedCertificate);
         }
-        self.observe_finality(self.height, subject.val, &certificate.attesters());
+        self.observe_finality(self.height, subject.val, &certificate.attestations);
         if self.fatal.is_some() {
             return Err(SyncError::FinalityViolation);
         }
@@ -3190,8 +3221,12 @@ impl DevNode {
 }
 
 fn evidence_transaction(evidence: &Equivocation, chain_id: u64) -> Wrapper {
+    evidence_call(evidence.encode(), chain_id)
+}
+
+fn evidence_call(payload: Vec<u8>, chain_id: u64) -> Wrapper {
     let target = evidence_address();
-    let call = Call::new(target.clone(), evidence.encode());
+    let call = Call::new(target.clone(), payload);
     let body = Body::with_context(target, 0, 0, 0, call, 0, chain_id);
     Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new())
 }

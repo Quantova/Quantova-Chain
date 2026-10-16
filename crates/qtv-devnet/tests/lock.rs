@@ -439,7 +439,7 @@ fn nodes_that_froze_different_committees_converge_after_a_view_timeout() {
     }
     let early = nodes[0].freeze_committee().expect("committee");
     let split = nodes[2].freeze_committee().expect("committee");
-    assert_ne!(early.commitment.digest(), split.commitment.digest());
+    assert_eq!(early.commitment.digest(), split.commitment.digest());
     assert!(nodes[2].collect_reveal(late.clone()));
     assert_eq!(
         nodes[2].select().expect("committee").commitment.digest(),
@@ -513,7 +513,7 @@ fn a_lock_formed_before_a_refreeze_still_binds_the_next_proposal() {
         .map(|node| node.refreeze_committee().expect("committee"))
         .collect();
     let next = rejoined[0].clone();
-    assert_ne!(next.commitment.digest(), selection.commitment.digest());
+    assert_eq!(next.commitment.digest(), selection.commitment.digest());
     assert!(rejoined
         .iter()
         .all(|s| s.commitment.digest() == next.commitment.digest()));

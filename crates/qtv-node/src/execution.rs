@@ -114,6 +114,7 @@ mod slot_charge {
             &|_k| 41,
             &memory,
             4_000_000,
+            true,
         )
         .expect("the call halts")
     }
@@ -165,7 +166,7 @@ mod slot_charge {
                     asked.set(asked.get() + 1);
                     41u64
                 };
-                execute_contract_call_lazy(&bytes, selector, &counting, &memory, limit)
+                execute_contract_call_lazy(&bytes, selector, &counting, &memory, limit, true)
             };
             (asked.get(), outcome)
         };
@@ -380,6 +381,7 @@ pub fn execute_contract_call_lazy(
     loader: &dyn Fn(&[u8; 32]) -> u64,
     memory: &[u8],
     meter_limit: u64,
+    strict: bool,
 ) -> Result<ContractOutcome, ExecError> {
     let access_cost = (container_bytes.len() as u64).saturating_mul(CODE_ACCESS_BYTE_METER);
     let vm_limit = meter_limit
@@ -389,11 +391,21 @@ pub fn execute_contract_call_lazy(
     container
         .entry_offset(&selector)
         .ok_or(ExecError::BadContainer)?;
-    let interpreter =
-        Interpreter::for_entry(&container, selector, vm_limit).map_err(|fault| match fault {
-            Fault::OutOfMeter => ExecError::MeterExhausted,
-            _ => ExecError::BadContainer,
-        })?;
+    let genesis = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
+    let opened = if selector == genesis {
+        Interpreter::for_genesis(&container, vm_limit)
+    } else {
+        Interpreter::for_entry(&container, selector, vm_limit)
+    };
+    let interpreter = opened.map_err(|fault| match fault {
+        Fault::OutOfMeter => ExecError::MeterExhausted,
+        _ => ExecError::BadContainer,
+    })?;
+    let interpreter = if strict {
+        interpreter
+    } else {
+        interpreter.with_legacy_rules()
+    };
     let affordable_touches = vm_limit / SLOT_ACCESS_METER;
     let touches = std::cell::Cell::new(0u64);
     let beyond_budget = std::cell::Cell::new(false);

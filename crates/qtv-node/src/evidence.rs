@@ -139,6 +139,162 @@ impl Equivocation {
     }
 }
 
+pub const DOUBLE_FINALITY_TAG: &[u8] = b"QTV-DOUBLE-FINALITY/1";
+
+pub const MAX_FINALITY_VOTES: usize = 512;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinalityVote {
+    pub signer: String,
+    pub view: u64,
+    pub slot: u64,
+    pub committee: [u8; 32],
+    pub sig: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DoubleFinality {
+    pub height: u64,
+    pub block_a: Vec<u8>,
+    pub votes_a: Vec<FinalityVote>,
+    pub block_b: Vec<u8>,
+    pub votes_b: Vec<FinalityVote>,
+}
+
+fn put_votes(encoder: &mut Encoder, votes: &[FinalityVote]) {
+    encoder.put_u64(votes.len() as u64);
+    for vote in votes {
+        encoder.put_bytes(vote.signer.as_bytes());
+        encoder.put_u64(vote.view);
+        encoder.put_u64(vote.slot);
+        encoder.put_bytes(&vote.committee);
+        encoder.put_bytes(&vote.sig);
+    }
+}
+
+fn get_votes(decoder: &mut Decoder<'_>) -> Option<Vec<FinalityVote>> {
+    let count = usize::try_from(decoder.get_u64().ok()?).ok()?;
+    if count == 0 || count > MAX_FINALITY_VOTES {
+        return None;
+    }
+    let mut votes = Vec::with_capacity(count);
+    for _ in 0..count {
+        let signer = String::from_utf8(decoder.get_bytes().ok()?.to_vec()).ok()?;
+        let view = decoder.get_u64().ok()?;
+        let slot = decoder.get_u64().ok()?;
+        let committee: [u8; 32] = decoder.get_bytes().ok()?.try_into().ok()?;
+        let sig = decoder.get_bytes().ok()?.to_vec();
+        votes.push(FinalityVote {
+            signer,
+            view,
+            slot,
+            committee,
+            sig,
+        });
+    }
+    Some(votes)
+}
+
+impl DoubleFinality {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut encoder = Encoder::new();
+        encoder.put_bytes(DOUBLE_FINALITY_TAG);
+        encoder.put_u64(self.height);
+        encoder.put_bytes(&self.block_a);
+        put_votes(&mut encoder, &self.votes_a);
+        encoder.put_bytes(&self.block_b);
+        put_votes(&mut encoder, &self.votes_b);
+        encoder.into_bytes()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<DoubleFinality> {
+        let mut decoder = Decoder::new(bytes);
+        if decoder.get_bytes().ok()? != DOUBLE_FINALITY_TAG {
+            return None;
+        }
+        let height = decoder.get_u64().ok()?;
+        let block_a = decoder.get_bytes().ok()?.to_vec();
+        let votes_a = get_votes(&mut decoder)?;
+        let block_b = decoder.get_bytes().ok()?.to_vec();
+        let votes_b = get_votes(&mut decoder)?;
+        decoder.finish().ok()?;
+        Some(DoubleFinality {
+            height,
+            block_a,
+            votes_a,
+            block_b,
+            votes_b,
+        })
+    }
+
+    fn side(
+        &self,
+        chain_id: u64,
+        block: &[u8],
+        votes: &[FinalityVote],
+        key_of: &impl Fn(&str) -> Option<Vec<u8>>,
+        stake_of: &impl Fn(&str) -> u128,
+    ) -> Option<(Vec<String>, u128)> {
+        let mut signers: Vec<String> = Vec::with_capacity(votes.len());
+        let mut stake: u128 = 0;
+        for vote in votes {
+            if signers.contains(&vote.signer) {
+                return None;
+            }
+            let pk: [u8; PUBLIC_KEY_BYTES] = key_of(&vote.signer)?.as_slice().try_into().ok()?;
+            let sig: [u8; SIGNATURE_BYTES] = vote.sig.as_slice().try_into().ok()?;
+            let msg = attestation_message(
+                chain_id,
+                self.height,
+                vote.slot,
+                vote.view,
+                &vote.committee,
+                block,
+            );
+            if !ml_dsa::verify(&pk, &msg, &sig, ATTEST_CONTEXT) {
+                return None;
+            }
+            stake = stake.saturating_add(stake_of(&vote.signer));
+            signers.push(vote.signer.clone());
+        }
+        Some((signers, stake))
+    }
+
+    pub fn offenders(
+        &self,
+        chain_id: u64,
+        key_of: impl Fn(&str) -> Option<Vec<u8>>,
+        stake_of: impl Fn(&str) -> u128,
+        total_stake: u128,
+    ) -> Option<Vec<String>> {
+        if self.block_a == self.block_b
+            || subject_is_view_change(&self.block_a)
+            || subject_is_view_change(&self.block_b)
+            || total_stake == 0
+        {
+            return None;
+        }
+        let (side_a, stake_a) =
+            self.side(chain_id, &self.block_a, &self.votes_a, &key_of, &stake_of)?;
+        let (side_b, stake_b) =
+            self.side(chain_id, &self.block_b, &self.votes_b, &key_of, &stake_of)?;
+        let quorum = |stake: u128| stake.saturating_mul(3) >= total_stake.saturating_mul(2);
+        if !quorum(stake_a) || !quorum(stake_b) {
+            return None;
+        }
+        let mut offenders: Vec<String> = side_a
+            .into_iter()
+            .filter(|signer| side_b.contains(signer))
+            .collect();
+        offenders.sort();
+        if offenders.is_empty() {
+            None
+        } else {
+            Some(offenders)
+        }
+    }
+}
+
 pub const MAX_HEIGHT_VIEW: u64 = 256;
 
 pub const MAX_PENDING_EVIDENCE: usize = 256;

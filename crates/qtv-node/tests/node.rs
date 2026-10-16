@@ -1,6 +1,8 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+#![allow(deprecated)]
+
 use qtv_account::{derive, Account};
 use qtv_governance::GuardianSet;
 use qtv_node::execution::{transfer_call, TRANSFER_METER};
@@ -311,7 +313,7 @@ fn fingerprint(node: &Node) -> Vec<BlockPrint> {
                 f.id(),
                 f.header_hash(),
                 *f.header().q_root(),
-                f.certificate.digest(),
+                f.certificate.envelope.block.val,
                 f.attesters.clone(),
             )
         })
