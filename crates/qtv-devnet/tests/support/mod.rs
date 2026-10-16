@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 #![allow(deprecated)]
-
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};

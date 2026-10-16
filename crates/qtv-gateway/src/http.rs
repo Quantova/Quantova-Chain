@@ -26,9 +26,7 @@ fn trusted_local() -> bool {
 
 fn local_direct_unlimited() -> bool {
     static UNLIMITED: OnceLock<bool> = OnceLock::new();
-    *UNLIMITED.get_or_init(|| {
-        std::env::var(LOCAL_DIRECT_UNLIMITED_ENV).as_deref() == Ok("1")
-    })
+    *UNLIMITED.get_or_init(|| std::env::var(LOCAL_DIRECT_UNLIMITED_ENV).as_deref() == Ok("1"))
 }
 
 fn cors_origin() -> Option<&'static str> {
