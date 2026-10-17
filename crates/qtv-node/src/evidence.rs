@@ -234,11 +234,17 @@ impl DoubleFinality {
         votes: &[FinalityVote],
         key_of: &impl Fn(&str) -> Option<Vec<u8>>,
         stake_of: &impl Fn(&str) -> u128,
-    ) -> Option<(Vec<String>, u128)> {
+    ) -> Option<(Vec<String>, u128, u64)> {
+        let first = votes.first()?;
         let mut signers: Vec<String> = Vec::with_capacity(votes.len());
         let mut stake: u128 = 0;
         for vote in votes {
-            if signers.contains(&vote.signer) {
+            if vote.view != first.view
+                || vote.slot != first.slot
+                || vote.committee != first.committee
+                || !crate::mempool::canonical_address(&vote.signer)
+                || signers.contains(&vote.signer)
+            {
                 return None;
             }
             let pk: [u8; PUBLIC_KEY_BYTES] = key_of(&vote.signer)?.as_slice().try_into().ok()?;
@@ -257,7 +263,7 @@ impl DoubleFinality {
             stake = stake.saturating_add(stake_of(&vote.signer));
             signers.push(vote.signer.clone());
         }
-        Some((signers, stake))
+        Some((signers, stake, first.view))
     }
 
     pub fn offenders(
@@ -274,10 +280,13 @@ impl DoubleFinality {
         {
             return None;
         }
-        let (side_a, stake_a) =
+        let (side_a, stake_a, view_a) =
             self.side(chain_id, &self.block_a, &self.votes_a, &key_of, &stake_of)?;
-        let (side_b, stake_b) =
+        let (side_b, stake_b, view_b) =
             self.side(chain_id, &self.block_b, &self.votes_b, &key_of, &stake_of)?;
+        if view_a != view_b {
+            return None;
+        }
         let quorum = |stake: u128| stake.saturating_mul(3) >= total_stake.saturating_mul(2);
         if !quorum(stake_a) || !quorum(stake_b) {
             return None;

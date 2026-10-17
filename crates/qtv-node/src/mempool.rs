@@ -129,7 +129,7 @@ fn zero_value_target(recipient: &str) -> bool {
     .any(|system| system == recipient)
 }
 
-fn canonical_address(address: &str) -> bool {
+pub(crate) fn canonical_address(address: &str) -> bool {
     match qtv_idfmt::parse_address(address) {
         Ok(payload) if payload.len() == qtv_idfmt::DIGEST_LEN => {
             qtv_idfmt::render_address(&payload).ok().as_deref() == Some(address)
