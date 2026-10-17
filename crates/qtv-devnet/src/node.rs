@@ -114,6 +114,7 @@ impl ServedBlock {
 const FINALIZED_RETAINED: usize = 512;
 
 const STATE_COMPACT_CHECK_BLOCKS: u64 = 1000;
+const STATE_COMPACT_STAGGER: u64 = 137;
 
 const MAX_FUTURE_PROPOSALS: usize = 256;
 const MAX_OUTBOX: usize = 4096;
@@ -2717,7 +2718,8 @@ impl DevNode {
         self.archive_burn_block(block)?;
         self.state_store.commit(height, self.ledger.q_root())?;
         self.record_registrations(block);
-        if height % STATE_COMPACT_CHECK_BLOCKS == 0 {
+        let stagger = self.id.wrapping_mul(STATE_COMPACT_STAGGER) % STATE_COMPACT_CHECK_BLOCKS;
+        if height % STATE_COMPACT_CHECK_BLOCKS == stagger {
             self.state_store.compact_if_bloated()?;
         }
         Ok(())

@@ -416,7 +416,7 @@ pub fn handle(
         Request::GenesisAccounts => Ok(genesis_accounts(node)),
         Request::Finality(height) => finality(node, height),
         Request::EventProof { height, index } => event_proof(node, height, index),
-        Request::ValidatorSet(epoch) => Ok(validator_set(node, epoch)),
+        Request::ValidatorSet(epoch) => validator_set(node, epoch),
         _ => Err(ClientError {
             code: "internal".to_string(),
             message: "the node could not serve this call".to_string(),
@@ -639,7 +639,13 @@ fn event_proof(node: &DevNode, height: u64, index: u64) -> Result<Json, ClientEr
     ]))
 }
 
-fn validator_set(node: &DevNode, epoch: u64) -> Json {
+fn validator_set(node: &DevNode, epoch: u64) -> Result<Json, ClientError> {
+    let current = node.epoch();
+    if epoch != current {
+        return Err(ClientError::not_found(format!(
+            "only the roster of the current epoch {current} is served"
+        )));
+    }
     let roster = node.roster_for_epoch(epoch);
     let total: u128 = roster.iter().map(|r| u128::from(r.stake)).sum();
     let members: Vec<Json> = roster
@@ -653,12 +659,12 @@ fn validator_set(node: &DevNode, epoch: u64) -> Json {
             ])
         })
         .collect();
-    object(vec![
+    Ok(object(vec![
         ("epoch", Json::Int(epoch)),
         ("chain_id", Json::str(node.chain_id().to_string())),
         ("total_stake", Json::str(total.to_string())),
         ("members", Json::Array(members)),
-    ])
+    ]))
 }
 
 fn burn_block(node: &DevNode, height: u64) -> Result<Json, ClientError> {
