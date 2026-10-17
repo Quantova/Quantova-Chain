@@ -23,10 +23,15 @@ use qtv_wipe::Zeroize;
 
 fn main() {
     let name = std::env::args().nth(1).expect("chain name");
-    let out = std::env::args().nth(2).expect("secret out path");
+    let id: u32 = std::env::args()
+        .nth(2)
+        .expect("operator id")
+        .parse()
+        .expect("the operator id is a number");
+    let out = std::env::args().nth(3).expect("secret out path");
     let cid = chain_binding(&name);
     let mut secrets = String::new();
-    for id in 0u32..3 {
+    {
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&urandom(32));
         let (pk, mut sk) = ml_dsa::keygen(&seed);
