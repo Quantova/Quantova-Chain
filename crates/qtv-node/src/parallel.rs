@@ -227,8 +227,7 @@ pub fn execute_parallel(
         let tasks: Vec<Task<'_>> = layer
             .iter()
             .filter(|&&index| {
-                let valid_until = candidates[index].body().valid_until_height();
-                valid_until == 0 || height <= valid_until
+                crate::node::within_validity(candidates[index].body().valid_until_height(), height)
             })
             .map(|&index| {
                 let wrapper = &candidates[index];

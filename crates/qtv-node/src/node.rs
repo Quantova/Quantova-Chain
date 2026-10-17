@@ -458,7 +458,9 @@ fn double_finality_offenders(
 pub(crate) fn evidence_admissible(chain_id: u64, wrapper: &Wrapper, ledger: &Ledger) -> bool {
     let args = wrapper.body().call().args();
     if let Some(evidence) = crate::evidence::DoubleFinality::decode(args) {
-        if !double_finality_live(chain_id, ledger) {
+        if !double_finality_live(chain_id, ledger)
+            || evidence.height > ledger.execution_height().saturating_add(1)
+        {
             return false;
         }
         return double_finality_offenders(chain_id, &evidence, ledger)
@@ -468,7 +470,9 @@ pub(crate) fn evidence_admissible(chain_id: u64, wrapper: &Wrapper, ledger: &Led
         Some(evidence) => evidence,
         None => return false,
     };
-    if ledger.is_validator_banned(&evidence.offender) {
+    if ledger.is_validator_banned(&evidence.offender)
+        || evidence.height > ledger.execution_height().saturating_add(1)
+    {
         return false;
     }
     match ledger.validator_attest_key(&evidence.offender) {
@@ -494,7 +498,9 @@ pub(crate) fn evidence_offender_is_slashable(wrapper: &Wrapper, ledger: &Ledger)
 fn dispatch_evidence(chain_id: u64, ledger: &mut Ledger, wrapper: &Wrapper) -> bool {
     let args = wrapper.body().call().args();
     if let Some(evidence) = crate::evidence::DoubleFinality::decode(args) {
-        if !double_finality_live(chain_id, ledger) {
+        if !double_finality_live(chain_id, ledger)
+            || evidence.height > ledger.execution_height().saturating_add(1)
+        {
             return false;
         }
         let Some(offenders) = double_finality_offenders(chain_id, &evidence, ledger) else {
@@ -510,6 +516,9 @@ fn dispatch_evidence(chain_id: u64, ledger: &mut Ledger, wrapper: &Wrapper) -> b
         Some(evidence) => evidence,
         None => return false,
     };
+    if evidence.height > ledger.execution_height().saturating_add(1) {
+        return false;
+    }
     let attest_pk = match ledger.validator_attest_key(&evidence.offender) {
         Some(attest_pk) => attest_pk,
         None => return false,
@@ -1208,6 +1217,12 @@ fn dispatch_bridge_exit(
     )
 }
 
+pub(crate) const MAX_VALIDITY_HORIZON: u64 = 7_200;
+
+pub(crate) fn within_validity(valid_until: u64, height: u64) -> bool {
+    valid_until == 0 || (height <= valid_until && valid_until - height <= MAX_VALIDITY_HORIZON)
+}
+
 const VM_BLOCK_METER_BUDGET: u64 = 50_000_000;
 
 pub(crate) const BLOCK_FRESH_LEAF_CEILING: u64 = 220;
@@ -1552,8 +1567,10 @@ fn execute_ordered_across(
         if hardened && !qtv_tx::addresses_parse(wrapper.body()) {
             continue;
         }
-        let valid_until = wrapper.body().valid_until_height();
-        if valid_until != 0 && ledger.execution_height() > valid_until {
+        if !within_validity(
+            wrapper.body().valid_until_height(),
+            ledger.execution_height(),
+        ) {
             continue;
         }
         let target = wrapper.body().call().target();

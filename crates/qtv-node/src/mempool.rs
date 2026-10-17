@@ -1145,8 +1145,8 @@ impl Mempool {
             let account = ledger.account(sender);
             let stale = wrapper.body().nonce() < account.nonce;
             let barred = sender_barred(ledger, &wrapper);
-            let valid_until = wrapper.body().valid_until_height();
-            let expired = valid_until != 0 && height > valid_until;
+            let expired =
+                !crate::node::within_validity(wrapper.body().valid_until_height(), height);
             let refused = is_plain_transfer(ledger, &wrapper)
                 && !crate::node::transfer_dispatchable(
                     ledger,
