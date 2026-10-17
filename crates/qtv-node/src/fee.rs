@@ -5,6 +5,8 @@ pub const MICRO_USD_FLOOR: u128 = 500;
 
 pub const MICRO_USD_CEILING: u128 = 1000;
 
+pub const DEPLOY_CAP_MICRO_USD: u128 = 50_000;
+
 pub type AssetTag = [u8; 8];
 
 pub const fn asset_tag(name: &str) -> AssetTag {
@@ -58,6 +60,16 @@ impl FeeParams {
 
     pub fn ceiling_fee(&self) -> u64 {
         self.native_fee(MICRO_USD_CEILING)
+    }
+
+    pub fn deploy_cap_native(&self) -> u64 {
+        let native = DEPLOY_CAP_MICRO_USD
+            .saturating_mul(self.native_unit)
+            .checked_div(self.rate_micro_usd_per_qtov)
+            .unwrap_or(0);
+        u64::try_from(native)
+            .unwrap_or(u64::MAX)
+            .max(self.transfer_fee())
     }
 
     pub fn floor_native_uncapped(&self) -> u64 {

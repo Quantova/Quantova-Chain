@@ -790,8 +790,14 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
             let signature_ok = verified(&wrapper, &account.public_key, signature_hint);
-            if !crate::node::vm_admissible(&wrapper, &account, fee_params, signature_ok)
-                || !crate::node::vm_target_dispatchable(ledger, &wrapper)
+            let deploy_capped = crate::node::deploy_cap_active(ledger, &wrapper, fee_params);
+            if !crate::node::vm_admissible(
+                &wrapper,
+                &account,
+                fee_params,
+                signature_ok,
+                deploy_capped,
+            ) || !crate::node::vm_target_dispatchable(ledger, &wrapper)
             {
                 return Err(Reject::BadCall);
             }
@@ -995,8 +1001,15 @@ impl Mempool {
                     false
                 } else {
                     let account = ledger.account(wrapper.body().sender());
-                    crate::node::vm_admissible(&wrapper, &account, fee_params, verified[index])
-                        && crate::node::vm_target_dispatchable(ledger, &wrapper)
+                    let deploy_capped =
+                        crate::node::deploy_cap_active(ledger, &wrapper, fee_params);
+                    crate::node::vm_admissible(
+                        &wrapper,
+                        &account,
+                        fee_params,
+                        verified[index],
+                        deploy_capped,
+                    ) && crate::node::vm_target_dispatchable(ledger, &wrapper)
                 }
             } else if crate::node::is_key_register(&wrapper) {
                 !self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce())

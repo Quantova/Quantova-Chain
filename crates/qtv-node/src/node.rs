@@ -1233,6 +1233,25 @@ pub(crate) fn vm_meter_fee(meter: u64, fee_params: &FeeParams) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+pub(crate) fn deploy_cap_active(
+    ledger: &Ledger,
+    wrapper: &Wrapper,
+    fee_params: &FeeParams,
+) -> bool {
+    wrapper.body().call().target() == crate::ledger::vm_deploy_address()
+        && crate::upgrades::for_chain(fee_params.chain_id)
+            .deploy_fee_capped(ledger.execution_height())
+}
+
+pub(crate) fn vm_charge(meter: u64, fee_params: &FeeParams, deploy_capped: bool) -> u64 {
+    let fee = vm_meter_fee(meter, fee_params);
+    if deploy_capped {
+        fee.min(fee_params.deploy_cap_native())
+    } else {
+        fee
+    }
+}
+
 pub(crate) fn is_vm_op(ledger: &Ledger, wrapper: &Wrapper) -> bool {
     let _ = ledger;
     let target = wrapper.body().call().target();
@@ -1251,6 +1270,7 @@ pub(crate) fn vm_admissible(
     account: &Account,
     fee_params: &FeeParams,
     signature_ok: bool,
+    deploy_capped: bool,
 ) -> bool {
     let body = wrapper.body();
     if !account.has_key() || !qtv_tx::scheme_supported(wrapper.scheme()) || !signature_ok {
@@ -1265,7 +1285,7 @@ pub(crate) fn vm_admissible(
     {
         return false;
     }
-    let charged = vm_meter_fee(body.meter_limit(), fee_params);
+    let charged = vm_charge(body.meter_limit(), fee_params, deploy_capped);
     if body.fee() < u128::from(charged) {
         return false;
     }
@@ -1322,11 +1342,12 @@ fn dispatch_vm(
         return false;
     }
     let account = ledger.account(&sender);
-    if !vm_admissible(wrapper, &account, fee_params, signature_ok) {
+    let deploy_capped = deploy_cap_active(ledger, wrapper, fee_params);
+    if !vm_admissible(wrapper, &account, fee_params, signature_ok, deploy_capped) {
         return false;
     }
     ledger.arm_vm_meter(wrapper.body().meter_limit());
-    let charged = vm_meter_fee(wrapper.body().meter_limit(), fee_params);
+    let charged = vm_charge(wrapper.body().meter_limit(), fee_params, deploy_capped);
     let value = wrapper.body().value();
     let in_asset = wrapper.body().in_asset();
     let native_debit = if in_asset.is_none() { value } else { 0 };
@@ -1361,7 +1382,12 @@ fn dispatch_vm(
     if legacy {
         return true;
     }
-    let used_fee = vm_meter_fee(ledger.vm_meter_charge().min(meter), fee_params).min(charged);
+    let used_fee = vm_charge(
+        ledger.vm_meter_charge().min(meter),
+        fee_params,
+        deploy_capped,
+    )
+    .min(charged);
     let refund = charged - used_fee;
     if refund > 0 {
         let mut settled = ledger.account(&sender);
@@ -2775,12 +2801,12 @@ mod tests {
         let heavy = MAX_TX_METER + 1_000_000;
         let call = system_tx(&caller, &contract, vec![0u8; 8], 0, heavy, &fee);
         assert!(
-            !vm_admissible(&call, &account, &fee, true),
+            !vm_admissible(&call, &account, &fee, true, false),
             "a call keeps the ordinary ceiling"
         );
         let deploy = system_tx(&caller, &deploy_target, b"QVM1".to_vec(), 0, heavy, &fee);
         assert!(
-            vm_admissible(&deploy, &account, &fee, true),
+            vm_admissible(&deploy, &account, &fee, true, false),
             "a deploy may carry up to its own ceiling"
         );
         let past = system_tx(
@@ -2792,7 +2818,7 @@ mod tests {
             &fee,
         );
         assert!(
-            !vm_admissible(&past, &account, &fee, true),
+            !vm_admissible(&past, &account, &fee, true, false),
             "no deploy passes the deploy ceiling"
         );
     }
@@ -2813,7 +2839,7 @@ mod tests {
             100_000,
             &fee,
         );
-        assert!(vm_admissible(&fits, &account, &fee, true));
+        assert!(vm_admissible(&fits, &account, &fee, true, false));
         let over = system_tx(
             &caller,
             &contract,
@@ -2822,7 +2848,7 @@ mod tests {
             100_000,
             &fee,
         );
-        assert!(!vm_admissible(&over, &account, &fee, true));
+        assert!(!vm_admissible(&over, &account, &fee, true, false));
 
         let params =
             vec![0u8; qtv_vm::state::MEM_BYTES + 1 - crate::ledger::CONTRACT_CONTEXT_BYTES];
@@ -2838,7 +2864,7 @@ mod tests {
             100_000,
             &fee,
         );
-        assert!(!vm_admissible(&deploy, &account, &fee, true));
+        assert!(!vm_admissible(&deploy, &account, &fee, true, false));
     }
 
     #[test]

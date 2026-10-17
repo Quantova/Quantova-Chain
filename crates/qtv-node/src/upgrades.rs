@@ -6,18 +6,21 @@ pub struct Upgrades {
     pub gas_metered_from_height: u64,
     pub bound_draw_from_epoch: u64,
     pub hardened_from_height: u64,
+    pub deploy_fee_cap_from_height: u64,
 }
 
 pub const FROM_GENESIS: Upgrades = Upgrades {
     gas_metered_from_height: 0,
     bound_draw_from_epoch: 0,
     hardened_from_height: 0,
+    deploy_fee_cap_from_height: 0,
 };
 
 pub const TESTNET: Upgrades = Upgrades {
     gas_metered_from_height: 472_850,
     bound_draw_from_epoch: 11,
     hardened_from_height: 5_242_880,
+    deploy_fee_cap_from_height: 5_242_880,
 };
 
 pub fn for_chain(chain_id: u64) -> Upgrades {
@@ -39,6 +42,10 @@ impl Upgrades {
 
     pub fn hardened(&self, height: u64) -> bool {
         height >= self.hardened_from_height
+    }
+
+    pub fn deploy_fee_capped(&self, height: u64) -> bool {
+        height >= self.deploy_fee_cap_from_height
     }
 
     pub fn full_committee(&self, epoch: u64, heights_per_epoch: u64) -> bool {

@@ -663,6 +663,24 @@ fn node_info(ctx: &NodeContext, node: &DevNode) -> Json {
                 ),
                 ("quon_per_qtov", Json::str(fee.native_unit.to_string())),
                 ("transfer_quon", Json::str(fee.transfer_fee().to_string())),
+                (
+                    "deploy_cap_micro_usd",
+                    if qtv_node::upgrades::for_chain(fee.chain_id).deploy_fee_capped(node.height())
+                    {
+                        Json::str(qtv_node::fee::DEPLOY_CAP_MICRO_USD.to_string())
+                    } else {
+                        Json::Null
+                    },
+                ),
+                (
+                    "deploy_cap_quon",
+                    if qtv_node::upgrades::for_chain(fee.chain_id).deploy_fee_capped(node.height())
+                    {
+                        Json::str(fee.deploy_cap_native().to_string())
+                    } else {
+                        Json::Null
+                    },
+                ),
             ]),
         ),
         ("version", Json::str(&ctx.version)),
