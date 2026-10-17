@@ -61,32 +61,40 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-fn polymod(values: &[u8]) -> u32 {
-    let mut chk: u32 = 1;
-    for &value in values {
-        let top = chk >> 25;
-        chk = ((chk & 33554431) << 5) ^ u32::from(value);
-        for (bit, coefficient) in GENERATOR.iter().enumerate() {
-            if (top >> bit) & 1 == 1 {
-                chk ^= coefficient;
-            }
-        }
+const fn charset_index() -> [i8; 128] {
+    let mut table = [-1i8; 128];
+    let mut i = 0;
+    while i < CHARSET.len() {
+        table[CHARSET[i] as usize] = i as i8;
+        i += 1;
     }
-    chk
+    table
 }
 
-fn hrp_expand(hrp: &str) -> Vec<u8> {
-    let lowered = hrp.to_ascii_lowercase();
-    let bytes = lowered.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len() * 2 + 1);
-    for &byte in bytes {
-        out.push(byte >> 5);
+const CHARSET_INDEX: [i8; 128] = charset_index();
+
+#[inline]
+fn polymod_step(chk: u32, value: u8) -> u32 {
+    let top = chk >> 25;
+    let mut next = ((chk & 33554431) << 5) ^ u32::from(value);
+    let mut bit = 0;
+    while bit < GENERATOR.len() {
+        next ^= GENERATOR[bit] & 0u32.wrapping_sub((top >> bit) & 1);
+        bit += 1;
     }
-    out.push(0);
-    for &byte in bytes {
-        out.push(byte & 31);
+    next
+}
+
+fn hrp_polymod(hrp: &str) -> u32 {
+    let mut chk: u32 = 1;
+    for byte in hrp.bytes() {
+        chk = polymod_step(chk, byte.to_ascii_lowercase() >> 5);
     }
-    out
+    chk = polymod_step(chk, 0);
+    for byte in hrp.bytes() {
+        chk = polymod_step(chk, byte.to_ascii_lowercase() & 31);
+    }
+    chk
 }
 
 fn convert_bits(data: &[u8], from: u32, to: u32, pad: bool) -> Option<Vec<u8>> {
@@ -118,10 +126,14 @@ fn convert_bits(data: &[u8], from: u32, to: u32, pad: bool) -> Option<Vec<u8>> {
 }
 
 fn encode(hrp: &str, data: &[u8]) -> String {
-    let mut values = hrp_expand(hrp);
-    values.extend_from_slice(data);
-    values.extend_from_slice(&[0u8; 6]);
-    let residue = polymod(&values) ^ BECH32M_CONST;
+    let mut chk = hrp_polymod(hrp);
+    for &value in data {
+        chk = polymod_step(chk, value);
+    }
+    for _ in 0..6 {
+        chk = polymod_step(chk, 0);
+    }
+    let residue = chk ^ BECH32M_CONST;
 
     let mut out = String::with_capacity(hrp.len() + 1 + data.len() + 6);
     out.push_str(hrp);
@@ -171,16 +183,19 @@ fn decode(text: &str) -> Result<(String, Vec<u8>), Error> {
     let body = &lowered[separator + 1..];
     let mut groups = Vec::with_capacity(body.len());
     for byte in body.bytes() {
-        let index = CHARSET
-            .iter()
-            .position(|&symbol| symbol == byte)
+        let index = CHARSET_INDEX
+            .get(usize::from(byte))
+            .copied()
+            .filter(|&index| index >= 0)
             .ok_or(Error::BadChar)?;
         groups.push(index as u8);
     }
 
-    let mut values = hrp_expand(hrp);
-    values.extend_from_slice(&groups);
-    if polymod(&values) != BECH32M_CONST {
+    let mut chk = hrp_polymod(hrp);
+    for &group in &groups {
+        chk = polymod_step(chk, group);
+    }
+    if chk != BECH32M_CONST {
         return Err(Error::BadChecksum);
     }
 
