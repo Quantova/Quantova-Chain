@@ -54,13 +54,12 @@ validator, that operator runs `quantovad register --keystore <their keystore> --
 --online --slots <slots>` on their own machine and hands you the printed `validator = ...` line for the
 genesis. No party can reproduce another's key material.
 
-The slot budget is the height horizon. The sortition keys are one time, so the chain halts honestly at
-that height. The default of one hundred thousand blocks is about a day at a one second block interval.
-A longer testnet raises the horizon at the cost of larger key trees and more startup time, and running
-with no horizon needs the epoch and key rotation mechanism, which is a known open item. A public
-testnet either sets a horizon it is willing to reach and resets, or waits for key rotation.
+The slot budget bounds how many heights one set of sortition keys covers. Validators publish fresh
+sortition roots for the next epoch through epoch registration, and the committee moves to the new roots
+at the epoch boundary, so a testnet runs past one key tree for as long as its validators keep
+registering. A validator that publishes two different roots for the same epoch is not seated in it.
 
-Contract deploy and call transactions are held off the network until compute is priced by the meter
-and a per block budget bounds it, so a submitter cannot make every validator do unbounded work for a
-flat fee. Native transfers, staking, and governance are live. This is enforced in the node, not left
+Contract deploy and call transactions are live. Compute is priced by the meter and a per block meter
+budget bounds it, so a submitter cannot make every validator do unbounded work for a flat fee. Native
+transfers, staking, and governance are live as well. These limits are enforced in the node, not left
 to the operator.
