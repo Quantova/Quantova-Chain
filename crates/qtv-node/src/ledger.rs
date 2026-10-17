@@ -4667,6 +4667,7 @@ mod stake_state_tests {
         assert_eq!(over_rpc, direct, "both readers must agree");
     }
 
+    #[test]
     fn a_native_call_cannot_forge_the_paying_asset() {
         let mut prog = String::new();
         for (slot, off) in [(0u64, 88u64), (1, 96), (2, 104), (3, 112), (4, 120)] {

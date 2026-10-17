@@ -31,8 +31,13 @@ stays under `OUT/store`, only the node's public registration line goes into the 
 ```
 quantovad --config ./testnet-live/node.conf
 cd ../Transparency-Website/faucet-service
-FAUCET_OPERATOR_SEED=<the seed setup printed> FAUCET_RPC=http://127.0.0.1:8645 npm start
+(umask 077 && read -rs SEED && printf 'FAUCET_OPERATOR_SEED=%s\n' "$SEED" > .env.faucet)
+set -a && . ./.env.faucet && set +a && FAUCET_RPC=http://127.0.0.1:8645 npm start
 ```
+
+Paste the seed setup printed when the first line waits for input. It is read without echo, so it never
+reaches the terminal, the shell history or a process argument list, and it is kept in .env.faucet, which
+only your user can read.
 
 The node serves the gateway on the configured RPC address, the faucet dispenses TQTOV to a Q1 address
 over that gateway through the QCore SDK, and the explorer indexer reads the same gateway to fill the

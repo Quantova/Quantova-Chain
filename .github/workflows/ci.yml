@@ -18,19 +18,13 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: Quantova/QCore.rs
-          ref: e23fd1281af1da2efb610ddf5f975be04b005960
-          path: QCore.rs
-          persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
           repository: Quantova/QVM
           ref: 4979bda62d1cf34a56ac7a523262eaa49d130140
           path: QVM
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
-          toolchain: stable
+          toolchain: 1.98.0
           components: rustfmt, clippy
       - name: fmt
         working-directory: Quantova-Chain
@@ -41,6 +35,10 @@ jobs:
       - name: test
         working-directory: Quantova-Chain
         run: cargo test --workspace --all-features --locked
+      - name: test attributes
+        working-directory: Quantova-Chain
+        run: |
+          find crates -name '*.rs' -print0 | xargs -0 awk 'FNR==1{prev=""} /^[[:space:]]*fn (a|an)_[a-z0-9_]*\(\)/ { if (prev !~ /#\[test\]|#\[should_panic|#\[ignore/) { print FILENAME":"FNR": "$0; bad=1 } } { if ($0 !~ /^[[:space:]]*$/) prev=$0 } END { exit bad }'
       - name: supply chain gate
         working-directory: Quantova-Chain
         run: |

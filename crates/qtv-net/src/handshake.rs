@@ -211,24 +211,26 @@ fn respond<S: Read + Write>(
 
 static UNPINNED_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
 const MAX_UNPINNED_INFLIGHT: usize = 64;
+static KNOWN_SET_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+const MAX_KNOWN_SET_INFLIGHT: usize = 128;
 
-struct InflightGuard;
+struct InflightGuard(&'static AtomicUsize);
 
 impl InflightGuard {
-    fn acquire() -> Result<InflightGuard> {
-        if UNPINNED_INFLIGHT.fetch_add(1, Ordering::AcqRel) >= MAX_UNPINNED_INFLIGHT {
-            UNPINNED_INFLIGHT.fetch_sub(1, Ordering::AcqRel);
+    fn acquire(counter: &'static AtomicUsize, cap: usize) -> Result<InflightGuard> {
+        if counter.fetch_add(1, Ordering::AcqRel) >= cap {
+            counter.fetch_sub(1, Ordering::AcqRel);
             return Err(Error::Handshake(
                 "too many unauthenticated handshakes in flight",
             ));
         }
-        Ok(InflightGuard)
+        Ok(InflightGuard(counter))
     }
 }
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        UNPINNED_INFLIGHT.fetch_sub(1, Ordering::AcqRel);
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -238,7 +240,10 @@ fn respond_known<S: Read + Write>(
     expected: Option<&PeerId>,
     known: Option<&[PeerId]>,
 ) -> Result<Channel<S>> {
-    let _inflight = InflightGuard::acquire()?;
+    let _inflight = match known {
+        Some(_) => InflightGuard::acquire(&KNOWN_SET_INFLIGHT, MAX_KNOWN_SET_INFLIGHT)?,
+        None => InflightGuard::acquire(&UNPINNED_INFLIGHT, MAX_UNPINNED_INFLIGHT)?,
+    };
     let initiator_public: ml_dsa::PublicKey = read_array(&mut stream)?;
     let client_random: [u8; 32] = read_array(&mut stream)?;
 
