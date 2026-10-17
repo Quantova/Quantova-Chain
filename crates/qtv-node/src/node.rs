@@ -1765,35 +1765,55 @@ fn execute_ordered_across(
 
 const PARALLEL_VERIFY_THRESHOLD: usize = 4;
 
+pub(crate) const MAX_HASH_SCHEME_PER_BLOCK: usize = 128;
+
 fn verify_signatures(ledger: &Ledger, candidates: &[Wrapper], verify_cores: usize) -> Vec<bool> {
     let keys: Vec<Vec<u8>> = candidates
         .iter()
         .map(|wrapper| ledger.account(wrapper.body().sender()).public_key)
+        .collect();
+    let mut hash_scheme_seen = 0usize;
+    let admitted: Vec<bool> = candidates
+        .iter()
+        .map(|wrapper| {
+            if wrapper.scheme() == qtv_tx::SCHEME_HASH {
+                hash_scheme_seen += 1;
+                hash_scheme_seen <= MAX_HASH_SCHEME_PER_BLOCK
+            } else {
+                true
+            }
+        })
         .collect();
 
     let mut verdicts = vec![false; candidates.len()];
     let cores = verify_cores.min(candidates.len());
 
     if cores <= 1 || candidates.len() < PARALLEL_VERIFY_THRESHOLD {
-        for (verdict, (wrapper, key)) in verdicts.iter_mut().zip(candidates.iter().zip(&keys)) {
-            *verdict = crate::sigcache::verify(wrapper, key);
+        for ((verdict, admit), (wrapper, key)) in verdicts
+            .iter_mut()
+            .zip(&admitted)
+            .zip(candidates.iter().zip(&keys))
+        {
+            *verdict = *admit && crate::sigcache::verify(wrapper, key);
         }
         return verdicts;
     }
 
     let chunk = candidates.len().div_ceil(cores);
     thread::scope(|scope| {
-        for ((verdict_chunk, wrapper_chunk), key_chunk) in verdicts
+        for (((verdict_chunk, admit_chunk), wrapper_chunk), key_chunk) in verdicts
             .chunks_mut(chunk)
+            .zip(admitted.chunks(chunk))
             .zip(candidates.chunks(chunk))
             .zip(keys.chunks(chunk))
         {
             scope.spawn(move || {
-                for (verdict, (wrapper, key)) in verdict_chunk
+                for ((verdict, admit), (wrapper, key)) in verdict_chunk
                     .iter_mut()
+                    .zip(admit_chunk)
                     .zip(wrapper_chunk.iter().zip(key_chunk))
                 {
-                    *verdict = crate::sigcache::verify(wrapper, key);
+                    *verdict = *admit && crate::sigcache::verify(wrapper, key);
                 }
             });
         }
