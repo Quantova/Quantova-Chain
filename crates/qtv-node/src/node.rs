@@ -319,6 +319,12 @@ pub(crate) fn key_register_admissible(
     if qtv_account::address_for_key(wrapper.scheme(), &public_key).as_str() != body.sender() {
         return None;
     }
+    if wrapper.scheme() == qtv_tx::SCHEME_LATTICE
+        && <&[u8; qtv_crypto::ml_dsa::PUBLIC_KEY_BYTES]>::try_from(public_key.as_slice())
+            .is_ok_and(qtv_crypto::ml_dsa::public_key_is_degenerate)
+    {
+        return None;
+    }
     if body.nonce() != account.nonce || body.meter_limit() < crate::execution::TRANSFER_METER {
         return None;
     }
