@@ -25,6 +25,54 @@ use qtv_gateway::{ClientError, GatewayCall, Json, NodeContext, Request};
 
 const VERIFY_WORKERS: usize = 4;
 
+const READ_WORKERS: usize = 2;
+
+const RPC_WINDOW_BUDGET: Duration = Duration::from_millis(6);
+
+struct ReadJob {
+    ledger: Arc<Ledger>,
+    request: Request,
+    reply: Sender<Result<Json, ClientError>>,
+}
+
+fn start_read_pool() -> SyncSender<ReadJob> {
+    let (job_tx, job_rx) = sync_channel::<ReadJob>(1024);
+    let job_rx = Arc::new(Mutex::new(job_rx));
+    for _ in 0..READ_WORKERS {
+        let job_rx = Arc::clone(&job_rx);
+        thread::spawn(move || loop {
+            let job = {
+                let guard = match job_rx.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return,
+                };
+                guard.recv()
+            };
+            let Ok(ReadJob {
+                ledger,
+                request,
+                reply,
+            }) = job
+            else {
+                return;
+            };
+            let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                qtv_gateway::service::handle_ledger(&ledger, &request)
+            }));
+            let result = match served {
+                Ok(Some(result)) => result,
+                _ => Err(ClientError {
+                    code: "internal".to_string(),
+                    message: "the node could not serve this call".to_string(),
+                    http: 500,
+                }),
+            };
+            let _ = reply.send(result);
+        });
+    }
+    job_tx
+}
+
 struct VerifyJob {
     wrapper: Wrapper,
     ledger: Arc<Ledger>,
@@ -285,6 +333,8 @@ pub struct Driver {
     verify_jobs: Option<SyncSender<VerifyJob>>,
     verify_done: Option<Receiver<VerifyDone>>,
     verify_snapshot: Option<(u64, Arc<Ledger>)>,
+    read_jobs: Option<SyncSender<ReadJob>>,
+    rpc_window: (Instant, Duration),
 }
 
 impl Driver {
@@ -330,6 +380,8 @@ impl Driver {
             verify_jobs: None,
             verify_done: None,
             verify_snapshot: None,
+            read_jobs: None,
+            rpc_window: (Instant::now(), Duration::ZERO),
         }
     }
 
@@ -406,10 +458,19 @@ impl Driver {
             return;
         }
         let started = Instant::now();
+        if self.rpc_window.0.elapsed() >= TICK {
+            self.rpc_window = (started, Duration::ZERO);
+        }
+        let budget = RPC_TICK_BUDGET
+            .min(RPC_WINDOW_BUDGET)
+            .saturating_sub(self.rpc_window.1);
+        if self.read_jobs.is_none() {
+            self.read_jobs = Some(start_read_pool());
+        }
         let fee_params = self.node.fee_params();
         let mut snapshot: Option<Arc<qtv_node::ledger::Ledger>> = None;
         for _ in 0..RPC_CALLS_PER_TICK {
-            if started.elapsed() >= RPC_TICK_BUDGET {
+            if started.elapsed() >= budget {
                 break;
             }
             let Some(call) = self
@@ -419,6 +480,28 @@ impl Driver {
             else {
                 break;
             };
+            if qtv_gateway::service::is_ledger_read(&call.request) {
+                if snapshot.is_none() {
+                    snapshot = Some(self.fresh_snapshot());
+                }
+                if let (Some(ledger), Some(jobs)) = (snapshot.as_ref(), self.read_jobs.as_ref()) {
+                    let job = ReadJob {
+                        ledger: Arc::clone(ledger),
+                        request: call.request,
+                        reply: call.reply,
+                    };
+                    if let Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) =
+                        jobs.try_send(job)
+                    {
+                        let _ = job.reply.send(Err(ClientError {
+                            code: "rate_limited".to_string(),
+                            message: "the node is busy, retry shortly".to_string(),
+                            http: 503,
+                        }));
+                    }
+                    continue;
+                }
+            }
             if let Request::Submit(bytes) = &call.request {
                 if snapshot.is_none() {
                     snapshot = Some(self.fresh_snapshot());
@@ -454,6 +537,7 @@ impl Driver {
             });
             let _ = call.reply.send(result);
         }
+        self.rpc_window.1 = self.rpc_window.1.saturating_add(started.elapsed());
     }
 
     pub fn run(

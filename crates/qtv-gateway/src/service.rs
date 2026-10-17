@@ -4,6 +4,7 @@
 use qtv_devnet::wire::wrapper_from_bytes;
 use qtv_devnet::DevNode;
 use qtv_node::fee::FeeParams;
+use qtv_node::ledger::Ledger;
 use qtv_node::ledger::SideEvent;
 use qtv_node::mempool::{Admitted, Reject};
 use qtv_tx::Wrapper;
@@ -253,7 +254,7 @@ fn key_list(body: &Json) -> Result<Vec<[u8; 32]>, ClientError> {
     Ok(keys)
 }
 
-fn storage_at(node: &DevNode, address: &str, keys: &[[u8; 32]]) -> Result<Json, ClientError> {
+fn storage_at(ledger: &Ledger, address: &str, keys: &[[u8; 32]]) -> Result<Json, ClientError> {
     if qtv_idfmt::parse_address(address).is_err() {
         return Err(ClientError::bad(
             "bad_address",
@@ -277,7 +278,6 @@ fn storage_at(node: &DevNode, address: &str, keys: &[[u8; 32]]) -> Result<Json, 
             ))
         }
     };
-    let ledger = node.ledger();
     let slots: Vec<Json> = keys
         .iter()
         .map(|key| {
@@ -321,45 +321,78 @@ fn issuer_id(body: &Json) -> Result<[u8; 32], ClientError> {
     hex_bytes::<32>(body, "issuer")
 }
 
+pub fn is_ledger_read(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Account(_)
+            | Request::Container(_)
+            | Request::Storage(_)
+            | Request::StorageAt { .. }
+            | Request::Supply
+            | Request::AssetBalance { .. }
+            | Request::AssetSupply { .. }
+            | Request::BridgedBalance { .. }
+            | Request::BridgedSupply { .. }
+            | Request::BridgeReserves { .. }
+            | Request::StakingState
+            | Request::GovernanceReferenda
+            | Request::Validators
+            | Request::ChainParams
+    )
+}
+
+pub fn handle_ledger(ledger: &Ledger, request: &Request) -> Option<Result<Json, ClientError>> {
+    Some(match request {
+        Request::Account(address) => account(ledger, address),
+        Request::Container(address) => container(ledger, address),
+        Request::Storage(address) => storage(ledger, address),
+        Request::StorageAt { address, keys } => storage_at(ledger, address, keys),
+        Request::Supply => Ok(supply(ledger)),
+        Request::AssetBalance { issuer, holder } => Ok(asset_balance(ledger, issuer, holder)),
+        Request::AssetSupply { issuer } => Ok(asset_supply(ledger, issuer)),
+        Request::BridgedBalance { asset_id, holder } => {
+            Ok(bridged_balance(ledger, asset_id, holder))
+        }
+        Request::BridgedSupply { asset_id } => Ok(bridged_supply(ledger, asset_id)),
+        Request::BridgeReserves { asset_id } => Ok(bridge_reserves(ledger, asset_id)),
+        Request::StakingState => Ok(staking_state(ledger)),
+        Request::GovernanceReferenda => Ok(governance_referenda(ledger)),
+        Request::Validators => Ok(validators(ledger)),
+        Request::ChainParams => Ok(chain_params(ledger)),
+        _ => return None,
+    })
+}
+
 pub fn handle(
     ctx: &NodeContext,
     node: &mut DevNode,
     request: Request,
 ) -> Result<Json, ClientError> {
+    if let Some(result) = handle_ledger(node.ledger(), &request) {
+        return result;
+    }
     match request {
         Request::NodeInfo => Ok(node_info(ctx, node)),
         Request::Head => Ok(head(node)),
-        Request::Account(address) => account(node, &address),
         Request::Transaction(tx_id) => transaction(node, &tx_id),
         Request::Submit(bytes) => Ok(submit(node, bytes)),
         Request::Block(selector) => block(node, selector),
-        Request::Validators => Ok(validators(node)),
-        Request::ChainParams => Ok(chain_params(node)),
-        Request::StakingState => Ok(staking_state(node)),
         Request::Pending => Ok(pending(node)),
-        Request::Supply => Ok(supply(node)),
-        Request::Container(address) => container(node, &address),
-        Request::Storage(address) => storage(node, &address),
-        Request::StorageAt { address, keys } => storage_at(node, &address, &keys),
         Request::Events(height) => events(node, height),
         Request::SideEvents(height) => side_events(node, height),
         Request::FinalizedHead => Ok(finalized_head(node)),
         Request::BurnBlock(height) => burn_block(node, height),
         Request::BurnHeightsAfter(cursor) => Ok(burn_heights_after(node, cursor)),
-        Request::BridgedBalance { asset_id, holder } => {
-            Ok(bridged_balance(node, &asset_id, &holder))
-        }
-        Request::BridgedSupply { asset_id } => Ok(bridged_supply(node, &asset_id)),
-        Request::BridgeReserves { asset_id } => Ok(bridge_reserves(node, &asset_id)),
-        Request::AssetBalance { issuer, holder } => Ok(asset_balance(node, &issuer, &holder)),
-        Request::AssetSupply { issuer } => Ok(asset_supply(node, &issuer)),
-        Request::GovernanceReferenda => Ok(governance_referenda(node)),
         Request::GenesisAccounts => Ok(genesis_accounts(node)),
+        _ => Err(ClientError {
+            code: "internal".to_string(),
+            message: "the node could not serve this call".to_string(),
+            http: 500,
+        }),
     }
 }
 
-fn bridged_balance(node: &DevNode, asset_id: &[u8; 16], holder: &[u8; 32]) -> Json {
-    let ledger = node.ledger();
+fn bridged_balance(ledger: &Ledger, asset_id: &[u8; 16], holder: &[u8; 32]) -> Json {
     object(vec![
         ("asset_id", Json::str(crate::json::to_hex(asset_id))),
         ("holder", Json::str(crate::json::to_hex(holder))),
@@ -375,8 +408,7 @@ fn bridged_balance(node: &DevNode, asset_id: &[u8; 16], holder: &[u8; 32]) -> Js
     ])
 }
 
-fn bridge_reserves(node: &DevNode, asset_id: &[u8; 16]) -> Json {
-    let ledger = node.ledger();
+fn bridge_reserves(ledger: &Ledger, asset_id: &[u8; 16]) -> Json {
     let (custody, supply) = ledger.bridge_reserve_state(asset_id).unwrap_or((0, 0));
     let outstanding = custody.saturating_sub(supply);
     object(vec![
@@ -391,8 +423,7 @@ fn bridge_reserves(node: &DevNode, asset_id: &[u8; 16]) -> Json {
     ])
 }
 
-fn asset_balance(node: &DevNode, issuer: &[u8; 32], holder: &[u8; 32]) -> Json {
-    let ledger = node.ledger();
+fn asset_balance(ledger: &Ledger, issuer: &[u8; 32], holder: &[u8; 32]) -> Json {
     object(vec![
         (
             "issuer",
@@ -410,8 +441,7 @@ fn asset_balance(node: &DevNode, issuer: &[u8; 32], holder: &[u8; 32]) -> Json {
     ])
 }
 
-fn asset_supply(node: &DevNode, issuer: &[u8; 32]) -> Json {
-    let ledger = node.ledger();
+fn asset_supply(ledger: &Ledger, issuer: &[u8; 32]) -> Json {
     object(vec![
         (
             "issuer",
@@ -421,8 +451,7 @@ fn asset_supply(node: &DevNode, issuer: &[u8; 32]) -> Json {
     ])
 }
 
-fn governance_referenda(node: &DevNode) -> Json {
-    let ledger = node.ledger();
+fn governance_referenda(ledger: &Ledger) -> Json {
     let items: Vec<Json> = ledger
         .gov_referenda(MAX_LIST_ITEMS)
         .into_iter()
@@ -455,8 +484,7 @@ fn governance_referenda(node: &DevNode) -> Json {
     object(vec![("referenda", Json::Array(items))])
 }
 
-fn bridged_supply(node: &DevNode, asset_id: &[u8; 16]) -> Json {
-    let ledger = node.ledger();
+fn bridged_supply(ledger: &Ledger, asset_id: &[u8; 16]) -> Json {
     let asset = ledger.bridged_asset(asset_id);
     object(vec![
         ("asset_id", Json::str(crate::json::to_hex(asset_id))),
@@ -544,8 +572,7 @@ fn burn_heights_after(node: &DevNode, cursor: u64) -> Json {
     ])
 }
 
-fn staking_state(node: &DevNode) -> Json {
-    let ledger = node.ledger();
+fn staking_state(ledger: &Ledger) -> Json {
     let mainnet_start = ledger.stake_mainnet_start();
     object(vec![
         ("reward_pool", Json::Int(ledger.stake_pool())),
@@ -562,8 +589,7 @@ fn staking_state(node: &DevNode) -> Json {
     ])
 }
 
-fn chain_params(node: &DevNode) -> Json {
-    let ledger = node.ledger();
+fn chain_params(ledger: &Ledger) -> Json {
     let tracks: Vec<Json> = qtv_governance::Track::all()
         .iter()
         .map(|track| {
@@ -620,8 +646,7 @@ fn chain_params(node: &DevNode) -> Json {
     ])
 }
 
-fn validators(node: &DevNode) -> Json {
-    let ledger = node.ledger();
+fn validators(ledger: &Ledger) -> Json {
     let ids = ledger.validator_ids();
     let total = ids.len();
     let mut list = Vec::new();
@@ -704,14 +729,14 @@ fn head(node: &DevNode) -> Json {
     ])
 }
 
-fn account(node: &DevNode, address: &str) -> Result<Json, ClientError> {
+fn account(ledger: &Ledger, address: &str) -> Result<Json, ClientError> {
     if qtv_idfmt::parse_address(address).is_err() {
         return Err(ClientError::bad(
             "bad_address",
             "the address is not a q1 Bech32m address",
         ));
     }
-    let account = node.ledger().account(address);
+    let account = ledger.account(address);
     Ok(object(vec![
         ("address", Json::str(address)),
         ("nonce", Json::Int(account.nonce)),
@@ -904,10 +929,10 @@ fn pending(node: &DevNode) -> Json {
     ])
 }
 
-fn supply(node: &DevNode) -> Json {
+fn supply(ledger: &Ledger) -> Json {
     object(vec![(
         "supply_quon",
-        Json::str(node.ledger().total_supply().to_string()),
+        Json::str(ledger.total_supply().to_string()),
     )])
 }
 
@@ -1214,14 +1239,14 @@ fn side_event_json(index: u64, event: &SideEvent) -> Json {
     object(fields)
 }
 
-fn container(node: &DevNode, address: &str) -> Result<Json, ClientError> {
+fn container(ledger: &Ledger, address: &str) -> Result<Json, ClientError> {
     if qtv_idfmt::parse_address(address).is_err() {
         return Err(ClientError::bad(
             "bad_address",
             "the address is not a q1 address",
         ));
     }
-    match node.ledger().contract_code_at(address) {
+    match ledger.contract_code_at(address) {
         Some(code) => Ok(object(vec![
             ("address", Json::str(address)),
             ("container", Json::str(crate::json::to_hex(&code))),
@@ -1231,22 +1256,19 @@ fn container(node: &DevNode, address: &str) -> Result<Json, ClientError> {
     }
 }
 
-fn storage(node: &DevNode, address: &str) -> Result<Json, ClientError> {
+fn storage(ledger: &Ledger, address: &str) -> Result<Json, ClientError> {
     if qtv_idfmt::parse_address(address).is_err() {
         return Err(ClientError::bad(
             "bad_address",
             "the address is not a q1 address",
         ));
     }
-    let all = node
-        .ledger()
-        .contract_storage_at_capped(address)
-        .ok_or_else(|| {
-            ClientError::bad(
-                "storage_too_large",
-                "the contract storage is too large to serve over rpc",
-            )
-        })?;
+    let all = ledger.contract_storage_at_capped(address).ok_or_else(|| {
+        ClientError::bad(
+            "storage_too_large",
+            "the contract storage is too large to serve over rpc",
+        )
+    })?;
     let total = all.len();
     let slots: Vec<Json> = all
         .into_iter()
