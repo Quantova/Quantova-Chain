@@ -13,14 +13,14 @@ pub const FROM_GENESIS: Upgrades = Upgrades {
     gas_metered_from_height: 0,
     bound_draw_from_epoch: 0,
     hardened_from_height: 0,
-    deploy_fee_cap_from_height: 0,
+    deploy_fee_cap_from_height: u64::MAX,
 };
 
 pub const TESTNET: Upgrades = Upgrades {
     gas_metered_from_height: 472_850,
     bound_draw_from_epoch: 11,
     hardened_from_height: 5_242_880,
-    deploy_fee_cap_from_height: 5_242_880,
+    deploy_fee_cap_from_height: u64::MAX,
 };
 
 pub fn for_chain(chain_id: u64) -> Upgrades {
