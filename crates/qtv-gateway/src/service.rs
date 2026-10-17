@@ -66,6 +66,12 @@ pub enum Request {
     },
     GovernanceReferenda,
     GenesisAccounts,
+    Finality(u64),
+    EventProof {
+        height: u64,
+        index: u64,
+    },
+    ValidatorSet(u64),
 }
 
 pub struct ClientError {
@@ -199,6 +205,30 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
                 .and_then(Json::as_u64)
                 .ok_or_else(|| ClientError::bad("bad_request", "burn_block needs a height"))?;
             Ok(Request::BurnBlock(height))
+        }
+        "get_finality" => {
+            let height = body
+                .get("height")
+                .and_then(Json::as_u64)
+                .ok_or_else(|| ClientError::bad("bad_request", "get_finality needs a height"))?;
+            Ok(Request::Finality(height))
+        }
+        "get_event_proof" => {
+            let height = body
+                .get("height")
+                .and_then(Json::as_u64)
+                .ok_or_else(|| ClientError::bad("bad_request", "get_event_proof needs a height"))?;
+            let index = body
+                .get("index")
+                .and_then(Json::as_u64)
+                .ok_or_else(|| ClientError::bad("bad_request", "get_event_proof needs an index"))?;
+            Ok(Request::EventProof { height, index })
+        }
+        "get_validator_set" => {
+            let epoch = body.get("epoch").and_then(Json::as_u64).ok_or_else(|| {
+                ClientError::bad("bad_request", "get_validator_set needs an epoch")
+            })?;
+            Ok(Request::ValidatorSet(epoch))
         }
         "burn_heights_after" => {
             let cursor = body.get("cursor").and_then(Json::as_u64).ok_or_else(|| {
@@ -384,6 +414,9 @@ pub fn handle(
         Request::BurnBlock(height) => burn_block(node, height),
         Request::BurnHeightsAfter(cursor) => Ok(burn_heights_after(node, cursor)),
         Request::GenesisAccounts => Ok(genesis_accounts(node)),
+        Request::Finality(height) => finality(node, height),
+        Request::EventProof { height, index } => event_proof(node, height, index),
+        Request::ValidatorSet(epoch) => Ok(validator_set(node, epoch)),
         _ => Err(ClientError {
             code: "internal".to_string(),
             message: "the node could not serve this call".to_string(),
@@ -524,6 +557,107 @@ fn finalized_head(node: &DevNode) -> Json {
     object(vec![
         ("head", Json::Int(node.finalized_head())),
         ("bridge_epoch", Json::Int(node.ledger().bridge_epoch())),
+    ])
+}
+
+fn finality(node: &DevNode, height: u64) -> Result<Json, ClientError> {
+    node.take_serve_saturated();
+    let Some(served) = node.served_block(height) else {
+        if node.take_serve_saturated() {
+            return Err(ClientError::busy());
+        }
+        return Err(ClientError::not_found(format!(
+            "no finalized block at height {height}"
+        )));
+    };
+    let header = served.block.header();
+    Ok(object(vec![
+        ("height", Json::Int(header.height())),
+        ("epoch", Json::Int(node.epoch_of(header.height()))),
+        ("chain_id", Json::str(node.chain_id().to_string())),
+        (
+            "header_bytes",
+            Json::str(crate::json::to_hex(&qtv_codec::to_bytes(header))),
+        ),
+        (
+            "header_hash",
+            Json::str(crate::json::to_hex(&header.hash())),
+        ),
+        (
+            "certificate",
+            Json::str(crate::json::to_hex(served.block.certificate())),
+        ),
+    ]))
+}
+
+fn event_proof(node: &DevNode, height: u64, index: u64) -> Result<Json, ClientError> {
+    node.take_serve_saturated();
+    let Some(served) = node.served_block(height) else {
+        if node.take_serve_saturated() {
+            return Err(ClientError::busy());
+        }
+        return Err(ClientError::not_found(format!(
+            "no finalized block at height {height}"
+        )));
+    };
+    let header = served.block.header();
+    let leaves: Vec<Vec<u8>> = node.events_at(height).iter().map(|e| e.encode()).collect();
+    if qtv_block::event_root(&leaves) != *header.event_root() {
+        if node.take_serve_saturated() {
+            return Err(ClientError::busy());
+        }
+        return Err(ClientError::not_found(format!(
+            "the events held for height {height} do not match its header"
+        )));
+    }
+    let position = usize::try_from(index).unwrap_or(usize::MAX);
+    let Some(proof) = qtv_block::prove_inclusion(&leaves, position) else {
+        return Err(ClientError::not_found(format!(
+            "height {height} has no event at index {index}"
+        )));
+    };
+    let steps: Vec<Json> = proof
+        .steps
+        .iter()
+        .map(|step| {
+            object(vec![
+                ("sibling", Json::str(crate::json::to_hex(&step.sibling))),
+                ("left", Json::Bool(step.sibling_on_left)),
+            ])
+        })
+        .collect();
+    Ok(object(vec![
+        ("height", Json::Int(height)),
+        ("index", Json::Int(index)),
+        ("event_count", Json::Int(leaves.len() as u64)),
+        (
+            "event_root",
+            Json::str(crate::json::to_hex(header.event_root())),
+        ),
+        ("leaf", Json::str(crate::json::to_hex(&leaves[position]))),
+        ("steps", Json::Array(steps)),
+    ]))
+}
+
+fn validator_set(node: &DevNode, epoch: u64) -> Json {
+    let roster = node.roster_for_epoch(epoch);
+    let total: u128 = roster.iter().map(|r| u128::from(r.stake)).sum();
+    let members: Vec<Json> = roster
+        .iter()
+        .map(|r| {
+            object(vec![
+                ("id", Json::Int(r.id)),
+                ("stake", Json::str(r.stake.to_string())),
+                ("bond_address", Json::str(&r.bond_address)),
+                ("attest_pk", Json::str(crate::json::to_hex(&r.attest_pk))),
+            ])
+        })
+        .collect();
+    object(vec![
+        ("epoch", Json::Int(epoch)),
+        ("chain_id", Json::str(node.chain_id().to_string())),
+        ("total_stake", Json::str(total.to_string())),
+        ("members", Json::Array(members)),
     ])
 }
 

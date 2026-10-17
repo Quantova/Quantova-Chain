@@ -2749,6 +2749,18 @@ impl DevNode {
         self.burn_archive.entry(height)
     }
 
+    pub fn epoch_of(&self, height: Height) -> u64 {
+        self.consensus.epoch_for(height)
+    }
+
+    pub fn roster_for_epoch(&self, epoch: u64) -> Vec<ValidatorRegistration> {
+        self.epoch_roster_for(epoch)
+    }
+
+    pub fn chain_id(&self) -> u64 {
+        self.consensus.chain_id()
+    }
+
     pub fn burn_heights_after(&self, cursor: Height) -> Vec<Height> {
         self.burn_archive.heights_after(cursor)
     }
