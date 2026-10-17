@@ -17,6 +17,46 @@ use qtv_wipe::Zeroizing;
 
 const MINT_METER: u64 = 5_000_000;
 
+const DEFAULT_FINALITY_DEPTH: u32 = 32;
+
+const FINALITY_DEPTHS: &[(u32, u32)] = &[
+    (43, 6),
+    (2, 64),
+    (16, 2),
+    (3, 15),
+    (4, 128),
+    (5, 1),
+    (22, 32),
+    (23, 19),
+    (24, 1),
+    (25, 12),
+    (26, 2),
+    (27, 1),
+    (28, 1),
+    (29, 1),
+    (30, 1),
+    (31, 1),
+    (32, 1),
+    (34, 10),
+    (35, 12),
+    (36, 30),
+    (37, 24),
+];
+
+const KNOWN_SOURCE_CHAINS: std::ops::RangeInclusive<u32> = 1..=43;
+
+fn finality_depth_for(source_chain: u32) -> Option<u32> {
+    if !KNOWN_SOURCE_CHAINS.contains(&source_chain) || source_chain == 38 {
+        return None;
+    }
+    Some(
+        FINALITY_DEPTHS
+            .iter()
+            .find(|(chain, _)| *chain == source_chain)
+            .map_or(DEFAULT_FINALITY_DEPTH, |(_, depth)| *depth),
+    )
+}
+
 fn urandom32() -> Zeroizing<[u8; 32]> {
     let mut b = Zeroizing::new([0u8; 32]);
     if qtv_crypto::rng::try_fill_random(&mut b[..]).is_err() {
@@ -80,9 +120,15 @@ fn fixed<const N: usize>(value: &str, name: &str) -> [u8; N] {
 }
 
 fn fact_from(a: &[String]) -> Fact {
+    let source_chain: u32 = arg(&a[0], "source_chain");
+    let finality_depth = finality_depth_for(source_chain).unwrap_or_else(|| {
+        fail(&format!(
+            "source chain {source_chain} has no pinned finality depth, so no fact can be signed for it"
+        ))
+    });
     let fact = Fact {
         version: FACT_VERSION,
-        source_chain: arg(&a[0], "source_chain"),
+        source_chain,
         dest_chain: arg(&a[1], "dest_chain"),
         route_id: arg(&a[2], "route_id"),
         direction: Direction::Deposit,
@@ -91,7 +137,7 @@ fn fact_from(a: &[String]) -> Fact {
         asset_id: fixed(&a[5], "asset"),
         amount: arg(&a[6], "amount"),
         recipient: fixed(&a[7], "recipient"),
-        finality_depth: 0,
+        finality_depth,
         observed_height: arg(&a[9], "observed"),
         expiry_height: arg(&a[8], "expiry"),
     };
@@ -112,8 +158,9 @@ fn fact_from(a: &[String]) -> Fact {
 
 fn describe(fact: &Fact) -> String {
     format!(
-        "source_chain {} dest_chain {} route {} nonce {} source_ref {} asset {} amount {} recipient {} observed {} expiry {}",
+        "source_chain {} finality_depth {} dest_chain {} route {} nonce {} source_ref {} asset {} amount {} recipient {} observed {} expiry {}",
         fact.source_chain,
+        fact.finality_depth,
         fact.dest_chain,
         fact.route_id,
         fact.nonce,
@@ -255,7 +302,6 @@ fn keygen(a: &[String]) {
     let prefix = &a[2];
     let seed = urandom32();
     let (pk, sk) = ml_dsa::keygen(&seed);
-    let sk = Zeroizing::new(sk);
     let pop = ml_dsa::sign(
         &sk,
         &operator_pop_challenge(id, &pk, chain_id),
@@ -472,7 +518,6 @@ fn guardian_keygen(a: &[String]) {
     let prefix = &a[0];
     let seed = urandom32();
     let (pk, sk) = ml_dsa::keygen(&seed);
-    let sk = Zeroizing::new(sk);
     let mut rendered = Zeroizing::new(String::with_capacity(2 * (pk.len() + sk.len()) + 2));
     push_hex(&mut rendered, &pk);
     rendered.push(' ');
@@ -517,5 +562,34 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(private_text(text).unwrap(), "1 2 3\n");
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn every_signed_fact_carries_the_pinned_finality_depth_of_its_source() {
+        let args = |source: &str| -> Vec<String> {
+            [
+                source,
+                "9000",
+                "1",
+                "7",
+                &"11".repeat(32),
+                &"22".repeat(16),
+                "500",
+                &"33".repeat(32),
+                "900000",
+                "800000",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+        };
+        assert_eq!(fact_from(&args("43")).finality_depth, 6);
+        assert_eq!(fact_from(&args("2")).finality_depth, 64);
+        assert_eq!(fact_from(&args("4")).finality_depth, 128);
+        assert_eq!(fact_from(&args("6")).finality_depth, DEFAULT_FINALITY_DEPTH);
+        assert!(FINALITY_DEPTHS.iter().all(|(_, depth)| *depth >= 1));
+        assert_eq!(finality_depth_for(0), None);
+        assert_eq!(finality_depth_for(38), None);
+        assert_eq!(finality_depth_for(44), None);
     }
 }
