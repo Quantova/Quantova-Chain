@@ -6,24 +6,20 @@ use std::fmt;
 use qtv_crypto::{ml_dsa, sha3};
 
 use crate::{fill_random, Error, Result};
-use qtv_wipe::Zeroize;
 
 #[derive(Clone)]
 pub struct Identity {
     public: ml_dsa::PublicKey,
-    secret: ml_dsa::SecretKey,
-}
-
-impl Drop for Identity {
-    fn drop(&mut self) {
-        self.secret.zeroize();
-    }
+    secret: std::sync::Arc<ml_dsa::SecretKey>,
 }
 
 impl Identity {
     pub fn from_seed(seed: &[u8; ml_dsa::SEED_BYTES]) -> Self {
         let (public, secret) = ml_dsa::keygen(seed);
-        Self { public, secret }
+        Self {
+            public,
+            secret: std::sync::Arc::new(secret),
+        }
     }
 
     pub fn public(&self) -> &ml_dsa::PublicKey {

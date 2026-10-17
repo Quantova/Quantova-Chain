@@ -5005,7 +5005,7 @@ mod tests {
     }
 
     const BRIDGE_DEST: u32 = 9000;
-    type OperatorSecret = [u8; qtv_crypto::ml_dsa::SECRET_KEY_BYTES];
+    type OperatorSecret = qtv_crypto::ml_dsa::SecretKey;
 
     fn bridge_operator(index: u64) -> ([u8; qtv_crypto::ml_dsa::PUBLIC_KEY_BYTES], OperatorSecret) {
         let mut seed = [0u8; 32];

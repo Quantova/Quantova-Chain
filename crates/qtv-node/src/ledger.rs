@@ -1191,6 +1191,9 @@ impl Ledger {
     }
 
     pub fn set_validator_attest_key(&mut self, address: &str, attest_pk: &[u8]) {
+        if attest_key_degenerate(attest_pk) {
+            return;
+        }
         if let Some(id) = address_id(address) {
             self.write_leaf(stake_attest_key(&id), attest_pk.to_vec());
         }
@@ -1201,6 +1204,9 @@ impl Ledger {
         address: &str,
         attest_pk: &[u8],
     ) -> Option<(Key, Vec<u8>)> {
+        if attest_key_degenerate(attest_pk) {
+            return None;
+        }
         let id = address_id(address)?;
         let key = stake_attest_key(&id);
         self.write_leaf(key, attest_pk.to_vec());
@@ -9160,6 +9166,11 @@ pub const NATIVE_EVENT_SOURCE: &str = "qtv/native";
 
 pub const SLASH_DISPOSITION_BURN: &str = "burn";
 pub const SLASH_DISPOSITION_TREASURY: &str = "treasury";
+
+fn attest_key_degenerate(attest_pk: &[u8]) -> bool {
+    <&[u8; qtv_crypto::ml_dsa::PUBLIC_KEY_BYTES]>::try_from(attest_pk)
+        .is_ok_and(qtv_crypto::ml_dsa::public_key_is_degenerate)
+}
 
 pub const EVENT_TRANSFER: [u8; 4] = *b"QXFR";
 pub const EVENT_BOND: [u8; 4] = *b"QBND";

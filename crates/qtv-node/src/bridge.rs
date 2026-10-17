@@ -784,12 +784,7 @@ mod tests {
         }
     }
 
-    fn operator(
-        index: u64,
-    ) -> (
-        [u8; PUBLIC_KEY_BYTES],
-        [u8; qtv_crypto::ml_dsa::SECRET_KEY_BYTES],
-    ) {
+    fn operator(index: u64) -> ([u8; PUBLIC_KEY_BYTES], qtv_crypto::ml_dsa::SecretKey) {
         let mut seed = [0u8; 32];
         seed[..8].copy_from_slice(&index.to_le_bytes());
         ml_dsa::keygen(&seed)

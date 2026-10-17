@@ -35,10 +35,7 @@ const HASH_SEED_LEN: usize = slh_dsa::PUBLIC_KEY_BYTES / 2;
 
 pub fn hash_keypair(
     seed: &[u8; SEED_LEN],
-) -> (
-    [u8; slh_dsa::SECRET_KEY_BYTES],
-    [u8; slh_dsa::PUBLIC_KEY_BYTES],
-) {
+) -> (slh_dsa::SecretKey, [u8; slh_dsa::PUBLIC_KEY_BYTES]) {
     let mut material = [0u8; 3 * HASH_SEED_LEN];
     sha3::shake256(seed, &mut material);
     let mut sk_seed = [0u8; HASH_SEED_LEN];
@@ -137,8 +134,7 @@ pub fn derive_with_scheme(
             public_key.to_vec()
         }
         SCHEME_HASH => {
-            let (mut secret, public_key) = hash_keypair(&seed);
-            secret.zeroize();
+            let (_secret, public_key) = hash_keypair(&seed);
             public_key.to_vec()
         }
         _ => return None,

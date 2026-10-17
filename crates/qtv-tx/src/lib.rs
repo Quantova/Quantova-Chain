@@ -7,7 +7,6 @@
 use qtv_account::Account;
 use qtv_codec::{to_bytes, Encode, Encoder};
 use qtv_crypto::{ml_dsa, sha3, slh_dsa};
-use qtv_wipe::Zeroizing;
 
 pub const SCHEME_LATTICE: u8 = qtv_account::SCHEME_LATTICE;
 
@@ -307,7 +306,6 @@ pub fn sign(account: &Account, body: &Body) -> Wrapper {
         }
         SCHEME_HASH => {
             let (secret, _public) = qtv_account::hash_keypair(account.seed());
-            let secret = Zeroizing::new(secret);
             slh_dsa::sign(&secret, &digest, DOMAIN_TX, &SIGN_RANDOMIZER_HASH)
                 .expect("the domain context stays within the length bound")
                 .to_vec()
