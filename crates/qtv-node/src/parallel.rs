@@ -311,7 +311,7 @@ mod tests {
             u128::from(fee_params.transfer_fee()),
             call,
         );
-        sign(from, &body)
+        sign(from, &body, &[0u8; 32])
     }
 
     fn population(count: u64, balance: u64) -> (Ledger, Vec<KeyAccount>) {
@@ -561,7 +561,7 @@ mod tests {
                 u128::from(fee.transfer_fee()),
                 call,
             );
-            sign(&attacker, &body)
+            sign(&attacker, &body, &[0u8; 32])
         };
 
         for parallel_path in [false, true] {
@@ -612,7 +612,7 @@ mod tests {
                 u128::from(fee.transfer_fee()),
                 call,
             );
-            sign(&attacker, &body)
+            sign(&attacker, &body, &[0u8; 32])
         };
         let block = vec![signed(&canonical), signed(&alias)];
 
@@ -667,7 +667,7 @@ mod tests {
                 u128::from(fee.transfer_fee()),
                 call,
             );
-            sign(&attacker, &body)
+            sign(&attacker, &body, &[0u8; 32])
         };
         let block = vec![
             signed(&canonical, &sink_a.address()),

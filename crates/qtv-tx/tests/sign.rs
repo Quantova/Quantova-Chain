@@ -36,8 +36,8 @@ fn rebuild(body: &Body, nonce: u64, args: Vec<u8>) -> Body {
 #[test]
 fn signed_transaction_verifies() {
     let account = derive(&master(), 0);
-    let wrapper = sign(&account, &sample_body());
-    assert!(verify(&wrapper, account.public_key()));
+    let wrapper = sign(&account, &sample_body(), &[0u8; 32]);
+    assert!(verify(&wrapper, account.public_key(), &[0u8; 32]));
     assert_eq!(wrapper.scheme(), SCHEME_LATTICE);
 }
 
@@ -45,30 +45,30 @@ fn signed_transaction_verifies() {
 fn tampered_body_is_rejected() {
     let account = derive(&master(), 0);
     let body = sample_body();
-    let wrapper = sign(&account, &body);
+    let wrapper = sign(&account, &body, &[0u8; 32]);
     let tampered = rebuild(&body, body.nonce(), vec![9, 9, 9]);
     let forged = Wrapper::new(tampered, wrapper.scheme(), wrapper.signature().to_vec());
-    assert!(!verify(&forged, account.public_key()));
+    assert!(!verify(&forged, account.public_key(), &[0u8; 32]));
 }
 
 #[test]
 fn tampered_nonce_is_rejected() {
     let account = derive(&master(), 0);
     let body = sample_body();
-    let wrapper = sign(&account, &body);
+    let wrapper = sign(&account, &body, &[0u8; 32]);
     let tampered = rebuild(&body, body.nonce() + 1, body.call().args().to_vec());
     let forged = Wrapper::new(tampered, wrapper.scheme(), wrapper.signature().to_vec());
-    assert!(!verify(&forged, account.public_key()));
+    assert!(!verify(&forged, account.public_key(), &[0u8; 32]));
 }
 
 #[test]
 fn tampered_signature_is_rejected() {
     let account = derive(&master(), 0);
-    let wrapper = sign(&account, &sample_body());
+    let wrapper = sign(&account, &sample_body(), &[0u8; 32]);
     let mut signature = wrapper.signature().to_vec();
     signature[0] ^= 255;
     let forged = Wrapper::new(wrapper.body().clone(), wrapper.scheme(), signature);
-    assert!(!verify(&forged, account.public_key()));
+    assert!(!verify(&forged, account.public_key(), &[0u8; 32]));
 }
 
 #[test]
@@ -76,20 +76,20 @@ fn a_different_public_key_is_rejected() {
     let seed = master();
     let account = derive(&seed, 0);
     let other = derive(&seed, 1);
-    let wrapper = sign(&account, &sample_body());
-    assert!(!verify(&wrapper, other.public_key()));
+    let wrapper = sign(&account, &sample_body(), &[0u8; 32]);
+    assert!(!verify(&wrapper, other.public_key(), &[0u8; 32]));
 }
 
 #[test]
 fn an_unknown_scheme_is_rejected() {
     let account = derive(&master(), 0);
-    let wrapper = sign(&account, &sample_body());
+    let wrapper = sign(&account, &sample_body(), &[0u8; 32]);
     let forged = Wrapper::new(
         wrapper.body().clone(),
         SCHEME_FALCON + 1,
         wrapper.signature().to_vec(),
     );
-    assert!(!verify(&forged, account.public_key()));
+    assert!(!verify(&forged, account.public_key(), &[0u8; 32]));
 }
 
 #[test]
@@ -99,10 +99,10 @@ fn hash_scheme_signs_and_verifies() {
     let target = derive_with_scheme(&seed, SCHEME_HASH, 1).unwrap();
     let call = Call::new(target.address(), vec![1, 2, 3, 4, 5]);
     let body = Body::new(account.address(), 7, 21_000, 1_000_000, call);
-    let wrapper = sign(&account, &body);
+    let wrapper = sign(&account, &body, &[0u8; 32]);
     assert_eq!(wrapper.scheme(), SCHEME_HASH);
-    assert!(verify(&wrapper, account.public_key()));
-    assert!(!verify(&wrapper, target.public_key()));
+    assert!(verify(&wrapper, account.public_key(), &[0u8; 32]));
+    assert!(!verify(&wrapper, target.public_key(), &[0u8; 32]));
 }
 
 #[test]
@@ -119,8 +119,8 @@ fn the_chain_id_is_bound_into_the_signature() {
         0,
         qtv_tx::MAINNET_CHAIN_ID,
     );
-    let wrapper = sign(&account, &mainnet);
-    assert!(verify(&wrapper, account.public_key()));
+    let wrapper = sign(&account, &mainnet, &[0u8; 32]);
+    assert!(verify(&wrapper, account.public_key(), &[0u8; 32]));
 
     let testnet = Body::with_context(
         account.address(),
@@ -133,7 +133,7 @@ fn the_chain_id_is_bound_into_the_signature() {
     );
     let replayed = Wrapper::new(testnet, wrapper.scheme(), wrapper.signature().to_vec());
     assert!(
-        !verify(&replayed, account.public_key()),
+        !verify(&replayed, account.public_key(), &[0u8; 32]),
         "a mainnet signature does not authenticate the same body on another network"
     );
 }
@@ -156,8 +156,8 @@ fn a_carried_asset_is_bound_into_the_signature() {
         qtv_tx::LOCAL_CHAIN_ID,
     )
     .carrying(issuer32);
-    let wrapper = sign(&account, &body);
-    assert!(verify(&wrapper, account.public_key()));
+    let wrapper = sign(&account, &body, &[0u8; 32]);
+    assert!(verify(&wrapper, account.public_key(), &[0u8; 32]));
     assert_eq!(wrapper.body().in_asset(), Some(issuer32));
 
     let plain = Body::with_context(
@@ -171,7 +171,7 @@ fn a_carried_asset_is_bound_into_the_signature() {
     );
     let forged = Wrapper::new(plain, wrapper.scheme(), wrapper.signature().to_vec());
     assert!(
-        !verify(&forged, account.public_key()),
+        !verify(&forged, account.public_key(), &[0u8; 32]),
         "dropping the carried asset does not authenticate the same body"
     );
 }
@@ -187,7 +187,7 @@ fn body_encoding_is_byte_identical() {
 #[test]
 fn transaction_id_round_trips_through_the_format() {
     let account = derive(&master(), 0);
-    let wrapper = sign(&account, &sample_body());
+    let wrapper = sign(&account, &sample_body(), &[0u8; 32]);
     let id = wrapper.id();
     let payload = qtv_idfmt::parse_tx(&id).unwrap();
     let again = qtv_idfmt::render_tx(&payload).unwrap();
@@ -248,8 +248,8 @@ fn address_case_can_never_change_the_signature() {
         "casing the sender or the target does not move the signed bytes"
     );
 
-    let signed_upper = sign(&account, &body_upper);
-    let signed_lower = sign(&account, &body_lower);
+    let signed_upper = sign(&account, &body_upper, &[0u8; 32]);
+    let signed_lower = sign(&account, &body_lower, &[0u8; 32]);
     assert_eq!(signed_upper.signature(), signed_lower.signature());
     assert_eq!(signed_upper.id(), signed_lower.id());
 }
@@ -266,9 +266,9 @@ fn a_raw_byte_signed_transaction_verifies() {
         1_000_000,
         call,
     );
-    let wrapper = sign(&account, &body);
+    let wrapper = sign(&account, &body, &[0u8; 32]);
     assert!(
-        verify(&wrapper, account.public_key()),
+        verify(&wrapper, account.public_key(), &[0u8; 32]),
         "the verifier recomputes the digest over the decoded payload"
     );
 }
@@ -336,18 +336,18 @@ fn the_signed_transaction_reproduces_the_qcore_js_payable_vector() {
         4_032_652_574_364_075_694,
     )
     .calling();
-    let wrapper = sign(&sender, &body);
-    assert!(verify(&wrapper, sender.public_key()));
+    let wrapper = sign(&sender, &body, &[0u8; 32]);
+    assert!(verify(&wrapper, sender.public_key(), &[0u8; 32]));
     assert_eq!(
         wrapper.id(),
-        "QTX18MRMZTQ5EPD30MU9FAXLNT076JFV53K3C229TEFXUFS9VHSF3LZSZCN7H6"
+        "QTX15G5T8NNFM79Y6F7LQ0YPVR9R7ZF0RX4UFXLPNL9GRRYLK2FP3YPQY7CCPG"
     );
 }
 
 #[test]
 fn a_remembered_id_is_the_hash_of_the_wrapper_and_does_not_change_equality() {
     let account = derive(&master(), 0);
-    let wrapper = sign(&account, &sample_body());
+    let wrapper = sign(&account, &sample_body(), &[0u8; 32]);
     let fresh = Wrapper::new(
         wrapper.body().clone(),
         wrapper.scheme(),
@@ -358,6 +358,6 @@ fn a_remembered_id_is_the_hash_of_the_wrapper_and_does_not_change_equality() {
     assert_eq!(wrapper.id_str(), first);
     assert_eq!(fresh, wrapper, "a cached id is not part of equality");
     assert_eq!(fresh.id(), first, "the id is the wrapper's hash, not state");
-    let other = sign(&account, &rebuild(&sample_body(), 8, vec![9]));
+    let other = sign(&account, &rebuild(&sample_body(), 8, vec![9]), &[0u8; 32]);
     assert_ne!(other.id(), first);
 }

@@ -35,7 +35,7 @@ fn transfer(from: &KeyAccount, to: &str, fee: u128) -> Wrapper {
         fee,
         transfer_call(to, 100),
     );
-    sign(from, &body)
+    sign(from, &body, &[0u8; 32])
 }
 
 fn main() {

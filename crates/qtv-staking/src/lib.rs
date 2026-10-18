@@ -130,6 +130,38 @@ impl Bond {
         }
     }
 
+    pub fn weight_in_epoch(&self, epoch: u64, heights_per_epoch: u64) -> u64 {
+        if self.exit_requested_at.is_none() {
+            return self.amount_in_epoch(epoch, heights_per_epoch);
+        }
+        if heights_per_epoch == 0 || self.raised_at_height / heights_per_epoch < epoch {
+            0
+        } else {
+            self.active_amount.min(self.amount)
+        }
+    }
+
+    pub fn request_exit_at(&mut self, now_day: u64, height: u64, heights_per_epoch: u64) -> bool {
+        if self.exit_requested_at.is_some() || !self.can_request_exit(now_day) {
+            return false;
+        }
+        let epoch = height.checked_div(heights_per_epoch).unwrap_or(0);
+        self.active_amount = self.amount_in_epoch(epoch, heights_per_epoch);
+        self.raised_at_height = height;
+        self.exit_requested_at = Some(now_day);
+        true
+    }
+
+    pub fn rejoin(&mut self, height: u64, heights_per_epoch: u64) {
+        if self.exit_requested_at.is_none() {
+            return;
+        }
+        let epoch = height.checked_div(heights_per_epoch).unwrap_or(0);
+        self.active_amount = self.weight_in_epoch(epoch, heights_per_epoch);
+        self.raised_at_height = height;
+        self.exit_requested_at = None;
+    }
+
     pub fn raise_to(&mut self, total: u64, height: u64, heights_per_epoch: u64) {
         let epoch = height.checked_div(heights_per_epoch).unwrap_or(0);
         self.active_amount = self.amount_in_epoch(epoch, heights_per_epoch);

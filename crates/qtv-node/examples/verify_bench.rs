@@ -75,7 +75,10 @@ fn main() {
         let recipient = tagged_address(1, i as u64);
         let call = transfer_call(&recipient, 100);
         let body = Body::new(senders[i].address(), 0, TRANSFER_METER, fee_amount, call);
-        (sign(&senders[i], &body), senders[i].public_key().to_vec())
+        (
+            sign(&senders[i], &body, &[0u8; 32]),
+            senders[i].public_key().to_vec(),
+        )
     });
 
     let seq: Vec<f64> = (0..3)
@@ -83,7 +86,7 @@ fn main() {
             let start = Instant::now();
             let mut ok = 0usize;
             for (w, pk) in &signed {
-                if verify(w, pk) {
+                if verify(w, pk, &[0u8; 32]) {
                     ok += 1;
                 }
             }
@@ -106,7 +109,7 @@ fn main() {
                                 if i >= signed.len() {
                                     break;
                                 }
-                                if verify(&signed[i].0, &signed[i].1) {
+                                if verify(&signed[i].0, &signed[i].1, &[0u8; 32]) {
                                     ok += 1;
                                 }
                             }

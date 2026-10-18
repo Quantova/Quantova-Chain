@@ -1127,7 +1127,7 @@ mod tests {
             1,
             qtv_tx::Call::new(account.address(), Vec::new()),
         );
-        let wrapper = qtv_tx::sign(&account, &body);
+        let wrapper = qtv_tx::sign(&account, &body, &[0u8; 32]);
         let job = |reply| VerifyJob {
             tx_id: wrapper.id(),
             wrapper: wrapper.clone(),

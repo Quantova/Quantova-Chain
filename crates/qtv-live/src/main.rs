@@ -106,7 +106,7 @@ fn build_batch(
     for (i, from) in senders.iter().enumerate() {
         let call = transfer_call(&recipients[i], TRANSFER_AMOUNT);
         let body = Body::new(from.address(), nonces[i], TRANSFER_METER, fee, call);
-        batch.push(sign(from, &body));
+        batch.push(sign(from, &body, &[0u8; 32]));
         nonces[i] += 1;
     }
     (batch, start.elapsed())
@@ -258,7 +258,7 @@ fn main() {
     let sample_tx_bytes = {
         let call = transfer_call(&recipients[0], TRANSFER_AMOUNT);
         let body = Body::new(senders[0].address(), 0, TRANSFER_METER, fee, call);
-        qtv_codec::to_bytes(&sign(&senders[0], &body)).len()
+        qtv_codec::to_bytes(&sign(&senders[0], &body, &[0u8; 32])).len()
     };
     let est_body_bytes = sample_tx_bytes * senders_n;
     let old_single_record_width = (MAX_RECORD_PLAINTEXT - 4096) / sample_tx_bytes;

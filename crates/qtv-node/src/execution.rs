@@ -4,7 +4,7 @@
 use qtv_codec::{Decoder, Encoder};
 use qtv_tx::Call;
 use qtv_vm::asm::assemble;
-use qtv_vm::interp::{Fault, Interpreter};
+use qtv_vm::interp::{Fault, Interpreter, SystemProgram};
 use std::sync::OnceLock;
 
 const SENDER_SLOT: u64 = 0;
@@ -262,8 +262,12 @@ pub fn execute_transfer(
     meter_limit: u64,
 ) -> Result<Transferred, ExecError> {
     static TRANSFER_CODE: OnceLock<Vec<u8>> = OnceLock::new();
-    let code = TRANSFER_CODE
-        .get_or_init(|| assemble(TRANSFER_PROGRAM).expect("the transfer program assembles"));
+    static TRANSFER: OnceLock<SystemProgram> = OnceLock::new();
+    let program = *TRANSFER.get_or_init(|| {
+        let code = TRANSFER_CODE
+            .get_or_init(|| assemble(TRANSFER_PROGRAM).expect("the transfer program assembles"));
+        SystemProgram::verify(code).expect("the transfer program is an admitted system program")
+    });
     let consts = [amount, fee];
     let (sender_key, recipient_key) = (sender_key(), recipient_key());
     let mut storage = std::collections::BTreeMap::new();
@@ -273,7 +277,7 @@ pub fn execute_transfer(
     memory[..32].copy_from_slice(&sender_key);
     memory[32..].copy_from_slice(&recipient_key);
 
-    let outcome = Interpreter::for_system_program(code, &consts, meter_limit)
+    let outcome = Interpreter::for_system_program(program, &consts, meter_limit)
         .with_storage(storage)
         .with_memory(&memory)
         .run()

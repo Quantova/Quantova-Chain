@@ -13,9 +13,9 @@ use qtv_net::{Channel, Identity, PeerId};
 
 use crate::util::{hex, log};
 
-const HELLO_TAG: &[u8; 8] = b"QTVGEN01";
+const HELLO_TAG: &[u8; 8] = b"QTVGEN02";
 
-const HELLO_LEN: usize = 8 + 32;
+const HELLO_LEN: usize = 8 + 32 + 32;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -705,11 +705,15 @@ fn hello_frame(genesis_hash: &[u8; 32]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(HELLO_LEN);
     frame.extend_from_slice(HELLO_TAG);
     frame.extend_from_slice(genesis_hash);
+    frame.extend_from_slice(&qtv_node::upgrades::protocol_digest());
     frame
 }
 
 fn hello_ok(frame: &[u8], genesis_hash: &[u8; 32]) -> bool {
-    frame.len() == HELLO_LEN && &frame[..8] == HELLO_TAG && &frame[8..] == genesis_hash
+    frame.len() == HELLO_LEN
+        && &frame[..8] == HELLO_TAG
+        && &frame[8..40] == genesis_hash
+        && frame[40..] == qtv_node::upgrades::protocol_digest()
 }
 
 fn forward_frame(

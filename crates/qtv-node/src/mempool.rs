@@ -129,6 +129,28 @@ fn zero_value_target(recipient: &str) -> bool {
     .any(|system| system == recipient)
 }
 
+pub const MAX_TX_BYTES: usize = 256 * 1024;
+
+const FIXED_FIELD_SLACK: usize = 1024;
+
+pub(crate) fn oversized(wrapper: &Wrapper) -> bool {
+    let body = wrapper.body();
+    let variable = body
+        .call()
+        .args()
+        .len()
+        .saturating_add(wrapper.signature().len())
+        .saturating_add(body.sender().len())
+        .saturating_add(body.call().target().len());
+    if variable > MAX_TX_BYTES {
+        return true;
+    }
+    if variable.saturating_add(FIXED_FIELD_SLACK) <= MAX_TX_BYTES {
+        return false;
+    }
+    qtv_codec::to_bytes(wrapper).len() > MAX_TX_BYTES
+}
+
 pub(crate) fn canonical_address(address: &str) -> bool {
     match qtv_idfmt::parse_address(address) {
         Ok(payload) if payload.len() == qtv_idfmt::DIGEST_LEN => {
@@ -374,7 +396,11 @@ pub fn admission_hint(wrapper: &Wrapper, ledger: &Ledger, fee_params: &FeeParams
     hint
 }
 
-fn candidate_order(a: &Wrapper, b: &Wrapper, ceiling: u128) -> std::cmp::Ordering {
+fn candidate_order(
+    (ia, a): (usize, &Wrapper),
+    (ib, b): (usize, &Wrapper),
+    ceiling: u128,
+) -> std::cmp::Ordering {
     is_feeless(b)
         .cmp(&is_feeless(a))
         .then_with(|| {
@@ -383,8 +409,7 @@ fn candidate_order(a: &Wrapper, b: &Wrapper, ceiling: u128) -> std::cmp::Orderin
                 .min(ceiling)
                 .cmp(&a.body().fee().min(ceiling))
         })
-        .then_with(|| a.body().sender().cmp(b.body().sender()))
-        .then_with(|| a.body().nonce().cmp(&b.body().nonce()))
+        .then_with(|| ia.cmp(&ib))
 }
 
 #[derive(Debug, Clone)]
@@ -741,6 +766,9 @@ impl Mempool {
         if !canonical_address(wrapper.body().sender()) {
             return Err(Reject::UnknownSender);
         }
+        if !canonical_address(wrapper.body().call().target()) || oversized(&wrapper) {
+            return Err(Reject::BadCall);
+        }
         if sender_barred(ledger, &wrapper) {
             return Err(Reject::BadCall);
         }
@@ -946,6 +974,8 @@ impl Mempool {
         fee_params: &FeeParams,
         verify_cores: usize,
     ) -> Vec<Wrapper> {
+        let mut batch = batch;
+        batch.retain(|wrapper| !oversized(wrapper));
         let verified = verify_signatures(ledger, &batch, verify_cores);
         self.ceiling = u128::from(fee_params.ceiling_fee());
         self.height = ledger.execution_height();
@@ -958,7 +988,11 @@ impl Mempool {
             if self.ids.contains(&id) {
                 continue;
             }
-            if !canonical_address(wrapper.body().sender()) || sender_barred(ledger, &wrapper) {
+            if !canonical_address(wrapper.body().sender())
+                || !canonical_address(wrapper.body().call().target())
+                || oversized(&wrapper)
+                || sender_barred(ledger, &wrapper)
+            {
                 continue;
             }
             if crate::node::is_bridge_mint(&wrapper) {
@@ -1087,9 +1121,9 @@ impl Mempool {
     }
 
     pub fn candidates(&self) -> Vec<Wrapper> {
-        let mut ordered = self.pending.clone();
-        ordered.sort_by(|a, b| candidate_order(a, b, self.ceiling));
-        ordered
+        let mut ordered: Vec<(usize, &Wrapper)> = self.pending.iter().enumerate().collect();
+        ordered.sort_by(|a, b| candidate_order(*a, *b, self.ceiling));
+        ordered.into_iter().map(|(_, w)| w.clone()).collect()
     }
 
     #[cfg(test)]
@@ -1113,15 +1147,15 @@ impl Mempool {
     }
 
     pub fn top_candidates_within(&self, limit: usize, max_bytes: usize) -> Vec<Wrapper> {
-        let mut refs: Vec<&Wrapper> = self.pending.iter().collect();
+        let mut refs: Vec<(usize, &Wrapper)> = self.pending.iter().enumerate().collect();
         if refs.len() > limit {
-            refs.select_nth_unstable_by(limit, |a, b| candidate_order(a, b, self.ceiling));
+            refs.select_nth_unstable_by(limit, |a, b| candidate_order(*a, *b, self.ceiling));
             refs.truncate(limit);
         }
-        refs.sort_by(|a, b| candidate_order(a, b, self.ceiling));
+        refs.sort_by(|a, b| candidate_order(*a, *b, self.ceiling));
         let mut room = max_bytes;
         let mut taken = Vec::with_capacity(refs.len().min(limit));
-        for wrapper in refs {
+        for (_, wrapper) in refs {
             let weight = wrapper.body().call().args().len() + wrapper.signature().len() + 256;
             if weight > room && !taken.is_empty() {
                 break;
@@ -1271,7 +1305,7 @@ mod tests {
     fn signed_transfer(from: &KeyAccount, to: &str, amount: u64, nonce: u64, fee: u128) -> Wrapper {
         let call = transfer_call(to, amount);
         let body = Body::new(from.address(), nonce, TRANSFER_METER, fee, call);
-        sign(from, &body)
+        sign(from, &body, &[0u8; 32])
     }
 
     #[test]
@@ -1319,7 +1353,7 @@ mod tests {
             qtov.chain_id,
         );
         assert!(matches!(
-            pool.admit(sign(&bob, &body), &ledger, &qtov, None),
+            pool.admit(sign(&bob, &body, &[0u8; 32]), &ledger, &qtov, None),
             Ok(Admitted::Fresh)
         ));
         let bob_id: [u8; 32] = qtv_idfmt::parse_address(&bob.address())
@@ -1347,7 +1381,7 @@ mod tests {
         let call = transfer_call(&keypair(9).address(), 100);
         let body = Body::new(alice.address(), 0, TRANSFER_METER, ceiling, call).valid_until(5);
         assert!(matches!(
-            pool.admit(sign(&alice, &body), &ledger, &params, None),
+            pool.admit(sign(&alice, &body, &[0u8; 32]), &ledger, &params, None),
             Ok(Admitted::Fresh)
         ));
         assert_eq!(pool.pending_len(), 1);
@@ -1918,6 +1952,7 @@ mod tests {
         let tx = sign(
             &attacker,
             &Body::new(alias.clone(), 0, TRANSFER_METER, fee, call),
+            &[0u8; 32],
         );
         assert_eq!(
             pool.admit(tx, &ledger, &params, None),
@@ -1993,6 +2028,7 @@ mod tests {
                 fee,
                 qtv_tx::Call::new(crate::ledger::gov_system_address(), vec![5]),
             ),
+            &[0u8; 32],
         );
         assert_eq!(
             pool.admit(aliased, &ledger, &params, None),
@@ -2014,6 +2050,7 @@ mod tests {
                 fee,
                 qtv_tx::Call::new(crate::ledger::gov_system_address(), vec![5]),
             ),
+            &[0u8; 32],
         );
         assert_ne!(
             pool.admit(canonical, &ledger, &params, None),
@@ -2044,7 +2081,7 @@ mod tests {
     fn gov_release(from: &KeyAccount, nonce: u64, fee: u128) -> Wrapper {
         let call = qtv_tx::Call::new(crate::ledger::gov_system_address(), vec![5]);
         let body = Body::new(from.address(), nonce, TRANSFER_METER, fee, call);
-        sign(from, &body)
+        sign(from, &body, &[0u8; 32])
     }
 
     #[test]
@@ -2210,7 +2247,7 @@ mod tests {
         );
         let mut pool = Mempool::new();
         assert_eq!(
-            pool.admit(sign(&alice, &foreign), &ledger, &params, None),
+            pool.admit(sign(&alice, &foreign, &[0u8; 32]), &ledger, &params, None),
             Err(Reject::WrongChain)
         );
         assert!(pool.is_empty());
@@ -2225,7 +2262,7 @@ mod tests {
             params.chain_id,
         );
         assert!(pool
-            .admit(sign(&alice, &native), &ledger, &params, None)
+            .admit(sign(&alice, &native, &[0u8; 32]), &ledger, &params, None)
             .is_ok());
         assert_eq!(pool.len(), 1);
     }

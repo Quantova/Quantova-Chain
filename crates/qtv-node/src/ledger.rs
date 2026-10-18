@@ -890,7 +890,7 @@ impl Ledger {
             .unwrap_or(0)
     }
 
-    pub fn staked_weight_in_epoch(&self, address: &str, epoch: u64) -> u64 {
+    pub fn governance_stake_in_epoch(&self, address: &str, epoch: u64) -> u64 {
         let id = match address_id(address) {
             Some(id) => id,
             None => return 0,
@@ -901,6 +901,22 @@ impl Ledger {
         self.stake_bond(&id)
             .map(|bond| {
                 bond.amount_in_epoch(epoch, self.heights_per_epoch)
+                    / qtv_staking::NATIVE_UNIT as u64
+            })
+            .unwrap_or(0)
+    }
+
+    pub fn staked_weight_in_epoch(&self, address: &str, epoch: u64) -> u64 {
+        let id = match address_id(address) {
+            Some(id) => id,
+            None => return 0,
+        };
+        if self.is_stake_banned(&id) || self.is_gov_blacklisted(&id) {
+            return 0;
+        }
+        self.stake_bond(&id)
+            .map(|bond| {
+                bond.weight_in_epoch(epoch, self.heights_per_epoch)
                     / qtv_staking::NATIVE_UNIT as u64
             })
             .unwrap_or(0)
@@ -3302,7 +3318,7 @@ impl Ledger {
         if account.balance < stake {
             return false;
         }
-        let bonded = self.staked_weight_in_epoch(voter, self.current_epoch()) as u128
+        let bonded = self.governance_stake_in_epoch(voter, self.current_epoch()) as u128
             * qtv_staking::NATIVE_UNIT as u128;
         if u128::from(stake) > bonded {
             return false;
@@ -3962,7 +3978,7 @@ impl Ledger {
             raised_at_height: 0,
         });
         bond.bonded_at_day = day;
-        bond.exit_requested_at = None;
+        bond.rejoin(self.execution_height, self.heights_per_epoch);
         bond.raise_to(total, self.execution_height, self.heights_per_epoch);
         self.set_stake_bond(&id, &bond);
         self.credit_staked(amount);
@@ -4066,7 +4082,7 @@ impl Ledger {
             raised_at_height: 0,
         });
         bond.bonded_at_day = day;
-        bond.exit_requested_at = None;
+        bond.rejoin(self.execution_height, self.heights_per_epoch);
         bond.raise_to(total, self.execution_height, self.heights_per_epoch);
         self.set_stake_bond(&id, &bond);
         self.credit_staked(amount);
@@ -4125,7 +4141,8 @@ impl Ledger {
             Some(bond) => bond,
             None => return false,
         };
-        if bond.request_exit(now_day) {
+        let height = self.execution_height();
+        if bond.request_exit_at(now_day, height, self.heights_per_epoch) {
             self.set_stake_bond(&id, &bond);
             true
         } else {

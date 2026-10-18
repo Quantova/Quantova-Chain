@@ -185,6 +185,7 @@ const MAX_SERVE_BLOCKS: u64 = 256;
 #[derive(Debug)]
 pub enum RoundError {
     Io(io::Error),
+    GenesisMismatch,
     Net(qtv_net::Error),
     NoCommittee,
     NotFinalized,
@@ -399,6 +400,7 @@ fn genesis_supply_value(genesis: &Genesis, roster: &[ValidatorRegistration]) -> 
 
 impl DevNode {
     pub fn open(node: &NodeConfig, devnet: &DevnetConfig) -> Result<DevNode, RoundError> {
+        qtv_node::bind_genesis(devnet.genesis_hash).map_err(|_| RoundError::GenesisMismatch)?;
         std::fs::create_dir_all(&node.store_dir)?;
         let store_lock = qtv_node::watermark::hold(&node.store_dir.join("node"))?;
         let block_store = BlockStore::open(node.store_dir.join("blocks.log"))?;

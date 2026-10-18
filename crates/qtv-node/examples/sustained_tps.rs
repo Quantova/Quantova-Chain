@@ -66,7 +66,7 @@ fn build_block(senders: &[KeyAccount], fee: &FeeParams, threads: usize) -> Vec<W
         let recipient = tagged_address(1, i as u64);
         let call = transfer_call(&recipient, 100);
         let body = Body::new(senders[i].address(), 0, TRANSFER_METER, fee_amount, call);
-        sign(&senders[i], &body)
+        sign(&senders[i], &body, &[0u8; 32])
     })
 }
 

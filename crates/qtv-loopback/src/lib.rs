@@ -88,7 +88,7 @@ pub fn build_batch(
     for (i, from) in senders.iter().enumerate() {
         let call = transfer_call(&recipients[i], TRANSFER_AMOUNT);
         let body = Body::new(from.address(), nonces[i], TRANSFER_METER, fee, call);
-        batch.push(sign(from, &body));
+        batch.push(sign(from, &body, &[0u8; 32]));
         nonces[i] += 1;
     }
     (batch, start.elapsed())

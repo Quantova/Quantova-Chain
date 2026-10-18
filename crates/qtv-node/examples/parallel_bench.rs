@@ -83,7 +83,7 @@ fn build_block(
         };
         let call = transfer_call(&recipient, 100);
         let body = Body::new(senders[i].address(), 0, TRANSFER_METER, fee_amount, call);
-        sign(&senders[i], &body)
+        sign(&senders[i], &body, &[0u8; 32])
     })
 }
 

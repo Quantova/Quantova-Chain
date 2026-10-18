@@ -101,7 +101,7 @@ pub fn transfer(from: &Account, to: &str, amount: u64, nonce: u64, params: &FeeP
         u128::from(params.transfer_fee()),
         call,
     );
-    sign(from, &body)
+    sign(from, &body, &[0u8; 32])
 }
 
 pub fn encoded_chain(node: &DevNode) -> Vec<Vec<u8>> {

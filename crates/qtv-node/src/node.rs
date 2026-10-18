@@ -688,7 +688,7 @@ pub fn build_guardian_enact_tx(
     };
     let call = qtv_tx::Call::new(crate::ledger::bridge_guardian_address(), act.encode());
     let body = qtv_tx::Body::with_context(relayer.address(), nonce, meter, fee, call, 0, chain_id);
-    qtv_tx::try_sign(relayer, &body)
+    qtv_tx::try_sign(relayer, &body, &crate::sigcache::genesis()?)
 }
 
 fn guardian_member_id(scheme: u8, public_key: &[u8]) -> Option<[u8; 32]> {
@@ -1983,6 +1983,8 @@ impl Node {
             }
         }
         ledger.seed_validator_set(&validator_ids);
+        crate::sigcache::bind_genesis(ledger.chain_genesis_hash())
+            .expect("a process binds one genesis");
 
         let sim_attesters: BTreeMap<u64, qtv_attest::Attester> = validators
             .iter()
@@ -2551,7 +2553,7 @@ mod tests {
             u128::from(fee.transfer_fee()),
             call,
         );
-        sign(from, &body)
+        sign(from, &body, &[0u8; 32])
     }
 
     fn system_tx(
@@ -2570,7 +2572,7 @@ mod tests {
             u128::from(vm_meter_fee(meter, fee)),
             call,
         );
-        sign(from, &body)
+        sign(from, &body, &[0u8; 32])
     }
 
     fn call_tx(
@@ -2590,7 +2592,7 @@ mod tests {
             call,
         )
         .calling();
-        sign(from, &body)
+        sign(from, &body, &[0u8; 32])
     }
 
     fn payable_tx(
@@ -2613,7 +2615,7 @@ mod tests {
             qtv_tx::LOCAL_CHAIN_ID,
         )
         .calling();
-        sign(from, &body)
+        sign(from, &body, &[0u8; 32])
     }
 
     fn address_bytes(address: &str) -> [u8; 32] {
@@ -2637,7 +2639,7 @@ mod tests {
                 transfer_call(&bob.address(), 10),
             )
             .valid_until(5);
-            sign(&alice, &body)
+            sign(&alice, &body, &[0u8; 32])
         };
 
         let mut sequential = Ledger::new();
@@ -3648,7 +3650,7 @@ mod tests {
             u128::from(fee.transfer_fee()),
             call,
         );
-        sign(from, &body)
+        sign(from, &body, &[0u8; 32])
     }
 
     fn register_tx(from: &KeyAccount, nonce: u64, fee: &FeeParams) -> Wrapper {
@@ -3663,7 +3665,7 @@ mod tests {
             u128::from(fee.transfer_fee()),
             call,
         );
-        sign(from, &body)
+        sign(from, &body, &[0u8; 32])
     }
 
     #[test]
@@ -3777,7 +3779,7 @@ mod tests {
             u128::from(fee.transfer_fee()),
             call,
         );
-        let forged_wrong_key = sign(&attacker, &body);
+        let forged_wrong_key = sign(&attacker, &body, &[0u8; 32]);
         assert!(
             execute_ordered(&mut ledger, &[forged_wrong_key], &fee, 0).is_empty(),
             "a key that does not hash to the sender is refused"
@@ -3798,7 +3800,7 @@ mod tests {
             u128::from(fee.transfer_fee()),
             call,
         );
-        let forged_wrong_signer = sign(&attacker, &body);
+        let forged_wrong_signer = sign(&attacker, &body, &[0u8; 32]);
         let before = ledger.q_root();
         assert!(
             execute_ordered(&mut ledger, &[forged_wrong_signer.clone()], &fee, 0).is_empty(),
@@ -4377,7 +4379,13 @@ mod tests {
 
         let inline: Vec<bool> = block
             .iter()
-            .map(|w| qtv_tx::verify(w, &ledger.account(w.body().sender()).public_key))
+            .map(|w| {
+                qtv_tx::verify(
+                    w,
+                    &ledger.account(w.body().sender()).public_key,
+                    &crate::sigcache::genesis().unwrap(),
+                )
+            })
             .collect();
         assert_eq!(
             serial, inline,

@@ -361,6 +361,12 @@ fn attest(a: &[String]) {
     if key_chain != chain_id {
         fail("this operator key was made for another chain");
     }
+    if chain_id == qtv_tx::MAINNET_CHAIN_ID {
+        fail("manual attestation is refused on mainnet, where facts come only from the proof verified oracle");
+    }
+    if env::var("QTV_ORACLE_MANUAL_ATTEST").ok().as_deref() != Some("1") {
+        fail("manual attestation signs a fact typed by hand with no source chain proof, set QTV_ORACLE_MANUAL_ATTEST=1 to confirm on a test network");
+    }
     let committee = Committee::load(&a[1], chain_id);
     let expected = committee
         .key(id)
@@ -438,8 +444,8 @@ fn collect_signatures(
 }
 
 fn mint(a: &[String]) {
-    if a.len() != 19 {
-        fail("mint <signatures> <committee> <chain_id> <source_chain> <dest_chain> <route_id> <nonce> <source_ref_hex> <asset_hex> <amount> <recipient_hex> <expiry> <observed> <relayer_seed_file> <relayer_index> <fee> <era_hex> <tx_nonce> <valid_until>");
+    if a.len() != 20 {
+        fail("mint <signatures> <committee> <chain_id> <source_chain> <dest_chain> <route_id> <nonce> <source_ref_hex> <asset_hex> <amount> <recipient_hex> <expiry> <observed> <relayer_seed_file> <relayer_index> <fee> <era_hex> <tx_nonce> <valid_until> <genesis_hex>");
     }
     let chain_id: u64 = arg(&a[2], "chain_id");
     let committee = Committee::load(&a[1], chain_id);
@@ -450,6 +456,7 @@ fn mint(a: &[String]) {
     let era: [u8; 32] = fixed(&a[16], "era");
     let tx_nonce: u64 = arg(&a[17], "tx_nonce");
     let valid_until: u64 = arg(&a[18], "valid_until");
+    let genesis: [u8; 32] = fixed(&a[19], "genesis");
     let signatures = collect_signatures(&a[0], &committee, &fact, chain_id, &era);
     let set = OperatorSet::new(committee.operators.clone(), committee.threshold);
     let attestation = Attestation { fact, signatures };
@@ -480,7 +487,7 @@ fn mint(a: &[String]) {
         chain_id,
     )
     .valid_until(valid_until);
-    let Some(wrapper) = try_sign(&relayer, &body) else {
+    let Some(wrapper) = try_sign(&relayer, &body, &genesis) else {
         fail("the relayer or target address does not parse");
     };
     println!("{}", hexs(&to_bytes(&wrapper)));

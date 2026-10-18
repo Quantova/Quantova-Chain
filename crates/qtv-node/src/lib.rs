@@ -21,5 +21,7 @@ pub mod node;
 pub mod parallel;
 pub mod provenance;
 mod sigcache;
+
+pub use sigcache::{bind_genesis, genesis as bound_genesis};
 pub mod upgrades;
 pub mod watermark;

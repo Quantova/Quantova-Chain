@@ -44,7 +44,7 @@ fn main() {
         u128::from(fee),
         call,
     );
-    let wrapper = sign(&sender, &body);
+    let wrapper = sign(&sender, &body, &[0u8; 32]);
 
     let encoded = qtv_codec::to_bytes(&wrapper);
 

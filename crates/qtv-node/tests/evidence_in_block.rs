@@ -92,7 +92,7 @@ fn evidence_tx(evidence: &Equivocation, fee: &FeeParams) -> Wrapper {
         u128::from(fee.transfer_fee()),
         call,
     );
-    sign(&reporter(), &body)
+    sign(&reporter(), &body, &[0u8; 32])
 }
 
 fn seeded_ledger(offender_address: &str, offender_pk: &[u8]) -> Ledger {
@@ -215,7 +215,7 @@ fn an_evidence_and_registration_block_matches_across_the_parallel_and_ordered_pa
             u128::from(fee.transfer_fee()),
             call,
         );
-        sign(&registrar, &body)
+        sign(&registrar, &body, &[0u8; 32])
     };
     let payment = {
         let call = transfer_call(&payee.address(), 1_000);
@@ -226,7 +226,7 @@ fn an_evidence_and_registration_block_matches_across_the_parallel_and_ordered_pa
             u128::from(fee.transfer_fee()),
             call,
         );
-        sign(&payer, &body)
+        sign(&payer, &body, &[0u8; 32])
     };
     let block = vec![evidence, registration, payment];
 

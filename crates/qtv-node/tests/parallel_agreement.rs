@@ -30,7 +30,7 @@ fn tx(from: &KeyAccount, to: &str, amount: u64, nonce: u64, fee: u128) -> Wrappe
         fee,
         transfer_call(to, amount),
     );
-    sign(from, &body)
+    sign(from, &body, &[0u8; 32])
 }
 
 fn raw(from: &KeyAccount, to: &str, args: Vec<u8>, nonce: u64, fee: u128, meter: u64) -> Wrapper {
@@ -41,7 +41,7 @@ fn raw(from: &KeyAccount, to: &str, args: Vec<u8>, nonce: u64, fee: u128, meter:
         fee,
         Call::new(to.to_string(), args),
     );
-    sign(from, &body)
+    sign(from, &body, &[0u8; 32])
 }
 
 fn raw_call(
@@ -60,7 +60,7 @@ fn raw_call(
         Call::new(to.to_string(), args),
     )
     .calling();
-    sign(from, &body)
+    sign(from, &body, &[0u8; 32])
 }
 
 fn container() -> Vec<u8> {
@@ -81,6 +81,7 @@ fn container() -> Vec<u8> {
 
 #[test]
 fn ordered_and_parallel_agree_on_random_blocks() {
+    qtv_node::bind_genesis([0u8; 32]).unwrap();
     let fee_params = FeeParams::devnet();
     let base_fee = u128::from(fee_params.transfer_fee());
     let keys: Vec<KeyAccount> = (0..12).map(|i| derive(&SEED, i)).collect();

@@ -23,6 +23,23 @@ pub const TESTNET: Upgrades = Upgrades {
     deploy_fee_cap_from_height: u64::MAX,
 };
 
+pub const PROTOCOL_VERSION: u32 = 1;
+
+fn table_bytes(table: &Upgrades, out: &mut Vec<u8>) {
+    out.extend_from_slice(&table.gas_metered_from_height.to_le_bytes());
+    out.extend_from_slice(&table.bound_draw_from_epoch.to_le_bytes());
+    out.extend_from_slice(&table.hardened_from_height.to_le_bytes());
+    out.extend_from_slice(&table.deploy_fee_cap_from_height.to_le_bytes());
+}
+
+pub fn protocol_digest() -> [u8; 32] {
+    let mut input = b"qtv/protocol".to_vec();
+    input.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+    table_bytes(&FROM_GENESIS, &mut input);
+    table_bytes(&TESTNET, &mut input);
+    qtv_crypto::sha3::sha3_256(&input)
+}
+
 pub fn for_chain(chain_id: u64) -> Upgrades {
     if chain_id == qtv_tx::TESTNET_CHAIN_ID {
         TESTNET

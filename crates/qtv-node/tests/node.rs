@@ -69,7 +69,7 @@ fn transfer(from: &Account, to: &str, amount: u64, nonce: u64, params: &FeeParam
         u128::from(params.transfer_fee()),
         call,
     );
-    sign(from, &body)
+    sign(from, &body, &[0u8; 32])
 }
 
 fn tampered(mut wrapper: Wrapper) -> Wrapper {
@@ -661,7 +661,7 @@ fn a_contract_call_worth_more_than_the_sender_holds_is_never_admitted() {
         u64::MAX,
         params.chain_id,
     );
-    let tx = sign(&alice, &body);
+    let tx = sign(&alice, &body, &[0u8; 32]);
 
     assert!(
         node.submit(tx).is_err(),

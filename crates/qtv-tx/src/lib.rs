@@ -278,22 +278,26 @@ impl Encode for Wrapper {
     }
 }
 
-fn body_digest(body: &Body) -> [u8; 32] {
-    sha3::sha3_256(&to_bytes(body))
+fn body_digest(body: &Body, genesis: &[u8; 32]) -> [u8; 32] {
+    let bytes = to_bytes(body);
+    let mut input = Vec::with_capacity(32 + bytes.len());
+    input.extend_from_slice(genesis);
+    input.extend_from_slice(&bytes);
+    sha3::sha3_256(&input)
 }
 
-pub fn try_sign(account: &Account, body: &Body) -> Option<Wrapper> {
+pub fn try_sign(account: &Account, body: &Body, genesis: &[u8; 32]) -> Option<Wrapper> {
     if qtv_idfmt::parse_address(body.sender()).is_err()
         || qtv_idfmt::parse_address(body.call().target()).is_err()
     {
         return None;
     }
     #[allow(deprecated)]
-    Some(sign(account, body))
+    Some(sign(account, body, genesis))
 }
 
 #[deprecated(note = "panics on an address that does not parse, use try_sign")]
-pub fn sign(account: &Account, body: &Body) -> Wrapper {
+pub fn sign(account: &Account, body: &Body, genesis: &[u8; 32]) -> Wrapper {
     assert!(
         qtv_idfmt::parse_address(body.sender()).is_ok(),
         "sign refuses a sender address that does not parse to an address payload"
@@ -302,7 +306,7 @@ pub fn sign(account: &Account, body: &Body) -> Wrapper {
         qtv_idfmt::parse_address(body.call().target()).is_ok(),
         "sign refuses a call target that does not parse to an address payload"
     );
-    let digest = body_digest(body);
+    let digest = body_digest(body, genesis);
     let scheme = account.scheme();
     let signature = match scheme {
         SCHEME_LATTICE => {
@@ -316,8 +320,6 @@ pub fn sign(account: &Account, body: &Body) -> Wrapper {
                 .expect("the domain context stays within the length bound")
                 .to_vec()
         }
-        #[cfg(feature = "fn-dsa")]
-        SCHEME_FALCON => Vec::new(),
         _ => Vec::new(),
     };
     Wrapper::new(body.clone(), scheme, signature)
@@ -332,8 +334,8 @@ pub fn addresses_parse(body: &Body) -> bool {
         && qtv_idfmt::parse_address(body.call().target()).is_ok()
 }
 
-pub fn verify(wrapper: &Wrapper, public_key: &[u8]) -> bool {
-    let digest = body_digest(&wrapper.body);
+pub fn verify(wrapper: &Wrapper, public_key: &[u8], genesis: &[u8; 32]) -> bool {
+    let digest = body_digest(&wrapper.body, genesis);
     match wrapper.scheme {
         SCHEME_LATTICE => {
             let public_key: &ml_dsa::PublicKey = match public_key.try_into() {
@@ -356,8 +358,6 @@ pub fn verify(wrapper: &Wrapper, public_key: &[u8]) -> bool {
             }
             slh_dsa::verify(public_key, &digest, &wrapper.signature, DOMAIN_TX)
         }
-        #[cfg(feature = "fn-dsa")]
-        SCHEME_FALCON => false,
         _ => false,
     }
 }
@@ -373,7 +373,7 @@ mod fail_closed_tests {
         let account = derive(&[7u8; 32], 0);
         let call = Call::new("not a Q1 address".to_string(), vec![1, 2, 3]);
         let body = Body::new(account.address(), 0, 1_210, 500, call);
-        let _ = sign(&account, &body);
+        let _ = sign(&account, &body, &[0u8; 32]);
     }
 
     #[test]
@@ -383,7 +383,7 @@ mod fail_closed_tests {
         let target = derive(&[7u8; 32], 1).address();
         let call = Call::new(target, vec![1, 2, 3]);
         let body = Body::new("not a Q1 address".to_string(), 0, 1_210, 500, call);
-        let _ = sign(&account, &body);
+        let _ = sign(&account, &body, &[0u8; 32]);
     }
 
     #[test]
@@ -414,8 +414,8 @@ mod fail_closed_tests {
         let target = derive(&[7u8; 32], 1).address();
         let call = Call::new(target, vec![1, 2, 3]);
         let body = Body::new(account.address(), 0, 1_210, 500, call);
-        let wrapper = sign(&account, &body);
-        assert!(verify(&wrapper, account.public_key()));
+        let wrapper = sign(&account, &body, &[0u8; 32]);
+        assert!(verify(&wrapper, account.public_key(), &[0u8; 32]));
     }
 
     #[test]
@@ -439,14 +439,14 @@ mod fail_closed_tests {
         let build = |sender: &str, target: &str| {
             let call = Call::new(target.to_string(), vec![1, 2, 3]);
             let body = Body::new(sender.to_string(), 0, 1_210, 500, call);
-            sign(&account, &body)
+            sign(&account, &body, &[0u8; 32])
         };
         let canonical = build(&canonical_sender, &canonical_target);
         let aliased = build(&alias_sender, &alias_target);
 
         assert_eq!(
-            body_digest(canonical.body()),
-            body_digest(aliased.body()),
+            body_digest(canonical.body(), &[0u8; 32]),
+            body_digest(aliased.body(), &[0u8; 32]),
             "the surface case reached the signed preimage"
         );
         assert_eq!(
@@ -459,9 +459,9 @@ mod fail_closed_tests {
             aliased.id(),
             "the surface case moved the transaction id"
         );
-        assert!(verify(&canonical, account.public_key()));
+        assert!(verify(&canonical, account.public_key(), &[0u8; 32]));
         assert!(
-            verify(&aliased, account.public_key()),
+            verify(&aliased, account.public_key(), &[0u8; 32]),
             "the signature stands for either surface form because both bind one payload"
         );
     }
