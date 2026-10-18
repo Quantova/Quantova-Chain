@@ -1225,6 +1225,18 @@ fn dispatch_bridge_exit(
 
 pub(crate) const MAX_VALIDITY_HORIZON: u64 = 7_200;
 
+pub(crate) fn validity_admits(wrapper: &Wrapper, height: u64) -> bool {
+    let valid_until = wrapper.body().valid_until_height();
+    if valid_until == 0 {
+        let public = matches!(
+            wrapper.body().chain_id(),
+            qtv_tx::TESTNET_CHAIN_ID | qtv_tx::MAINNET_CHAIN_ID
+        );
+        return !public || crate::mempool::is_feeless(wrapper) || is_registration(wrapper);
+    }
+    within_validity(valid_until, height)
+}
+
 pub(crate) fn within_validity(valid_until: u64, height: u64) -> bool {
     valid_until == 0 || (height <= valid_until && valid_until - height <= MAX_VALIDITY_HORIZON)
 }
@@ -1576,10 +1588,7 @@ fn execute_ordered_across(
         if hardened && !qtv_tx::addresses_parse(wrapper.body()) {
             continue;
         }
-        if !within_validity(
-            wrapper.body().valid_until_height(),
-            ledger.execution_height(),
-        ) {
+        if !validity_admits(wrapper, ledger.execution_height()) {
             continue;
         }
         let target = wrapper.body().call().target();

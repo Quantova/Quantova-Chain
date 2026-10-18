@@ -226,9 +226,7 @@ pub fn execute_parallel(
     for layer in &layers {
         let tasks: Vec<Task<'_>> = layer
             .iter()
-            .filter(|&&index| {
-                crate::node::within_validity(candidates[index].body().valid_until_height(), height)
-            })
+            .filter(|&&index| crate::node::validity_admits(&candidates[index], height))
             .map(|&index| {
                 let wrapper = &candidates[index];
                 let (sender_address, recipient_address) = access(wrapper);
