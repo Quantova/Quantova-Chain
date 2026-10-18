@@ -22,6 +22,12 @@ pub const TESTNET_CHAIN_NAME: &str = "Q-test-net-01";
 
 pub const MAINNET_CHAIN_NAME: &str = "Q-main-net-1";
 
+pub const RETIRED_CHAIN_NAMES: &[&str] = &["Q-test-net-1"];
+
+pub fn chain_name_is_retired(name: &str) -> bool {
+    RETIRED_CHAIN_NAMES.contains(&name)
+}
+
 pub const LOCAL_CHAIN_ID: u64 = 13749533161254861464;
 
 pub const TESTNET_CHAIN_ID: u64 = 6995079887857407393;

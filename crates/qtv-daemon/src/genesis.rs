@@ -186,6 +186,12 @@ impl GenesisFile {
         }
 
         let chain_id = chain_id.ok_or("the genesis is missing 'chain_id'")?;
+        if qtv_tx::chain_name_is_retired(&chain_id) {
+            return Err(format!(
+                "the chain name {chain_id} belonged to an earlier network, so transactions signed \
+                 for it would be valid again; give the new genesis a name that was never used"
+            ));
+        }
         let genesis_time = genesis_time.ok_or("the genesis is missing 'genesis_time'")?;
         let chain_binding = chain_binding(&chain_id);
         for (spec, proof) in validators.iter().zip(&proofs) {
