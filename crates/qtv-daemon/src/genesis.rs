@@ -726,8 +726,8 @@ mod tests {
     #[test]
     fn the_native_asset_moves_off_the_frozen_v4_preimage() {
         let genesis = sample_genesis(None);
-        let produced = genesis_hash("Q-test-net-1", "genesis", 64, &genesis);
-        let legacy = legacy_v4_hash("Q-test-net-1", "genesis", 64, &genesis);
+        let produced = genesis_hash("Q-test-net-01", "genesis", 64, &genesis);
+        let legacy = legacy_v4_hash("Q-test-net-01", "genesis", 64, &genesis);
         assert_ne!(
             produced, legacy,
             "committing the native asset into the preimage is a genesis format change, so it \
@@ -744,8 +744,8 @@ mod tests {
         ceiling.bridge_dest_chain = None;
         ceiling.bridge_exit_max_amount = Some(7);
         assert_ne!(
-            genesis_hash("Q-test-net-1", "genesis", 64, &dest),
-            genesis_hash("Q-test-net-1", "genesis", 64, &ceiling)
+            genesis_hash("Q-test-net-01", "genesis", 64, &dest),
+            genesis_hash("Q-test-net-01", "genesis", 64, &ceiling)
         );
     }
 
@@ -755,8 +755,8 @@ mod tests {
         qtov.fee_params.native_asset = asset_tag("QTOV");
         let mut tqtov = sample_genesis(None);
         tqtov.fee_params.native_asset = asset_tag("TQTOV");
-        let qtov_hash = genesis_hash("Q-test-net-1", "genesis", 64, &qtov);
-        let tqtov_hash = genesis_hash("Q-test-net-1", "genesis", 64, &tqtov);
+        let qtov_hash = genesis_hash("Q-test-net-01", "genesis", 64, &qtov);
+        let tqtov_hash = genesis_hash("Q-test-net-01", "genesis", 64, &tqtov);
         assert_ne!(
             qtov_hash, tqtov_hash,
             "two genesis files naming a different native asset must never hash the same"
@@ -765,13 +765,13 @@ mod tests {
 
     #[test]
     fn the_guardian_operator_and_asset_caps_bind_into_the_genesis_hash() {
-        let base = genesis_hash("Q-test-net-1", "genesis", 64, &sample_genesis(None));
+        let base = genesis_hash("Q-test-net-01", "genesis", 64, &sample_genesis(None));
 
         let mut g = sample_genesis(None);
         g.guardians = qtv_governance::GuardianSet::new(vec![[9u8; 32], [8u8; 32], [7u8; 32]], 2);
         assert_ne!(
             base,
-            genesis_hash("Q-test-net-1", "genesis", 64, &g),
+            genesis_hash("Q-test-net-01", "genesis", 64, &g),
             "the guardian set must bind into the genesis hash"
         );
 
@@ -782,7 +782,7 @@ mod tests {
         ));
         assert_ne!(
             base,
-            genesis_hash("Q-test-net-1", "genesis", 64, &o),
+            genesis_hash("Q-test-net-01", "genesis", 64, &o),
             "the bridge operator set must bind into the genesis hash"
         );
 
@@ -793,7 +793,7 @@ mod tests {
             epoch_cap: 100_000,
             requires_stark: false,
         }];
-        let a_hash = genesis_hash("Q-test-net-1", "genesis", 64, &a);
+        let a_hash = genesis_hash("Q-test-net-01", "genesis", 64, &a);
         assert_ne!(base, a_hash, "an asset cap must bind into the genesis hash");
 
         let mut a2 = sample_genesis(None);
@@ -805,15 +805,15 @@ mod tests {
         }];
         assert_ne!(
             a_hash,
-            genesis_hash("Q-test-net-1", "genesis", 64, &a2),
+            genesis_hash("Q-test-net-01", "genesis", 64, &a2),
             "changing only an asset cap must move the genesis hash"
         );
     }
 
     #[test]
     fn a_set_bridge_dest_chain_moves_the_genesis_hash() {
-        let unset = genesis_hash("Q-test-net-1", "genesis", 64, &sample_genesis(None));
-        let set = genesis_hash("Q-test-net-1", "genesis", 64, &sample_genesis(Some(7)));
+        let unset = genesis_hash("Q-test-net-01", "genesis", 64, &sample_genesis(None));
+        let set = genesis_hash("Q-test-net-01", "genesis", 64, &sample_genesis(Some(7)));
         assert_ne!(
             unset, set,
             "a set bridge destination must bind into the genesis hash, so a chain that fixes its \

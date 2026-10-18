@@ -18,13 +18,13 @@ pub const DOMAIN_TX: &[u8] = b"quantova.transaction.v1";
 
 pub const LOCAL_CHAIN_NAME: &str = "Q-dev-net-1";
 
-pub const TESTNET_CHAIN_NAME: &str = "Q-test-net-1";
+pub const TESTNET_CHAIN_NAME: &str = "Q-test-net-01";
 
 pub const MAINNET_CHAIN_NAME: &str = "Q-main-net-1";
 
 pub const LOCAL_CHAIN_ID: u64 = 13749533161254861464;
 
-pub const TESTNET_CHAIN_ID: u64 = 4032652574364075694;
+pub const TESTNET_CHAIN_ID: u64 = 6995079887857407393;
 
 pub const MAINNET_CHAIN_ID: u64 = 5296651311193914109;
 

@@ -17,7 +17,7 @@ cargo build --release --manifest-path ../QCore.rs/Cargo.toml --bin qcore
 ## Generate the genesis and the config
 
 ```
-QCORE=./target/release/qcore OUT=./testnet-live CHAIN_ID=Q-test-net-1 ./testnet/setup.sh
+QCORE=./target/release/qcore OUT=./testnet-live CHAIN_ID=Q-test-net-01 ./testnet/setup.sh
 ```
 
 This creates a fresh faucet wallet, generates the node keystore, writes the genesis file and the node

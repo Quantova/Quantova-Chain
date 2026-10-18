@@ -288,7 +288,7 @@ fn the_chain_id_follows_the_display_string_hash() {
         qtv_tx::MAINNET_CHAIN_ID
     );
     assert_eq!(qtv_tx::LOCAL_CHAIN_NAME, "Q-dev-net-1");
-    assert_eq!(qtv_tx::TESTNET_CHAIN_NAME, "Q-test-net-1");
+    assert_eq!(qtv_tx::TESTNET_CHAIN_NAME, "Q-test-net-01");
     assert_eq!(qtv_tx::MAINNET_CHAIN_NAME, "Q-main-net-1");
 }
 
@@ -333,7 +333,7 @@ fn the_signed_transaction_reproduces_the_qcore_js_payable_vector() {
         1_000_000,
         call,
         250_000,
-        qtv_tx::TESTNET_CHAIN_ID,
+        4_032_652_574_364_075_694,
     )
     .calling();
     let wrapper = sign(&sender, &body);

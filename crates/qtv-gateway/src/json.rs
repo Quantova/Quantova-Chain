@@ -400,7 +400,7 @@ mod tests {
     #[test]
     fn a_render_round_trips_through_the_parser() {
         let value = object(vec![
-            ("chain_id", Json::str("Q-test-net-1")),
+            ("chain_id", Json::str("Q-test-net-01")),
             ("height", Json::Int(42)),
             ("balance", Json::str("100000000000")),
             ("ok", Json::Bool(true)),
@@ -413,7 +413,7 @@ mod tests {
         let back = parse(&text).expect("parse");
         assert_eq!(
             back.get("chain_id").and_then(Json::as_str),
-            Some("Q-test-net-1")
+            Some("Q-test-net-01")
         );
         assert_eq!(back.get("height").and_then(Json::as_u64), Some(42));
         assert_eq!(field_count(&back), 5);
