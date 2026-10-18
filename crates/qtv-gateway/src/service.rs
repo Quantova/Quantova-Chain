@@ -71,6 +71,7 @@ pub enum Request {
         height: u64,
         index: u64,
     },
+    TransactionProof(String),
     ValidatorSet(u64),
 }
 
@@ -223,6 +224,16 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
                 .and_then(Json::as_u64)
                 .ok_or_else(|| ClientError::bad("bad_request", "get_event_proof needs an index"))?;
             Ok(Request::EventProof { height, index })
+        }
+        "get_transaction_proof" => {
+            let tx_id = string_field(body, "tx_id")?;
+            if tx_id.len() > MAX_TX_ID_CHARS {
+                return Err(ClientError::bad(
+                    "bad_request",
+                    "the tx_id is too long".to_string(),
+                ));
+            }
+            Ok(Request::TransactionProof(tx_id))
         }
         "get_validator_set" => {
             let epoch = body.get("epoch").and_then(Json::as_u64).ok_or_else(|| {
@@ -416,6 +427,7 @@ pub fn handle(
         Request::GenesisAccounts => Ok(genesis_accounts(node)),
         Request::Finality(height) => finality(node, height),
         Request::EventProof { height, index } => event_proof(node, height, index),
+        Request::TransactionProof(tx_id) => transaction_proof(node, &tx_id),
         Request::ValidatorSet(epoch) => validator_set(node, epoch),
         _ => Err(ClientError {
             code: "internal".to_string(),
@@ -635,6 +647,68 @@ fn event_proof(node: &DevNode, height: u64, index: u64) -> Result<Json, ClientEr
             Json::str(crate::json::to_hex(header.event_root())),
         ),
         ("leaf", Json::str(crate::json::to_hex(&leaves[position]))),
+        ("steps", Json::Array(steps)),
+    ]))
+}
+
+fn transaction_proof(node: &DevNode, tx_id: &str) -> Result<Json, ClientError> {
+    node.take_serve_saturated();
+    let Some((height, position)) = node.finalized_location(tx_id) else {
+        if node.take_serve_saturated() {
+            return Err(ClientError::busy());
+        }
+        return Err(ClientError::not_found(format!(
+            "no finalized transaction {tx_id}"
+        )));
+    };
+    let Some(served) = node.served_block(height) else {
+        if node.take_serve_saturated() {
+            return Err(ClientError::busy());
+        }
+        return Err(ClientError::not_found(format!(
+            "no finalized block at height {height}"
+        )));
+    };
+    let body = served.block.body();
+    let at = position
+        .filter(|at| body.get(*at).is_some_and(|w| w.id() == tx_id))
+        .or_else(|| body.iter().position(|w| w.id() == tx_id));
+    let Some(index) = at else {
+        return Err(ClientError::not_found(format!(
+            "transaction {tx_id} is not in the block at height {height}"
+        )));
+    };
+    let header = served.block.header();
+    if qtv_block::transaction_root(body) != *header.transaction_root() {
+        return Err(ClientError::not_found(format!(
+            "the transactions held for height {height} do not match its header"
+        )));
+    }
+    let leaves: Vec<Vec<u8>> = body.iter().map(qtv_codec::to_bytes).collect();
+    let Some(proof) = qtv_block::prove_inclusion(&leaves, index) else {
+        return Err(ClientError::not_found(format!(
+            "height {height} has no transaction at index {index}"
+        )));
+    };
+    let steps: Vec<Json> = proof
+        .steps
+        .iter()
+        .map(|step| {
+            object(vec![
+                ("sibling", Json::str(crate::json::to_hex(&step.sibling))),
+                ("left", Json::Bool(step.sibling_on_left)),
+            ])
+        })
+        .collect();
+    Ok(object(vec![
+        ("tx_id", Json::str(tx_id)),
+        ("height", Json::Int(height)),
+        ("index", Json::Int(index as u64)),
+        (
+            "transaction_root",
+            Json::str(crate::json::to_hex(header.transaction_root())),
+        ),
+        ("leaf", Json::str(crate::json::to_hex(&leaves[index]))),
         ("steps", Json::Array(steps)),
     ]))
 }
