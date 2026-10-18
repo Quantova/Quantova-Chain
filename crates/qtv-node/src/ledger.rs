@@ -2712,7 +2712,7 @@ impl Ledger {
     }
 
     pub fn deploy_contract(&mut self, deployer: &str, nonce: u64, code: &[u8]) -> Option<String> {
-        self.deploy_contract_under(deployer, nonce, code, false)
+        self.deploy_contract_under(deployer, nonce, code, false, false)
     }
 
     pub fn deploy_contract_under(
@@ -2721,10 +2721,13 @@ impl Ledger {
         nonce: u64,
         code: &[u8],
         legacy_testnet_key: bool,
+        mainnet: bool,
     ) -> Option<String> {
         let container = crate::execution::decode_container(code)?;
         container.verify().ok()?;
-        let canonical = if legacy_testnet_key {
+        let canonical = if mainnet {
+            self.provenance.admit_mainnet(code, &container)?
+        } else if legacy_testnet_key {
             self.provenance.admit_legacy_testnet(code, &container)?
         } else {
             self.provenance.admit(code, &container)?

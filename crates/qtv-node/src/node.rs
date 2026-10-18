@@ -1448,7 +1448,10 @@ fn run_vm(
             return;
         }
         ledger.arm_vm_meter_deploy(deploy_cost);
-        if let Some(contract) = ledger.deploy_contract_under(&sender, nonce, container, legacy) {
+        let mainnet = fee_params.chain_id == qtv_tx::MAINNET_CHAIN_ID;
+        if let Some(contract) =
+            ledger.deploy_contract_under(&sender, nonce, container, legacy, mainnet)
+        {
             let genesis = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
             let mut genesis_memory =
                 vec![0u8; crate::ledger::CONTRACT_CONTEXT_BYTES + params.len()];
