@@ -27,8 +27,8 @@ qtv-staking = { path = "../qtv-staking" }
 qtv-net = { path = "../qtv-net" }
 qtv-devnet = { path = "../qtv-devnet", features = ["test-fixtures"] }
 
-qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "8e762a53c911c4c57f5d93f57a2d4551041bdbde" }
-qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "8e762a53c911c4c57f5d93f57a2d4551041bdbde" }
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "c3e731c8e7b371cddd9795b8a8f5261f4a46762b" }
+qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "c3e731c8e7b371cddd9795b8a8f5261f4a46762b" }
 
 [lints]
 workspace = true

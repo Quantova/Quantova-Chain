@@ -11,7 +11,7 @@ publish = false
 description = "The block header, body, transaction root, and block id for the Quantova stack."
 
 [dependencies]
-qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "03d1702150ed41f8db78d69affe0ce6565b1724c" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "e47d6cd94e71c13b22e2990f8c2b0a2e3a2204d0" }
 qtv-codec = { path = "../qtv-codec" }
 qtv-tx = { path = "../qtv-tx" }
 qtv-idfmt = { path = "../qtv-idfmt" }
