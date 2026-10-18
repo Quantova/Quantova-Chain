@@ -730,6 +730,8 @@ fn validator_set(node: &DevNode, epoch: u64) -> Result<Json, ClientError> {
                 ("stake", Json::str(r.stake.to_string())),
                 ("bond_address", Json::str(&r.bond_address)),
                 ("attest_pk", Json::str(crate::json::to_hex(&r.attest_pk))),
+                ("root", Json::str(crate::json::to_hex(&r.root.digest))),
+                ("root_slots", Json::str(r.root.slots.to_string())),
             ])
         })
         .collect();
