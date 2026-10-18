@@ -199,7 +199,7 @@ fn a_certificate_carrying_block_round_trips_and_still_verifies() {
     let decoded = certificate_from_bytes(&cert_bytes).expect("cert decodes");
     assert_eq!(decoded.digest(), cert.digest());
     assert!(decoded
-        .verify(CHAIN_ID, &commitment, &beacon, 3)
+        .verify_with_trusted_commitment(CHAIN_ID, &commitment, &beacon, 3)
         .is_verified());
 
     let header = Header::new(

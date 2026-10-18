@@ -39,6 +39,7 @@ fn context() -> NodeContext {
 fn config_with_accounts(base: &Path, accounts: Vec<GenesisAccount>) -> DevnetConfig {
     let node = NodeConfig::online(1, 2_000, base.join("node-1"));
     DevnetConfig {
+        genesis_hash: [0u8; 32],
         fee_params: FeeParams::devnet(),
         accounts,
         nodes: vec![node],

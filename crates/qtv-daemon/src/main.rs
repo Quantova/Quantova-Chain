@@ -288,6 +288,7 @@ fn build_devnet(genesis_file: &genesis::GenesisFile) -> DevnetConfig {
         .map(ValidatorRegistration::from_spec)
         .collect();
     DevnetConfig {
+        genesis_hash: genesis_file.hash,
         fee_params: genesis_file.genesis.fee_params,
         accounts: genesis_file.genesis.accounts.clone(),
         nodes: Vec::new(),
@@ -323,7 +324,8 @@ fn register(args: RegisterArgs) -> Result<(), String> {
                 args.id, &secret, args.stake, args.slots,
             )
             .expect("genesis bounds the slot count");
-            let (_, sig) = attester.epoch_registration(genesis::chain_binding(name), 0);
+            let (_, sig) =
+                attester.epoch_registration(genesis::genesis_registration_binding(name), 0);
             format!(" {}", util::hex(&sig))
         }
         None => String::new(),

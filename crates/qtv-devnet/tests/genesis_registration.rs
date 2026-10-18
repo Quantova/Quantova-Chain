@@ -72,6 +72,7 @@ fn a_genesis_of_independent_registrations_finalises_and_reproduces_no_peer_secre
         .collect();
 
     let config = DevnetConfig {
+        genesis_hash: [0u8; 32],
         fee_params: FeeParams::devnet(),
         accounts: vec![GenesisAccount::from_account(&alice, 1_000_000)],
         nodes,

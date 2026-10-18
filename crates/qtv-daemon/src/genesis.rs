@@ -26,6 +26,10 @@ pub(crate) fn chain_binding(chain_id: &str) -> u64 {
     )
 }
 
+pub(crate) fn genesis_registration_binding(chain_id: &str) -> qtv_attest::ChainBinding {
+    qtv_attest::ChainBinding::new(chain_binding(chain_id), [0u8; 32])
+}
+
 pub(crate) const MAX_GENESIS_SLOTS: u64 = 1 << 16;
 
 pub(crate) const MIN_GENESIS_SLOTS: u64 = 4;
@@ -194,12 +198,13 @@ impl GenesisFile {
         }
         let genesis_time = genesis_time.ok_or("the genesis is missing 'genesis_time'")?;
         let chain_binding = chain_binding(&chain_id);
+        let registration_binding = genesis_registration_binding(&chain_id);
         for (spec, proof) in validators.iter().zip(&proofs) {
             match proof {
                 Some(sig) => {
                     if !qtv_attest::epoch_registration_verifies(
                         &spec.attest_pk,
-                        chain_binding,
+                        registration_binding,
                         spec.id,
                         0,
                         &spec.root,

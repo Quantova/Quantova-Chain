@@ -23,6 +23,7 @@ fn chain_config(base: &std::path::Path, count: usize) -> DevnetConfig {
         })
         .collect();
     DevnetConfig {
+        genesis_hash: [0u8; 32],
         fee_params: FeeParams::devnet(),
         accounts: Vec::new(),
         nodes,

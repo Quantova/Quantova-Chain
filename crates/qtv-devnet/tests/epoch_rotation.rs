@@ -37,6 +37,7 @@ fn config_with_slots(base: &std::path::Path, online: &[bool], slots: u64) -> Dev
         })
         .collect();
     DevnetConfig {
+        genesis_hash: [0u8; 32],
         fee_params: FeeParams::devnet(),
         accounts: vec![],
         nodes,

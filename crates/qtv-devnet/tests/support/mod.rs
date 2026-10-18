@@ -75,6 +75,7 @@ pub fn config_with_fanout(
         })
         .collect();
     DevnetConfig {
+        genesis_hash: [0u8; 32],
         fee_params: FeeParams::devnet(),
         accounts,
         nodes,

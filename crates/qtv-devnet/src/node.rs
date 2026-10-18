@@ -330,6 +330,7 @@ pub struct DevNode {
     parent_time: u64,
     parent_val: Parent,
     genesis_time: u64,
+    genesis_hash: [u8; 32],
     block_store: BlockStore,
     event_store: EventStore,
     side_event_store: EventStore,
@@ -436,7 +437,10 @@ impl DevNode {
             ledger: Ledger::new(),
             mempool: Mempool::new(),
             consensus: Consensus::with_slots(
-                devnet.fee_params.chain_id,
+                qtv_node::consensus::ChainBinding::new(
+                    devnet.fee_params.chain_id,
+                    devnet.genesis_hash,
+                ),
                 node.id,
                 secret,
                 roster.clone(),
@@ -452,6 +456,7 @@ impl DevNode {
             parent_time: 0,
             parent_val: Parent::Genesis,
             genesis_time: devnet.genesis_time,
+            genesis_hash: devnet.genesis_hash,
             block_store,
             event_store,
             side_event_store,
@@ -589,6 +594,8 @@ impl DevNode {
         let (validators_key, validators_value) = self.ledger.seed_validator_set(&validator_ids);
         self.state_store
             .put_account(validators_key, validators_value)?;
+        let (hash_key, hash_value) = self.ledger.seed_chain_genesis_hash(&self.genesis_hash);
+        self.state_store.put_account(hash_key, hash_value)?;
         if let Some(dest_chain) = genesis.bridge_dest_chain {
             let (dest_key, dest_value) = self.ledger.seed_bridge_dest_chain(dest_chain);
             self.state_store.put_account(dest_key, dest_value)?;
@@ -710,7 +717,7 @@ impl DevNode {
             };
             if !qtv_attest::epoch_registration_verifies(
                 &reg.attest_pk,
-                self.consensus.chain_id(),
+                self.consensus.binding(),
                 note.id,
                 note.epoch,
                 &note.root,
@@ -787,7 +794,7 @@ impl DevNode {
         };
         if !qtv_attest::epoch_registration_verifies(
             &reg.attest_pk,
-            self.consensus.chain_id(),
+            self.consensus.binding(),
             note.id,
             note.epoch,
             &note.root,
@@ -1334,7 +1341,7 @@ impl DevNode {
         }
         proposal
             .auth
-            .signature_verifies(self.consensus.chain_id(), &member.attest_pk)
+            .signature_verifies(self.consensus.binding(), &member.attest_pk)
     }
 
     pub fn coded_auth_ok(&self, selection: &Selection, coded: &CodedProposal) -> bool {
@@ -1366,7 +1373,7 @@ impl DevNode {
         if auth.block != subject {
             return false;
         }
-        auth.signature_verifies(self.consensus.chain_id(), &member.attest_pk)
+        auth.signature_verifies(self.consensus.binding(), &member.attest_pk)
     }
 
     pub fn accept_proposal(
@@ -2145,7 +2152,7 @@ impl DevNode {
         if att.height != self.height || att.slot != self.consensus.slot_for(self.height) {
             return false;
         }
-        if !att.signature_verifies(self.consensus.chain_id(), &member.attest_pk) {
+        if !att.signature_verifies(self.consensus.binding(), &member.attest_pk) {
             return false;
         }
         att.is_entitled_in(
@@ -2195,7 +2202,7 @@ impl DevNode {
         }
         if !record
             .att
-            .signature_verifies(self.consensus.chain_id(), &member.attest_pk)
+            .signature_verifies(self.consensus.binding(), &member.attest_pk)
         {
             return false;
         }
@@ -2566,7 +2573,7 @@ impl DevNode {
     }
 
     fn signed_offender(&self, attestation: &Attestation) -> Option<String> {
-        let chain_id = self.consensus.chain_id();
+        let chain_id = self.consensus.binding();
         self.base_roster.iter().find_map(|r| {
             if r.id == attestation.from && attestation.signature_verifies(chain_id, &r.attest_pk) {
                 Some(r.bond_address.clone())
@@ -3143,8 +3150,8 @@ impl DevNode {
             .committee_for_certificate(self.height, &certificate)
             .ok_or(SyncError::NoCommittee)?;
         if !certificate
-            .verify(
-                self.consensus.chain_id(),
+            .verify_with_trusted_commitment(
+                self.consensus.binding(),
                 &selection.commitment,
                 &self.beacon,
                 selection.tau,
@@ -3562,6 +3569,7 @@ mod registration_window_tests {
             })
             .collect();
         let config = DevnetConfig {
+            genesis_hash: [0u8; 32],
             fee_params: FeeParams::devnet(),
             accounts: vec![],
             nodes: nodes.clone(),
@@ -3729,6 +3737,7 @@ mod finality_gate_tests {
             })
             .collect();
         let config = DevnetConfig {
+            genesis_hash: [0u8; 32],
             fee_params: FeeParams::devnet(),
             accounts: vec![],
             nodes: nodes.clone(),

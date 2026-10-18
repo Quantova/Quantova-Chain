@@ -454,7 +454,7 @@ fn double_finality_offenders(
     ledger: &Ledger,
 ) -> Option<Vec<String>> {
     evidence.offenders(
-        chain_id,
+        qtv_attest::ChainBinding::new(chain_id, ledger.chain_genesis_hash()),
         |address| ledger.validator_attest_key(address),
         |address| ledger.bonded_stake(address),
         u128::from(ledger.total_staked()),
@@ -482,7 +482,10 @@ pub(crate) fn evidence_admissible(chain_id: u64, wrapper: &Wrapper, ledger: &Led
         return false;
     }
     match ledger.validator_attest_key(&evidence.offender) {
-        Some(attest_pk) => evidence.attributes(chain_id, &attest_pk),
+        Some(attest_pk) => evidence.attributes(
+            qtv_attest::ChainBinding::new(chain_id, ledger.chain_genesis_hash()),
+            &attest_pk,
+        ),
         None => false,
     }
 }
@@ -529,7 +532,10 @@ fn dispatch_evidence(chain_id: u64, ledger: &mut Ledger, wrapper: &Wrapper) -> b
         Some(attest_pk) => attest_pk,
         None => return false,
     };
-    if !evidence.attributes(chain_id, &attest_pk) {
+    if !evidence.attributes(
+        qtv_attest::ChainBinding::new(chain_id, ledger.chain_genesis_hash()),
+        &attest_pk,
+    ) {
         return false;
     }
     ledger.slash_validator(&evidence.offender)
@@ -1990,7 +1996,7 @@ impl Node {
             .collect();
         let sim_online = validators.iter().map(|v| (v.id, v.online)).collect();
         let consensus = Consensus::with_slots(
-            genesis.fee_params.chain_id,
+            crate::consensus::ChainBinding::new(genesis.fee_params.chain_id, [0u8; 32]),
             validators[0].id,
             &validators[0].secret,
             crate::consensus::roster_of(&validators, slots),
@@ -2038,7 +2044,7 @@ impl Node {
     ) -> Vec<qtv_attest::Attestation> {
         let height = self.height;
         let slot = qtv_sampler::epoch::slot_in_epoch(height, self.slots);
-        let chain_id = self.consensus.chain_id();
+        let chain_id = self.consensus.binding();
         let block = crate::consensus::Block::new(height, value, self.parent_val);
         let committee = self
             .consensus
@@ -2168,7 +2174,7 @@ impl Node {
         }
         let block = crate::consensus::Block::new(height, value, self.parent_val);
 
-        let chain_id = self.consensus.chain_id();
+        let chain_id = self.consensus.binding();
         let attestations: Vec<qtv_attest::Attestation> = selection
             .members
             .iter()

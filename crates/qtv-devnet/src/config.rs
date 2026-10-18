@@ -78,6 +78,7 @@ pub const DEFAULT_SLOTS: u64 = qtv_sampler::validator::DEFAULT_SLOTS;
 
 #[derive(Clone, Debug)]
 pub struct DevnetConfig {
+    pub genesis_hash: [u8; 32],
     pub fee_params: FeeParams,
     pub accounts: Vec<GenesisAccount>,
     pub nodes: Vec<NodeConfig>,
@@ -180,6 +181,7 @@ mod secret_redaction_tests {
     #[test]
     fn a_devnet_config_never_prints_a_node_secret() {
         let config = DevnetConfig {
+            genesis_hash: [0u8; 32],
             fee_params: qtv_node::fee::FeeParams::devnet(),
             accounts: Vec::new(),
             nodes: vec![NodeConfig {

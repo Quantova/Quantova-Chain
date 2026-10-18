@@ -7,6 +7,7 @@ use qtv_codec::{Decoder, Encoder};
 use qtv_crypto::ml_dsa::{self, PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
 
 use qtv_attest::params::ATTEST_CONTEXT;
+use qtv_attest::ChainBinding;
 
 fn subject_is_view_change(block_bytes: &[u8]) -> bool {
     let len = block_bytes.len();
@@ -14,15 +15,16 @@ fn subject_is_view_change(block_bytes: &[u8]) -> bool {
 }
 
 fn attestation_message(
-    chain_id: u64,
+    chain_id: ChainBinding,
     height: u64,
     slot: u64,
     view: u64,
     committee: &[u8; 32],
     block_bytes: &[u8],
 ) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(8 + 24 + block_bytes.len());
-    msg.extend_from_slice(&chain_id.to_le_bytes());
+    let mut msg = Vec::with_capacity(8 + 32 + 24 + block_bytes.len());
+    msg.extend_from_slice(&chain_id.chain_id.to_le_bytes());
+    msg.extend_from_slice(&chain_id.genesis);
     msg.extend_from_slice(&height.to_le_bytes());
     msg.extend_from_slice(&slot.to_le_bytes());
     msg.extend_from_slice(&view.to_le_bytes());
@@ -48,7 +50,8 @@ pub struct Equivocation {
 }
 
 impl Equivocation {
-    pub fn attributes(&self, chain_id: u64, attest_pk: &[u8]) -> bool {
+    pub fn attributes(&self, chain_id: impl Into<ChainBinding>, attest_pk: &[u8]) -> bool {
+        let chain_id: ChainBinding = chain_id.into();
         if self.block_a == self.block_b {
             return false;
         }
@@ -229,7 +232,7 @@ impl DoubleFinality {
 
     fn side(
         &self,
-        chain_id: u64,
+        chain_id: ChainBinding,
         block: &[u8],
         votes: &[FinalityVote],
         key_of: &impl Fn(&str) -> Option<Vec<u8>>,
@@ -268,11 +271,12 @@ impl DoubleFinality {
 
     pub fn offenders(
         &self,
-        chain_id: u64,
+        chain_id: impl Into<ChainBinding>,
         key_of: impl Fn(&str) -> Option<Vec<u8>>,
         stake_of: impl Fn(&str) -> u128,
         total_stake: u128,
     ) -> Option<Vec<String>> {
+        let chain_id: ChainBinding = chain_id.into();
         if self.block_a == self.block_b
             || subject_is_view_change(&self.block_a)
             || subject_is_view_change(&self.block_b)

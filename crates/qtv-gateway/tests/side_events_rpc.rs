@@ -29,6 +29,7 @@ fn unique_base(name: &str) -> std::path::PathBuf {
 fn single_node(base: &Path) -> DevnetConfig {
     let node = NodeConfig::online(1, 2_000, base.join("node-1"));
     DevnetConfig {
+        genesis_hash: [0u8; 32],
         fee_params: FeeParams::devnet(),
         accounts: Vec::new(),
         nodes: vec![node],

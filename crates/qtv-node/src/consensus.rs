@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use qtv_attest::aggregate::aggregate;
+pub use qtv_attest::attestation::ChainBinding;
 use qtv_attest::committee::MemberKey;
 use qtv_attest::{Attestation, Attester, Certificate, CommitteeCommitment, CommitteeDigest};
 use qtv_crypto::ml_dsa::PublicKey;
@@ -166,10 +167,11 @@ pub fn genesis_beacon() -> Beacon {
 pub const VIEW_CHANGE_SUBJECT_COST: u64 = u64::MAX;
 
 pub fn equivocation_offenders(
-    chain_id: u64,
+    chain_id: impl Into<ChainBinding>,
     attestations: &[Attestation],
     roster: &[ValidatorRegistration],
 ) -> Vec<u64> {
+    let chain_id: ChainBinding = chain_id.into();
     let mut flagged: Vec<u64> = Vec::new();
     for (index, first) in attestations.iter().enumerate() {
         for second in &attestations[index + 1..] {
@@ -196,11 +198,12 @@ pub fn equivocation_offenders(
 }
 
 pub fn double_finalize_offenders(
-    chain_id: u64,
+    chain_id: impl Into<ChainBinding>,
     attestations: &[Attestation],
     roster: &[ValidatorRegistration],
     tau: u64,
 ) -> Vec<u64> {
+    let chain_id: ChainBinding = chain_id.into();
     let mut quorums: Vec<(u64, [u8; 32], Vec<u64>)> = Vec::new();
     for att in attestations {
         if att.block.cost == VIEW_CHANGE_SUBJECT_COST {
@@ -306,7 +309,7 @@ impl FinalityLedger {
 }
 
 pub struct Consensus {
-    chain_id: u64,
+    chain: ChainBinding,
     own: Attester,
     own_id: u64,
     roster: Vec<ValidatorRegistration>,
@@ -319,21 +322,22 @@ pub struct Consensus {
 
 impl Consensus {
     pub fn new(
-        chain_id: u64,
+        chain: impl Into<ChainBinding>,
         own_id: u64,
         own_secret: &[u8; 32],
         roster: Vec<ValidatorRegistration>,
     ) -> Self {
-        Self::with_slots(chain_id, own_id, own_secret, roster, DEFAULT_SLOTS)
+        Self::with_slots(chain.into(), own_id, own_secret, roster, DEFAULT_SLOTS)
     }
 
     pub fn with_slots(
-        chain_id: u64,
+        chain: impl Into<ChainBinding>,
         own_id: u64,
         own_secret: &[u8; 32],
         mut roster: Vec<ValidatorRegistration>,
         slots: u64,
     ) -> Self {
+        let chain: ChainBinding = chain.into();
         roster.sort_by_key(|r| r.id);
         let own_stake = roster
             .iter()
@@ -343,7 +347,7 @@ impl Consensus {
         let own = Attester::from_secret_with_slots(own_id, own_secret, own_stake, slots)
             .expect("genesis bounds the slot count");
         Consensus {
-            chain_id,
+            chain,
             own,
             own_id,
             roster,
@@ -356,7 +360,11 @@ impl Consensus {
     }
 
     pub fn chain_id(&self) -> u64 {
-        self.chain_id
+        self.chain.chain_id
+    }
+
+    pub fn binding(&self) -> ChainBinding {
+        self.chain
     }
 
     pub fn reweight(&mut self, roster: Vec<ValidatorRegistration>) {
@@ -383,7 +391,7 @@ impl Consensus {
                 return (root, sig);
             }
         }
-        let (root, sig) = self.own.epoch_registration(self.chain_id, epoch);
+        let (root, sig) = self.own.epoch_registration(self.chain, epoch);
         *self.registration.borrow_mut() = Some((epoch, root, sig));
         (root, sig)
     }
@@ -426,11 +434,11 @@ impl Consensus {
     }
 
     pub fn bound_draw(&self) -> bool {
-        crate::upgrades::for_chain(self.chain_id).bound_draw(self.epoch)
+        crate::upgrades::for_chain(self.chain.chain_id).bound_draw(self.epoch)
     }
 
     pub fn full_committee(&self) -> bool {
-        crate::upgrades::for_chain(self.chain_id).full_committee(self.epoch, self.epoch_len)
+        crate::upgrades::for_chain(self.chain.chain_id).full_committee(self.epoch, self.epoch_len)
     }
 
     pub fn draw_mode(&self) -> DrawMode {
@@ -563,9 +571,10 @@ impl Consensus {
             .map(|m| u128::from(m.stake))
             .fold(0u128, u128::saturating_add);
         let absent_stake: u128 = expected_stake.saturating_sub(realized_stake);
-        let commitment = CommitteeCommitment::from_member_keys(slot, member_keys, self.budget)
-            .with_total_weight(registered_weight)
-            .with_absent_stake(absent_stake);
+        let commitment =
+            CommitteeCommitment::from_member_keys(slot, member_keys, self.budget, view.mode())
+                .with_total_weight(registered_weight)
+                .with_absent_stake(absent_stake);
         let leader = view.elect_leader(&committee, beacon, slot)?.id;
         let expected = qtv_sampler::sortition::expected_committee(&weights, self.budget);
         let tau =
@@ -626,7 +635,7 @@ impl Consensus {
         beacon: &Beacon,
     ) -> Option<Attestation> {
         self.own
-            .attest(self.chain_id, height, slot, view, committee, block, beacon)
+            .attest(self.chain, height, slot, view, committee, block, beacon)
     }
 
     pub fn finalize(
@@ -639,7 +648,7 @@ impl Consensus {
         attestations: &[Attestation],
     ) -> Option<Certificate> {
         aggregate(
-            self.chain_id,
+            self.chain,
             height,
             slot,
             block,
@@ -657,7 +666,12 @@ impl Consensus {
         beacon: &Beacon,
     ) -> bool {
         certificate
-            .verify(self.chain_id, &selection.commitment, beacon, selection.tau)
+            .verify_with_trusted_commitment(
+                self.chain,
+                &selection.commitment,
+                beacon,
+                selection.tau,
+            )
             .is_verified()
     }
 }
@@ -1309,7 +1323,12 @@ mod tests {
 
         assert!(!consensus.verify(&forged, &selection, &beacon));
         assert_eq!(
-            forged.verify(CHAIN_ID, &selection.commitment, &beacon, selection.tau),
+            forged.verify_with_trusted_commitment(
+                CHAIN_ID,
+                &selection.commitment,
+                &beacon,
+                selection.tau
+            ),
             Verdict::Rejected(RejectReason::NotEntitled)
         );
     }

@@ -27,6 +27,7 @@ fn config(base: &std::path::Path) -> DevnetConfig {
         })
         .collect();
     DevnetConfig {
+        genesis_hash: [0u8; 32],
         fee_params: FeeParams::devnet(),
         accounts: vec![],
         nodes,

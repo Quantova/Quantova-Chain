@@ -281,6 +281,7 @@ const BRIDGE_BTC_BEST_WORK_TAG: &[u8] = b"qtv/bridge/btcbestwork";
 const BRIDGE_ETH_ANCHOR_TAG: &[u8] = b"qtv/bridge/ethanchor/";
 const BRIDGE_COSMOS_ANCHOR_TAG: &[u8] = b"qtv/bridge/cosmosanchor/";
 const CHAIN_GENESIS_TIME_TAG: &[u8] = b"qtv/chain/genesistime";
+const CHAIN_GENESIS_HASH_TAG: &[u8] = b"qtv/chain/genesishash";
 const BRIDGE_EPOCH_TAG: &[u8] = b"qtv/bridge/epoch";
 const BRIDGE_BURN_REF_DOMAIN: &[u8] = b"qtv/bridge/burn-ref/v1";
 const BRIDGE_EXIT_SEEN_TAG: &[u8] = b"qtv/bridge/exitseen/";
@@ -1920,6 +1921,25 @@ impl Ledger {
             .filter(|bytes| !bytes.is_empty())
             .map(|bytes| from_bytes(bytes).expect("state holds a canonical genesis time"))
             .unwrap_or(0)
+    }
+
+    pub fn chain_genesis_hash(&self) -> [u8; 32] {
+        self.trie
+            .get(&stake_singleton_key(CHAIN_GENESIS_HASH_TAG))
+            .filter(|bytes| bytes.len() == 32)
+            .map(|bytes| {
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(bytes);
+                hash
+            })
+            .unwrap_or([0u8; 32])
+    }
+
+    pub fn seed_chain_genesis_hash(&mut self, hash: &[u8; 32]) -> (Key, Vec<u8>) {
+        let key = stake_singleton_key(CHAIN_GENESIS_HASH_TAG);
+        let bytes = hash.to_vec();
+        self.write_leaf(key, bytes.clone());
+        (key, bytes)
     }
 
     pub fn seed_chain_genesis_time(&mut self, genesis_time: u64) -> (Key, Vec<u8>) {

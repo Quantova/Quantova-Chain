@@ -45,6 +45,7 @@ fn a_devnet_of_keystore_backed_nodes_stands_up_and_finalizes() {
     let alice = user(0);
     let bob = user(1);
     let config = DevnetConfig {
+        genesis_hash: [0u8; 32],
         fee_params: FeeParams::devnet(),
         accounts: vec![GenesisAccount::from_account(&alice, 1_000_000)],
         nodes,
