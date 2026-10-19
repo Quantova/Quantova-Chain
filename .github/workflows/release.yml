@@ -1,0 +1,53 @@
+# Copyright 2026 Quantova Inc
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+name: release
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: Quantova-Chain
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.98.0
+      - name: build the node from the tagged commit
+        working-directory: Quantova-Chain
+        run: cargo build --locked --release -p qtv-daemon -p qtv-oracle
+      - name: software bill of materials
+        working-directory: Quantova-Chain
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --format json --spec-version 1.5 --all-features
+          mkdir -p "$RUNNER_TEMP/dist"
+          find crates -name '*.cdx.json' -exec cp {} "$RUNNER_TEMP/dist/" \;
+      - name: collect binaries and checksums
+        working-directory: Quantova-Chain
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/dist"
+          for bin in quantovad qtv-oracle; do
+            [ -f "target/release/$bin" ] && cp "target/release/$bin" "$dist/$bin-linux-x86_64"
+          done
+          cd "$dist"
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
+          subject-path: ${{ runner.temp }}/dist/*
+      - name: publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" "$RUNNER_TEMP"/dist/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "Built by CI from $GITHUB_SHA. Verify with gh attestation verify <file> --repo $GITHUB_REPOSITORY and sha256sum -c SHA256SUMS."

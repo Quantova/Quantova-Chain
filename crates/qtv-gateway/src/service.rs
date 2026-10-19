@@ -925,6 +925,10 @@ fn node_info(ctx: &NodeContext, node: &DevNode) -> Json {
             ]),
         ),
         ("version", Json::str(&ctx.version)),
+        (
+            "protocol",
+            Json::Int(u64::from(qtv_node::upgrades::PROTOCOL_VERSION)),
+        ),
     ])
 }
 

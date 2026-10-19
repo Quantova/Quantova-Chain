@@ -75,6 +75,8 @@ pub fn leader_for(selection: &Selection, view: View) -> u64 {
 
 const GENESIS_COMMIT_HEIGHT: Height = 0;
 
+const RESTART_HOLD_TIMEOUTS: u8 = 2;
+
 const MAX_ROUND_ATTESTATIONS: usize = 8192;
 const MAX_RELAY_BLOCKS_PER_VIEW: usize = 2;
 const MAX_RELAY_BUCKETS: usize = 1 << 16;
@@ -374,6 +376,7 @@ pub struct DevNode {
     pending_notes: Vec<RegisterNote>,
     sign_guard: Option<SignGuard>,
     prevote_guard: Option<PrevoteGuard>,
+    restart_hold: u8,
     store_lock: Option<std::fs::File>,
     lock_file: LockFile,
     finality: FinalityLedger,
@@ -420,6 +423,11 @@ impl DevNode {
         let lock_file = LockFile::open(node.store_dir.join("lock.state"));
 
         let roster: Vec<ValidatorRegistration> = devnet.roster();
+        let restart_hold = if block_store.head_height().is_some() && roster.len() > 1 {
+            RESTART_HOLD_TIMEOUTS
+        } else {
+            0
+        };
 
         let genesis = devnet.genesis();
         let genesis_accounts = genesis.accounts.clone();
@@ -501,6 +509,7 @@ impl DevNode {
             pending_notes: Vec::new(),
             sign_guard: Some(sign_guard),
             prevote_guard: Some(prevote_guard),
+            restart_hold,
             store_lock: Some(store_lock),
             lock_file,
             finality: FinalityLedger::new(),
@@ -1204,6 +1213,9 @@ impl DevNode {
     }
 
     fn build_proposal_at(&mut self, selection: &Selection, view: View) -> Option<Proposal> {
+        if self.restart_hold > 0 {
+            return None;
+        }
         let height = self.height;
         let proposer = self.validator_address(leader_for(selection, view));
         let chain_id = self.fee_params.chain_id;
@@ -1468,7 +1480,7 @@ impl DevNode {
     }
 
     fn guard_height(&mut self, view: View, value: &[u8; 32]) -> bool {
-        if self.fatal.is_some() {
+        if self.fatal.is_some() || self.restart_hold > 0 {
             return false;
         }
         let Some(guard) = self.sign_guard.as_mut() else {
@@ -1749,6 +1761,9 @@ impl DevNode {
         if !self.proposal_auth_ok(selection, &proposal) {
             return Vec::new();
         }
+        if from != self.id {
+            self.restart_hold = 0;
+        }
         if !proposal.justification.is_empty() {
             return self.on_justified_proposal(selection, proposal);
         }
@@ -1901,6 +1916,9 @@ impl DevNode {
             if *already != value {
                 return Vec::new();
             }
+        }
+        if self.restart_hold > 0 {
+            return Vec::new();
         }
         let Some(guard) = self.prevote_guard.as_mut() else {
             return Vec::new();
@@ -2440,6 +2458,9 @@ impl DevNode {
         let Some(offender) = self.signed_offender(&attestation) else {
             return false;
         };
+        if attestation.from != self.id {
+            self.restart_hold = 0;
+        }
         self.watch_for_equivocation(&attestation, offender);
         if let Ok(selection) = self.select() {
             if self.seen_atts.len() < MAX_SEEN_ATTESTATIONS {
@@ -2478,6 +2499,7 @@ impl DevNode {
     }
 
     pub fn on_timeout(&mut self, view: View) -> bool {
+        self.restart_hold = self.restart_hold.saturating_sub(1);
         if self.view != view || self.staged.is_some() {
             return false;
         }
