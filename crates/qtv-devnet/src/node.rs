@@ -7,6 +7,7 @@ use std::io;
 
 use qtv_attest::committee::CommitteeDigest;
 use qtv_attest::{Attestation, Certificate};
+use qtv_block::light::{encode_roster, roster_commitment, roster_commitment_key, RosterEntry};
 use qtv_block::{event_root, transaction_root, Block as ChainBlock, Header};
 use qtv_codec::{to_bytes, Decoder};
 use qtv_net::{Identity, PeerId};
@@ -24,7 +25,10 @@ use qtv_node::mempool::{Admitted, Mempool, Reject};
 use qtv_node::node::{execute_ordered, reweigh_roster_for_epoch, Genesis, GenesisAccount};
 use qtv_node::watermark::{LockFile, PrevoteGuard, SignGuard};
 use qtv_sampler::committee::PublishedReveal;
-use qtv_store::{BlockStore, BurnArchive, BurnArchiveEntry, EventStore, StateStore, TxIndex};
+use qtv_store::{
+    BlockStore, BurnArchive, BurnArchiveEntry, EventStore, RosterArchive, RosterArchiveEntry,
+    StateStore, TxIndex,
+};
 use qtv_tx::{Body, Call, Wrapper};
 
 use crate::config::{DevnetConfig, NodeConfig};
@@ -339,6 +343,7 @@ pub struct DevNode {
     side_event_store: EventStore,
     state_store: StateStore,
     burn_archive: BurnArchive,
+    roster_archive: RosterArchive,
     outbox: Vec<Wrapper>,
     staged: Option<Staged>,
     lock: Option<Lock>,
@@ -413,6 +418,7 @@ impl DevNode {
         let floor = block_store.head_height().map(|head| head.saturating_sub(1));
         let state_store = StateStore::open_with_floor(node.store_dir.join("state.log"), floor)?;
         let burn_archive = BurnArchive::open(node.store_dir.join("burns.log"))?;
+        let roster_archive = RosterArchive::open(node.store_dir.join("rosters.log"))?;
         let sign_guard = SignGuard::open(node.store_dir.join("sign.watermark"))?;
         let prevote_guard = PrevoteGuard::open(node.store_dir.join("prevote.watermark"))?;
         if let Some(head) = block_store.head_height() {
@@ -472,6 +478,7 @@ impl DevNode {
             side_event_store,
             state_store,
             burn_archive,
+            roster_archive,
             outbox: Vec::new(),
             staged: None,
             lock: None,
@@ -696,6 +703,61 @@ impl DevNode {
                 r
             })
             .collect()
+    }
+
+    fn prospective_roster(&self, ledger: &Ledger, epoch: u64) -> Vec<ValidatorRegistration> {
+        let carried = self.next_for == epoch;
+        reweigh_roster_for_epoch(ledger, &self.base_roster, epoch)
+            .into_iter()
+            .map(|mut r| {
+                if carried {
+                    r.root = match self.next_roots.get(&r.id) {
+                        Some(root) => *root,
+                        None if self.next_conflicted.contains(&r.id) => UNSEATED_ROOT,
+                        None => r.root,
+                    };
+                }
+                r
+            })
+            .collect()
+    }
+
+    fn closes_epoch(&self, height: Height) -> Option<u64> {
+        let next = self.consensus.epoch_for(height.saturating_add(1));
+        (next != self.consensus.epoch_for(height)).then_some(next)
+    }
+
+    fn seal_epoch_roster(&self, ledger: &mut Ledger, height: Height) {
+        if let Some(next) = self.closes_epoch(height) {
+            let entries = roster_entries(&self.prospective_roster(ledger, next));
+            ledger.set_roster_commitment(next, &roster_commitment(next, &entries));
+        }
+    }
+
+    fn archive_roster_proof(&mut self, height: Height) -> io::Result<()> {
+        let Some(next) = self.closes_epoch(height) else {
+            return Ok(());
+        };
+        let entries = roster_entries(&self.prospective_roster(&self.ledger, next));
+        let proof = self.ledger.prove(&roster_commitment_key(next));
+        self.roster_archive.append(RosterArchiveEntry {
+            epoch: next,
+            height,
+            roster: encode_roster(&entries),
+            proof: to_bytes(&proof),
+        })
+    }
+
+    pub fn roster_proof(&self, epoch: u64) -> Option<RosterArchiveEntry> {
+        self.roster_archive.entry(epoch)
+    }
+
+    pub fn genesis_roster(&self) -> Vec<RosterEntry> {
+        roster_entries(&reweigh_roster_for_epoch(
+            &self.ledger,
+            &self.base_roster,
+            0,
+        ))
     }
 
     fn registration_open(&self, height: Height) -> bool {
@@ -1254,6 +1316,7 @@ impl DevNode {
             block_time,
             PROPOSAL_TARGET_BYTES,
         );
+        self.seal_epoch_roster(&mut ledger, height);
         self.mempool.evict(&outcome.refused_feeless);
         let included = outcome.included;
         let event_leaves: Vec<Vec<u8>> = ledger
@@ -1443,6 +1506,7 @@ impl DevNode {
         ledger.set_round_proposer(header.proposer());
         ledger.set_execution_height(header.height());
         let included = execute_ordered(&mut ledger, body, &self.fee_params, header.time());
+        self.seal_epoch_roster(&mut ledger, header.height());
         let event_leaves: Vec<Vec<u8>> = ledger
             .block_events()
             .iter()
@@ -2747,6 +2811,7 @@ impl DevNode {
             result?;
         }
         self.archive_burn_block(block)?;
+        self.archive_roster_proof(height)?;
         self.state_store.commit(height, self.ledger.q_root())?;
         self.record_registrations(block);
         let stagger = self.id.wrapping_mul(STATE_COMPACT_STAGGER) % STATE_COMPACT_CHECK_BLOCKS;
@@ -3193,6 +3258,7 @@ impl DevNode {
         ledger.set_round_proposer(header.proposer());
         ledger.set_execution_height(header.height());
         let included = execute_ordered(&mut ledger, block.body(), &self.fee_params, header.time());
+        self.seal_epoch_roster(&mut ledger, header.height());
         let event_leaves: Vec<Vec<u8>> = ledger
             .block_events()
             .iter()
@@ -3274,6 +3340,19 @@ fn evidence_call(payload: Vec<u8>, chain_id: u64) -> Wrapper {
     let call = Call::new(target.clone(), payload);
     let body = Body::with_context(target, 0, 0, 0, call, 0, chain_id);
     Wrapper::new(body, qtv_tx::SCHEME_LATTICE, Vec::new())
+}
+
+fn roster_entries(roster: &[ValidatorRegistration]) -> Vec<RosterEntry> {
+    roster
+        .iter()
+        .map(|r| RosterEntry {
+            id: r.id,
+            stake: r.stake,
+            attest_pk: r.attest_pk.to_vec(),
+            root_digest: r.root.digest,
+            root_slots: r.root.slots,
+        })
+        .collect()
 }
 
 const UNSEATED_ROOT: Root = Root {

@@ -3,6 +3,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod light;
+
 use std::fmt;
 
 use qtv_codec::{to_bytes, Decode, Decoder, Encode, Encoder};

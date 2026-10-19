@@ -161,6 +161,36 @@ impl<'a> Iterator for LeafRange<'a> {
     }
 }
 
+fn cached_subtree(
+    leaves: Leaves<'_>,
+    defaults: &[Hash],
+    nodes: &Nodes<'_>,
+    level: usize,
+    prefix: &Key,
+) -> Hash {
+    if level == DEPTH {
+        return match leaves.get(prefix) {
+            Some(value) => leaf_hash(value),
+            None => defaults[DEPTH],
+        };
+    }
+    if let Some(hash) = nodes.get(&(level as u16, *prefix)) {
+        return *hash;
+    }
+    let end = subtree_end(prefix, level);
+    let mut range = leaves.range(*prefix..=end);
+    match (range.next(), range.next()) {
+        (None, _) => defaults[level],
+        (Some((key, value)), None) => single_leaf_hash(defaults, key, value, level),
+        _ => {
+            let left = cached_subtree(leaves, defaults, nodes, level + 1, prefix);
+            let right =
+                cached_subtree(leaves, defaults, nodes, level + 1, &with_bit(prefix, level));
+            node_hash(&left, &right)
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Nodes<'a> {
     base: &'a HashMap<NodeId, Hash>,
@@ -673,21 +703,29 @@ impl Trie {
     }
 
     pub fn prove(&self, key: &Key) -> Proof {
-        let entries = self.entries();
-        let mut slice = entries.as_slice();
+        self.root();
+        let cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let nodes = Nodes {
+            base: &cache.nodes,
+            delta: &cache.node_delta,
+        };
+        let leaves = self.leaves();
         let mut siblings = Vec::with_capacity(DEPTH);
         for level in 0..DEPTH {
-            let split = slice.partition_point(|entry| key_bit(&entry.0, level) == 0);
-            let (left, right) = slice.split_at(split);
-            if key_bit(key, level) == 0 {
-                siblings.push(self.subtree(right, level + 1));
-                slice = left;
-            } else {
-                siblings.push(self.subtree(left, level + 1));
-                slice = right;
-            }
+            let mut sibling = prefix_at(key, level + 1);
+            sibling[level >> 3] ^= 1u8 << (7 - (level & 7));
+            siblings.push(cached_subtree(
+                leaves,
+                &self.defaults,
+                &nodes,
+                level + 1,
+                &sibling,
+            ));
         }
-        let value = self.leaves().get(key).cloned();
+        let value = leaves.get(key).cloned();
         Proof { value, siblings }
     }
 

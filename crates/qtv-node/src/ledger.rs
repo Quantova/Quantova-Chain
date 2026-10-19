@@ -64,20 +64,7 @@ const _: () = assert!(
 );
 
 pub(crate) fn state_key(address: &str) -> Key {
-    match qtv_idfmt::parse_address(address) {
-        Ok(payload) => {
-            let mut input = Vec::with_capacity(ACCOUNT_TAG.len() + payload.len());
-            input.extend_from_slice(ACCOUNT_TAG);
-            input.extend_from_slice(&payload);
-            sha3::sha3_256(&input)
-        }
-        Err(_) => {
-            let mut input = Vec::with_capacity(ACCOUNT_UNPARSED_TAG.len() + address.len());
-            input.extend_from_slice(ACCOUNT_UNPARSED_TAG);
-            input.extend_from_slice(address.as_bytes());
-            sha3::sha3_256(&input)
-        }
-    }
+    qtv_block::light::account_state_key(address)
 }
 
 pub fn account_key(address: &str) -> Key {
@@ -1949,6 +1936,23 @@ impl Ledger {
                 hash
             })
             .unwrap_or([0u8; 32])
+    }
+
+    pub fn set_roster_commitment(&mut self, epoch: u64, commitment: &[u8; 32]) {
+        self.write_leaf(
+            qtv_block::light::roster_commitment_key(epoch),
+            commitment.to_vec(),
+        );
+    }
+
+    pub fn roster_commitment(&self, epoch: u64) -> Option<[u8; 32]> {
+        self.trie
+            .get(&qtv_block::light::roster_commitment_key(epoch))
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+    }
+
+    pub fn prove(&self, key: &Key) -> qtv_state::Proof {
+        self.trie.prove(key)
     }
 
     pub fn seed_chain_genesis_hash(&mut self, hash: &[u8; 32]) -> (Key, Vec<u8>) {

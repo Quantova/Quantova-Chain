@@ -72,6 +72,8 @@ pub enum Request {
         index: u64,
     },
     TransactionProof(String),
+    RosterProof(u64),
+    AccountProof(String),
     ValidatorSet(u64),
 }
 
@@ -235,6 +237,13 @@ pub fn build_request(method: &str, body: &Json) -> Result<Request, ClientError> 
             }
             Ok(Request::TransactionProof(tx_id))
         }
+        "get_roster_proof" => {
+            let epoch = body.get("epoch").and_then(Json::as_u64).ok_or_else(|| {
+                ClientError::bad("bad_request", "get_roster_proof needs an epoch")
+            })?;
+            Ok(Request::RosterProof(epoch))
+        }
+        "get_account_proof" => Ok(Request::AccountProof(string_field(body, "address")?)),
         "get_validator_set" => {
             let epoch = body.get("epoch").and_then(Json::as_u64).ok_or_else(|| {
                 ClientError::bad("bad_request", "get_validator_set needs an epoch")
@@ -428,6 +437,8 @@ pub fn handle(
         Request::Finality(height) => finality(node, height),
         Request::EventProof { height, index } => event_proof(node, height, index),
         Request::TransactionProof(tx_id) => transaction_proof(node, &tx_id),
+        Request::RosterProof(epoch) => roster_proof(node, epoch),
+        Request::AccountProof(address) => account_proof(node, &address),
         Request::ValidatorSet(epoch) => validator_set(node, epoch),
         _ => Err(ClientError {
             code: "internal".to_string(),
@@ -599,6 +610,91 @@ fn finality(node: &DevNode, height: u64) -> Result<Json, ClientError> {
             "certificate",
             Json::str(crate::json::to_hex(served.block.certificate())),
         ),
+    ]))
+}
+
+fn certified(node: &DevNode, height: u64) -> Result<(String, String), ClientError> {
+    node.take_serve_saturated();
+    let Some(served) = node.served_block(height) else {
+        if node.take_serve_saturated() {
+            return Err(ClientError::busy());
+        }
+        return Err(ClientError::not_found(format!(
+            "no finalized block at height {height}"
+        )));
+    };
+    Ok((
+        crate::json::to_hex(&qtv_codec::to_bytes(served.block.header())),
+        crate::json::to_hex(served.block.certificate()),
+    ))
+}
+
+fn roster_json(entries: &[qtv_block::light::RosterEntry]) -> Json {
+    Json::Array(
+        entries
+            .iter()
+            .map(|e| {
+                object(vec![
+                    ("id", Json::Int(e.id)),
+                    ("stake", Json::str(e.stake.to_string())),
+                    ("attest_pk", Json::str(crate::json::to_hex(&e.attest_pk))),
+                    ("root", Json::str(crate::json::to_hex(&e.root_digest))),
+                    ("root_slots", Json::str(e.root_slots.to_string())),
+                ])
+            })
+            .collect(),
+    )
+}
+
+fn roster_proof(node: &DevNode, epoch: u64) -> Result<Json, ClientError> {
+    if epoch == 0 {
+        return Ok(object(vec![
+            ("epoch", Json::Int(0)),
+            ("members", roster_json(&node.genesis_roster())),
+        ]));
+    }
+    let Some(entry) = node.roster_proof(epoch) else {
+        return Err(ClientError::not_found(format!(
+            "no roster commitment is archived for epoch {epoch}"
+        )));
+    };
+    let members = qtv_block::light::decode_roster(&entry.roster).ok_or_else(|| ClientError {
+        code: "internal".to_string(),
+        message: "the archived roster is malformed".to_string(),
+        http: 500,
+    })?;
+    let (header, certificate) = certified(node, entry.height)?;
+    Ok(object(vec![
+        ("epoch", Json::Int(epoch)),
+        ("height", Json::Int(entry.height)),
+        ("members", roster_json(&members)),
+        ("proof", Json::str(crate::json::to_hex(&entry.proof))),
+        ("header_bytes", Json::str(header)),
+        ("certificate", Json::str(certificate)),
+    ]))
+}
+
+fn account_proof(node: &DevNode, address: &str) -> Result<Json, ClientError> {
+    if qtv_idfmt::parse_address(address).is_err() {
+        return Err(ClientError::bad(
+            "bad_request",
+            "the address does not parse",
+        ));
+    }
+    let height = node.height().saturating_sub(1);
+    let (header, certificate) = certified(node, height)?;
+    let key = qtv_block::light::account_state_key(address);
+    let proof = node.ledger().prove(&key);
+    Ok(object(vec![
+        ("address", Json::str(address)),
+        ("height", Json::Int(height)),
+        ("epoch", Json::Int(node.epoch_of(height))),
+        (
+            "proof",
+            Json::str(crate::json::to_hex(&qtv_codec::to_bytes(&proof))),
+        ),
+        ("header_bytes", Json::str(header)),
+        ("certificate", Json::str(certificate)),
     ]))
 }
 
