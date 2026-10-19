@@ -257,6 +257,9 @@ impl Parser {
                     Some('u') => s.push(self.unicode_escape()?),
                     _ => return Err("bad escape in a string".to_string()),
                 },
+                Some(c) if (c as u32) < 0x20 => {
+                    return Err("a string carries a raw control character".to_string())
+                }
                 Some(c) => s.push(c),
                 None => return Err("a string was not closed".to_string()),
             }
@@ -285,6 +288,9 @@ impl Parser {
         }
         let text: String = self.chars[start..self.pos].iter().collect();
         let shown: String = text.chars().take(32).collect();
+        if text.len() > 1 && text.starts_with('0') {
+            return Err(format!("'{shown}' has a leading zero"));
+        }
         text.parse::<u64>()
             .map(Json::Int)
             .map_err(|_| format!("'{shown}' is not a whole number the wire accepts"))
