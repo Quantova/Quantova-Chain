@@ -1825,9 +1825,6 @@ impl DevNode {
         if !self.proposal_auth_ok(selection, &proposal) {
             return Vec::new();
         }
-        if from != self.id {
-            self.restart_hold = 0;
-        }
         if !proposal.justification.is_empty() {
             return self.on_justified_proposal(selection, proposal);
         }
@@ -2522,9 +2519,6 @@ impl DevNode {
         let Some(offender) = self.signed_offender(&attestation) else {
             return false;
         };
-        if attestation.from != self.id {
-            self.restart_hold = 0;
-        }
         self.watch_for_equivocation(&attestation, offender);
         if let Ok(selection) = self.select() {
             if self.seen_atts.len() < MAX_SEEN_ATTESTATIONS {
