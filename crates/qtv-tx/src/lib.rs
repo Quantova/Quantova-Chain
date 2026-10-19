@@ -45,9 +45,6 @@ pub fn chain_id_from_name(name: &str) -> u64 {
 
 const SIGN_RANDOMIZER: [u8; 32] = [0u8; 32];
 
-const SIGN_RANDOMIZER_HASH: [u8; slh_dsa::PUBLIC_KEY_BYTES / 2] =
-    [0u8; slh_dsa::PUBLIC_KEY_BYTES / 2];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Call {
     target: String,
@@ -286,17 +283,56 @@ fn body_digest(body: &Body, genesis: &[u8; 32]) -> [u8; 32] {
     sha3::sha3_256(&input)
 }
 
-pub fn try_sign(account: &Account, body: &Body, genesis: &[u8; 32]) -> Option<Wrapper> {
-    if qtv_idfmt::parse_address(body.sender()).is_err()
-        || qtv_idfmt::parse_address(body.call().target()).is_err()
-    {
-        return None;
-    }
-    #[allow(deprecated)]
-    Some(sign(account, body, genesis))
+fn addresses_ok(body: &Body) -> bool {
+    qtv_idfmt::parse_address(body.sender()).is_ok()
+        && qtv_idfmt::parse_address(body.call().target()).is_ok()
 }
 
-#[deprecated(note = "panics on an address that does not parse, use try_sign")]
+fn sign_with(account: &Account, body: &Body, genesis: &[u8; 32], rnd: &[u8; 32]) -> Wrapper {
+    let digest = body_digest(body, genesis);
+    let scheme = account.scheme();
+    let signature = match scheme {
+        SCHEME_LATTICE => ml_dsa::sign_from_seed(account.seed(), &digest, DOMAIN_TX, rnd)
+            .expect("the domain context stays within the length bound")
+            .to_vec(),
+        SCHEME_HASH => {
+            let (secret, _public) = qtv_account::hash_keypair(account.seed());
+            let mut addrnd = [0u8; slh_dsa::PUBLIC_KEY_BYTES / 2];
+            if rnd != &SIGN_RANDOMIZER {
+                let wide = sha3::sha3_256(rnd);
+                let n = addrnd.len();
+                addrnd.copy_from_slice(&wide[..n]);
+            }
+            slh_dsa::sign(&secret, &digest, DOMAIN_TX, &addrnd)
+                .expect("the domain context stays within the length bound")
+                .to_vec()
+        }
+        _ => Vec::new(),
+    };
+    Wrapper::new(body.clone(), scheme, signature)
+}
+
+pub fn try_sign(account: &Account, body: &Body, genesis: &[u8; 32]) -> Option<Wrapper> {
+    let mut rnd = [0u8; 32];
+    qtv_crypto::rng::try_fill_random(&mut rnd).ok()?;
+    let signed = try_sign_hedged(account, body, genesis, &rnd);
+    rnd.fill(0);
+    signed
+}
+
+pub fn try_sign_hedged(
+    account: &Account,
+    body: &Body,
+    genesis: &[u8; 32],
+    rnd: &[u8; 32],
+) -> Option<Wrapper> {
+    if !addresses_ok(body) || rnd == &SIGN_RANDOMIZER {
+        return None;
+    }
+    Some(sign_with(account, body, genesis, rnd))
+}
+
+#[deprecated(note = "signs without fresh randomness, use try_sign")]
 pub fn sign(account: &Account, body: &Body, genesis: &[u8; 32]) -> Wrapper {
     assert!(
         qtv_idfmt::parse_address(body.sender()).is_ok(),
@@ -306,23 +342,7 @@ pub fn sign(account: &Account, body: &Body, genesis: &[u8; 32]) -> Wrapper {
         qtv_idfmt::parse_address(body.call().target()).is_ok(),
         "sign refuses a call target that does not parse to an address payload"
     );
-    let digest = body_digest(body, genesis);
-    let scheme = account.scheme();
-    let signature = match scheme {
-        SCHEME_LATTICE => {
-            ml_dsa::sign_from_seed(account.seed(), &digest, DOMAIN_TX, &SIGN_RANDOMIZER)
-                .expect("the domain context stays within the length bound")
-                .to_vec()
-        }
-        SCHEME_HASH => {
-            let (secret, _public) = qtv_account::hash_keypair(account.seed());
-            slh_dsa::sign(&secret, &digest, DOMAIN_TX, &SIGN_RANDOMIZER_HASH)
-                .expect("the domain context stays within the length bound")
-                .to_vec()
-        }
-        _ => Vec::new(),
-    };
-    Wrapper::new(body.clone(), scheme, signature)
+    sign_with(account, body, genesis, &SIGN_RANDOMIZER)
 }
 
 pub fn scheme_supported(scheme: u8) -> bool {
