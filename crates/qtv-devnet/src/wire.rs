@@ -502,7 +502,20 @@ fn decode_committee_reveals(
         let credential = decode_credential(decoder)?;
         reveals.push(PublishedReveal::new(id, credential));
     }
+    if reveals.windows(2).any(|pair| pair[0].id > pair[1].id) {
+        return Err(DecodeError::BadLength);
+    }
     Ok(reveals)
+}
+
+fn sorted_attestations(attestations: &[Attestation]) -> Result<(), DecodeError> {
+    if attestations
+        .windows(2)
+        .any(|pair| pair[0].from > pair[1].from)
+    {
+        return Err(DecodeError::BadLength);
+    }
+    Ok(())
 }
 
 fn encode_view_change(encoder: &mut Encoder, record: &ViewChange) {
@@ -641,6 +654,7 @@ fn decode_certificate(decoder: &mut Decoder<'_>) -> Result<Certificate, DecodeEr
     for _ in 0..count {
         attestations.push(decode_attestation(decoder)?);
     }
+    sorted_attestations(&attestations)?;
     let committee_reveals = decode_committee_reveals(decoder)?;
     Ok(Certificate::new(envelope, attestations).with_committee_reveals(committee_reveals))
 }
@@ -819,6 +833,7 @@ pub fn certificate_from_bytes(bytes: &[u8]) -> Result<Certificate, DecodeError> 
             for _ in 0..count {
                 attestations.push(decode_attestation(&mut decoder)?);
             }
+            sorted_attestations(&attestations)?;
             let committee_reveals = decode_committee_reveals(&mut decoder)?;
             Certificate::new(envelope, attestations).with_committee_reveals(committee_reveals)
         }

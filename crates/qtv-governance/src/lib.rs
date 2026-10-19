@@ -209,7 +209,11 @@ impl Encode for Ballot {
 
 impl Decode for Ballot {
     fn decode(decoder: &mut Decoder<'_>) -> Result<Self, Error> {
-        let aye = decoder.get_u8()? != 0;
+        let aye = match decoder.get_u8()? {
+            0 => false,
+            1 => true,
+            byte => return Err(Error::InvalidOption { byte }),
+        };
         let conviction = Conviction::decode(decoder)?;
         let stake = decoder.get_u64()?;
         Ok(Ballot {

@@ -253,7 +253,11 @@ fn decode_gov_op(op: u8, payload: &[u8]) -> Option<GovOp> {
         1 => GovOp::Propose(Action::decode(&mut decoder).ok()?),
         2 => GovOp::Vote {
             referendum: decoder.get_u64().ok()?,
-            aye: decoder.get_u8().ok()? != 0,
+            aye: match decoder.get_u8().ok()? {
+                0 => false,
+                1 => true,
+                _ => return None,
+            },
             conviction: Conviction::decode(&mut decoder).ok()?,
             stake: decoder.get_u64().ok()?,
         },
