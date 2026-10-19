@@ -47,6 +47,7 @@ fn run_serial(
     height_cap: usize,
 ) -> RunResult {
     let base = std::env::temp_dir().join(format!("qtv-loopback-serial-{}", std::process::id()));
+    std::fs::create_dir(&base).expect("create a fresh store base");
     let senders = accounts(senders_n);
     let recipient_addrs = recipients(&senders);
     let fee = transfer_fee();
@@ -182,7 +183,7 @@ fn run_loopback(
     validator_bin: &str,
 ) -> Vec<RunResult> {
     let base = std::env::temp_dir().join(format!("qtv-loopback-mp-{}", std::process::id()));
-    std::fs::create_dir_all(&base).expect("create the store base");
+    std::fs::create_dir(&base).expect("create a fresh store base");
 
     let mut children: Vec<Child> = Vec::with_capacity(validators);
     for idx in 0..validators {

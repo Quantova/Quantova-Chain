@@ -248,6 +248,7 @@ fn main() {
 
     let base =
         std::env::temp_dir().join(format!("qtv-live-{}-{}", std::process::id(), GENESIS_TIME));
+    std::fs::create_dir(&base).expect("create a fresh store base");
     let senders = accounts(senders_n);
     let recipients: Vec<String> = (0..senders_n)
         .map(|i| senders[(i + 1) % senders_n].address())

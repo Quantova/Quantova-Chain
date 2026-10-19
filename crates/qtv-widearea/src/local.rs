@@ -58,7 +58,7 @@ pub fn run_scenario(scenario: &Scenario) -> Vec<RunReport> {
         std::process::id(),
         fastrand_suffix()
     ));
-    std::fs::create_dir_all(&base).expect("create the store base");
+    std::fs::create_dir(&base).expect("create a fresh store base");
 
     let ports: Vec<u16> = (0..scenario.validators).map(|_| free_port()).collect();
     let addrs = ports
