@@ -19,7 +19,7 @@ qtv-account = { path = "../qtv-account" }
 qtv-idfmt = { path = "../qtv-idfmt" }
 
 qtv-node = { path = "../qtv-node" }
-qtv-attest = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "fe6d36c335f985358df3eba0774f4094ec2d9c31" }
+qtv-attest = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "8e998f97b5df74f8181c69ea980c0aaa1c120e2c" }
 qtv-tx = { path = "../qtv-tx" }
 qtv-governance = { path = "../qtv-governance" }
 
@@ -31,7 +31,7 @@ qtv-devnet = { path = "../qtv-devnet" }
 
 qtv-gateway = { path = "../qtv-gateway" }
 
-qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "46f70778a505a495adb3a1805620802b380ce465" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "4e37c52984740f345f96e2c8536803bce5f3b805" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
