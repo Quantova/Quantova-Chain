@@ -169,7 +169,7 @@ fn ordered_and_parallel_agree_on_random_blocks() {
                         &qtv_node::ledger::vm_deploy_address(),
                         container(),
                         nonce,
-                        5_000_000,
+                        base_fee + u128::from(fee_params.deploy_fee()),
                         12_000_000,
                     )
                 }

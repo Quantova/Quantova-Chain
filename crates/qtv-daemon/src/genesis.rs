@@ -58,6 +58,7 @@ impl GenesisFile {
         let mut rate_micro_usd_per_qtov: Option<u128> = None;
         let mut native_unit: Option<u128> = None;
         let mut max_fee_native: Option<u64> = None;
+        let mut deploy_treasury: Option<[u8; 32]> = None;
         let mut bridge_dest_chain: Option<u32> = None;
         let mut bridge_exit_max_amount: Option<u128> = None;
         let mut guardian_members: Vec<[u8; 32]> = Vec::new();
@@ -101,6 +102,13 @@ impl GenesisFile {
                 }
                 "fee_native_unit" => native_unit = Some(field.u128("fee_native_unit")?),
                 "fee_max_native" => max_fee_native = Some(field.u64("fee_max_native")?),
+                "fee_deploy_treasury" => {
+                    let payload: [u8; 32] = qtv_idfmt::parse_address(field.value.trim())
+                        .ok()
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .ok_or_else(|| field.error("fee_deploy_treasury expects a Q1 address"))?;
+                    deploy_treasury = Some(payload);
+                }
                 "bridge_dest_chain" => bridge_dest_chain = Some(field.u32("bridge_dest_chain")?),
                 "bridge_exit_max_amount" => {
                     bridge_exit_max_amount = Some(field.u128("bridge_exit_max_amount")?)
@@ -234,6 +242,16 @@ impl GenesisFile {
             max_fee_native: max_fee_native.ok_or("the genesis is missing 'fee_max_native'")?,
             chain_id: chain_binding,
             native_asset: asset_tag(&asset),
+            deploy_treasury: match deploy_treasury {
+                Some(treasury) => treasury,
+                None if chain_id.starts_with("Q-dev-net") => FeeParams::devnet().deploy_treasury,
+                None => {
+                    return Err(
+                        "the genesis is missing 'fee_deploy_treasury', the Q1 address that receives the deploy fee"
+                            .to_string(),
+                    )
+                }
+            },
         };
         if fee_params.rate_micro_usd_per_qtov == 0 {
             return Err(
@@ -558,7 +576,7 @@ fn parse_account(field: &Field) -> Result<GenesisAccount, String> {
 
 fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) -> [u8; 32] {
     let mut buf: Vec<u8> = Vec::new();
-    buf.extend_from_slice(b"QTV-GENESIS-V7");
+    buf.extend_from_slice(b"QTV-GENESIS-V8");
     put_bytes(&mut buf, chain_id.as_bytes());
     put_bytes(&mut buf, message.as_bytes());
     buf.extend_from_slice(&genesis.genesis_time.to_le_bytes());
@@ -568,6 +586,7 @@ fn genesis_hash(chain_id: &str, message: &str, slots: u64, genesis: &Genesis) ->
     buf.extend_from_slice(&genesis.fee_params.native_unit.to_le_bytes());
     buf.extend_from_slice(&genesis.fee_params.max_fee_native.to_le_bytes());
     buf.extend_from_slice(&genesis.fee_params.native_asset);
+    buf.extend_from_slice(&genesis.fee_params.deploy_treasury);
     match genesis.bridge_dest_chain {
         Some(dest_chain) => {
             buf.push(1);
@@ -682,6 +701,7 @@ mod tests {
                 max_fee_native: 10_000,
                 chain_id: 42,
                 native_asset: asset_tag("QDEVNET"),
+                deploy_treasury: [0xde; 32],
             },
             accounts: vec![account(1, 100), account(2, 100)],
             validators: vec![validator(1, 2_000), validator(2, 2_000)],

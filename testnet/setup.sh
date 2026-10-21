@@ -38,6 +38,7 @@ fee_transfer_micro_usd = 500
 fee_rate_micro_usd_per_qtov = 1000000
 fee_native_unit = 1000000
 fee_max_native = 1000
+fee_deploy_treasury = ${DEPLOY_TREASURY:?set DEPLOY_TREASURY to the Q1 address that receives the deploy fee}
 $VALIDATOR_LINE
 account = 1 $FAUCET_PUBKEY $FAUCET_QUON
 EOF

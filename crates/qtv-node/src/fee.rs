@@ -5,7 +5,7 @@ pub const MICRO_USD_FLOOR: u128 = 500;
 
 pub const MICRO_USD_CEILING: u128 = 1000;
 
-pub const DEPLOY_CAP_MICRO_USD: u128 = 50_000;
+pub const DEPLOY_FEE_MICRO_USD: u128 = 5_000_000;
 
 pub type AssetTag = [u8; 8];
 
@@ -30,6 +30,7 @@ pub struct FeeParams {
     pub max_fee_native: u64,
     pub chain_id: u64,
     pub native_asset: AssetTag,
+    pub deploy_treasury: [u8; 32],
 }
 
 impl FeeParams {
@@ -41,6 +42,7 @@ impl FeeParams {
             max_fee_native: 1_000,
             chain_id: qtv_tx::LOCAL_CHAIN_ID,
             native_asset: asset_tag("QDEVNET"),
+            deploy_treasury: [0xde; 32],
         }
     }
 
@@ -62,14 +64,16 @@ impl FeeParams {
         self.native_fee(MICRO_USD_CEILING)
     }
 
-    pub fn deploy_cap_native(&self) -> u64 {
-        let native = DEPLOY_CAP_MICRO_USD
+    pub fn deploy_fee(&self) -> u64 {
+        let native = DEPLOY_FEE_MICRO_USD
             .saturating_mul(self.native_unit)
             .checked_div(self.rate_micro_usd_per_qtov)
             .unwrap_or(0);
-        u64::try_from(native)
-            .unwrap_or(u64::MAX)
-            .max(self.transfer_fee())
+        u64::try_from(native).unwrap_or(u64::MAX)
+    }
+
+    pub fn deploy_treasury_address(&self) -> String {
+        qtv_idfmt::render_address(&self.deploy_treasury).unwrap_or_default()
     }
 
     pub fn floor_native_uncapped(&self) -> u64 {
@@ -112,6 +116,19 @@ mod tests {
     }
 
     #[test]
+    fn the_deploy_fee_is_frozen_at_five_dollars() {
+        assert_eq!(DEPLOY_FEE_MICRO_USD, 5_000_000);
+        let p = FeeParams::devnet();
+        assert_eq!(p.deploy_fee(), 5_000_000);
+        let dear = FeeParams {
+            rate_micro_usd_per_qtov: 2_000_000,
+            ..p
+        };
+        assert_eq!(dear.deploy_fee(), 2_500_000);
+        assert!(p.deploy_treasury_address().starts_with("Q1"));
+    }
+
+    #[test]
     fn a_transfer_fee_is_nonzero_and_within_the_band() {
         let p = FeeParams::devnet();
         let floor = p.native_fee(MICRO_USD_FLOOR);
@@ -140,6 +157,7 @@ mod tests {
             max_fee_native: 1_000,
             chain_id: qtv_tx::LOCAL_CHAIN_ID,
             native_asset: asset_tag("QDEVNET"),
+            deploy_treasury: [0xde; 32],
         };
         let dear = FeeParams {
             rate_micro_usd_per_qtov: 2_000_000,
@@ -157,6 +175,7 @@ mod tests {
             max_fee_native: 1_000,
             chain_id: qtv_tx::LOCAL_CHAIN_ID,
             native_asset: asset_tag("QDEVNET"),
+            deploy_treasury: [0xde; 32],
         };
         assert_eq!(fresh.native_fee(MICRO_USD_CEILING), 1_000);
         let stale_low = FeeParams {
@@ -175,6 +194,7 @@ mod tests {
             max_fee_native: u64::MAX,
             chain_id: qtv_tx::LOCAL_CHAIN_ID,
             native_asset: asset_tag("QDEVNET"),
+            deploy_treasury: [0xde; 32],
         };
         assert_eq!(p.transfer_fee(), u64::MAX);
     }
@@ -188,6 +208,7 @@ mod tests {
             max_fee_native: 1_000,
             chain_id: qtv_tx::LOCAL_CHAIN_ID,
             native_asset: asset_tag("QDEVNET"),
+            deploy_treasury: [0xde; 32],
         };
         assert_eq!(p.transfer_fee(), 0);
     }

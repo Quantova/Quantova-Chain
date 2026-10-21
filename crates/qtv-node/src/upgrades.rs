@@ -6,30 +6,26 @@ pub struct Upgrades {
     pub gas_metered_from_height: u64,
     pub bound_draw_from_epoch: u64,
     pub hardened_from_height: u64,
-    pub deploy_fee_cap_from_height: u64,
 }
 
 pub const FROM_GENESIS: Upgrades = Upgrades {
     gas_metered_from_height: 0,
     bound_draw_from_epoch: 0,
     hardened_from_height: 0,
-    deploy_fee_cap_from_height: u64::MAX,
 };
 
 pub const TESTNET: Upgrades = Upgrades {
     gas_metered_from_height: 0,
     bound_draw_from_epoch: 0,
     hardened_from_height: 0,
-    deploy_fee_cap_from_height: u64::MAX,
 };
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 fn table_bytes(table: &Upgrades, out: &mut Vec<u8>) {
     out.extend_from_slice(&table.gas_metered_from_height.to_le_bytes());
     out.extend_from_slice(&table.bound_draw_from_epoch.to_le_bytes());
     out.extend_from_slice(&table.hardened_from_height.to_le_bytes());
-    out.extend_from_slice(&table.deploy_fee_cap_from_height.to_le_bytes());
 }
 
 pub fn protocol_digest() -> [u8; 32] {
@@ -59,10 +55,6 @@ impl Upgrades {
 
     pub fn hardened(&self, height: u64) -> bool {
         height >= self.hardened_from_height
-    }
-
-    pub fn deploy_fee_capped(&self, height: u64) -> bool {
-        height >= self.deploy_fee_cap_from_height
     }
 
     pub fn full_committee(&self, epoch: u64, heights_per_epoch: u64) -> bool {

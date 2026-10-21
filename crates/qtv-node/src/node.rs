@@ -1268,31 +1268,41 @@ fn meter_ceiling(wrapper: &Wrapper) -> u64 {
 const MAX_REGISTRATION_BYTES: usize = 4096;
 const MAX_VM_ARGS: usize = 128 * 1024;
 
-pub(crate) fn vm_meter_fee(meter: u64, fee_params: &FeeParams) -> u64 {
-    let units = meter.div_ceil(crate::execution::TRANSFER_METER).max(1);
-    u128::from(fee_params.transfer_fee())
-        .saturating_mul(u128::from(units))
-        .try_into()
-        .unwrap_or(u64::MAX)
+pub(crate) fn vm_meter_fee(_meter: u64, fee_params: &FeeParams) -> u64 {
+    fee_params.transfer_fee()
 }
 
-pub(crate) fn deploy_cap_active(
-    ledger: &Ledger,
-    wrapper: &Wrapper,
-    fee_params: &FeeParams,
-) -> bool {
+pub(crate) fn is_deploy(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::vm_deploy_address()
-        && crate::upgrades::for_chain(fee_params.chain_id)
-            .deploy_fee_capped(ledger.execution_height())
 }
 
-pub(crate) fn vm_charge(meter: u64, fee_params: &FeeParams, deploy_capped: bool) -> u64 {
+pub(crate) fn vm_charge(meter: u64, fee_params: &FeeParams, deploy: bool) -> u64 {
     let fee = vm_meter_fee(meter, fee_params);
-    if deploy_capped {
-        fee.min(fee_params.deploy_cap_native())
+    if deploy {
+        fee.saturating_add(fee_params.deploy_fee())
     } else {
         fee
     }
+}
+
+fn settle_deploy_fee(
+    ledger: &mut Ledger,
+    sender: &str,
+    fee_params: &FeeParams,
+    fee: u64,
+    deployed: bool,
+) {
+    if fee == 0 {
+        return;
+    }
+    let payee = if deployed {
+        fee_params.deploy_treasury_address()
+    } else {
+        sender.to_string()
+    };
+    let mut account = ledger.account(&payee);
+    account.balance = account.balance.saturating_add(fee);
+    ledger.set_account(&payee, &account);
 }
 
 pub(crate) fn is_vm_op(ledger: &Ledger, wrapper: &Wrapper) -> bool {
@@ -1313,7 +1323,7 @@ pub(crate) fn vm_admissible(
     account: &Account,
     fee_params: &FeeParams,
     signature_ok: bool,
-    deploy_capped: bool,
+    deploy: bool,
 ) -> bool {
     let body = wrapper.body();
     if !account.has_key() || !qtv_tx::scheme_supported(wrapper.scheme()) || !signature_ok {
@@ -1328,7 +1338,7 @@ pub(crate) fn vm_admissible(
     {
         return false;
     }
-    let charged = vm_charge(body.meter_limit(), fee_params, deploy_capped);
+    let charged = vm_charge(body.meter_limit(), fee_params, deploy);
     if body.fee() < u128::from(charged) {
         return false;
     }
@@ -1385,12 +1395,12 @@ fn dispatch_vm(
         return false;
     }
     let account = ledger.account(&sender);
-    let deploy_capped = deploy_cap_active(ledger, wrapper, fee_params);
-    if !vm_admissible(wrapper, &account, fee_params, signature_ok, deploy_capped) {
+    let deploy = is_deploy(wrapper);
+    if !vm_admissible(wrapper, &account, fee_params, signature_ok, deploy) {
         return false;
     }
     ledger.arm_vm_meter(wrapper.body().meter_limit());
-    let charged = vm_charge(wrapper.body().meter_limit(), fee_params, deploy_capped);
+    let charged = vm_charge(wrapper.body().meter_limit(), fee_params, deploy);
     let value = wrapper.body().value();
     let in_asset = wrapper.body().in_asset();
     let native_debit = if in_asset.is_none() { value } else { 0 };
@@ -1405,9 +1415,20 @@ fn dispatch_vm(
     charged_account.balance -= charged;
     charged_account.nonce += 1;
     ledger.set_account(&sender, &charged_account);
+    let deploy_fee = if deploy {
+        fee_params.deploy_fee().min(charged)
+    } else {
+        0
+    };
+    let network_fee = charged - deploy_fee;
+    let deployed_to = if deploy {
+        crate::ledger::contract_address(&sender, nonce)
+    } else {
+        None
+    };
     let legacy = legacy_vm_rules(ledger, fee_params);
     if legacy {
-        ledger.collect_fee(charged);
+        ledger.collect_fee(network_fee);
     }
     run_vm(
         ledger,
@@ -1422,16 +1443,15 @@ fn dispatch_vm(
         now_seconds,
         legacy,
     );
+    let deployed = deployed_to
+        .as_deref()
+        .is_some_and(|address| ledger.is_contract(address));
+    settle_deploy_fee(ledger, &sender, fee_params, deploy_fee, deployed);
     if legacy {
         return true;
     }
-    let used_fee = vm_charge(
-        ledger.vm_meter_charge().min(meter),
-        fee_params,
-        deploy_capped,
-    )
-    .min(charged);
-    let refund = charged - used_fee;
+    let used_fee = vm_meter_fee(ledger.vm_meter_charge().min(meter), fee_params).min(network_fee);
+    let refund = network_fee - used_fee;
     if refund > 0 {
         let mut settled = ledger.account(&sender);
         settled.balance = settled.balance.saturating_add(refund);
@@ -2568,12 +2588,13 @@ mod tests {
         meter: u64,
         fee: &FeeParams,
     ) -> Wrapper {
+        let deploy = target == crate::ledger::vm_deploy_address();
         let call = qtv_tx::Call::new(target.to_string(), args);
         let body = Body::new(
             from.address(),
             nonce,
             meter,
-            u128::from(vm_meter_fee(meter, fee)),
+            u128::from(vm_charge(meter, fee, deploy)),
             call,
         );
         sign(from, &body, &[0u8; 32])
@@ -2689,15 +2710,17 @@ mod tests {
     }
 
     #[test]
-    fn a_vm_call_is_priced_per_meter() {
+    fn every_vm_call_pays_the_one_locked_fee() {
         let fee = FeeParams::devnet();
         let base = fee.transfer_fee();
         assert_eq!(vm_meter_fee(crate::execution::TRANSFER_METER, &fee), base);
         assert_eq!(
             vm_meter_fee(crate::execution::TRANSFER_METER * 10, &fee),
-            base * 10
+            base
         );
-        assert!(vm_meter_fee(MAX_TX_METER, &fee) > base * 1000);
+        assert_eq!(vm_meter_fee(MAX_TX_METER, &fee), base);
+        assert_eq!(vm_meter_fee(MAX_DEPLOY_METER, &fee), base);
+        assert!(base <= fee.ceiling_fee());
     }
 
     #[test]
@@ -3154,10 +3177,16 @@ mod tests {
             deposit_value,
             "the contract took custody of the native value it was sent"
         );
+        assert_eq!(
+            ledger.balance(&fee.deploy_treasury_address()),
+            fee.deploy_fee(),
+            "the treasury received the frozen deploy fee"
+        );
         let deployer_paid = deployer_start - ledger.balance(&deployer.address()) - deposit_value;
-        assert!(
-            deployer_paid > 0 && deployer_paid <= 2 * charged,
-            "the depositor paid two metered fees and parted with the value it sent"
+        assert_eq!(
+            deployer_paid,
+            2 * charged + fee.deploy_fee(),
+            "the deployer paid two locked fees, the deploy fee and parted with the value it sent"
         );
 
         let supply_before = ledger.balance(&contract) + ledger.balance(&payee.address());
@@ -3173,7 +3202,7 @@ mod tests {
         let pull_fee = payee_start + payout - ledger.balance(&payee.address());
         assert!(
             pull_fee > 0 && pull_fee <= charged,
-            "the caller received the native funds the contract sent and paid a metered fee"
+            "the caller received the native funds the contract sent and paid the locked fee"
         );
         let supply_after = ledger.balance(&contract) + ledger.balance(&payee.address());
         assert_eq!(
@@ -3235,7 +3264,7 @@ mod tests {
         let payee_paid = payee_before - ledger.balance(&payee.address());
         assert!(
             payee_paid > 0 && payee_paid <= vm_meter_fee(100_000, &fee),
-            "the caller minted no funds and only paid the metered fee"
+            "the caller minted no funds and only paid the locked fee"
         );
     }
 
@@ -3272,6 +3301,16 @@ mod tests {
         assert!(
             !ledger.is_contract(&rejected),
             "a malformed container deploys no contract"
+        );
+        assert_eq!(
+            ledger.balance(&fee.deploy_treasury_address()),
+            0,
+            "a failed deploy pays the treasury nothing"
+        );
+        assert_eq!(
+            ledger.balance(&deployer.address()),
+            10_000 * 1_000_000 - vm_meter_fee(100_000, &fee),
+            "a failed deploy keeps its deploy fee and pays only the locked fee"
         );
 
         let good_code = qtv_vm::asm::assemble("LDI r0, 1\nHALT").expect("assembles");

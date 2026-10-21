@@ -818,14 +818,9 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
             let signature_ok = verified(&wrapper, &account.public_key, signature_hint);
-            let deploy_capped = crate::node::deploy_cap_active(ledger, &wrapper, fee_params);
-            if !crate::node::vm_admissible(
-                &wrapper,
-                &account,
-                fee_params,
-                signature_ok,
-                deploy_capped,
-            ) || !crate::node::vm_target_dispatchable(ledger, &wrapper)
+            let deploy = crate::node::is_deploy(&wrapper);
+            if !crate::node::vm_admissible(&wrapper, &account, fee_params, signature_ok, deploy)
+                || !crate::node::vm_target_dispatchable(ledger, &wrapper)
             {
                 return Err(Reject::BadCall);
             }
@@ -1035,14 +1030,13 @@ impl Mempool {
                     false
                 } else {
                     let account = ledger.account(wrapper.body().sender());
-                    let deploy_capped =
-                        crate::node::deploy_cap_active(ledger, &wrapper, fee_params);
+                    let deploy = crate::node::is_deploy(&wrapper);
                     crate::node::vm_admissible(
                         &wrapper,
                         &account,
                         fee_params,
                         verified[index],
-                        deploy_capped,
+                        deploy,
                     ) && crate::node::vm_target_dispatchable(ledger, &wrapper)
                 }
             } else if crate::node::is_key_register(&wrapper) {
