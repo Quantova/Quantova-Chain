@@ -534,6 +534,8 @@ impl DevNode {
             dev.block_store.truncate_to_height(committed)?;
             dev.event_store.truncate_to_height(committed)?;
             dev.side_event_store.truncate_to_height(committed)?;
+            dev.burn_archive.truncate_to_height(committed)?;
+            dev.roster_archive.truncate_to_height(committed)?;
         }
 
         if dev.block_store.is_empty() {

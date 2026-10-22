@@ -84,6 +84,20 @@ impl BurnArchive {
         Ok(())
     }
 
+    pub fn truncate_to_height(&mut self, height: u64) -> io::Result<()> {
+        let cut = self
+            .by_height
+            .range((Bound::Excluded(height), Bound::Unbounded))
+            .map(|(_, (start, _))| start.saturating_sub(qtv_codec::LENGTH_WIDTH as u64))
+            .min();
+        let Some(cut) = cut else {
+            return Ok(());
+        };
+        self.log.truncate(cut)?;
+        self.by_height.retain(|_, (start, _)| *start < cut);
+        Ok(())
+    }
+
     pub fn entry(&self, height: u64) -> Option<BurnArchiveEntry> {
         let (start, len) = *self.by_height.get(&height)?;
         let payload = self.log.read_payload(start, len).ok()?;

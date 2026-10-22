@@ -77,6 +77,23 @@ impl RosterArchive {
         Ok(())
     }
 
+    pub fn truncate_to_height(&mut self, height: u64) -> io::Result<()> {
+        let mut cut: Option<u64> = None;
+        for (&epoch, &(start, _)) in &self.by_epoch {
+            let stale = self.entry(epoch).is_none_or(|entry| entry.height > height);
+            if stale {
+                let frame = start.saturating_sub(qtv_codec::LENGTH_WIDTH as u64);
+                cut = Some(cut.map_or(frame, |c| c.min(frame)));
+            }
+        }
+        let Some(cut) = cut else {
+            return Ok(());
+        };
+        self.log.truncate(cut)?;
+        self.by_epoch.retain(|_, (start, _)| *start < cut);
+        Ok(())
+    }
+
     pub fn entry(&self, epoch: u64) -> Option<RosterArchiveEntry> {
         let (start, len) = *self.by_epoch.get(&epoch)?;
         let payload = self.log.read_payload(start, len).ok()?;
