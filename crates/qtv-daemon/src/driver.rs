@@ -94,6 +94,44 @@ const VERIFY_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 
 const PEER_FAULT_SILENCE: Duration = Duration::from_secs(600);
 
+pub const MIN_FREE_BYTES_ENV: &str = "QTV_MIN_FREE_BYTES";
+
+const DEFAULT_MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+const DISK_CHECK_EVERY: Duration = Duration::from_secs(5);
+
+struct DiskGuard {
+    dir: std::path::PathBuf,
+    floor: u64,
+    checked: Option<Instant>,
+    low: bool,
+}
+
+impl DiskGuard {
+    fn low(&mut self) -> bool {
+        let due = self
+            .checked
+            .is_none_or(|at| at.elapsed() >= DISK_CHECK_EVERY);
+        if due {
+            self.checked = Some(Instant::now());
+            let low = crate::util::free_bytes(&self.dir).is_some_and(|free| free < self.floor);
+            if low != self.low {
+                log(&if low {
+                    format!(
+                        "the store volume of {} holds less than {} free bytes, the node pauses                          signing, proposing and writing blocks until space is freed",
+                        self.dir.display(),
+                        self.floor
+                    )
+                } else {
+                    "the store volume has room again, the node resumes".to_string()
+                });
+            }
+            self.low = low;
+        }
+        self.low
+    }
+}
+
 struct Charge {
     bytes: usize,
     held: Arc<AtomicUsize>,
@@ -382,6 +420,7 @@ pub struct Driver {
     read_jobs: Option<SyncSender<ReadJob>>,
     rpc_window: (Instant, Duration),
     faulted: std::collections::HashMap<u64, Instant>,
+    disk: Option<DiskGuard>,
 }
 
 impl Driver {
@@ -431,7 +470,25 @@ impl Driver {
             read_jobs: None,
             rpc_window: (Instant::now(), Duration::ZERO),
             faulted: std::collections::HashMap::new(),
+            disk: None,
         }
+    }
+
+    pub fn guard_disk(&mut self, dir: std::path::PathBuf) {
+        let floor = std::env::var(MIN_FREE_BYTES_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(DEFAULT_MIN_FREE_BYTES);
+        self.disk = Some(DiskGuard {
+            dir,
+            floor,
+            checked: None,
+            low: false,
+        });
+    }
+
+    fn disk_low(&mut self) -> bool {
+        self.disk.as_mut().is_some_and(DiskGuard::low)
     }
 
     pub fn attach_rpc(&mut self, context: NodeContext, requests: Receiver<GatewayCall>) {
@@ -609,6 +666,11 @@ impl Driver {
                     self.budget.saturating_sub(1)
                 ));
                 return Ok(());
+            }
+            if self.disk_low() {
+                self.serve_rpc();
+                std::thread::sleep(block_interval.max(Duration::from_millis(200)));
+                continue;
             }
             self.drive_one_height(block_interval, view_timeout, stopped)?;
         }

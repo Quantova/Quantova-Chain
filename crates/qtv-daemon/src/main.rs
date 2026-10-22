@@ -231,6 +231,7 @@ fn run(config_path: &Path) -> Result<(), String> {
     spawn_stop_watcher(stop_path, stopped.clone());
 
     let mut driver = driver::Driver::new(node, idx, mesh);
+    driver.guard_disk(settings.store_dir.clone());
 
     if let Some(rpc_addr) = settings.rpc_listen.clone() {
         let rpc_listener = TcpListener::bind(&rpc_addr)

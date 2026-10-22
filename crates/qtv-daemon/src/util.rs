@@ -45,3 +45,21 @@ pub fn log(message: &str) {
         .unwrap_or(0);
     eprintln!("[quantovad t={secs}] {message}");
 }
+
+#[cfg(unix)]
+pub fn free_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    let status = unsafe { libc::statvfs(name.as_ptr(), stats.as_mut_ptr()) };
+    if status != 0 {
+        return None;
+    }
+    let stats = unsafe { stats.assume_init() };
+    Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
+}
+
+#[cfg(not(unix))]
+pub fn free_bytes(_path: &std::path::Path) -> Option<u64> {
+    None
+}
