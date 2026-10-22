@@ -249,6 +249,8 @@ pub enum SyncError {
     WrongStateRoot,
     CheckpointConflict,
     FinalityViolation,
+    Oversized,
+    WrongProposer,
     Io,
 }
 
@@ -3222,8 +3224,14 @@ impl DevNode {
         if header.beacon_seed() != self.beacon.seed() {
             return Err(SyncError::WrongBeacon);
         }
-        if header.time() < self.parent_time {
+        if header.time() < self.parent_time
+            || header.time()
+                > qtv_node::node::wall_clock_seconds().saturating_add(MAX_BLOCK_TIME_AHEAD_SECS)
+        {
             return Err(SyncError::WrongTime);
+        }
+        if body_bytes(block.body()) > MAX_BLOCK_BODY_BYTES {
+            return Err(SyncError::Oversized);
         }
         let certificate = crate::wire::certificate_from_bytes(block.certificate())
             .map_err(|_| SyncError::BadCertificate)?;
@@ -3238,6 +3246,14 @@ impl DevNode {
         let selection = self
             .committee_for_certificate(self.height, &certificate)
             .ok_or(SyncError::NoCommittee)?;
+        let proposer_seated = self
+            .base_roster
+            .iter()
+            .filter(|v| v.bond_address == *header.proposer())
+            .any(|v| selection.commitment.member(v.id).is_some());
+        if !proposer_seated {
+            return Err(SyncError::WrongProposer);
+        }
         if !certificate
             .verify_with_trusted_commitment(
                 self.consensus.binding(),
