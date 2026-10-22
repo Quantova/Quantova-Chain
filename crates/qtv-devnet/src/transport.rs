@@ -5,7 +5,14 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::thread;
 
-use qtv_net::{duplex, Channel, DuplexStream, Identity, Result};
+use qtv_net::{duplex, Channel, DuplexStream, Error, Identity, Result};
+
+fn not_connected(reason: &str) -> Error {
+    Error::Io(std::io::Error::new(
+        std::io::ErrorKind::NotConnected,
+        reason,
+    ))
+}
 
 pub struct Mesh<S> {
     node_count: usize,
@@ -45,7 +52,7 @@ impl<S: Read + Write> Mesh<S> {
         let channel = self
             .links
             .get_mut(&(from, to))
-            .expect("a mesh link exists for every ordered pair");
+            .ok_or_else(|| not_connected("no mesh link for this pair"))?;
         channel.send(bytes)?;
         *self.pending.entry((from, to)).or_insert(0) += 1;
         Ok(())
@@ -69,12 +76,12 @@ impl<S: Read + Write> Mesh<S> {
             .pending
             .get_mut(&(from, to))
             .filter(|c| **c > 0)
-            .expect("a delivery event fires only for a record in flight");
+            .ok_or_else(|| not_connected("no record in flight on this link"))?;
         *count -= 1;
         let channel = self
             .links
             .get_mut(&(to, from))
-            .expect("a mesh link exists for every ordered pair");
+            .ok_or_else(|| not_connected("no mesh link for this pair"))?;
         channel.recv()
     }
 
@@ -88,7 +95,7 @@ impl<S: Read + Write> Mesh<S> {
             let channel = self
                 .links
                 .get_mut(&(receiver, from))
-                .expect("a mesh link exists for every ordered pair");
+                .ok_or_else(|| not_connected("no mesh link for this pair"))?;
             for _ in 0..count {
                 out.push((from, channel.recv()?));
             }
@@ -108,7 +115,11 @@ pub fn connect_duplex_pair(
     let peer_far = id_j.peer_id();
     let accepting = thread::spawn(move || Channel::accept_pinned(far, &id_far, &peer_near));
     let channel_i = Channel::connect_pinned(near, &id_near, &peer_far)?;
-    let channel_j = accepting.join().expect("the accept thread joins")?;
+    let channel_j = accepting.join().map_err(|_| {
+        Error::Io(std::io::Error::other(
+            "the accepting side of the pair failed",
+        ))
+    })??;
     Ok((channel_i, channel_j))
 }
 

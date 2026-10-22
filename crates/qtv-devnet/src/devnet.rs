@@ -748,7 +748,9 @@ impl<S: Read + Write> Devnet<S> {
             if time > deadline {
                 break;
             }
-            let event = self.clock.next_event().expect("a peeked event pops");
+            let Some(event) = self.clock.next_event() else {
+                break;
+            };
             self.handle_event(event, ceiling, &active)?;
         }
         self.exchange_reveals();
