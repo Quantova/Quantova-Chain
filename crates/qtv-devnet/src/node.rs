@@ -1224,9 +1224,11 @@ impl DevNode {
         let tau = selection.tau.max(qtv_sampler::params::finality_threshold(
             commitment.len() as u64
         ));
-        commitment.len() as u64 >= tau
+        let seats_ok = selection.mode == qtv_sampler::sortition::DrawMode::Full
+            || commitment.len() as u64 >= tau;
+        seats_ok
             && commitment.committee_stake().saturating_mul(3)
-                >= commitment.quorum_stake().saturating_mul(2)
+                > commitment.quorum_stake().saturating_mul(2)
     }
 
     pub fn refreeze_committee(&mut self) -> Result<Selection, RoundError> {
@@ -2052,7 +2054,13 @@ impl DevNode {
             .filter(|p| p.view == view && p.block == subject)
             .cloned()
             .collect();
-        if (prevotes.len() as u64) < selection.tau {
+        let voters: Vec<u64> = {
+            let mut voters: Vec<u64> = prevotes.iter().map(|p| p.from).collect();
+            voters.sort_unstable();
+            voters.dedup();
+            voters
+        };
+        if !stake_quorum(selection, &voters) {
             return Vec::new();
         }
         let Some(polka) = self.consensus.finalize(
@@ -2393,7 +2401,8 @@ impl DevNode {
             }),
             _ => true,
         });
-        let out = if valid.len() as u64 >= selection.tau {
+        let signers: Vec<u64> = valid.iter().map(|record| record.att.from).collect();
+        let out = if stake_quorum(selection, &signers) {
             Some(valid)
         } else {
             None
@@ -2481,7 +2490,7 @@ impl DevNode {
             seen.push(record.att.from);
             records.push(record.clone());
         }
-        if seen.len() as u64 >= selection.tau {
+        if stake_quorum(selection, &seen) {
             Some(records)
         } else {
             None
@@ -2489,25 +2498,23 @@ impl DevNode {
     }
 
     pub fn view_sync_target(&self, selection: &Selection) -> Option<View> {
-        let blocking =
-            view_sync_blocking(selection.expected, selection.members.len(), selection.tau);
         let mut views: Vec<View> = self.view_changes.iter().map(|r| r.target_view).collect();
         views.sort_unstable();
         views.dedup();
         views
             .into_iter()
             .rev()
-            .find(|&view| self.distinct_view_changes(view) >= blocking)
+            .find(|&view| stake_blocking(selection, &self.distinct_view_changes(view)))
     }
 
-    fn distinct_view_changes(&self, view: View) -> usize {
+    fn distinct_view_changes(&self, view: View) -> Vec<u64> {
         let mut seen: Vec<u64> = Vec::new();
         for record in &self.view_changes {
             if record.target_view == view && !seen.contains(&record.att.from) {
                 seen.push(record.att.from);
             }
         }
-        seen.len()
+        seen
     }
 
     pub fn jump_to(&mut self, view: View) {
@@ -2617,14 +2624,15 @@ impl DevNode {
                     .insert(attestation.from);
             }
         }
+        let full = selection.mode == qtv_sampler::sortition::DrawMode::Full;
         by_view.values().any(|seen| {
             let stake = seen
                 .iter()
                 .map(|&id| u128::from(commitment.stake_of(id)))
                 .fold(0u128, u128::saturating_add);
-            seen.len() as u64 >= tau
+            (full || seen.len() as u64 >= tau)
                 && quorum_stake > 0
-                && stake.saturating_mul(3) >= quorum_stake.saturating_mul(2)
+                && stake.saturating_mul(3) > quorum_stake.saturating_mul(2)
         })
     }
 
@@ -3417,6 +3425,29 @@ fn record_carries_more(held: &ViewChange, incoming: &ViewChange) -> bool {
         .as_ref()
         .is_some_and(|block| !block.body.is_empty());
     (incoming_body && !held_body) || (incoming.polka.is_some() && held.polka.is_none())
+}
+
+fn seated_stake(selection: &Selection, ids: &[u64]) -> u128 {
+    ids.iter()
+        .map(|&id| u128::from(selection.commitment.stake_of(id)))
+        .fold(0u128, u128::saturating_add)
+}
+
+fn stake_quorum(selection: &Selection, ids: &[u64]) -> bool {
+    let quorum_stake = selection.commitment.quorum_stake();
+    let seats_ok = selection.mode == qtv_sampler::sortition::DrawMode::Full
+        || ids.len() as u64 >= selection.tau;
+    seats_ok
+        && quorum_stake > 0
+        && seated_stake(selection, ids).saturating_mul(3) > quorum_stake.saturating_mul(2)
+}
+
+fn stake_blocking(selection: &Selection, ids: &[u64]) -> bool {
+    if selection.mode == qtv_sampler::sortition::DrawMode::Full {
+        let quorum_stake = selection.commitment.quorum_stake();
+        return quorum_stake > 0 && seated_stake(selection, ids).saturating_mul(3) > quorum_stake;
+    }
+    ids.len() >= view_sync_blocking(selection.expected, selection.members.len(), selection.tau)
 }
 
 fn view_sync_blocking(expected: u64, members: usize, tau: u64) -> usize {
