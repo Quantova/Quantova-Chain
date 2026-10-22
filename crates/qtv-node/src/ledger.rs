@@ -3962,7 +3962,16 @@ impl Ledger {
                 Ok(())
             }
             b"bridge_payout_cap" => {
-                self.set_bridge_payout_cap(u128_from_le(value).ok_or(EnactError::BadValue)?);
+                let cap = u128_from_le(value).ok_or(EnactError::BadValue)?;
+                let ceiling = self
+                    .bridge_asset_ids()
+                    .iter()
+                    .filter_map(|id| self.bridged_asset(id))
+                    .fold(0u128, |sum, asset| sum.saturating_add(asset.epoch_cap));
+                if cap > ceiling {
+                    return Err(EnactError::BadValue);
+                }
+                self.set_bridge_payout_cap(cap);
                 Ok(())
             }
             b"gov_deposit" => {
