@@ -68,8 +68,12 @@ fn open_run(path: PathBuf) -> io::Result<Run> {
 
 fn next_record(reader: &mut std::io::BufReader<File>) -> Option<([u8; 32], u64)> {
     let mut buf = [0u8; RECORD];
-    reader.read_exact(&mut buf).ok()?;
-    split_record(&buf)
+    loop {
+        reader.read_exact(&mut buf).ok()?;
+        if let Some(record) = split_record(&buf) {
+            return Some(record);
+        }
+    }
 }
 
 impl TxIndex {
@@ -106,20 +110,18 @@ impl TxIndex {
             .create(true)
             .open(&tail_path)?;
         let tail_bytes = tail.metadata()?.len() as usize;
-        let tail_len = tail_bytes / RECORD;
+        let stored = tail_bytes / RECORD;
         if tail_bytes % RECORD != 0 {
-            tail.set_len((tail_len * RECORD) as u64)?;
+            tail.set_len((stored * RECORD) as u64)?;
         }
-        let mut tail_mem = Vec::with_capacity(tail_len);
+        let mut tail_mem = Vec::with_capacity(stored);
         {
             let mut r = std::io::BufReader::new(File::open(&tail_path)?);
-            for _ in 0..tail_len {
-                match next_record(&mut r) {
-                    Some(record) => tail_mem.push(record),
-                    None => break,
-                }
+            while let Some(record) = next_record(&mut r) {
+                tail_mem.push(record);
             }
         }
+        let tail_len = tail_mem.len();
         Ok(TxIndex {
             dir,
             tail_path,
