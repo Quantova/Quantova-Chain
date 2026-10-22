@@ -114,7 +114,6 @@ mod slot_charge {
             &|_k| 41,
             &memory,
             4_000_000,
-            true,
         )
         .expect("the call halts")
     }
@@ -166,7 +165,7 @@ mod slot_charge {
                     asked.set(asked.get() + 1);
                     41u64
                 };
-                execute_contract_call_lazy(&bytes, selector, &counting, &memory, limit, true)
+                execute_contract_call_lazy(&bytes, selector, &counting, &memory, limit)
             };
             (asked.get(), outcome)
         };
@@ -385,7 +384,6 @@ pub fn execute_contract_call_lazy(
     loader: &dyn Fn(&[u8; 32]) -> u64,
     memory: &[u8],
     meter_limit: u64,
-    strict: bool,
 ) -> Result<ContractOutcome, ExecError> {
     let access_cost = (container_bytes.len() as u64).saturating_mul(CODE_ACCESS_BYTE_METER);
     let vm_limit = meter_limit
@@ -405,11 +403,6 @@ pub fn execute_contract_call_lazy(
         Fault::OutOfMeter => ExecError::MeterExhausted,
         _ => ExecError::BadContainer,
     })?;
-    let interpreter = if strict {
-        interpreter
-    } else {
-        interpreter.with_legacy_rules()
-    };
     let affordable_touches = vm_limit / SLOT_ACCESS_METER;
     let touches = std::cell::Cell::new(0u64);
     let beyond_budget = std::cell::Cell::new(false);

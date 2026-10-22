@@ -2978,10 +2978,7 @@ impl Ledger {
                     None => 0,
                 }
             };
-            let strict = crate::upgrades::for_chain(chain_id).hardened(self.execution_height);
-            crate::execution::execute_contract_call_lazy(
-                &code, selector, &loader, &memory, meter, strict,
-            )
+            crate::execution::execute_contract_call_lazy(&code, selector, &loader, &memory, meter)
         };
         match executed {
             Ok(outcome) => {
