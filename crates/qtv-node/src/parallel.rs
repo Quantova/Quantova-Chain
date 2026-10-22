@@ -193,6 +193,7 @@ pub fn execute_parallel(
             || target == bridge_freeze_address.as_str()
             || target == bridge_unfreeze_address.as_str()
             || crate::node::is_key_register(wrapper)
+            || crate::node::is_stake_payee(wrapper)
             || crate::node::is_evidence(wrapper)
             || crate::node::is_registration(wrapper)
             || crate::node::is_bridge_guardian(wrapper)

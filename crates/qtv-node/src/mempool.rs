@@ -323,6 +323,7 @@ fn is_plain_transfer(ledger: &Ledger, wrapper: &Wrapper) -> bool {
     !is_feeless(wrapper)
         && !crate::node::is_vm_op(ledger, wrapper)
         && !crate::node::is_key_register(wrapper)
+        && !crate::node::is_stake_payee(wrapper)
         && !crate::node::is_bridge_exit(wrapper)
         && !crate::node::is_registration(wrapper)
         && wrapper.body().call().target() != crate::ledger::gov_system_address()
@@ -853,6 +854,26 @@ impl Mempool {
             {
                 return Err(Reject::BadCall);
             }
+        } else if crate::node::is_stake_payee(&wrapper) {
+            if self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce()) {
+                return Err(Reject::SenderQueueFull);
+            }
+            let account = ledger.account(wrapper.body().sender());
+            if !sender_prevalidated(&wrapper, &account, fee_params) {
+                return Err(Reject::BadCall);
+            }
+            let signature_ok = verified(&wrapper, &account.public_key, signature_hint);
+            if crate::node::stake_payee_admissible(
+                &wrapper,
+                &account,
+                fee_params,
+                signature_ok,
+                ledger,
+            )
+            .is_none()
+            {
+                return Err(Reject::BadCall);
+            }
         } else if wrapper.body().call().target() == crate::ledger::gov_system_address() {
             if self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce()) {
                 return Err(Reject::SenderQueueFull);
@@ -1059,6 +1080,19 @@ impl Mempool {
                         let account = ledger.account(wrapper.body().sender());
                         crate::node::key_register_admissible(&wrapper, &account, fee_params, None)
                             .is_some()
+                    }
+            } else if crate::node::is_stake_payee(&wrapper) {
+                !self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce())
+                    && {
+                        let account = ledger.account(wrapper.body().sender());
+                        crate::node::stake_payee_admissible(
+                            &wrapper,
+                            &account,
+                            fee_params,
+                            verified[index],
+                            ledger,
+                        )
+                        .is_some()
                     }
             } else if wrapper.body().call().target() == crate::ledger::gov_system_address() {
                 !self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce())

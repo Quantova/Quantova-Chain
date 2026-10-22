@@ -302,6 +302,70 @@ pub(crate) fn governance_admissible(
     decode_gov_op(op, &args[1..])
 }
 
+pub(crate) fn is_stake_payee(wrapper: &Wrapper) -> bool {
+    wrapper.body().call().target() == crate::ledger::stake_payee_address()
+}
+
+pub(crate) fn stake_payee_admissible(
+    wrapper: &Wrapper,
+    account: &Account,
+    fee_params: &FeeParams,
+    signature_ok: bool,
+    ledger: &Ledger,
+) -> Option<[u8; 32]> {
+    let body = wrapper.body();
+    if !is_stake_payee(wrapper) {
+        return None;
+    }
+    if !account.has_key() || !qtv_tx::scheme_supported(wrapper.scheme()) || !signature_ok {
+        return None;
+    }
+    if body.nonce() != account.nonce || body.meter_limit() < crate::execution::TRANSFER_METER {
+        return None;
+    }
+    if body.fee() < u128::from(fee_params.transfer_fee()) {
+        return None;
+    }
+    let charged = u64::try_from(body.fee().min(u128::from(fee_params.ceiling_fee())))
+        .unwrap_or_else(|_| fee_params.ceiling_fee());
+    if account.balance < charged {
+        return None;
+    }
+    let payee = <[u8; 32]>::try_from(body.call().args()).ok()?;
+    let sender = qtv_idfmt::parse_address(body.sender())
+        .ok()
+        .and_then(|payload| <[u8; 32]>::try_from(payload.as_slice()).ok())?;
+    if payee == [0u8; 32] || ledger.stake_payee(&sender).is_some() {
+        return None;
+    }
+    Some(payee)
+}
+
+fn dispatch_stake_payee(
+    ledger: &mut Ledger,
+    wrapper: &Wrapper,
+    signature_ok: bool,
+    fee_params: &FeeParams,
+) -> bool {
+    let sender = wrapper.body().sender().to_string();
+    if ledger.is_blacklisted(&sender) {
+        return false;
+    }
+    let account = ledger.account(&sender);
+    let Some(payee) = stake_payee_admissible(wrapper, &account, fee_params, signature_ok, ledger)
+    else {
+        return false;
+    };
+    let charged = u64::try_from(
+        wrapper
+            .body()
+            .fee()
+            .min(u128::from(fee_params.ceiling_fee())),
+    )
+    .unwrap_or_else(|_| fee_params.ceiling_fee());
+    ledger.designate_stake_payee_with_fee(&sender, &payee, charged)
+}
+
 pub(crate) fn is_key_register(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::key_register_address()
 }
@@ -1769,6 +1833,14 @@ fn execute_ordered_across(
         }
         if is_key_register(wrapper) {
             if ledger.apply_atomic(|l| dispatch_key_register(l, wrapper, fee_params)) {
+                included.push(wrapper.clone());
+            }
+            continue;
+        }
+        if is_stake_payee(wrapper) {
+            if ledger
+                .apply_atomic(|l| dispatch_stake_payee(l, wrapper, verified[index], fee_params))
+            {
                 included.push(wrapper.clone());
             }
             continue;

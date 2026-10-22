@@ -130,6 +130,15 @@ impl FeeSplit {
     }
 }
 
+const STAKE_PAYEE_TAG: &[u8] = b"qtv/stake/payee/";
+
+fn stake_payee_key(id: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(STAKE_PAYEE_TAG.len() + id.len());
+    input.extend_from_slice(STAKE_PAYEE_TAG);
+    input.extend_from_slice(id);
+    sha3::sha3_256(&input)
+}
+
 fn stake_bond_key(id: &[u8; 32]) -> Key {
     let mut input = Vec::with_capacity(STAKE_BOND_TAG.len() + id.len());
     input.extend_from_slice(STAKE_BOND_TAG);
@@ -480,6 +489,11 @@ pub fn stake_claim_address() -> String {
 pub fn stake_exit_address() -> String {
     static STAKE_EXIT_ADDRESS: OnceLock<String> = OnceLock::new();
     cached_address(&STAKE_EXIT_ADDRESS, b"qtv/stake/exit")
+}
+
+pub fn stake_payee_address() -> String {
+    static STAKE_PAYEE_ADDRESS: OnceLock<String> = OnceLock::new();
+    cached_address(&STAKE_PAYEE_ADDRESS, b"qtv/stake/payee")
 }
 
 pub fn stake_withdraw_address() -> String {
@@ -4257,6 +4271,36 @@ impl Ledger {
         }
     }
 
+    pub fn stake_payee(&self, id: &[u8; 32]) -> Option<[u8; 32]> {
+        self.trie
+            .get(&stake_payee_key(id))
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+    }
+
+    pub fn designate_stake_payee_with_fee(
+        &mut self,
+        address: &str,
+        payee: &[u8; 32],
+        fee: u64,
+    ) -> bool {
+        let Some(id) = address_id(address) else {
+            return false;
+        };
+        if self.stake_payee(&id).is_some() || *payee == [0u8; 32] {
+            return false;
+        }
+        let mut account = self.account(address);
+        if account.balance < fee {
+            return false;
+        }
+        account.balance -= fee;
+        account.nonce += 1;
+        self.set_account(address, &account);
+        self.collect_fee(fee);
+        self.write_leaf(stake_payee_key(&id), payee.to_vec());
+        true
+    }
+
     pub fn withdraw_stake(&mut self, address: &str, now_day: u64) -> bool {
         let id = match address_id(address) {
             Some(id) => id,
@@ -4268,9 +4312,13 @@ impl Ledger {
         };
         self.clear_stake_bond(&id);
         self.debit_staked(bond.amount);
-        let mut account = self.account(address);
+        let payee = self
+            .stake_payee(&id)
+            .and_then(|payee| id_bytes_to_address(&payee))
+            .unwrap_or_else(|| address.to_string());
+        let mut account = self.account(&payee);
         account.balance = account.balance.saturating_add(bond.amount);
-        self.set_account(address, &account);
+        self.set_account(&payee, &account);
         self.record_unbond_event(address, bond.amount);
         self.record_side_event(SideEvent::Unbond {
             validator: address.to_string(),
