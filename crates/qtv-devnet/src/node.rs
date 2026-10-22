@@ -2376,7 +2376,24 @@ impl DevNode {
             seen.push(record.att.from);
             valid.push(record.clone());
         }
-        let out = if seen.len() as u64 >= selection.tau {
+        let backed_top = valid
+            .iter()
+            .filter(|record| record.polka.is_some())
+            .filter_map(|record| {
+                record
+                    .locked
+                    .as_ref()
+                    .map(|block| (record.lock_view, header_value(&block.header.hash())))
+            })
+            .max_by_key(|(lock_view, _)| *lock_view);
+        valid.retain(|record| match (&record.locked, &record.polka) {
+            (Some(block), None) => backed_top.is_some_and(|(top, value)| {
+                record.lock_view < top
+                    || (record.lock_view == top && header_value(&block.header.hash()) == value)
+            }),
+            _ => true,
+        });
+        let out = if valid.len() as u64 >= selection.tau {
             Some(valid)
         } else {
             None
