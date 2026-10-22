@@ -92,6 +92,8 @@ struct VerifyDone {
 
 const VERIFY_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 
+const PEER_FAULT_SILENCE: Duration = Duration::from_secs(600);
+
 struct Charge {
     bytes: usize,
     held: Arc<AtomicUsize>,
@@ -379,6 +381,7 @@ pub struct Driver {
     verify_snapshot: Option<(u64, Arc<Ledger>)>,
     read_jobs: Option<SyncSender<ReadJob>>,
     rpc_window: (Instant, Duration),
+    faulted: std::collections::HashMap<u64, Instant>,
 }
 
 impl Driver {
@@ -427,6 +430,7 @@ impl Driver {
             verify_snapshot: None,
             read_jobs: None,
             rpc_window: (Instant::now(), Duration::ZERO),
+            faulted: std::collections::HashMap::new(),
         }
     }
 
@@ -872,7 +876,46 @@ impl Driver {
         }
     }
 
+    fn peer_faulted(&mut self, source: u64) -> bool {
+        let now = Instant::now();
+        self.faulted.retain(|_, until| *until > now);
+        self.faulted.contains_key(&source)
+    }
+
+    fn fault_peer(&mut self, source: u64) {
+        log(&format!(
+            "a message from peer {source} faulted while it was checked, it was dropped and the peer is ignored for {} s",
+            PEER_FAULT_SILENCE.as_secs()
+        ));
+        self.faulted
+            .insert(source, Instant::now() + PEER_FAULT_SILENCE);
+    }
+
     fn dispatch(&mut self, message: Message, selection: &Selection, source: u64) {
+        if self.peer_faulted(source) {
+            return;
+        }
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.dispatch_unguarded(message, selection, source)
+        }));
+        if checked.is_err() {
+            self.fault_peer(source);
+        }
+    }
+
+    fn dispatch_heightless(&mut self, message: Message, source: u64) {
+        if self.peer_faulted(source) {
+            return;
+        }
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.dispatch_heightless_unguarded(message, source)
+        }));
+        if checked.is_err() {
+            self.fault_peer(source);
+        }
+    }
+
+    fn dispatch_unguarded(&mut self, message: Message, selection: &Selection, source: u64) {
         match message {
             Message::CodedProposal(coded) => {
                 let relay = (*coded).clone();
@@ -929,7 +972,7 @@ impl Driver {
                 }
             }
             other @ (Message::Tx(_) | Message::GetBlocks { .. } | Message::Blocks(_)) => {
-                self.dispatch_heightless(other, source)
+                self.dispatch_heightless_unguarded(other, source)
             }
             Message::Peers(_) | Message::Status(_) => {}
         }
@@ -978,7 +1021,7 @@ impl Driver {
         }
     }
 
-    fn dispatch_heightless(&mut self, message: Message, source: u64) {
+    fn dispatch_heightless_unguarded(&mut self, message: Message, source: u64) {
         match message {
             Message::Tx(transaction) => self.verify_gossiped(transaction),
             Message::GetBlocks { from, to } => {
