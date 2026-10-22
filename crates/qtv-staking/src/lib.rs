@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 use qtv_codec::{Decode, Decoder, Encode, Encoder, Error};
+#[cfg(test)]
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const NATIVE_UNIT: u128 = 1_000_000;
@@ -245,6 +246,7 @@ impl Decode for RewardTranche {
     }
 }
 
+#[cfg(test)]
 pub struct StakeLedger {
     bonds: BTreeMap<[u8; 32], Bond>,
     banned: BTreeSet<[u8; 32]>,
@@ -254,6 +256,7 @@ pub struct StakeLedger {
     minted: u64,
 }
 
+#[cfg(test)]
 impl StakeLedger {
     pub fn new(pool: u64) -> StakeLedger {
         StakeLedger {
