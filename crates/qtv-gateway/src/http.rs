@@ -29,6 +29,38 @@ fn local_direct_unlimited() -> bool {
     *UNLIMITED.get_or_init(|| std::env::var(LOCAL_DIRECT_UNLIMITED_ENV).as_deref() == Ok("1"))
 }
 
+pub const ALLOWED_HOSTS_ENV: &str = "QTV_RPC_ALLOWED_HOSTS";
+
+fn allowed_hosts() -> &'static [String] {
+    static HOSTS: OnceLock<Vec<String>> = OnceLock::new();
+    HOSTS.get_or_init(|| {
+        std::env::var(ALLOWED_HOSTS_ENV)
+            .unwrap_or_default()
+            .split(',')
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect()
+    })
+}
+
+fn host_allowed(host: &str) -> bool {
+    let host = host.trim().to_ascii_lowercase();
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        return rest
+            .split(']')
+            .next()
+            .is_some_and(|ip| ip.parse::<std::net::Ipv6Addr>().is_ok());
+    } else {
+        host.rsplit_once(':')
+            .filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit()))
+            .map(|(name, _)| name)
+            .unwrap_or(&host)
+    };
+    name.parse::<std::net::Ipv4Addr>().is_ok()
+        || name == "localhost"
+        || allowed_hosts().iter().any(|allowed| allowed == name)
+}
+
 fn cors_origin() -> Option<&'static str> {
     CORS_ORIGIN.get().and_then(|o| o.as_deref())
 }
@@ -542,6 +574,9 @@ fn handle_connection(
     let mut content_length = 0usize;
     let mut seen_length = false;
     let mut forwarded_for: Option<String> = None;
+    let mut host: Option<String> = None;
+    let mut origin: Option<String> = None;
+    let mut content_type: Option<String> = None;
     loop {
         let header = match read_capped_line(&mut reader, &mut head_budget, deadline) {
             Ok(Some(header)) => header,
@@ -592,6 +627,37 @@ fn handle_connection(
         if let Some(value) = header_value(trimmed, "x-forwarded-for") {
             forwarded_for = Some(value.to_string());
         }
+        if let Some(value) = header_value(trimmed, "host") {
+            host = Some(value.to_string());
+        }
+        if let Some(value) = header_value(trimmed, "origin") {
+            origin = Some(value.trim().to_string());
+        }
+        if let Some(value) = header_value(trimmed, "content-type") {
+            content_type = Some(value.trim().to_ascii_lowercase());
+        }
+    }
+    if !host.as_deref().is_some_and(host_allowed) {
+        return write_error(
+            &mut stream,
+            421,
+            "host_not_allowed",
+            "the request names a host this gateway does not serve",
+        );
+    }
+    if let Some(origin) = origin.as_deref() {
+        let same_origin = origin.split_once("://").is_some_and(|(_, rest)| {
+            host.as_deref()
+                .is_some_and(|h| h.eq_ignore_ascii_case(rest))
+        });
+        if cors_origin() != Some(origin) && !same_origin {
+            return write_error(
+                &mut stream,
+                403,
+                "origin_not_allowed",
+                "requests from this browser origin are refused",
+            );
+        }
     }
 
     let mut _forwarded_guard: Option<ForwardedGuard> = None;
@@ -601,7 +667,7 @@ fn handle_connection(
         } else {
             None
         };
-        let direct = forwarded.is_none() && trusted_local() && local_direct_unlimited();
+        let direct = forwarded_for.is_none() && trusted_local() && local_direct_unlimited();
         let client = limiter_key(forwarded.unwrap_or(peer));
         match limiter.admit_client(client, direct, MAX_CONNECTIONS_PER_IP, Instant::now()) {
             Admit::Untracked => {}
@@ -647,6 +713,17 @@ fn handle_connection(
             405,
             "method_not_allowed",
             "the RPC accepts POST",
+        );
+    }
+    if !content_type
+        .as_deref()
+        .is_some_and(|t| t.split(';').next().map(str::trim) == Some("application/json"))
+    {
+        return write_error(
+            &mut stream,
+            415,
+            "unsupported_media_type",
+            "the RPC accepts application/json bodies only",
         );
     }
     if content_length > MAX_BODY {
@@ -825,6 +902,7 @@ fn write_response(stream: &mut TcpStream, code: u16, body: &str) -> IoResult<()>
         "HTTP/1.1 {code} {reason}\r\n\
          Content-Type: application/json\r\n\
          X-Content-Type-Options: nosniff\r\n\
+         Strict-Transport-Security: max-age=31536000; includeSubDomains\r\n\
          Content-Length: {len}\r\n\
          {cors}\
          Connection: close\r\n\
@@ -847,6 +925,8 @@ fn reason(code: u16) -> &'static str {
         405 => "Method Not Allowed",
         408 => "Request Timeout",
         413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
+        421 => "Misdirected Request",
         429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
         503 => "Service Unavailable",
@@ -1385,7 +1465,7 @@ mod tests {
         let port = serve_stub();
         let response = round_trip(
             port,
-            "POST /v1/node_info HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}",
+            "POST /v1/node_info HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
         );
         assert!(
             !response.contains("Access-Control-Allow-Origin"),
@@ -1398,7 +1478,7 @@ mod tests {
         let port = serve_stub();
         let response = round_trip(
             port,
-            "POST /v1/node_info HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}",
+            "POST /v1/node_info HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
         );
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
         assert!(response.contains("\"ok\""), "{response}");
@@ -1421,7 +1501,7 @@ mod tests {
         let response = round_trip(
             port,
             &format!(
-                "POST /v1/node_info HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                "POST /v1/node_info HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
                 MAX_BODY + 1
             ),
         );
@@ -1453,7 +1533,7 @@ mod tests {
         let port = serve_stub();
         let response = round_trip(
             port,
-            "POST /v1/does_not_exist HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+            "POST /v1/does_not_exist HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
         );
         assert!(response.starts_with("HTTP/1.1 404"), "{response}");
     }
