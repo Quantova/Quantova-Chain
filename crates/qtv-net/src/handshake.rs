@@ -1,7 +1,7 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use qtv_wipe::Zeroize;
+use qtv_wipe::{Zeroize, Zeroizing};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -187,8 +187,8 @@ fn initiate<S: Read + Write>(
         return Err(Error::UnexpectedPeer);
     }
 
-    let mut kem_random = [0u8; 32];
-    fill_random(&mut kem_random)?;
+    let mut kem_random = Zeroizing::new([0u8; 32]);
+    fill_random(&mut kem_random[..])?;
     let (shared_secret, ciphertext) = ml_kem::encaps(&encaps_key, &kem_random)
         .ok_or(Error::Handshake("non canonical encapsulation key"))?;
     transcript.absorb(&ciphertext);
@@ -205,7 +205,6 @@ fn initiate<S: Read + Write>(
     let keys = keyschedule::derive(&shared_secret, &final_bound);
     let mut shared_secret = shared_secret;
     shared_secret.zeroize();
-    kem_random.zeroize();
     Ok(Channel::new(stream, Role::Initiator, peer, keys))
 }
 
@@ -282,10 +281,10 @@ fn respond_known<S: Read + Write>(
         return Err(Error::Authentication);
     }
 
-    let mut kem_seed = [0u8; 32];
-    let mut kem_z = [0u8; 32];
-    fill_random(&mut kem_seed)?;
-    fill_random(&mut kem_z)?;
+    let mut kem_seed = Zeroizing::new([0u8; 32]);
+    let mut kem_z = Zeroizing::new([0u8; 32]);
+    fill_random(&mut kem_seed[..])?;
+    fill_random(&mut kem_z[..])?;
     let (encaps_key, decaps_key) = ml_kem::keygen(&kem_seed, &kem_z);
 
     let mut server_random = [0u8; 32];
@@ -328,8 +327,6 @@ fn respond_known<S: Read + Write>(
     shared_secret.zeroize();
     let mut decaps_key = decaps_key;
     decaps_key.zeroize();
-    kem_seed.zeroize();
-    kem_z.zeroize();
     Ok(Channel::new(stream, Role::Responder, peer, keys))
 }
 
