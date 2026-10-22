@@ -1994,11 +1994,7 @@ pub fn reweigh_roster_for_epoch(
         .iter()
         .map(|r| {
             let mut reweighed = r.clone();
-            reweighed.stake = if ledger.is_frozen(&r.bond_address) {
-                0
-            } else {
-                ledger.staked_weight_in_epoch(&r.bond_address, epoch)
-            };
+            reweighed.stake = ledger.staked_weight_in_epoch(&r.bond_address, epoch);
             reweighed
         })
         .collect();
@@ -2014,11 +2010,7 @@ pub fn committee_weights(ledger: &Ledger, base: &[ConsensusValidator]) -> Vec<Co
         .iter()
         .map(|v| ConsensusValidator {
             id: v.id,
-            stake: if ledger.is_frozen(&v.bond_address) {
-                0
-            } else {
-                ledger.staked_weight(&v.bond_address)
-            },
+            stake: ledger.staked_weight(&v.bond_address),
             online: v.online,
             secret: v.secret,
             bond_address: v.bond_address.clone(),
@@ -2570,7 +2562,7 @@ mod tests {
     }
 
     #[test]
-    fn a_frozen_validator_drops_out_of_the_consensus_roster() {
+    fn a_guardian_freeze_never_changes_consensus_weight() {
         let base: Vec<crate::consensus::ValidatorRegistration> = (1..=3u64)
             .map(|id| {
                 let mut reg = crate::consensus::ValidatorRegistration::from_secret(
@@ -2608,7 +2600,7 @@ mod tests {
                 .iter()
                 .map(|r| r.stake)
                 .collect::<Vec<_>>(),
-            vec![0, 2_000, 2_000]
+            vec![2_000, 2_000, 2_000]
         );
         assert_eq!(live.staked_weight(&base[0].bond_address), 2_000);
     }
