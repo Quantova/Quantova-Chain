@@ -3044,9 +3044,13 @@ impl DevNode {
     ) -> bool {
         let now = std::time::Instant::now();
         let (mut since, mut spent) = budget.get();
-        if now.duration_since(since) >= std::time::Duration::from_secs(1) {
+        let windows = now.duration_since(since).as_secs();
+        if windows > 0 {
+            let repaid = usize::try_from(windows)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(SERVED_DECODE_BYTES_PER_SEC);
             since = now;
-            spent = 0;
+            spent = spent.saturating_sub(repaid);
         }
         if spent > 0 && spent.saturating_add(bytes) > SERVED_DECODE_BYTES_PER_SEC {
             self.served_saturated.set(true);
