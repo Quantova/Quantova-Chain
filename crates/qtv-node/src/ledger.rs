@@ -3512,7 +3512,9 @@ impl Ledger {
                 let after_period = already
                     .checked_add(u128::from(*amount))
                     .ok_or(EnactError::Overflow)?;
-                if after_period > u128::from(qtv_staking::gov_mint_ceiling(self.total_supply())) {
+                let base = u64::try_from(u128::from(self.total_supply()).saturating_sub(already))
+                    .unwrap_or(0);
+                if after_period > u128::from(qtv_staking::gov_mint_ceiling(base)) {
                     return Err(EnactError::BadValue);
                 }
                 let mut account = self.account(&addr);
