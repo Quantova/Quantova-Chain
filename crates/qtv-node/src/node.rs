@@ -1453,6 +1453,17 @@ fn vm_memory_fits(wrapper: &Wrapper) -> bool {
 
 const DEPLOY_PARAMS_TAG: &[u8; 8] = b"QDEPLOY2";
 
+const DEPLOY_MINT_TAG: &[u8; 8] = b"QDEPMINT";
+
+fn split_mint_ceiling(args: &[u8]) -> (Option<u128>, &[u8]) {
+    if args.len() >= 24 && &args[0..8] == DEPLOY_MINT_TAG {
+        let mut ceiling = [0u8; 16];
+        ceiling.copy_from_slice(&args[8..24]);
+        return (Some(u128::from_be_bytes(ceiling)), &args[24..]);
+    }
+    (None, args)
+}
+
 fn split_deploy_args(args: &[u8]) -> (&[u8], &[u8]) {
     if args.len() >= 12 && &args[0..8] == DEPLOY_PARAMS_TAG {
         let len = u32::from_be_bytes([args[8], args[9], args[10], args[11]]) as usize;
@@ -1573,7 +1584,8 @@ fn run_vm(
     let target = target.to_string();
     let args = args.to_vec();
     if target == crate::ledger::vm_deploy_address() {
-        let (container, params) = split_deploy_args(&args);
+        let (mint_ceiling, framed) = split_mint_ceiling(&args);
+        let (container, params) = split_deploy_args(framed);
         let deploy_cost = crate::execution::deploy_meter_cost(container.len());
         if deploy_cost > meter {
             ledger.arm_vm_meter(meter);
@@ -1584,6 +1596,9 @@ fn run_vm(
         if let Some(contract) =
             ledger.deploy_contract_under(&sender, nonce, container, legacy, mainnet)
         {
+            if let Some(ceiling) = mint_ceiling {
+                ledger.declare_mint_ceiling(&contract, ceiling);
+            }
             let genesis = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
             let mut genesis_memory =
                 vec![0u8; crate::ledger::CONTRACT_CONTEXT_BYTES + params.len()];

@@ -299,6 +299,15 @@ fn asset_balance_key(asset_id: &[u8; 16], holder: &[u8; 32]) -> Key {
     sha3::sha3_256(&input)
 }
 
+const ASSET_MINT_CEILING_TAG: &[u8] = b"qtv/asset/mint-ceiling";
+
+fn asset_mint_ceiling_key(asset_id: &[u8; 16]) -> Key {
+    let mut input = Vec::with_capacity(ASSET_MINT_CEILING_TAG.len() + asset_id.len());
+    input.extend_from_slice(ASSET_MINT_CEILING_TAG);
+    input.extend_from_slice(asset_id);
+    sha3::sha3_256(&input)
+}
+
 fn asset_supply_key(asset_id: &[u8; 16]) -> Key {
     let mut input = Vec::with_capacity(ASSET_SUPPLY_TAG.len() + asset_id.len());
     input.extend_from_slice(ASSET_SUPPLY_TAG);
@@ -2748,7 +2757,44 @@ impl Ledger {
     pub fn clear_contract_code(&mut self, address: &str) {
         if let Some(id) = address_id(address) {
             self.erase_leaf(&contract_code_key(&id));
+            self.erase_leaf(&asset_mint_ceiling_key(&asset_id_of(&id)));
         }
+    }
+
+    pub fn declare_mint_ceiling(&mut self, contract: &str, ceiling: u128) -> bool {
+        let Some(id) = address_id(contract) else {
+            return false;
+        };
+        let key = asset_mint_ceiling_key(&asset_id_of(&id));
+        if ceiling == 0 || self.trie.get(&key).is_some_and(|bytes| !bytes.is_empty()) {
+            return false;
+        }
+        self.write_leaf(key, ceiling.to_be_bytes().to_vec());
+        true
+    }
+
+    pub fn mint_ceiling(&self, contract_id: &[u8; 32]) -> u128 {
+        self.trie
+            .get(&asset_mint_ceiling_key(&asset_id_of(contract_id)))
+            .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
+            .map(u128::from_be_bytes)
+            .unwrap_or(0)
+    }
+
+    fn mint_within_ceiling(
+        &mut self,
+        contract_id: &[u8; 32],
+        holder: &[u8; 32],
+        amount: u128,
+    ) -> bool {
+        let issued = self.asset_supply(&asset_id_of(contract_id));
+        if issued
+            .checked_add(amount)
+            .is_none_or(|total| total > self.mint_ceiling(contract_id))
+        {
+            return false;
+        }
+        self.mint_asset(contract_id, holder, amount)
     }
 
     pub fn deploy_contract(&mut self, deployer: &str, nonce: u64, code: &[u8]) -> Option<String> {
@@ -3071,7 +3117,8 @@ impl Ledger {
                             let mut holder = [0u8; 32];
                             holder.copy_from_slice(&data[..32]);
                             let amount = u64::from_be_bytes(data[32..40].try_into().unwrap());
-                            if !self.mint_asset(&contract_id, &holder, u128::from(amount)) {
+                            if !self.mint_within_ceiling(&contract_id, &holder, u128::from(amount))
+                            {
                                 return false;
                             }
                             continue;
@@ -5087,6 +5134,7 @@ mod stake_state_tests {
         let contract_id = [70u8; 32];
         let contract = qtv_idfmt::render_address(&contract_id).unwrap();
         l.set_contract_code(&contract_id, &container.canonical_bytes());
+        assert!(l.declare_mint_ceiling(&contract, 1_000));
 
         let caller = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
         let holder = [0xCCu8; 32];
@@ -5126,6 +5174,7 @@ mod stake_state_tests {
         let contract_id = [70u8; 32];
         let contract = qtv_idfmt::render_address(&contract_id).unwrap();
         l.set_contract_code(&contract_id, &container.canonical_bytes());
+        assert!(l.declare_mint_ceiling(&contract, 1_000));
         let caller = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
 
         let mut payload = vec![0u8; 120];
