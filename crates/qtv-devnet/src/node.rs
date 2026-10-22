@@ -3321,6 +3321,13 @@ impl DevNode {
             leader,
             attesters,
         });
+        let synced = self.height.saturating_sub(1);
+        if let Some(guard) = self.sign_guard.as_mut() {
+            guard.raise_to(synced).map_err(|_| SyncError::Io)?;
+        }
+        if let Some(guard) = self.prevote_guard.as_mut() {
+            guard.raise_to(synced).map_err(|_| SyncError::Io)?;
+        }
         Ok(())
     }
 }

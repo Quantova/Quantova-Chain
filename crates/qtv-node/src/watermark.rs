@@ -70,6 +70,15 @@ impl SignGuard {
         }
     }
 
+    pub fn raise_to(&mut self, height: u64) -> io::Result<()> {
+        if self.mark.is_some_and(|(mh, _, _)| mh >= height) {
+            return Ok(());
+        }
+        self.persist(height, u64::MAX, &[0u8; 32])?;
+        self.mark = Some((height, u64::MAX, Some([0u8; 32])));
+        Ok(())
+    }
+
     pub fn try_sign(&mut self, height: u64, view: u64, value: &[u8; 32]) -> io::Result<bool> {
         if !self.permits(height, view, value) {
             return Ok(false);
@@ -172,6 +181,15 @@ impl PrevoteGuard {
             }
             None => true,
         }
+    }
+
+    pub fn raise_to(&mut self, height: u64) -> io::Result<()> {
+        if self.mark.is_some_and(|(mh, _, _)| mh >= height) {
+            return Ok(());
+        }
+        self.persist(height, u64::MAX, &[0u8; 32])?;
+        self.mark = Some((height, u64::MAX, [0u8; 32]));
+        Ok(())
     }
 
     pub fn try_prevote(&mut self, height: u64, view: u64, value: &[u8; 32]) -> io::Result<bool> {
