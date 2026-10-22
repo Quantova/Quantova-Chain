@@ -13,7 +13,7 @@ use qtv_loopback::{
 };
 use qtv_widearea::env as wenv;
 use qtv_widearea::runtime::{build_mesh, HeightOutcome, PhaseTimers, Runtime};
-use qtv_widearea::{env_usize, format_result, RunReport};
+use qtv_widearea::{env_usize, format_result, harness_bind_addr, RunReport};
 
 fn port_of(addr: &str) -> u16 {
     addr.rsplit_once(':')
@@ -79,8 +79,9 @@ fn main() {
     );
 
     let port = port_of(&addrs[idx]);
+    let bind = harness_bind_addr(&addrs[idx]).unwrap_or_else(|reason| panic!("{reason}"));
     let listener =
-        TcpListener::bind(("0.0.0.0", port)).expect("bind the transport port on every interface");
+        TcpListener::bind(bind).expect("bind the transport port on this validator address");
 
     let identity = node_identity(idx as u64 + 1);
     let senders = accounts(senders_n);

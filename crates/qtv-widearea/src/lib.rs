@@ -25,6 +25,23 @@ pub mod env {
     pub const ACK_FIXTURE_KEYS: &str = "QTV_WA_ACK_FIXTURE_KEYS";
 }
 
+pub fn harness_bind_addr(addr: &str) -> Result<std::net::SocketAddr, String> {
+    let socket: std::net::SocketAddr = addr
+        .trim()
+        .parse()
+        .map_err(|_| format!("{addr} is not an ip:port the harness can bind"))?;
+    let private = match socket.ip() {
+        std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
+        std::net::IpAddr::V6(ip) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
+    };
+    if !private {
+        return Err(format!(
+            "{addr} is not a loopback or private address, the harness keys are derivable and it never listens publicly"
+        ));
+    }
+    Ok(socket)
+}
+
 pub fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
