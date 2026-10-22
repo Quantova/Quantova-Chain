@@ -16,8 +16,8 @@ use qtv_node::consensus::{
     FinalityStatus, Parent, Selection, ValidatorRegistration,
 };
 use qtv_node::evidence::{
-    DoubleFinality, Equivocation, EvidencePool, FinalityVote, PrevoteEquivocation,
-    ProposalEquivocation, ProposalShape, SignedPrevote, SignedProposal,
+    DoubleFinality, Equivocation, EvidencePool, FinalityVote, LockViolation, PrevoteEquivocation,
+    ProposalEquivocation, ProposalShape, SignedPrecommit, SignedPrevote, SignedProposal,
 };
 use qtv_node::fee::FeeParams;
 use qtv_node::ledger::{
@@ -383,6 +383,8 @@ pub struct DevNode {
     prevote_equivocations: Vec<PrevoteEquivocation>,
     proposals_seen: HashMap<(u64, View), SignedProposal>,
     proposal_equivocations: Vec<ProposalEquivocation>,
+    precommits_seen: HashMap<u64, Vec<SignedPrecommit>>,
+    lock_violations: Vec<LockViolation>,
     tx_index: TxIndex,
     prevoted: std::collections::BTreeMap<View, [u8; 32]>,
     events_by_height: HashMap<Height, Vec<BlockEvent>>,
@@ -524,6 +526,8 @@ impl DevNode {
             prevote_equivocations: Vec::new(),
             proposals_seen: HashMap::new(),
             proposal_equivocations: Vec::new(),
+            precommits_seen: HashMap::new(),
+            lock_violations: Vec::new(),
             tx_index,
             prevoted: std::collections::BTreeMap::new(),
             events_by_height: HashMap::new(),
@@ -1322,6 +1326,7 @@ impl DevNode {
         candidates.extend(self.double_finality_evidence());
         candidates.extend(self.prevote_equivocation_evidence());
         candidates.extend(self.proposal_equivocation_evidence());
+        candidates.extend(self.lock_violation_evidence());
         if self.registration_open(height) {
             for note in self.epoch_registration_notes() {
                 candidates.push(registration_transaction(&note, chain_id));
@@ -1866,6 +1871,7 @@ impl DevNode {
         self.prevotes.clear();
         self.prevotes_seen.clear();
         self.proposals_seen.clear();
+        self.precommits_seen.clear();
         self.future_props.clear();
         self.view_changes.clear();
         self.polka_rejects.clear();
@@ -2151,6 +2157,14 @@ impl DevNode {
             pol,
             sig: att.sig.to_vec(),
         };
+        let precommits = self
+            .precommits_seen
+            .get(&att.from)
+            .cloned()
+            .unwrap_or_default();
+        for precommit in precommits {
+            self.queue_lock_violation(att.from, precommit, att.view, signed.clone());
+        }
         match self.prevotes_seen.get(&(att.from, att.view)) {
             Some(first) if (first.value, first.pol) != (value, pol) => {
                 let offender = self.validator_address(att.from);
@@ -2179,6 +2193,84 @@ impl DevNode {
                 }
             }
         }
+    }
+
+    fn watch_precommit(&mut self, att: &Attestation) {
+        if att.height != self.height {
+            return;
+        }
+        let precommit = SignedPrecommit {
+            view: att.view,
+            slot: att.slot,
+            committee: att.committee,
+            value: att.block.val,
+            parent: match att.block.parent {
+                Parent::Value(value) => Some(value),
+                Parent::Genesis => None,
+            },
+            cost: att.block.cost,
+            sig: att.sig.to_vec(),
+        };
+        let prevotes: Vec<(View, SignedPrevote)> = self
+            .prevotes_seen
+            .iter()
+            .filter(|((from, view), _)| *from == att.from && *view > att.view)
+            .map(|((_, view), prevote)| (*view, prevote.clone()))
+            .collect();
+        for (view, prevote) in prevotes {
+            self.queue_lock_violation(att.from, precommit.clone(), view, prevote);
+        }
+        let held = self.precommits_seen.len();
+        let entry = self.precommits_seen.entry(att.from).or_default();
+        if entry.len() < MAX_ATTESTATIONS_PER_SENDER
+            && held < MAX_WATCHED_PREVOTES
+            && !entry
+                .iter()
+                .any(|seen| seen.view == precommit.view && seen.value == precommit.value)
+        {
+            entry.push(precommit);
+        }
+    }
+
+    fn queue_lock_violation(
+        &mut self,
+        from: u64,
+        precommit: SignedPrecommit,
+        prevote_view: View,
+        prevote: SignedPrevote,
+    ) {
+        if prevote_view <= precommit.view
+            || prevote.value == precommit.value
+            || prevote.pol.is_some_and(|pol| pol >= precommit.view)
+        {
+            return;
+        }
+        let offender = self.validator_address(from);
+        if offender.is_empty()
+            || self.ledger.is_validator_banned(&offender)
+            || self.lock_violations.len() >= MAX_PREVOTE_EVIDENCE
+            || self
+                .lock_violations
+                .iter()
+                .any(|e| e.offender == offender && e.height == self.height)
+        {
+            return;
+        }
+        self.lock_violations.push(LockViolation {
+            offender,
+            height: self.height,
+            precommit,
+            prevote_view,
+            prevote,
+        });
+    }
+
+    pub fn lock_violation_evidence(&self) -> Vec<Wrapper> {
+        let chain_id = self.fee_params.chain_id;
+        self.lock_violations
+            .iter()
+            .map(|evidence| evidence_call(evidence.encode(), chain_id))
+            .collect()
     }
 
     pub fn prevote_equivocation_evidence(&self) -> Vec<Wrapper> {
@@ -2726,6 +2818,9 @@ impl DevNode {
             return false;
         };
         self.watch_for_equivocation(&attestation, offender);
+        if attestation.block.cost != qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST {
+            self.watch_precommit(&attestation);
+        }
         if let Ok(selection) = self.select() {
             if self.seen_atts.len() < MAX_SEEN_ATTESTATIONS {
                 self.seen_atts.insert(digest);
@@ -2914,6 +3009,11 @@ impl DevNode {
                 && !included.contains(&evidence_call(evidence.encode(), chain_id).id())
         });
         self.proposal_equivocations.retain(|evidence| {
+            evidence.height.saturating_add(EVIDENCE_WINDOW) > height
+                && !ledger.is_validator_banned(&evidence.offender)
+                && !included.contains(&evidence_call(evidence.encode(), chain_id).id())
+        });
+        self.lock_violations.retain(|evidence| {
             evidence.height.saturating_add(EVIDENCE_WINDOW) > height
                 && !ledger.is_validator_banned(&evidence.offender)
                 && !included.contains(&evidence_call(evidence.encode(), chain_id).id())
@@ -3544,6 +3644,7 @@ impl DevNode {
         self.prevotes.clear();
         self.prevotes_seen.clear();
         self.proposals_seen.clear();
+        self.precommits_seen.clear();
         self.future_props.clear();
         self.view_changes.clear();
         self.polka_rejects.clear();

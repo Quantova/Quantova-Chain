@@ -464,6 +464,151 @@ impl ProposalEquivocation {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedPrecommit {
+    pub view: u64,
+    pub slot: u64,
+    pub committee: [u8; 32],
+    pub value: [u8; 32],
+    pub parent: Option<[u8; 32]>,
+    pub cost: u64,
+    pub sig: Vec<u8>,
+}
+
+impl SignedPrecommit {
+    fn block(&self, height: u64) -> qtv_bft::block::Block {
+        let parent = match self.parent {
+            Some(value) => qtv_bft::block::Parent::Value(value),
+            None => qtv_bft::block::Parent::Genesis,
+        };
+        qtv_bft::block::Block::with_cost(height, self.value, parent, self.cost)
+    }
+
+    fn verifies(&self, chain_id: ChainBinding, pk: &[u8; PUBLIC_KEY_BYTES], height: u64) -> bool {
+        let Ok(sig) = <[u8; SIGNATURE_BYTES]>::try_from(self.sig.as_slice()) else {
+            return false;
+        };
+        let msg = attestation_message(
+            chain_id,
+            height,
+            self.slot,
+            self.view,
+            &self.committee,
+            &self.block(height).to_bytes(),
+        );
+        ml_dsa::verify(pk, &msg, &sig, ATTEST_CONTEXT)
+    }
+
+    fn put(&self, encoder: &mut Encoder) {
+        encoder.put_u64(self.view);
+        encoder.put_u64(self.slot);
+        encoder.put_bytes(&self.committee);
+        encoder.put_bytes(&self.value);
+        match self.parent {
+            Some(parent) => {
+                encoder.put_u8(1);
+                encoder.put_bytes(&parent);
+            }
+            None => {
+                encoder.put_u8(0);
+                encoder.put_bytes(&[0u8; 32]);
+            }
+        }
+        encoder.put_u64(self.cost);
+        encoder.put_bytes(&self.sig);
+    }
+
+    fn get(decoder: &mut Decoder<'_>) -> Option<SignedPrecommit> {
+        let view = decoder.get_u64().ok()?;
+        let slot = decoder.get_u64().ok()?;
+        let committee: [u8; 32] = decoder.get_bytes().ok()?.try_into().ok()?;
+        let value: [u8; 32] = decoder.get_bytes().ok()?.try_into().ok()?;
+        let flag = decoder.get_u8().ok()?;
+        let parent_bytes: [u8; 32] = decoder.get_bytes().ok()?.try_into().ok()?;
+        let parent = match flag {
+            1 => Some(parent_bytes),
+            0 if parent_bytes == [0u8; 32] => None,
+            _ => return None,
+        };
+        let cost = decoder.get_u64().ok()?;
+        let sig = decoder.get_bytes().ok()?.to_vec();
+        Some(SignedPrecommit {
+            view,
+            slot,
+            committee,
+            value,
+            parent,
+            cost,
+            sig,
+        })
+    }
+}
+
+pub const LOCK_VIOLATION_TAG: &[u8] = b"QTV-LOCK-VIOLATION/1";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LockViolation {
+    pub offender: String,
+    pub height: u64,
+    pub precommit: SignedPrecommit,
+    pub prevote_view: u64,
+    pub prevote: SignedPrevote,
+}
+
+impl LockViolation {
+    pub fn attributes(&self, chain_id: impl Into<ChainBinding>, attest_pk: &[u8]) -> bool {
+        let chain_id: ChainBinding = chain_id.into();
+        if self.precommit.cost == crate::consensus::VIEW_CHANGE_SUBJECT_COST
+            || self.prevote_view <= self.precommit.view
+            || self.prevote.value == self.precommit.value
+            || self
+                .prevote
+                .pol
+                .is_some_and(|pol| pol >= self.precommit.view)
+        {
+            return false;
+        }
+        let Ok(pk) = <[u8; PUBLIC_KEY_BYTES]>::try_from(attest_pk) else {
+            return false;
+        };
+        self.precommit.verifies(chain_id, &pk, self.height)
+            && self
+                .prevote
+                .verifies(chain_id, &pk, self.height, self.prevote_view)
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut encoder = Encoder::new();
+        encoder.put_bytes(LOCK_VIOLATION_TAG);
+        encoder.put_bytes(self.offender.as_bytes());
+        encoder.put_u64(self.height);
+        self.precommit.put(&mut encoder);
+        encoder.put_u64(self.prevote_view);
+        self.prevote.put(&mut encoder);
+        encoder.into_bytes()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<LockViolation> {
+        let mut decoder = Decoder::new(bytes);
+        if decoder.get_bytes().ok()? != LOCK_VIOLATION_TAG {
+            return None;
+        }
+        let offender = String::from_utf8(decoder.get_bytes().ok()?.to_vec()).ok()?;
+        let height = decoder.get_u64().ok()?;
+        let precommit = SignedPrecommit::get(&mut decoder)?;
+        let prevote_view = decoder.get_u64().ok()?;
+        let prevote = SignedPrevote::get(&mut decoder)?;
+        decoder.finish().ok()?;
+        Some(LockViolation {
+            offender,
+            height,
+            precommit,
+            prevote_view,
+            prevote,
+        })
+    }
+}
+
 pub const DOUBLE_FINALITY_TAG: &[u8] = b"QTV-DOUBLE-FINALITY/1";
 
 pub const MAX_FINALITY_VOTES: usize = 512;
