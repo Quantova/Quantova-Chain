@@ -14,7 +14,7 @@ description = "The account model and key derivation pipeline for the Quantova st
 default = []
 
 [dependencies]
-qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "4e37c52984740f345f96e2c8536803bce5f3b805" }
+qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "28c0fff8f620c1663663f4bd271b7bae3dbddc80" }
 qtv-idfmt = { path = "../qtv-idfmt" }
 qtv-wipe = { path = "../qtv-wipe" }
 
