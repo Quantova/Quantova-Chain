@@ -28,17 +28,128 @@ fn wipe(bytes: &mut [u8]) {
     let _ = core::hint::black_box(&*bytes);
 }
 
+pub const KEYSTORE_PASSPHRASE_ENV: &str = "QTV_KEYSTORE_PASSPHRASE";
+
+pub const KEYSTORE_PASSPHRASE_FILE_ENV: &str = "QTV_KEYSTORE_PASSPHRASE_FILE";
+
+const SEALED_PREFIX: &str = "qks1:";
+
+const SEALED_AAD: &[u8] = b"QORUS/validator-keystore/v1";
+
+const KDF_ROUNDS: u32 = 200_000;
+
+const SALT_LEN: usize = 16;
+
+fn configured_passphrase() -> io::Result<Option<qtv_wipe::Zeroizing<Vec<u8>>>> {
+    if let Ok(file) = std::env::var(KEYSTORE_PASSPHRASE_FILE_ENV) {
+        let mut raw = fs::read(&file)?;
+        let trimmed = raw
+            .iter()
+            .rposition(|b| !b.is_ascii_whitespace())
+            .map_or(0, |end| end + 1);
+        let pass = qtv_wipe::Zeroizing::new(raw[..trimmed].to_vec());
+        wipe(&mut raw);
+        return Ok((!pass.is_empty()).then_some(pass));
+    }
+    Ok(std::env::var(KEYSTORE_PASSPHRASE_ENV)
+        .ok()
+        .filter(|pass| !pass.is_empty())
+        .map(|pass| qtv_wipe::Zeroizing::new(pass.into_bytes())))
+}
+
+fn sealing_key(passphrase: &[u8], salt: &[u8; SALT_LEN]) -> qtv_wipe::Zeroizing<[u8; 32]> {
+    let mut input = Vec::with_capacity(SEALED_AAD.len() + SALT_LEN + passphrase.len());
+    input.extend_from_slice(SEALED_AAD);
+    input.extend_from_slice(salt);
+    input.extend_from_slice(passphrase);
+    let mut state = qtv_wipe::Zeroizing::new([0u8; 32]);
+    qtv_crypto::sha3::shake256(&input, &mut state[..]);
+    wipe(&mut input);
+    let mut round = [0u8; 32 + SALT_LEN];
+    for _ in 0..KDF_ROUNDS {
+        round[..32].copy_from_slice(&state[..]);
+        round[32..].copy_from_slice(salt);
+        qtv_crypto::sha3::shake256(&round, &mut state[..]);
+    }
+    wipe(&mut round);
+    state
+}
+
+fn seal_secret(secret: &[u8; SECRET_LEN], passphrase: &[u8]) -> io::Result<String> {
+    let mut salt = [0u8; SALT_LEN];
+    let mut nonce = [0u8; qtv_crypto::chacha20poly1305::NONCE_BYTES];
+    fill_random(&mut salt)?;
+    fill_random(&mut nonce)?;
+    let key = sealing_key(passphrase, &salt);
+    let (ciphertext, tag) = qtv_crypto::chacha20poly1305::seal(&key, &nonce, SEALED_AAD, secret)
+        .ok_or_else(|| io::Error::other("the keystore could not be sealed"))?;
+    let mut blob = Vec::with_capacity(SALT_LEN + nonce.len() + ciphertext.len() + tag.len());
+    blob.extend_from_slice(&salt);
+    blob.extend_from_slice(&nonce);
+    blob.extend_from_slice(&ciphertext);
+    blob.extend_from_slice(&tag);
+    let mut text = String::with_capacity(SEALED_PREFIX.len() + blob.len() * 2);
+    text.push_str(SEALED_PREFIX);
+    for byte in &blob {
+        text.push_str(&format!("{byte:02x}"));
+    }
+    Ok(text)
+}
+
+fn open_sealed(hex: &str, passphrase: &[u8]) -> Option<qtv_wipe::Zeroizing<[u8; SECRET_LEN]>> {
+    use qtv_crypto::chacha20poly1305::{NONCE_BYTES, TAG_BYTES};
+    if hex.len() != 2 * (SALT_LEN + NONCE_BYTES + SECRET_LEN + TAG_BYTES) || !hex.is_ascii() {
+        return None;
+    }
+    let bytes: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    let salt: [u8; SALT_LEN] = bytes[..SALT_LEN].try_into().ok()?;
+    let nonce: [u8; NONCE_BYTES] = bytes[SALT_LEN..SALT_LEN + NONCE_BYTES].try_into().ok()?;
+    let body = &bytes[SALT_LEN + NONCE_BYTES..bytes.len() - TAG_BYTES];
+    let tag: [u8; TAG_BYTES] = bytes[bytes.len() - TAG_BYTES..].try_into().ok()?;
+    let key = sealing_key(passphrase, &salt);
+    let mut plain = qtv_crypto::chacha20poly1305::open(&key, &nonce, SEALED_AAD, body, &tag)?;
+    let secret = <[u8; SECRET_LEN]>::try_from(plain.as_slice())
+        .ok()
+        .map(qtv_wipe::Zeroizing::new);
+    wipe(&mut plain);
+    secret
+}
+
 pub fn load_or_generate(path: &Path) -> io::Result<qtv_wipe::Zeroizing<[u8; SECRET_LEN]>> {
+    let passphrase = configured_passphrase()?;
+    load_or_generate_with(path, passphrase.as_deref().map(|p| p.as_slice()))
+}
+
+pub fn load_or_generate_with(
+    path: &Path,
+    passphrase: Option<&[u8]>,
+) -> io::Result<qtv_wipe::Zeroizing<[u8; SECRET_LEN]>> {
     match fs::read(path) {
         Ok(mut raw) => {
             if let Err(error) = refuse_shared(path) {
                 wipe(&mut raw);
                 return Err(error);
             }
-            let parsed = std::str::from_utf8(&raw)
-                .ok()
-                .and_then(|text| parse_hex32(text.trim()))
-                .map(qtv_wipe::Zeroizing::new);
+            let text = std::str::from_utf8(&raw).ok().map(str::trim);
+            if let Some(sealed) = text.and_then(|t| t.strip_prefix(SEALED_PREFIX)) {
+                let opened = passphrase.and_then(|pass| open_sealed(sealed, pass));
+                wipe(&mut raw);
+                return opened.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "keystore {} is sealed and {} or {} does not open it",
+                            path.display(),
+                            KEYSTORE_PASSPHRASE_ENV,
+                            KEYSTORE_PASSPHRASE_FILE_ENV
+                        ),
+                    )
+                });
+            }
+            let parsed = text.and_then(parse_hex32).map(qtv_wipe::Zeroizing::new);
             wipe(&mut raw);
             parsed.ok_or_else(|| {
                 io::Error::new(
@@ -52,7 +163,7 @@ pub fn load_or_generate(path: &Path) -> io::Result<qtv_wipe::Zeroizing<[u8; SECR
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let secret = generate()?;
-            write_keystore(path, &secret)?;
+            write_keystore(path, &secret, passphrase)?;
             Ok(secret)
         }
         Err(error) => Err(error),
@@ -79,14 +190,21 @@ fn refuse_shared(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn write_keystore(path: &Path, secret: &[u8; SECRET_LEN]) -> io::Result<()> {
+fn write_keystore(
+    path: &Path,
+    secret: &[u8; SECRET_LEN],
+    passphrase: Option<&[u8]>,
+) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
             fs::create_dir_all(dir)?;
         }
     }
     let mut file = open_private(path)?;
-    let mut rendered = to_hex(secret);
+    let mut rendered = match passphrase {
+        Some(pass) => seal_secret(secret, pass)?,
+        None => to_hex(secret),
+    };
     let result = file
         .write_all(rendered.as_bytes())
         .and_then(|()| file.write_all(b"\n"))
