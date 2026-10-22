@@ -236,11 +236,9 @@ impl DoubleFinality {
         block: &[u8],
         votes: &[FinalityVote],
         key_of: &impl Fn(&str) -> Option<Vec<u8>>,
-        stake_of: &impl Fn(&str) -> u128,
-    ) -> Option<(Vec<String>, u128, u64)> {
+    ) -> Option<(Vec<String>, u64)> {
         let first = votes.first()?;
         let mut signers: Vec<String> = Vec::with_capacity(votes.len());
-        let mut stake: u128 = 0;
         for vote in votes {
             if vote.view != first.view
                 || vote.slot != first.slot
@@ -263,36 +261,26 @@ impl DoubleFinality {
             if !ml_dsa::verify(&pk, &msg, &sig, ATTEST_CONTEXT) {
                 return None;
             }
-            stake = stake.saturating_add(stake_of(&vote.signer));
             signers.push(vote.signer.clone());
         }
-        Some((signers, stake, first.view))
+        Some((signers, first.view))
     }
 
     pub fn offenders(
         &self,
         chain_id: impl Into<ChainBinding>,
         key_of: impl Fn(&str) -> Option<Vec<u8>>,
-        stake_of: impl Fn(&str) -> u128,
-        total_stake: u128,
     ) -> Option<Vec<String>> {
         let chain_id: ChainBinding = chain_id.into();
         if self.block_a == self.block_b
             || subject_is_view_change(&self.block_a)
             || subject_is_view_change(&self.block_b)
-            || total_stake == 0
         {
             return None;
         }
-        let (side_a, stake_a, view_a) =
-            self.side(chain_id, &self.block_a, &self.votes_a, &key_of, &stake_of)?;
-        let (side_b, stake_b, view_b) =
-            self.side(chain_id, &self.block_b, &self.votes_b, &key_of, &stake_of)?;
+        let (side_a, view_a) = self.side(chain_id, &self.block_a, &self.votes_a, &key_of)?;
+        let (side_b, view_b) = self.side(chain_id, &self.block_b, &self.votes_b, &key_of)?;
         if view_a != view_b {
-            return None;
-        }
-        let quorum = |stake: u128| stake.saturating_mul(3) >= total_stake.saturating_mul(2);
-        if !quorum(stake_a) || !quorum(stake_b) {
             return None;
         }
         let mut offenders: Vec<String> = side_a

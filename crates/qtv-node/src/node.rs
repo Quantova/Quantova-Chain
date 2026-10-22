@@ -460,8 +460,6 @@ fn double_finality_offenders(
     evidence.offenders(
         qtv_attest::ChainBinding::new(chain_id, ledger.chain_genesis_hash()),
         |address| ledger.validator_attest_key(address),
-        |address| ledger.bonded_stake(address),
-        u128::from(ledger.total_staked()),
     )
 }
 
