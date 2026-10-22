@@ -492,12 +492,14 @@ impl Mempool {
     }
 
     fn track(&mut self, wrapper: &Wrapper) {
-        let sender = wrapper.body().sender().to_string();
-        *self.by_sender.entry(sender.clone()).or_insert(0) += 1;
-        *self
-            .sender_nonces
-            .entry((sender, wrapper.body().nonce()))
-            .or_insert(0) += 1;
+        if !is_feeless(wrapper) {
+            let sender = wrapper.body().sender().to_string();
+            *self.by_sender.entry(sender.clone()).or_insert(0) += 1;
+            *self
+                .sender_nonces
+                .entry((sender, wrapper.body().nonce()))
+                .or_insert(0) += 1;
+        }
         if is_feeless(wrapper) {
             self.feeless_count += 1;
             self.feeless_payloads.insert(feeless_payload_key(wrapper));
@@ -514,19 +516,21 @@ impl Mempool {
 
     fn untrack(&mut self, wrapper: &Wrapper) {
         let sender = wrapper.body().sender();
-        if let Some(count) = self.by_sender.get_mut(sender) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                self.by_sender.remove(sender);
+        if !is_feeless(wrapper) {
+            if let Some(count) = self.by_sender.get_mut(sender) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.by_sender.remove(sender);
+                }
+            } else {
+                debug_assert!(false, "untracked a sender the index never held");
             }
-        } else {
-            debug_assert!(false, "untracked a sender the index never held");
-        }
-        let nonce_key = (sender.to_string(), wrapper.body().nonce());
-        if let Some(held) = self.sender_nonces.get_mut(&nonce_key) {
-            *held = held.saturating_sub(1);
-            if *held == 0 {
-                self.sender_nonces.remove(&nonce_key);
+            let nonce_key = (sender.to_string(), wrapper.body().nonce());
+            if let Some(held) = self.sender_nonces.get_mut(&nonce_key) {
+                *held = held.saturating_sub(1);
+                if *held == 0 {
+                    self.sender_nonces.remove(&nonce_key);
+                }
             }
         }
         if is_feeless(wrapper) {
@@ -625,7 +629,7 @@ impl Mempool {
     }
 
     fn has_capacity(&self, incoming: &Wrapper) -> bool {
-        if self.sender_count(incoming.body().sender()) >= self.per_sender {
+        if !is_feeless(incoming) && self.sender_count(incoming.body().sender()) >= self.per_sender {
             return false;
         }
         if is_priority(incoming) {
@@ -681,7 +685,7 @@ impl Mempool {
     }
 
     fn make_room(&mut self, incoming: &Wrapper) -> Result<(), Reject> {
-        if self.sender_count(incoming.body().sender()) >= self.per_sender {
+        if !is_feeless(incoming) && self.sender_count(incoming.body().sender()) >= self.per_sender {
             return Err(Reject::SenderQueueFull);
         }
         if is_feeless(incoming) {
