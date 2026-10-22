@@ -57,6 +57,8 @@ fn finality_depth_for(source_chain: u32) -> Option<u32> {
     )
 }
 
+const MAX_SECRET_FILE: u64 = 64 * 1024;
+
 fn urandom32() -> Zeroizing<[u8; 32]> {
     let mut b = Zeroizing::new([0u8; 32]);
     if qtv_crypto::rng::try_fill_random(&mut b[..]).is_err() {
@@ -202,22 +204,39 @@ fn fail(msg: &str) -> ! {
     std::process::exit(1);
 }
 
-fn private_text(path: &str) -> Result<String, String> {
+fn private_text(path: &str) -> Result<Zeroizing<String>, String> {
+    use std::io::Read;
+    let mut file = fs::File::open(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("reading {path}: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let meta = fs::metadata(path).map_err(|e| format!("reading {path}: {e}"))?;
         if meta.permissions().mode() & 0o077 != 0 {
             return Err(format!(
                 "the secret file {path} is readable by group or others, restrict it with chmod 600"
             ));
         }
     }
-    fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))
+    if meta.len() > MAX_SECRET_FILE {
+        return Err(format!(
+            "the secret file {path} is larger than any key file"
+        ));
+    }
+    let mut bytes = Zeroizing::new(vec![0u8; meta.len() as usize]);
+    file.read_exact(&mut bytes)
+        .map_err(|e| format!("reading {path}: {e}"))?;
+    if std::str::from_utf8(&bytes).is_err() {
+        return Err(format!("the secret file {path} is not text"));
+    }
+    let mut text = Zeroizing::new(String::new());
+    *text = String::from_utf8(std::mem::take(&mut *bytes)).unwrap_or_default();
+    Ok(text)
 }
 
 fn read_private(path: &str) -> Zeroizing<String> {
-    Zeroizing::new(private_text(path).unwrap_or_else(|e| fail(&e)))
+    private_text(path).unwrap_or_else(|e| fail(&e))
 }
 
 fn read_seed(path: &str) -> Zeroizing<[u8; 32]> {
@@ -309,16 +328,22 @@ fn keygen(a: &[String]) {
         &urandom32(),
     )
     .unwrap_or_else(|| fail("signing the proof of possession"));
-    let mut secret = Zeroizing::new(String::with_capacity(2 * SECRET_KEY_BYTES + 32));
-    secret.push_str(&format!("{id} {chain_id} "));
-    push_hex(&mut secret, &sk[..]);
-    secret.push('\n');
+    let secret = operator_secret_text(id, chain_id, &sk[..]);
     write_private(&format!("{prefix}.{id}.secret"), secret.as_bytes());
     let public = format!("{id} {} {}\n", hexs(&pk), hexs(&pop));
     fs::write(format!("{prefix}.{id}.pub"), &public)
         .unwrap_or_else(|e| fail(&format!("writing {prefix}.{id}.pub: {e}")));
     print!("{public}");
     eprintln!("wrote {prefix}.{id}.secret (keep it on this machine) and {prefix}.{id}.pub (send it to the coordinator)");
+}
+
+fn operator_secret_text(id: u32, chain_id: u64, sk: &[u8]) -> Zeroizing<String> {
+    let head = format!("{id} {chain_id} ");
+    let mut secret = Zeroizing::new(String::with_capacity(head.len() + 2 * sk.len() + 1));
+    secret.push_str(&head);
+    push_hex(&mut secret, sk);
+    secret.push('\n');
+    secret
 }
 
 fn committee(a: &[String]) {
@@ -567,7 +592,7 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(private_text(text).is_err());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(private_text(text).unwrap(), "1 2 3\n");
+        assert_eq!(private_text(text).unwrap().as_str(), "1 2 3\n");
         let _ = fs::remove_file(&path);
     }
 
