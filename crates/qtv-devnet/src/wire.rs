@@ -88,6 +88,14 @@ pub struct ViewChange {
     pub locked: Option<LockedBlock>,
     pub att: Attestation,
     pub polka: Option<Certificate>,
+    pub lock_pol: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct PrevoteNote {
+    pub att: Attestation,
+    pub value: [u8; 32],
+    pub pol: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -113,7 +121,7 @@ pub enum Message {
     Proposal(Box<Proposal>),
     CodedProposal(Box<CodedProposal>),
     Attest(Box<Attestation>),
-    Prevote(Box<Attestation>),
+    Prevote(Box<PrevoteNote>),
     Peers(Vec<PeerEntry>),
     Status(u64),
     GetBlocks { from: u64, to: u64 },
@@ -179,7 +187,9 @@ impl Message {
             }
             Message::Prevote(prevote) => {
                 encoder.put_tag(TAG_PREVOTE);
-                encode_attestation(&mut encoder, prevote);
+                encode_attestation(&mut encoder, &prevote.att);
+                put_value(&mut encoder, &prevote.value);
+                put_pol(&mut encoder, prevote.pol);
             }
             Message::Peers(peers) => {
                 encoder.put_tag(TAG_PEERS);
@@ -267,7 +277,12 @@ impl Message {
                 Message::CodedProposal(Box::new(decode_coded_proposal(&mut decoder)?))
             }
             TAG_ATTEST => Message::Attest(Box::new(decode_attestation(&mut decoder)?)),
-            TAG_PREVOTE => Message::Prevote(Box::new(decode_attestation(&mut decoder)?)),
+            TAG_PREVOTE => {
+                let att = decode_attestation(&mut decoder)?;
+                let value = get_value(&mut decoder)?;
+                let pol = get_pol(&mut decoder)?;
+                Message::Prevote(Box::new(PrevoteNote { att, value, pol }))
+            }
             TAG_PEERS => {
                 let count = decoder.get_u64()?;
                 let mut peers =
@@ -541,6 +556,30 @@ fn encode_view_change(encoder: &mut Encoder, record: &ViewChange) {
         }
         None => encoder.put_u8(0),
     }
+    put_pol(encoder, record.lock_pol);
+}
+
+fn put_pol(encoder: &mut Encoder, pol: Option<u64>) {
+    match pol {
+        Some(pol) => {
+            encoder.put_u8(1);
+            encoder.put_u64(pol);
+        }
+        None => {
+            encoder.put_u8(0);
+            encoder.put_u64(0);
+        }
+    }
+}
+
+fn get_pol(decoder: &mut Decoder<'_>) -> Result<Option<u64>, DecodeError> {
+    let flag = decoder.get_u8()?;
+    let pol = decoder.get_u64()?;
+    match (flag, pol) {
+        (1, pol) => Ok(Some(pol)),
+        (0, 0) => Ok(None),
+        (other, _) => Err(DecodeError::BadParent(other)),
+    }
 }
 
 pub(crate) fn coded_overhead(
@@ -624,6 +663,7 @@ fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeErr
         1 => Some(decode_certificate(decoder)?),
         other => return Err(DecodeError::BadParent(other)),
     };
+    let lock_pol = get_pol(decoder)?;
     Ok(ViewChange {
         height,
         target_view,
@@ -631,6 +671,7 @@ fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeErr
         locked,
         att,
         polka,
+        lock_pol,
     })
 }
 
@@ -777,9 +818,11 @@ pub fn lock_to_bytes(
     value: &[u8; 32],
     block: &LockedBlock,
     polka: &Certificate,
+    pol: Option<u64>,
 ) -> Vec<u8> {
     let mut encoder = Encoder::new();
     encoder.put_u64(view);
+    put_pol(&mut encoder, pol);
     put_value(&mut encoder, value);
     block.header.encode(&mut encoder);
     encoder.put_u64(block.body.len() as u64);
@@ -792,9 +835,10 @@ pub fn lock_to_bytes(
 
 pub fn lock_from_bytes(
     bytes: &[u8],
-) -> Result<(u64, [u8; 32], LockedBlock, Certificate), DecodeError> {
+) -> Result<(u64, Option<u64>, [u8; 32], LockedBlock, Certificate), DecodeError> {
     let mut decoder = Decoder::new(bytes);
     let view = decoder.get_u64()?;
+    let pol = get_pol(&mut decoder)?;
     let value = get_value(&mut decoder)?;
     let header = Header::decode(&mut decoder)?;
     let count = decoder.get_u64()?;
@@ -804,7 +848,7 @@ pub fn lock_from_bytes(
     }
     let polka = decode_certificate(&mut decoder)?;
     decoder.finish()?;
-    Ok((view, value, LockedBlock { header, body }, polka))
+    Ok((view, pol, value, LockedBlock { header, body }, polka))
 }
 
 pub fn certificate_to_bytes(certificate: &Certificate) -> Vec<u8> {

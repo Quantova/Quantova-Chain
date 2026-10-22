@@ -1003,7 +1003,7 @@ impl Driver {
             }
             Message::Proposal(_) => {}
             Message::Prevote(prevote) => {
-                let out = self.node.on_prevote(selection, *prevote);
+                let out = self.node.on_prevote_note(selection, *prevote);
                 for message in out {
                     self.emit(message);
                 }
@@ -1253,7 +1253,7 @@ fn message_height(message: &Message) -> Option<u64> {
         Message::Proposal(p) => Some(p.header.height()),
         Message::CodedProposal(c) => Some(c.header.height()),
         Message::Attest(a) => Some(a.height),
-        Message::Prevote(a) => Some(a.height),
+        Message::Prevote(a) => Some(a.att.height),
         Message::ViewChange(v) => Some(v.height),
         Message::Reveal(r) => Some(r.height),
         Message::Register(r) => Some(r.height),

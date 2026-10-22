@@ -15,7 +15,9 @@ use qtv_node::consensus::{
     genesis_beacon, header_value, Beacon, Block as ConsensusBlock, Consensus, FinalityLedger,
     FinalityStatus, Parent, Selection, ValidatorRegistration,
 };
-use qtv_node::evidence::{DoubleFinality, Equivocation, EvidencePool, FinalityVote};
+use qtv_node::evidence::{
+    DoubleFinality, Equivocation, EvidencePool, FinalityVote, PrevoteEquivocation, SignedPrevote,
+};
 use qtv_node::fee::FeeParams;
 use qtv_node::ledger::{
     account_key, evidence_address, registration_address, Account, BlockEvent, Ledger, SideEvent,
@@ -34,7 +36,7 @@ use qtv_tx::{Body, Call, Wrapper};
 use crate::config::{DevnetConfig, NodeConfig};
 use crate::wire::{
     decode_register_note, encode_register_note, lock_from_bytes, lock_to_bytes, CodedProposal,
-    LockedBlock, Message, Proposal, RegisterNote, RevealNote, ViewChange,
+    LockedBlock, Message, PrevoteNote, Proposal, RegisterNote, RevealNote, ViewChange,
 };
 use qtv_sampler::onetime::Root;
 
@@ -143,6 +145,10 @@ fn body_bytes(body: &[Wrapper]) -> usize {
 }
 
 const MAX_FUTURE_PROPOSAL_BYTES: usize = 16 * 1024 * 1024;
+
+const MAX_PREVOTE_EVIDENCE: usize = 256;
+
+const MAX_WATCHED_PREVOTES: usize = 4_096;
 
 fn proposal_weight(proposal: &Proposal) -> usize {
     proposal
@@ -308,10 +314,12 @@ struct Staged {
     included_ids: Vec<String>,
     ledger: Ledger,
     justification: Vec<ViewChange>,
+    pol: Option<View>,
 }
 
 struct Lock {
     view: View,
+    pol: Option<View>,
     value: [u8; 32],
     block: LockedBlock,
     polka: Certificate,
@@ -370,6 +378,8 @@ pub struct DevNode {
     slashed: Vec<u64>,
     finalized_votes: std::collections::BTreeMap<(Height, [u8; 32]), Vec<Attestation>>,
     double_finality: Vec<DoubleFinality>,
+    prevotes_seen: HashMap<(u64, View), SignedPrevote>,
+    prevote_equivocations: Vec<PrevoteEquivocation>,
     tx_index: TxIndex,
     prevoted: std::collections::BTreeMap<View, [u8; 32]>,
     events_by_height: HashMap<Height, Vec<BlockEvent>>,
@@ -505,6 +515,8 @@ impl DevNode {
             slashed: Vec::new(),
             finalized_votes: std::collections::BTreeMap::new(),
             double_finality: Vec::new(),
+            prevotes_seen: HashMap::new(),
+            prevote_equivocations: Vec::new(),
             tx_index,
             prevoted: std::collections::BTreeMap::new(),
             events_by_height: HashMap::new(),
@@ -556,17 +568,18 @@ impl DevNode {
         if height != self.height {
             return Ok(());
         }
-        let (view, value, block, polka) =
+        let (view, pol, value, block, polka) =
             lock_from_bytes(&payload).map_err(|_| RoundError::Decode)?;
         if header_value(&block.header.hash()) != value {
             return Err(RoundError::Decode);
         }
-        let _ = self.stage_from(&block.header, &block.body, view);
+        let _ = self.stage_from(&block.header, &block.body, view, pol);
         if view > self.view {
             self.view = view;
         }
         self.lock = Some(Lock {
             view,
+            pol,
             value,
             block,
             polka,
@@ -1294,6 +1307,7 @@ impl DevNode {
             .map(|evidence| evidence_transaction(evidence, chain_id))
             .collect();
         candidates.extend(self.double_finality_evidence());
+        candidates.extend(self.prevote_equivocation_evidence());
         if self.registration_open(height) {
             for note in self.epoch_registration_notes() {
                 candidates.push(registration_transaction(&note, chain_id));
@@ -1353,6 +1367,7 @@ impl DevNode {
             included_ids,
             ledger,
             justification: Vec::new(),
+            pol: None,
         });
         let auth = self.sign_proposal(view, &header, &included, &[])?;
         Some(Proposal {
@@ -1488,7 +1503,7 @@ impl DevNode {
         {
             return Err(RoundError::ProposalRejected);
         }
-        self.stage_from(header, &proposal.body, proposal.view)
+        self.stage_from(header, &proposal.body, proposal.view, None)
     }
 
     fn stage_from(
@@ -1496,6 +1511,7 @@ impl DevNode {
         header: &Header,
         body: &[Wrapper],
         view: View,
+        pol: Option<View>,
     ) -> Result<(), RoundError> {
         if header.height() != self.height
             || *header.parent_hash() != self.parent_header_hash
@@ -1535,6 +1551,7 @@ impl DevNode {
             included_ids,
             ledger,
             justification: Vec::new(),
+            pol,
         });
         Ok(())
     }
@@ -1766,6 +1783,7 @@ impl DevNode {
         self.seen_atts.clear();
         self.attest_relayed.clear();
         self.prevotes.clear();
+        self.prevotes_seen.clear();
         self.future_props.clear();
         self.view_changes.clear();
         self.polka_rejects.clear();
@@ -1891,8 +1909,9 @@ impl DevNode {
                 return Vec::new();
             }
         }
+        let pol = high.as_ref().map(|(polka_view, _)| *polka_view);
         if self
-            .stage_from(&proposal.header, &proposal.body, view)
+            .stage_from(&proposal.header, &proposal.body, view, pol)
             .is_err()
         {
             return Vec::new();
@@ -1938,7 +1957,7 @@ impl DevNode {
             };
             if improves && locked_body_fits(block) {
                 if let Some(polka) = &record.polka {
-                    if self.polka_backs(selection, top, block, polka) {
+                    if self.polka_backs(selection, top, record.lock_pol, block, polka) {
                         backed = Some(block.clone());
                     }
                 }
@@ -1951,11 +1970,12 @@ impl DevNode {
         &self,
         selection: &Selection,
         lock_view: View,
+        lock_pol: Option<View>,
         block: &LockedBlock,
         polka: &Certificate,
     ) -> bool {
         let value = header_value(&block.header.hash());
-        let subject = prevote_subject(self.height, lock_view, value);
+        let subject = prevote_subject(self.height, lock_view, value, lock_pol);
         if polka.envelope.block != subject
             || !polka.attestations.iter().all(|att| att.view == lock_view)
         {
@@ -1979,23 +1999,31 @@ impl DevNode {
         };
         let value = header_value(&staged.header.hash());
         let view = staged.view;
+        let pol = staged.pol;
         if let Some(already) = self.prevoted.get(&view) {
             if *already != value {
                 return Vec::new();
             }
         }
+        if self
+            .lock
+            .as_ref()
+            .is_some_and(|lock| view > lock.view && pol.is_none_or(|pol| pol < lock.view))
+        {
+            return Vec::new();
+        }
         if self.restart_hold > 0 {
             return Vec::new();
         }
+        let subject = prevote_subject(self.height, view, value, pol);
         let Some(guard) = self.prevote_guard.as_mut() else {
             return Vec::new();
         };
-        match guard.try_prevote(self.height, view, &value) {
+        match guard.try_prevote(self.height, view, &subject.val) {
             Ok(true) => {}
             Ok(false) | Err(_) => return Vec::new(),
         }
         let committee = self.current_committee_digest();
-        let subject = prevote_subject(self.height, view, value);
         let Some(prevote) = self.consensus.own_attestation(
             self.height,
             self.slot(),
@@ -2008,11 +2036,75 @@ impl DevNode {
         };
         self.prevoted.insert(view, value);
         self.record_prevote(&prevote);
-        let mut out = vec![Message::Prevote(Box::new(prevote))];
+        let mut out = vec![Message::Prevote(Box::new(PrevoteNote {
+            att: prevote,
+            value,
+            pol,
+        }))];
         if let Ok(selection) = self.select() {
             out.extend(self.form_polka_and_precommit(&selection));
         }
         out
+    }
+
+    pub fn on_prevote_note(&mut self, selection: &Selection, note: PrevoteNote) -> Vec<Message> {
+        let PrevoteNote { att, value, pol } = note;
+        if att.height != self.height
+            || att.block != prevote_subject(att.height, att.view, value, pol)
+        {
+            return Vec::new();
+        }
+        if !self.prevote_known(&att) && self.verify_attestation(selection, &att) {
+            self.watch_prevote(&att, value, pol);
+            self.record_prevote(&att);
+        }
+        self.form_polka_and_precommit(selection)
+    }
+
+    fn watch_prevote(&mut self, att: &Attestation, value: [u8; 32], pol: Option<View>) {
+        let signed = SignedPrevote {
+            slot: att.slot,
+            committee: att.committee,
+            value,
+            pol,
+            sig: att.sig.to_vec(),
+        };
+        match self.prevotes_seen.get(&(att.from, att.view)) {
+            Some(first) if (first.value, first.pol) != (value, pol) => {
+                let offender = self.validator_address(att.from);
+                if offender.is_empty()
+                    || self.ledger.is_validator_banned(&offender)
+                    || self.prevote_equivocations.len() >= MAX_PREVOTE_EVIDENCE
+                    || self
+                        .prevote_equivocations
+                        .iter()
+                        .any(|e| e.offender == offender && e.height == att.height)
+                {
+                    return;
+                }
+                self.prevote_equivocations.push(PrevoteEquivocation {
+                    offender,
+                    height: att.height,
+                    view: att.view,
+                    first: first.clone(),
+                    second: signed,
+                });
+            }
+            Some(_) => {}
+            None => {
+                if self.prevotes_seen.len() < MAX_WATCHED_PREVOTES {
+                    self.prevotes_seen.insert((att.from, att.view), signed);
+                }
+            }
+        }
+    }
+
+    pub fn prevote_equivocation_evidence(&self) -> Vec<Wrapper> {
+        let chain_id = self.fee_params.chain_id;
+        self.prevote_equivocations
+            .iter()
+            .map(|evidence| evidence_call(evidence.encode(), chain_id))
+            .collect()
     }
 
     pub fn on_prevote(&mut self, selection: &Selection, prevote: Attestation) -> Vec<Message> {
@@ -2047,7 +2139,8 @@ impl DevNode {
         if matches!(&self.lock, Some(lock) if lock.view >= view) {
             return Vec::new();
         }
-        let subject = prevote_subject(self.height, view, value);
+        let pol = self.staged.as_ref().and_then(|staged| staged.pol);
+        let subject = prevote_subject(self.height, view, value, pol);
         let prevotes: Vec<Attestation> = self
             .prevotes
             .iter()
@@ -2076,7 +2169,10 @@ impl DevNode {
         let polka = polka.with_committee_reveals(self.committee_reveals(selection));
         if self
             .lock_file
-            .store(self.height, &lock_to_bytes(view, &value, &block, &polka))
+            .store(
+                self.height,
+                &lock_to_bytes(view, &value, &block, &polka, pol),
+            )
             .is_err()
         {
             self.fatal = Some(Fatal::PersistFailed {
@@ -2086,6 +2182,7 @@ impl DevNode {
         }
         self.lock = Some(Lock {
             view,
+            pol,
             value,
             block,
             polka,
@@ -2140,15 +2237,16 @@ impl DevNode {
     }
 
     pub fn make_view_change(&mut self, target_view: View) -> Option<ViewChange> {
-        let (lock_view, locked_value, has_lock, locked, polka) = match &self.lock {
+        let (lock_view, locked_value, has_lock, locked, polka, lock_pol) = match &self.lock {
             Some(lock) => (
                 lock.view,
                 lock.value,
                 true,
                 Some(lock.block.clone()),
                 Some(lock.polka.clone()),
+                lock.pol,
             ),
-            None => (0, [0u8; 32], false, None, None),
+            None => (0, [0u8; 32], false, None, None, None),
         };
         let subject =
             view_change_subject(self.height, target_view, lock_view, locked_value, has_lock);
@@ -2168,6 +2266,7 @@ impl DevNode {
             locked,
             att,
             polka,
+            lock_pol,
         })
     }
 
@@ -2325,7 +2424,7 @@ impl DevNode {
         match (&record.locked, &record.polka) {
             (None, None) => true,
             (Some(block), Some(polka)) => {
-                self.polka_backs(selection, record.lock_view, block, polka)
+                self.polka_backs(selection, record.lock_view, record.lock_pol, block, polka)
             }
             _ => false,
         }
@@ -2445,7 +2544,9 @@ impl DevNode {
         view: View,
     ) -> Option<Proposal> {
         let records = self.justified_records(selection, view)?;
-        let bound = self.justified_lock(selection, &records).ok()?.or_else(|| {
+        let high = self.justified_lock(selection, &records).ok()?;
+        let pol = high.as_ref().map(|(polka_view, _)| *polka_view);
+        let bound = high.or_else(|| {
             self.lock
                 .as_ref()
                 .map(|lock| (lock.view, lock.block.clone()))
@@ -2453,7 +2554,8 @@ impl DevNode {
         let carried = carried_justification(records);
         let proposal = match bound {
             Some((_, locked)) => {
-                self.stage_from(&locked.header, &locked.body, view).ok()?;
+                self.stage_from(&locked.header, &locked.body, view, pol)
+                    .ok()?;
                 let auth = self.sign_proposal(view, &locked.header, &locked.body, &carried)?;
                 Proposal {
                     view,
@@ -2728,6 +2830,11 @@ impl DevNode {
                     .votes_a
                     .iter()
                     .any(|vote| !ledger.is_validator_banned(&vote.signer))
+                && !included.contains(&evidence_call(evidence.encode(), chain_id).id())
+        });
+        self.prevote_equivocations.retain(|evidence| {
+            evidence.height.saturating_add(EVIDENCE_WINDOW) > height
+                && !ledger.is_validator_banned(&evidence.offender)
                 && !included.contains(&evidence_call(evidence.encode(), chain_id).id())
         });
     }
@@ -3354,6 +3461,7 @@ impl DevNode {
         self.seen_atts.clear();
         self.attest_relayed.clear();
         self.prevotes.clear();
+        self.prevotes_seen.clear();
         self.future_props.clear();
         self.view_changes.clear();
         self.polka_rejects.clear();
@@ -3503,19 +3611,13 @@ fn proposal_subject(
     )
 }
 
-fn prevote_subject(height: Height, view: View, value: [u8; 32]) -> ConsensusBlock {
-    let mut buf = Vec::with_capacity(18 + 8 * 2 + 32);
-    buf.extend_from_slice(b"QTV-DEVNET-PREVOTE");
-    buf.extend_from_slice(&height.to_le_bytes());
-    buf.extend_from_slice(&view.to_le_bytes());
-    buf.extend_from_slice(&value);
-    let commitment = qtv_bft::hash::digest_256(&buf);
-    ConsensusBlock::with_cost(
-        height,
-        commitment,
-        Parent::Genesis,
-        qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST,
-    )
+fn prevote_subject(
+    height: Height,
+    view: View,
+    value: [u8; 32],
+    pol: Option<View>,
+) -> ConsensusBlock {
+    qtv_node::evidence::prevote_block(height, view, &value, pol)
 }
 
 fn view_change_subject(
@@ -3831,9 +3933,9 @@ mod registration_window_tests {
             built.proposer().to_string(),
             qtv_node::node::wall_clock_seconds() + 100,
         );
-        assert!(node.stage_from(&ahead, &proposal.body, 0).is_err());
+        assert!(node.stage_from(&ahead, &proposal.body, 0, None).is_err());
         assert!(
-            node.stage_from(built, &proposal.body, 0).is_ok(),
+            node.stage_from(built, &proposal.body, 0, None).is_ok(),
             "the same block at an honest time stages"
         );
     }

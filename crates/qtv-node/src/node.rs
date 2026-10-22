@@ -463,8 +463,30 @@ fn double_finality_offenders(
     )
 }
 
+fn prevote_equivocation_proven(
+    chain_id: u64,
+    evidence: &crate::evidence::PrevoteEquivocation,
+    ledger: &Ledger,
+) -> bool {
+    if evidence.height > ledger.execution_height().saturating_add(1) {
+        return false;
+    }
+    ledger
+        .validator_attest_key(&evidence.offender)
+        .is_some_and(|attest_pk| {
+            evidence.attributes(
+                qtv_attest::ChainBinding::new(chain_id, ledger.chain_genesis_hash()),
+                &attest_pk,
+            )
+        })
+}
+
 pub(crate) fn evidence_admissible(chain_id: u64, wrapper: &Wrapper, ledger: &Ledger) -> bool {
     let args = wrapper.body().call().args();
+    if let Some(evidence) = crate::evidence::PrevoteEquivocation::decode(args) {
+        return !ledger.is_validator_banned(&evidence.offender)
+            && prevote_equivocation_proven(chain_id, &evidence, ledger);
+    }
     if let Some(evidence) = crate::evidence::DoubleFinality::decode(args) {
         if !double_finality_live(chain_id, ledger)
             || evidence.height > ledger.execution_height().saturating_add(1)
@@ -500,6 +522,9 @@ pub(crate) fn evidence_offender_is_slashable(wrapper: &Wrapper, ledger: &Ledger)
             .iter()
             .any(|vote| !ledger.is_validator_banned(&vote.signer));
     }
+    if let Some(evidence) = crate::evidence::PrevoteEquivocation::decode(args) {
+        return !ledger.is_validator_banned(&evidence.offender);
+    }
     match crate::evidence::Equivocation::decode(args) {
         Some(evidence) => !ledger.is_validator_banned(&evidence.offender),
         None => false,
@@ -522,6 +547,10 @@ fn dispatch_evidence(chain_id: u64, ledger: &mut Ledger, wrapper: &Wrapper) -> b
             slashed |= ledger.slash_validator(&offender);
         }
         return slashed;
+    }
+    if let Some(evidence) = crate::evidence::PrevoteEquivocation::decode(args) {
+        return prevote_equivocation_proven(chain_id, &evidence, ledger)
+            && ledger.slash_validator(&evidence.offender);
     }
     let evidence = match crate::evidence::Equivocation::decode(args) {
         Some(evidence) => evidence,
@@ -895,6 +924,7 @@ pub(crate) fn feeless_decodes(wrapper: &Wrapper) -> bool {
     let args = wrapper.body().call().args();
     if is_evidence(wrapper) {
         crate::evidence::DoubleFinality::decode(args).is_some()
+            || crate::evidence::PrevoteEquivocation::decode(args).is_some()
             || crate::evidence::Equivocation::decode(args).is_some()
     } else if is_bridge_guardian(wrapper) {
         GuardianAct::decode(args).is_some()

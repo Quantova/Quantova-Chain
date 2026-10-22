@@ -41,7 +41,7 @@ fn index_of(config: &DevnetConfig, id: u64) -> usize {
 
 fn prevote_of(messages: &[Message]) -> Option<Attestation> {
     messages.iter().find_map(|message| match message {
-        Message::Prevote(att) => Some((**att).clone()),
+        Message::Prevote(note) => Some(note.att.clone()),
         _ => None,
     })
 }

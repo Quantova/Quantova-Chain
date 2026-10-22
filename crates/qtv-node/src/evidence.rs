@@ -142,6 +142,172 @@ impl Equivocation {
     }
 }
 
+pub const PREVOTE_DOMAIN: &[u8] = b"QTV-DEVNET-PREVOTE";
+
+pub fn prevote_block(
+    height: u64,
+    view: u64,
+    value: &[u8; 32],
+    pol: Option<u64>,
+) -> qtv_bft::block::Block {
+    let mut buf = Vec::with_capacity(PREVOTE_DOMAIN.len() + 8 * 3 + 32 + 1);
+    buf.extend_from_slice(PREVOTE_DOMAIN);
+    buf.extend_from_slice(&height.to_le_bytes());
+    buf.extend_from_slice(&view.to_le_bytes());
+    buf.extend_from_slice(value);
+    match pol {
+        Some(pol) => {
+            buf.push(1);
+            buf.extend_from_slice(&pol.to_le_bytes());
+        }
+        None => {
+            buf.push(0);
+            buf.extend_from_slice(&0u64.to_le_bytes());
+        }
+    }
+    qtv_bft::block::Block::with_cost(
+        height,
+        qtv_bft::hash::digest_256(&buf),
+        qtv_bft::block::Parent::Genesis,
+        crate::consensus::VIEW_CHANGE_SUBJECT_COST,
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedPrevote {
+    pub slot: u64,
+    pub committee: [u8; 32],
+    pub value: [u8; 32],
+    pub pol: Option<u64>,
+    pub sig: Vec<u8>,
+}
+
+impl SignedPrevote {
+    fn verifies(
+        &self,
+        chain_id: ChainBinding,
+        pk: &[u8; PUBLIC_KEY_BYTES],
+        height: u64,
+        view: u64,
+    ) -> bool {
+        let Ok(sig) = <[u8; SIGNATURE_BYTES]>::try_from(self.sig.as_slice()) else {
+            return false;
+        };
+        let block = prevote_block(height, view, &self.value, self.pol);
+        let msg = attestation_message(
+            chain_id,
+            height,
+            self.slot,
+            view,
+            &self.committee,
+            &block.to_bytes(),
+        );
+        ml_dsa::verify(pk, &msg, &sig, ATTEST_CONTEXT)
+    }
+
+    fn put(&self, encoder: &mut Encoder) {
+        encoder.put_u64(self.slot);
+        encoder.put_bytes(&self.committee);
+        encoder.put_bytes(&self.value);
+        put_pol(encoder, self.pol);
+        encoder.put_bytes(&self.sig);
+    }
+
+    fn get(decoder: &mut Decoder<'_>) -> Option<SignedPrevote> {
+        let slot = decoder.get_u64().ok()?;
+        let committee: [u8; 32] = decoder.get_bytes().ok()?.try_into().ok()?;
+        let value: [u8; 32] = decoder.get_bytes().ok()?.try_into().ok()?;
+        let pol = get_pol(decoder)?;
+        let sig = decoder.get_bytes().ok()?.to_vec();
+        Some(SignedPrevote {
+            slot,
+            committee,
+            value,
+            pol,
+            sig,
+        })
+    }
+}
+
+fn put_pol(encoder: &mut Encoder, pol: Option<u64>) {
+    match pol {
+        Some(pol) => {
+            encoder.put_u8(1);
+            encoder.put_u64(pol);
+        }
+        None => {
+            encoder.put_u8(0);
+            encoder.put_u64(0);
+        }
+    }
+}
+
+fn get_pol(decoder: &mut Decoder<'_>) -> Option<Option<u64>> {
+    let flag = decoder.get_u8().ok()?;
+    let pol = decoder.get_u64().ok()?;
+    match (flag, pol) {
+        (1, pol) => Some(Some(pol)),
+        (0, 0) => Some(None),
+        _ => None,
+    }
+}
+
+pub const PREVOTE_EQUIVOCATION_TAG: &[u8] = b"QTV-PREVOTE-EQUIVOCATION/1";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrevoteEquivocation {
+    pub offender: String,
+    pub height: u64,
+    pub view: u64,
+    pub first: SignedPrevote,
+    pub second: SignedPrevote,
+}
+
+impl PrevoteEquivocation {
+    pub fn attributes(&self, chain_id: impl Into<ChainBinding>, attest_pk: &[u8]) -> bool {
+        let chain_id: ChainBinding = chain_id.into();
+        if (self.first.value, self.first.pol) == (self.second.value, self.second.pol) {
+            return false;
+        }
+        let Ok(pk) = <[u8; PUBLIC_KEY_BYTES]>::try_from(attest_pk) else {
+            return false;
+        };
+        self.first.verifies(chain_id, &pk, self.height, self.view)
+            && self.second.verifies(chain_id, &pk, self.height, self.view)
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut encoder = Encoder::new();
+        encoder.put_bytes(PREVOTE_EQUIVOCATION_TAG);
+        encoder.put_bytes(self.offender.as_bytes());
+        encoder.put_u64(self.height);
+        encoder.put_u64(self.view);
+        self.first.put(&mut encoder);
+        self.second.put(&mut encoder);
+        encoder.into_bytes()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<PrevoteEquivocation> {
+        let mut decoder = Decoder::new(bytes);
+        if decoder.get_bytes().ok()? != PREVOTE_EQUIVOCATION_TAG {
+            return None;
+        }
+        let offender = String::from_utf8(decoder.get_bytes().ok()?.to_vec()).ok()?;
+        let height = decoder.get_u64().ok()?;
+        let view = decoder.get_u64().ok()?;
+        let first = SignedPrevote::get(&mut decoder)?;
+        let second = SignedPrevote::get(&mut decoder)?;
+        decoder.finish().ok()?;
+        Some(PrevoteEquivocation {
+            offender,
+            height,
+            view,
+            first,
+            second,
+        })
+    }
+}
+
 pub const DOUBLE_FINALITY_TAG: &[u8] = b"QTV-DOUBLE-FINALITY/1";
 
 pub const MAX_FINALITY_VOTES: usize = 512;

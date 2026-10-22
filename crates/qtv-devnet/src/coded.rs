@@ -1062,6 +1062,7 @@ mod tests {
             locked: Some(locked),
             att,
             polka: None,
+            lock_pol: None,
         }]
     }
 

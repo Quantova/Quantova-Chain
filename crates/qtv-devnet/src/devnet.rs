@@ -603,7 +603,7 @@ impl<S: Read + Write> Devnet<S> {
                     }
                     Message::Prevote(prevote) => {
                         if let Some(selection) = self.ready_selection(to)? {
-                            for message in self.nodes[to].on_prevote(&selection, *prevote) {
+                            for message in self.nodes[to].on_prevote_note(&selection, *prevote) {
                                 self.originate(to, &message, active)?;
                             }
                             self.settle(to, ceiling, active)?;

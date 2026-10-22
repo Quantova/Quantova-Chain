@@ -61,7 +61,7 @@ fn an_honest_view_change_is_not_a_slashable_equivocation() {
     let victim_prevote = out
         .into_iter()
         .find_map(|m| match m {
-            qtv_devnet::wire::Message::Prevote(att) => Some(*att),
+            qtv_devnet::wire::Message::Prevote(note) => Some(note.att),
             _ => None,
         })
         .expect("the victim prevotes the proposal");
@@ -70,12 +70,12 @@ fn an_honest_view_change_is_not_a_slashable_equivocation() {
         if i == victim_idx {
             continue;
         }
-        if let Some(qtv_devnet::wire::Message::Prevote(att)) = nodes[i]
+        if let Some(qtv_devnet::wire::Message::Prevote(note)) = nodes[i]
             .on_proposal(&selection, leader0, proposal.clone())
             .into_iter()
             .next()
         {
-            polka.push(*att);
+            polka.push(note.att);
         }
     }
     for prevote in &polka {

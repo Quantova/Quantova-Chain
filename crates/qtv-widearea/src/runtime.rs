@@ -284,7 +284,7 @@ impl Runtime {
             }
             Message::Prevote(prevote) => {
                 let aggregate_start = Instant::now();
-                let out = self.node.on_prevote(selection, *prevote);
+                let out = self.node.on_prevote_note(selection, *prevote);
                 self.phase.aggregate += aggregate_start.elapsed();
                 for message in out {
                     self.emit(message);

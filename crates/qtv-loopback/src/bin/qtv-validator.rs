@@ -124,7 +124,7 @@ impl Runtime {
                 }
             }
             Message::Prevote(prevote) => {
-                for message in self.node.on_prevote(selection, *prevote) {
+                for message in self.node.on_prevote_note(selection, *prevote) {
                     self.emit(message);
                 }
             }
