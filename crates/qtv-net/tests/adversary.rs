@@ -50,12 +50,17 @@ impl<S: Read> Read for FlipWrite<S> {
     }
 }
 
-const SERVER_HELLO_ENCAPS_OFFSET: u64 = ml_dsa::PUBLIC_KEY_BYTES as u64;
-const SERVER_HELLO_SIGNATURE_OFFSET: u64 =
-    (ml_dsa::PUBLIC_KEY_BYTES + ml_kem::ENCAPS_KEY_BYTES + 32) as u64;
+const CHALLENGE_BYTES: usize = 32;
 
-const CLIENT_HANDSHAKE_BYTES: u64 =
-    (ml_dsa::PUBLIC_KEY_BYTES + 32 + ml_kem::CIPHERTEXT_BYTES + ml_dsa::SIGNATURE_BYTES) as u64;
+const SERVER_HELLO_ENCAPS_OFFSET: u64 = (CHALLENGE_BYTES + ml_dsa::PUBLIC_KEY_BYTES) as u64;
+const SERVER_HELLO_SIGNATURE_OFFSET: u64 =
+    (CHALLENGE_BYTES + ml_dsa::PUBLIC_KEY_BYTES + ml_kem::ENCAPS_KEY_BYTES + 32) as u64;
+
+const CLIENT_HANDSHAKE_BYTES: u64 = (ml_dsa::PUBLIC_KEY_BYTES
+    + 32
+    + ml_dsa::SIGNATURE_BYTES
+    + ml_kem::CIPHERTEXT_BYTES
+    + ml_dsa::SIGNATURE_BYTES) as u64;
 
 #[test]
 fn a_tampered_transcript_is_rejected() {

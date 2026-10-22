@@ -21,6 +21,8 @@ const INITIATOR_CONTEXT: &[u8] = b"qtv-net initiator";
 
 const RESPONDER_CONTEXT: &[u8] = b"qtv-net responder";
 
+const INITIATOR_HELLO_CONTEXT: &[u8] = b"qtv-net initiator hello";
+
 impl<S: Read + Write> Channel<S> {
     pub fn connect(stream: S, identity: &Identity) -> Result<Self> {
         initiate(stream, identity, None)
@@ -143,16 +145,22 @@ fn initiate<S: Read + Write>(
     identity: &Identity,
     expected: Option<&PeerId>,
 ) -> Result<Channel<S>> {
+    let challenge: [u8; 32] = read_array(&mut stream)?;
     let mut client_random = [0u8; 32];
     fill_random(&mut client_random)?;
 
     let mut transcript = Transcript::new();
+    transcript.absorb(&challenge);
     transcript.absorb(identity.public());
     transcript.absorb(&client_random);
+    let hello_proof = identity.sign(&transcript.hash(), INITIATOR_HELLO_CONTEXT)?;
 
-    let mut hello = Vec::with_capacity(ml_dsa::PUBLIC_KEY_BYTES + client_random.len());
+    let mut hello = Vec::with_capacity(
+        ml_dsa::PUBLIC_KEY_BYTES + client_random.len() + ml_dsa::SIGNATURE_BYTES,
+    );
     hello.extend_from_slice(identity.public());
     hello.extend_from_slice(&client_random);
+    hello.extend_from_slice(&hello_proof);
     stream.write_all(&hello)?;
     stream.flush()?;
 
@@ -244,8 +252,14 @@ fn respond_known<S: Read + Write>(
         Some(_) => InflightGuard::acquire(&KNOWN_SET_INFLIGHT, MAX_KNOWN_SET_INFLIGHT)?,
         None => InflightGuard::acquire(&UNPINNED_INFLIGHT, MAX_UNPINNED_INFLIGHT)?,
     };
+    let mut challenge = [0u8; 32];
+    fill_random(&mut challenge)?;
+    stream.write_all(&challenge)?;
+    stream.flush()?;
+
     let initiator_public: ml_dsa::PublicKey = read_array(&mut stream)?;
     let client_random: [u8; 32] = read_array(&mut stream)?;
+    let hello_proof: ml_dsa::Signature = read_array(&mut stream)?;
 
     let peer = PeerId::from_public(&initiator_public);
     if expected.is_some_and(|pin| &peer != pin) {
@@ -255,15 +269,24 @@ fn respond_known<S: Read + Write>(
         return Err(Error::UnexpectedPeer);
     }
 
+    let mut transcript = Transcript::new();
+    transcript.absorb(&challenge);
+    transcript.absorb(&initiator_public);
+    transcript.absorb(&client_random);
+    if !ml_dsa::verify(
+        &initiator_public,
+        &transcript.hash(),
+        &hello_proof,
+        INITIATOR_HELLO_CONTEXT,
+    ) {
+        return Err(Error::Authentication);
+    }
+
     let mut kem_seed = [0u8; 32];
     let mut kem_z = [0u8; 32];
     fill_random(&mut kem_seed)?;
     fill_random(&mut kem_z)?;
     let (encaps_key, decaps_key) = ml_kem::keygen(&kem_seed, &kem_z);
-
-    let mut transcript = Transcript::new();
-    transcript.absorb(&initiator_public);
-    transcript.absorb(&client_random);
 
     let mut server_random = [0u8; 32];
     fill_random(&mut server_random)?;
