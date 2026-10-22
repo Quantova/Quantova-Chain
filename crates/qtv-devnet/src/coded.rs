@@ -236,7 +236,7 @@ fn entry_weight(pending: &Pending) -> usize {
 pub struct ProposalAssembler {
     pending: HashMap<ProposalKey, Pending>,
     done: HashMap<ProposalKey, u64>,
-    pinned: HashMap<(u64, u64), Commitment>,
+    pinned: HashMap<(u64, u64), (Commitment, [u8; 32])>,
     prepin_tokens: HashMap<u64, u32>,
     horizon: u64,
     round_height: u64,
@@ -300,7 +300,7 @@ impl ProposalAssembler {
     pub fn is_pinned(&self, height: u64, view: u64, commitment: &Commitment) -> bool {
         self.pinned
             .get(&(height, view))
-            .is_some_and(|pinned| pinned == commitment)
+            .is_some_and(|(pinned, _)| pinned == commitment)
     }
 
     pub fn admit(
@@ -333,9 +333,10 @@ impl ProposalAssembler {
         self.prune(prune_floor);
 
         let slot = (height, coded.view);
+        let auth_digest = crate::wire::attestation_digest(&coded.auth);
         match self.pinned.get(&slot) {
-            Some(pinned) => {
-                if *pinned != coded.commitment {
+            Some((pinned, pinned_auth)) => {
+                if *pinned != coded.commitment || *pinned_auth != auth_digest {
                     return None;
                 }
             }
@@ -354,7 +355,8 @@ impl ProposalAssembler {
                 if !verify_auth(&coded) {
                     return None;
                 }
-                self.pinned.insert(slot, coded.commitment.clone());
+                self.pinned
+                    .insert(slot, (coded.commitment.clone(), auth_digest));
             }
         }
 
@@ -366,7 +368,6 @@ impl ProposalAssembler {
             proof,
             auth,
         } = coded;
-        let auth_digest = crate::wire::attestation_digest(&auth);
         let is_new = !self.pending.contains_key(&key);
         if is_new && self.pending.len() >= MAX_PENDING_PROPOSALS {
             self.evict_lowest_pending();
