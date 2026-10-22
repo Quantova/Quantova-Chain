@@ -2013,10 +2013,17 @@ impl DevNode {
         if prevote.height != self.height {
             return Vec::new();
         }
-        if self.verify_attestation(selection, &prevote) {
+        if !self.prevote_known(&prevote) && self.verify_attestation(selection, &prevote) {
             self.record_prevote(&prevote);
         }
         self.form_polka_and_precommit(selection)
+    }
+
+    fn prevote_known(&self, prevote: &Attestation) -> bool {
+        prevote.block.cost != qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST
+            || self.prevotes.iter().any(|p| {
+                p.from == prevote.from && p.view == prevote.view && p.block == prevote.block
+            })
     }
 
     fn form_polka_and_precommit(&mut self, selection: &Selection) -> Vec<Message> {
@@ -2091,14 +2098,7 @@ impl DevNode {
     }
 
     fn record_prevote(&mut self, prevote: &Attestation) {
-        if prevote.block.cost != qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST {
-            return;
-        }
-        let seen = self
-            .prevotes
-            .iter()
-            .any(|p| p.from == prevote.from && p.view == prevote.view && p.block == prevote.block);
-        if seen {
+        if self.prevote_known(prevote) {
             return;
         }
         let from_count = self
