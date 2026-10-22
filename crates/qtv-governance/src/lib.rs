@@ -42,6 +42,7 @@ pub fn gov_deposit_bounds(total_supply: u64) -> (u64, u64) {
 pub const BRIDGE_FREEZE_BOND: u64 = Track::BlacklistKill.deposit();
 pub const BRIDGE_FREEZE_DURATION: u64 = 7 * DAY_SECONDS;
 pub const BRIDGE_FREEZE_COOLDOWN: u64 = DAY_SECONDS;
+pub const BRIDGE_FREEZE_REFUND_GRACE: u64 = HOUR_SECONDS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Track {

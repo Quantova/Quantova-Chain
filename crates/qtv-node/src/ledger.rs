@@ -516,6 +516,7 @@ const GOV_ELECTORATE_TAG: &[u8] = b"qtv/gov/electorate/";
 
 const BRIDGE_FREEZE_TAG: &[u8] = b"qtv/bridge/freeze";
 const BRIDGE_LAST_LIFT_TAG: &[u8] = b"qtv/bridge/lastlift";
+const BRIDGE_LAST_FREEZER_TAG: &[u8] = b"qtv/bridge/lastfreezer";
 const BRIDGE_VAULT_TAG: &[u8] = b"qtv/bridge/vault";
 const BRIDGE_GATEWAY_TAG: &[u8] = b"qtv/bridge/gateway";
 const BRIDGE_EXITS_TAG: &[u8] = b"qtv/bridge/exits";
@@ -1464,6 +1465,16 @@ impl Ledger {
         self.write_leaf(stake_singleton_key(BRIDGE_LAST_LIFT_TAG), to_bytes(&now));
     }
 
+    fn bridge_freezer_resting(&self, id: &[u8; 32], now: u64) -> bool {
+        let Some(last) = self.bridge_last_lift() else {
+            return false;
+        };
+        self.trie
+            .get(&stake_singleton_key(BRIDGE_LAST_FREEZER_TAG))
+            .is_some_and(|who| who[..] == id[..])
+            && now < last.saturating_add(qtv_governance::BRIDGE_FREEZE_DURATION)
+    }
+
     pub fn bridge_pool_vault(&self) -> Option<[u8; 32]> {
         self.trie
             .get(&stake_singleton_key(BRIDGE_VAULT_TAG))
@@ -1582,6 +1593,9 @@ impl Ledger {
                 return false;
             }
         }
+        if self.bridge_freezer_resting(&id, now) {
+            return false;
+        }
         let bond = qtv_governance::BRIDGE_FREEZE_BOND;
         let debit = match fee.checked_add(bond) {
             Some(debit) => debit,
@@ -1628,7 +1642,15 @@ impl Ledger {
         account.nonce += 1;
         self.set_account(caller, &account);
         self.collect_fee(fee);
-        self.lift_bridge_freeze(now, FreezeLift::Refund);
+        let started = record
+            .until
+            .saturating_sub(qtv_governance::BRIDGE_FREEZE_DURATION);
+        let outcome = if now <= started.saturating_add(qtv_governance::BRIDGE_FREEZE_REFUND_GRACE) {
+            FreezeLift::Refund
+        } else {
+            FreezeLift::Slash
+        };
+        self.lift_bridge_freeze(now, outcome);
         true
     }
 
@@ -1682,6 +1704,10 @@ impl Ledger {
         }
         self.clear_bridge_freeze();
         self.set_bridge_last_lift(now);
+        self.write_leaf(
+            stake_singleton_key(BRIDGE_LAST_FREEZER_TAG),
+            record.who.to_vec(),
+        );
     }
 
     pub fn bridged_asset(&self, asset_id: &[u8; 16]) -> Option<QAsset> {
@@ -4105,6 +4131,9 @@ impl Ledger {
             if now < last.saturating_add(qtv_governance::BRIDGE_FREEZE_COOLDOWN) {
                 return false;
             }
+        }
+        if self.bridge_freezer_resting(&id, now) {
+            return false;
         }
         fee.checked_add(qtv_governance::BRIDGE_FREEZE_BOND)
             .is_some_and(|debit| self.account(caller).balance >= debit)
@@ -7451,7 +7480,13 @@ mod stake_state_tests {
         );
         assert!(!l.bridge_is_frozen());
         assert!(
-            l.bridge_freeze_with_fee(&freezer, 0, 2_000 + cooldown),
+            !l.bridge_freeze_with_fee(&freezer, 0, 2_000 + cooldown),
+            "the same freezer rests for a whole freeze period after its lift"
+        );
+        let other = gov_addr(75);
+        fund(&mut l, &other, 1_500_000 * 1_000_000);
+        assert!(
+            l.bridge_freeze_with_fee(&other, 0, 2_000 + cooldown),
             "once the cooldown elapses a fresh freeze lands"
         );
         assert!(l.bridge_is_frozen());
