@@ -34,13 +34,13 @@ const STAGE_ONE: u8 = 1;
 
 const PREALLOC_LIMIT: usize = 4096;
 const MIN_WRAPPER: usize = 65;
-const MIN_VIEW_CHANGE: usize = 32;
-const MIN_CHAIN_BLOCK: usize = 16;
-const MIN_PEER: usize = 16;
-const MIN_ATTESTATION: usize = 32;
-const MIN_SIBLING: usize = 8;
+const MIN_VIEW_CHANGE: usize = 3_561;
+const MIN_CHAIN_BLOCK: usize = 208;
+const MIN_PEER: usize = 1_968;
+const MIN_ATTESTATION: usize = 3_526;
+const MIN_SIBLING: usize = 40;
 const MAX_CREDENTIAL_SIBLINGS: u64 = 64;
-const MIN_REVEAL: usize = 32;
+const MIN_REVEAL: usize = 64;
 const MAX_COMMITTEE_REVEALS: u64 = 4096;
 
 fn bounded_capacity(
