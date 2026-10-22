@@ -763,6 +763,9 @@ impl Mempool {
         if self.ids.contains(&id) {
             return Ok(Admitted::Known);
         }
+        if !crate::node::validity_admits(&wrapper, self.height) {
+            return Err(Reject::BadCall);
+        }
         if is_feeless(&wrapper)
             && self
                 .feeless_payloads

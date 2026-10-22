@@ -1313,7 +1313,9 @@ pub(crate) fn is_vm_op(ledger: &Ledger, wrapper: &Wrapper) -> bool {
 
 pub(crate) fn vm_target_dispatchable(ledger: &Ledger, wrapper: &Wrapper) -> bool {
     let target = wrapper.body().call().target();
-    !ledger.is_blacklisted(target)
+    (target == crate::ledger::vm_deploy_address() || ledger.is_contract(target))
+        && !ledger.is_blacklisted(wrapper.body().sender())
+        && !ledger.is_blacklisted(target)
         && !ledger.is_frozen(target)
         && !(ledger.bridge_is_frozen() && ledger.is_bridge_gateway(target))
 }
