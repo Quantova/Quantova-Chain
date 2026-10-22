@@ -3363,6 +3363,12 @@ impl Ledger {
         if self.gov_ballot(referendum_id, &voter_id).is_some() {
             return false;
         }
+        if self
+            .stake_bond(&voter_id)
+            .is_some_and(|bond| bond.exit_requested_at.is_some())
+        {
+            return false;
+        }
         let mut account = self.account(voter);
         if account.balance < stake {
             return false;
@@ -3379,7 +3385,9 @@ impl Ledger {
             until: 0,
         });
         lock.amount = lock.amount.saturating_add(stake);
-        let release = now.saturating_add(conviction.lock_seconds());
+        let release = now
+            .saturating_add(conviction.lock_seconds())
+            .max(referendum.decides_at());
         if release > lock.until {
             lock.until = release;
         }
@@ -4205,6 +4213,12 @@ impl Ledger {
             Some(bond) => bond,
             None => return false,
         };
+        if self
+            .gov_lock(&id)
+            .is_some_and(|lock| lock.amount > 0 && lock.until > now_day.saturating_mul(86_400))
+        {
+            return false;
+        }
         let height = self.execution_height();
         if bond.request_exit_at(now_day, height, self.heights_per_epoch) {
             self.set_stake_bond(&id, &bond);
