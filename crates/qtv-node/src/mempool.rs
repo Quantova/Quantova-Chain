@@ -133,15 +133,22 @@ pub const MAX_TX_BYTES: usize = 256 * 1024;
 
 const FIXED_FIELD_SLACK: usize = 1024;
 
-pub(crate) fn oversized(wrapper: &Wrapper) -> bool {
+fn variable_bytes(wrapper: &Wrapper) -> usize {
     let body = wrapper.body();
-    let variable = body
-        .call()
+    body.call()
         .args()
         .len()
         .saturating_add(wrapper.signature().len())
         .saturating_add(body.sender().len())
-        .saturating_add(body.call().target().len());
+        .saturating_add(body.call().target().len())
+}
+
+pub fn size_bound(wrapper: &Wrapper) -> usize {
+    variable_bytes(wrapper).saturating_add(FIXED_FIELD_SLACK)
+}
+
+pub fn oversized(wrapper: &Wrapper) -> bool {
+    let variable = variable_bytes(wrapper);
     if variable > MAX_TX_BYTES {
         return true;
     }

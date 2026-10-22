@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{
     channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError,
 };
@@ -18,7 +18,7 @@ use qtv_net::Channel;
 use qtv_node::consensus::Selection;
 use qtv_node::fee::FeeParams;
 use qtv_node::ledger::Ledger;
-use qtv_node::mempool::{admission_hint, AdmitHint};
+use qtv_node::mempool::{admission_hint, oversized, size_bound, AdmitHint, Reject};
 use qtv_tx::Wrapper;
 
 use qtv_gateway::{ClientError, GatewayCall, Json, NodeContext, Request};
@@ -79,6 +79,7 @@ struct VerifyJob {
     fee_params: FeeParams,
     tx_id: String,
     reply: Option<Sender<Result<Json, ClientError>>>,
+    charge: Option<Charge>,
 }
 
 struct VerifyDone {
@@ -86,16 +87,56 @@ struct VerifyDone {
     hint: Option<AdmitHint>,
     tx_id: String,
     reply: Option<Sender<Result<Json, ClientError>>>,
+    _charge: Option<Charge>,
 }
 
-fn queue_verify(jobs: &SyncSender<VerifyJob>, job: VerifyJob) {
-    if let Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) = jobs.try_send(job) {
-        if let Some(reply) = &job.reply {
-            let _ = reply.send(Ok(qtv_gateway::submit_reply(
-                Err(qtv_node::mempool::Reject::RateLimited),
-                &job.tx_id,
-            )));
+const VERIFY_QUEUE_BYTES: usize = 64 * 1024 * 1024;
+
+struct Charge {
+    bytes: usize,
+    held: Arc<AtomicUsize>,
+}
+
+impl Drop for Charge {
+    fn drop(&mut self) {
+        self.held.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+fn charge(held: &Arc<AtomicUsize>, bytes: usize) -> Option<Charge> {
+    let mut current = held.load(Ordering::Acquire);
+    loop {
+        let next = current
+            .checked_add(bytes)
+            .filter(|next| *next <= VERIFY_QUEUE_BYTES)?;
+        match held.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {
+                return Some(Charge {
+                    bytes,
+                    held: Arc::clone(held),
+                })
+            }
+            Err(seen) => current = seen,
         }
+    }
+}
+
+fn refuse(job: &VerifyJob, reject: Reject) {
+    if let Some(reply) = &job.reply {
+        let _ = reply.send(Ok(qtv_gateway::submit_reply(Err(reject), &job.tx_id)));
+    }
+}
+
+fn queue_verify(jobs: &SyncSender<VerifyJob>, held: &Arc<AtomicUsize>, mut job: VerifyJob) {
+    if oversized(&job.wrapper) {
+        return refuse(&job, Reject::BadCall);
+    }
+    let Some(charged) = charge(held, size_bound(&job.wrapper)) else {
+        return refuse(&job, Reject::RateLimited);
+    };
+    job.charge = Some(charged);
+    if let Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) = jobs.try_send(job) {
+        refuse(&job, Reject::RateLimited);
     }
 }
 
@@ -124,6 +165,7 @@ fn start_verify_pool() -> (SyncSender<VerifyJob>, Receiver<VerifyDone>) {
                 fee_params,
                 tx_id,
                 reply,
+                charge,
             } = match job {
                 Ok(job) => job,
                 Err(_) => return,
@@ -137,6 +179,7 @@ fn start_verify_pool() -> (SyncSender<VerifyJob>, Receiver<VerifyDone>) {
                 hint,
                 tx_id,
                 reply,
+                _charge: charge,
             };
             if done_tx.send(done).is_err() {
                 return;
@@ -332,6 +375,7 @@ pub struct Driver {
     rpc_requests: Option<Receiver<GatewayCall>>,
     verify_jobs: Option<SyncSender<VerifyJob>>,
     verify_done: Option<Receiver<VerifyDone>>,
+    verify_bytes: Arc<AtomicUsize>,
     verify_snapshot: Option<(u64, Arc<Ledger>)>,
     read_jobs: Option<SyncSender<ReadJob>>,
     rpc_window: (Instant, Duration),
@@ -379,6 +423,7 @@ impl Driver {
             rpc_requests: None,
             verify_jobs: None,
             verify_done: None,
+            verify_bytes: Arc::new(AtomicUsize::new(0)),
             verify_snapshot: None,
             read_jobs: None,
             rpc_window: (Instant::now(), Duration::ZERO),
@@ -411,17 +456,22 @@ impl Driver {
     }
 
     fn verify_gossiped(&mut self, wrapper: Wrapper) {
+        if oversized(&wrapper) {
+            return;
+        }
         self.ensure_verify_pool();
         let ledger = self.fresh_snapshot();
         if let Some(jobs) = self.verify_jobs.as_ref() {
             queue_verify(
                 jobs,
+                &self.verify_bytes,
                 VerifyJob {
                     tx_id: String::new(),
                     wrapper,
                     ledger,
                     fee_params: self.node.fee_params(),
                     reply: None,
+                    charge: None,
                 },
             );
         }
@@ -514,8 +564,9 @@ impl Driver {
                             ledger: Arc::clone(ledger),
                             fee_params,
                             reply: Some(call.reply.clone()),
+                            charge: None,
                         };
-                        queue_verify(jobs, job);
+                        queue_verify(jobs, &self.verify_bytes, job);
                         continue;
                     }
                 }
@@ -1134,13 +1185,15 @@ mod tests {
             ledger: std::sync::Arc::new(qtv_node::ledger::Ledger::new()),
             fee_params: qtv_node::fee::FeeParams::devnet(),
             reply,
+            charge: None,
         };
+        let held = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (jobs, _held) = std::sync::mpsc::sync_channel::<VerifyJob>(1);
         let (first_tx, first_rx) = std::sync::mpsc::channel();
-        queue_verify(&jobs, job(Some(first_tx)));
+        queue_verify(&jobs, &held, job(Some(first_tx)));
         assert!(first_rx.try_recv().is_err(), "a free slot takes the job");
         let (second_tx, second_rx) = std::sync::mpsc::channel();
-        queue_verify(&jobs, job(Some(second_tx)));
+        queue_verify(&jobs, &held, job(Some(second_tx)));
         let reply = second_rx.try_recv().expect("the refusal is immediate");
         assert!(reply.is_ok(), "a busy reply, not a transport error");
     }
