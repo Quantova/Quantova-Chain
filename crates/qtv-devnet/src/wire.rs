@@ -502,7 +502,7 @@ fn decode_committee_reveals(
         let credential = decode_credential(decoder)?;
         reveals.push(PublishedReveal::new(id, credential));
     }
-    if reveals.windows(2).any(|pair| pair[0].id > pair[1].id) {
+    if reveals.windows(2).any(|pair| pair[0].id >= pair[1].id) {
         return Err(DecodeError::BadLength);
     }
     Ok(reveals)
@@ -511,7 +511,7 @@ fn decode_committee_reveals(
 fn sorted_attestations(attestations: &[Attestation]) -> Result<(), DecodeError> {
     if attestations
         .windows(2)
-        .any(|pair| pair[0].from > pair[1].from)
+        .any(|pair| pair[0].from >= pair[1].from)
     {
         return Err(DecodeError::BadLength);
     }
