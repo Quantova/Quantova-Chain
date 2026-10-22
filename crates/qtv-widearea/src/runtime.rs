@@ -1,21 +1,18 @@
 // Copyright 2026 Quantova Inc
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::net::TcpStream;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use qtv_devnet::coded::{code_proposal, ProposalAssembler};
-use qtv_devnet::node::node_peer_id;
 use qtv_devnet::wire::Message;
 use qtv_devnet::{leader_for, DevNode};
-use qtv_net::{Channel, Identity};
+use qtv_net::Channel;
 use qtv_node::consensus::Selection;
 
 use qtv_loopback::message_height;
-
-type MeshChannels = (Vec<Option<Channel<TcpStream>>>, Receiver<(usize, Vec<u8>)>);
 
 #[derive(Clone, Copy, Default)]
 pub struct PhaseTimers {
@@ -38,9 +35,7 @@ pub enum HeightOutcome {
     Stalled,
 }
 
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
-
-const MESH_JOIN_TIMEOUT: Duration = Duration::from_secs(300);
+pub const MESH_JOIN_TIMEOUT: Duration = Duration::from_secs(300);
 
 const MAX_BUFFERED_FRAMES: usize = 8192;
 const MAX_BUFFERED_BYTES: usize = 32 * 1024 * 1024;
@@ -147,13 +142,13 @@ impl Runtime {
                 break;
             }
             match self.inbound.recv_timeout(Duration::from_millis(10)) {
-                Ok((_, bytes)) => match Message::decode(&bytes) {
+                Ok((src, bytes)) => match Message::decode(&bytes) {
                     Ok(Message::Register(note)) => {
                         if self.node.collect_registration((*note).clone()) {
                             self.broadcast(&Message::Register(note).encode());
                         }
                     }
-                    Ok(_) => buffer_bounded(&mut self.buffered, 0, bytes),
+                    Ok(_) => buffer_bounded(&mut self.buffered, src, bytes),
                     Err(_) => {}
                 },
                 Err(RecvTimeoutError::Timeout) => {}
@@ -190,13 +185,13 @@ impl Runtime {
                 break;
             }
             match self.inbound.recv_timeout(Duration::from_millis(10)) {
-                Ok((_, bytes)) => match Message::decode(&bytes) {
+                Ok((src, bytes)) => match Message::decode(&bytes) {
                     Ok(Message::Reveal(note)) => {
                         if self.node.collect_reveal((*note).clone()) {
                             self.broadcast(&Message::Reveal(note).encode());
                         }
                     }
-                    Ok(_) => buffer_bounded(&mut self.buffered, 0, bytes),
+                    Ok(_) => buffer_bounded(&mut self.buffered, src, bytes),
                     Err(_) => {}
                 },
                 Err(RecvTimeoutError::Timeout) => {}
@@ -344,6 +339,7 @@ impl Runtime {
     }
 
     fn sort_fill_record(
+        src: usize,
         bytes: Vec<u8>,
         start_height: u64,
         gossiped: &mut Vec<qtv_tx::Wrapper>,
@@ -353,7 +349,7 @@ impl Runtime {
             Ok(Message::Tx(transaction)) => gossiped.push(transaction),
             Ok(other) => match message_height(&other) {
                 Some(h) if h < start_height => {}
-                _ => buffer_bounded(buffered, 0, bytes),
+                _ => buffer_bounded(buffered, src, bytes),
             },
             Err(_) => {}
         }
@@ -385,10 +381,17 @@ impl Runtime {
         let mut gossiped: Vec<qtv_tx::Wrapper> = Vec::new();
         while self.node.mempool_len() < self.senders_n && Instant::now() < fill_deadline {
             match self.inbound.recv_timeout(Duration::from_millis(20)) {
-                Ok((_, bytes)) => {
-                    Self::sort_fill_record(bytes, start_height, &mut gossiped, &mut self.buffered);
-                    while let Ok((_, bytes)) = self.inbound.try_recv() {
+                Ok((src, bytes)) => {
+                    Self::sort_fill_record(
+                        src,
+                        bytes,
+                        start_height,
+                        &mut gossiped,
+                        &mut self.buffered,
+                    );
+                    while let Ok((src, bytes)) = self.inbound.try_recv() {
                         Self::sort_fill_record(
+                            src,
                             bytes,
                             start_height,
                             &mut gossiped,
@@ -508,92 +511,4 @@ impl Runtime {
             }
         }
     }
-}
-
-pub fn build_mesh(
-    listener: TcpListener,
-    addrs: &[String],
-    idx: usize,
-    n: usize,
-    up: &[bool],
-    identity: &Identity,
-) -> MeshChannels {
-    const INBOUND_FRAME_CAP: usize = 1024;
-    let (inbound_tx, inbound_rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_FRAME_CAP);
-    let (accepted_tx, accepted_rx) = mpsc::channel::<(usize, Channel<TcpStream>)>();
-
-    let up_peers = (0..n)
-        .filter(|&q| q != idx && up.get(q).copied().unwrap_or(false))
-        .count();
-
-    let identity_acc = identity.clone();
-    let up_ids: Vec<bool> = up.to_vec();
-    let acceptor = thread::spawn(move || {
-        let mut accepted = 0usize;
-        while accepted < up_peers {
-            let stream = match listener.accept() {
-                Ok((stream, _)) => stream,
-                Err(_) => continue,
-            };
-            let channel =
-                match Channel::accept_with_timeout(stream, &identity_acc, HANDSHAKE_TIMEOUT) {
-                    Ok(channel) => channel,
-                    Err(_) => continue,
-                };
-            let peer = channel.peer_id().clone();
-            let from = match (0..n).find(|&q| {
-                q != idx
-                    && up_ids.get(q).copied().unwrap_or(false)
-                    && node_peer_id(q as u64 + 1) == peer
-            }) {
-                Some(from) => from,
-                None => continue,
-            };
-            if accepted_tx.send((from, channel)).is_err() {
-                break;
-            }
-            accepted += 1;
-        }
-    });
-
-    let mut send: Vec<Option<Channel<TcpStream>>> = (0..n).map(|_| None).collect();
-    for q in 0..n {
-        if q == idx || !up.get(q).copied().unwrap_or(false) {
-            continue;
-        }
-        let addr = &addrs[q];
-        let peer = node_peer_id(q as u64 + 1);
-        let deadline = std::time::Instant::now() + MESH_JOIN_TIMEOUT;
-        let channel = loop {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "peer {q} never came up within the mesh join window"
-            );
-            let Ok(stream) = TcpStream::connect(addr) else {
-                thread::sleep(Duration::from_millis(20));
-                continue;
-            };
-            match Channel::connect_pinned_with_timeout(stream, identity, &peer, HANDSHAKE_TIMEOUT) {
-                Ok(channel) => break channel,
-                Err(_) => thread::sleep(Duration::from_millis(20)),
-            }
-        };
-        send[q] = Some(channel);
-    }
-
-    acceptor.join().expect("the acceptor thread joins");
-
-    for _ in 0..up_peers {
-        let (from, mut channel) = accepted_rx.recv().expect("an accepted inbound channel");
-        let out = inbound_tx.clone();
-        thread::spawn(move || {
-            while let Ok(bytes) = channel.recv() {
-                if out.send((from, bytes)).is_err() {
-                    break;
-                }
-            }
-        });
-    }
-    drop(inbound_tx);
-    (send, inbound_rx)
 }

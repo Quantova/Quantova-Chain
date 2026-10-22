@@ -3,15 +3,14 @@
 
 use std::io::{BufRead, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::thread;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use qtv_devnet::coded::{code_proposal, ProposalAssembler};
-use qtv_devnet::node::{node_identity, node_peer_id};
+use qtv_devnet::node::node_identity;
 use qtv_devnet::wire::Message;
 use qtv_devnet::{leader_for, DevNode};
-use qtv_net::{Channel, Identity};
+use qtv_net::Channel;
 
 use qtv_loopback::{
     accounts, build_batch, chain_digest, devnet_config, hex, message_height, recipients,
@@ -26,8 +25,6 @@ fn env_usize(name: &str, default: usize) -> usize {
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
 }
-
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
 const MESH_JOIN_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -324,86 +321,6 @@ impl Runtime {
     }
 }
 
-fn build_mesh(
-    listener: TcpListener,
-    ports: &[u16],
-    idx: usize,
-    n: usize,
-    identity: &Identity,
-) -> (Vec<Option<Channel<TcpStream>>>, Receiver<(usize, Vec<u8>)>) {
-    const INBOUND_FRAME_CAP: usize = 1024;
-    let (inbound_tx, inbound_rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(INBOUND_FRAME_CAP);
-    let (accepted_tx, accepted_rx) = mpsc::channel::<(usize, Channel<TcpStream>)>();
-
-    let identity_acc = identity.clone();
-    let acceptor = thread::spawn(move || {
-        let mut accepted = 0usize;
-        while accepted < n - 1 {
-            let Ok((stream, _)) = listener.accept() else {
-                continue;
-            };
-            let Ok(channel) =
-                Channel::accept_with_timeout(stream, &identity_acc, HANDSHAKE_TIMEOUT)
-            else {
-                continue;
-            };
-            let peer = channel.peer_id().clone();
-            let Some(from) = (0..n).find(|&q| q != idx && node_peer_id(q as u64 + 1) == peer)
-            else {
-                continue;
-            };
-            if accepted_tx.send((from, channel)).is_err() {
-                break;
-            }
-            accepted += 1;
-        }
-    });
-
-    let mut send: Vec<Option<Channel<TcpStream>>> = (0..n).map(|_| None).collect();
-    for q in 0..n {
-        if q == idx {
-            continue;
-        }
-        let addr = format!("127.0.0.1:{}", ports[q]);
-        let peer = node_peer_id(q as u64 + 1);
-        let deadline = std::time::Instant::now() + MESH_JOIN_TIMEOUT;
-        let channel = loop {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "peer {q} never came up within the mesh join window"
-            );
-            let Ok(stream) = TcpStream::connect(&addr) else {
-                thread::sleep(Duration::from_millis(20));
-                continue;
-            };
-            match Channel::connect_pinned_with_timeout(stream, identity, &peer, HANDSHAKE_TIMEOUT) {
-                Ok(channel) => break channel,
-                Err(_) => thread::sleep(Duration::from_millis(20)),
-            }
-        };
-        send[q] = Some(channel);
-    }
-
-    acceptor.join().expect("the acceptor thread joins");
-
-    for _ in 0..(n - 1) {
-        let (from, mut channel) = accepted_rx.recv().expect("an accepted inbound channel");
-        let out = inbound_tx.clone();
-        thread::spawn(move || loop {
-            match channel.recv() {
-                Ok(bytes) => {
-                    if out.send((from, bytes)).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        });
-    }
-    drop(inbound_tx);
-    (send, inbound_rx)
-}
-
 fn main() {
     let idx: usize = std::env::args()
         .nth(1)
@@ -447,7 +364,21 @@ fn main() {
     let node = DevNode::open(&config.nodes[idx], &config).expect("open the validator");
 
     eprintln!("[validator {idx}] standing up the qtv-net TCP mesh over {n} processes ...");
-    let (send, inbound) = build_mesh(listener, &ports, idx, n, &identity);
+    let addrs: Vec<String> = ports.iter().map(|p| format!("127.0.0.1:{p}")).collect();
+    let (send, inbound) = match qtv_loopback::mesh::build_mesh(
+        listener,
+        &addrs,
+        idx,
+        &vec![true; n],
+        &identity,
+        MESH_JOIN_TIMEOUT,
+    ) {
+        Ok(mesh) => mesh,
+        Err(reason) => {
+            eprintln!("[validator {idx}] {reason}");
+            std::process::exit(1);
+        }
+    };
     eprintln!("[validator {idx}] mesh up, driving the round ...");
 
     let mut rt = Runtime {

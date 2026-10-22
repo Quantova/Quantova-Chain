@@ -211,8 +211,13 @@ fn run_loopback(
     for (idx, reader) in readers.iter_mut().enumerate() {
         loop {
             let mut line = String::new();
-            let read = reader.read_line(&mut line).expect("read a child port line");
+            let read = reader.read_line(&mut line).unwrap_or(0);
             if read == 0 {
+                for child in children.iter_mut() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                let _ = std::fs::remove_dir_all(&base);
                 panic!("validator {idx} exited before it reported its listener port");
             }
             if let Some(port) = line.trim().strip_prefix("PORT ") {

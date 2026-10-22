@@ -12,7 +12,7 @@ use qtv_loopback::{
     accounts, build_batch, chain_digest, devnet_config, hex, recipients, transfer_fee,
 };
 use qtv_widearea::env as wenv;
-use qtv_widearea::runtime::{build_mesh, HeightOutcome, PhaseTimers, Runtime};
+use qtv_widearea::runtime::{HeightOutcome, PhaseTimers, Runtime, MESH_JOIN_TIMEOUT};
 use qtv_widearea::{env_usize, format_result, harness_bind_addr, RunReport};
 
 fn port_of(addr: &str) -> u16 {
@@ -93,7 +93,20 @@ fn main() {
     eprintln!(
         "[validator {idx}] standing up the qtv-net mesh over {up_count} of {n} hosts on port {port} ..."
     );
-    let (send, inbound) = build_mesh(listener, &addrs, idx, n, &up, &identity);
+    let (send, inbound) = match qtv_loopback::mesh::build_mesh(
+        listener,
+        &addrs,
+        idx,
+        &up,
+        &identity,
+        MESH_JOIN_TIMEOUT,
+    ) {
+        Ok(mesh) => mesh,
+        Err(reason) => {
+            eprintln!("[validator {idx}] {reason}");
+            std::process::exit(1);
+        }
+    };
     eprintln!("[validator {idx}] mesh up, driving the round ...");
 
     let mut rt = Runtime {

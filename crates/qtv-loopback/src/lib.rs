@@ -132,4 +132,5 @@ pub fn hex(bytes: &[u8]) -> String {
     s
 }
 
+pub mod mesh;
 pub mod stats;
