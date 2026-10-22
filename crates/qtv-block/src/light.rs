@@ -18,6 +18,10 @@ pub struct RosterEntry {
     pub root_slots: u64,
 }
 
+pub fn bridge_epoch_key() -> [u8; 32] {
+    sha3::sha3_256(b"qtv/bridge/epoch")
+}
+
 pub fn roster_commitment_key(epoch: u64) -> [u8; 32] {
     let mut input = Vec::with_capacity(ROSTER_KEY_TAG.len() + 8);
     input.extend_from_slice(ROSTER_KEY_TAG);

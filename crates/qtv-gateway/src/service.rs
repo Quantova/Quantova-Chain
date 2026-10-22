@@ -577,10 +577,21 @@ fn genesis_accounts(node: &DevNode) -> Json {
 }
 
 fn finalized_head(node: &DevNode) -> Json {
-    object(vec![
-        ("head", Json::Int(node.finalized_head())),
+    let head = node.finalized_head();
+    let mut fields = vec![
+        ("head", Json::Int(head)),
         ("bridge_epoch", Json::Int(node.ledger().bridge_epoch())),
-    ])
+    ];
+    if let Ok((header_bytes, certificate)) = certified(node, head) {
+        let proof = node.ledger().prove(&qtv_block::light::bridge_epoch_key());
+        fields.push(("header_bytes", Json::str(header_bytes)));
+        fields.push(("certificate", Json::str(certificate)));
+        fields.push((
+            "bridge_epoch_proof",
+            Json::str(crate::json::to_hex(&qtv_codec::to_bytes(&proof))),
+        ));
+    }
+    object(fields)
 }
 
 fn finality(node: &DevNode, height: u64) -> Result<Json, ClientError> {
