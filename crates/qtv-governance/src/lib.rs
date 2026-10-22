@@ -810,6 +810,8 @@ impl Decode for GuardianSet {
     }
 }
 
+pub const ENACTMENT_WINDOW: u64 = 30 * DAY_SECONDS;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Deciding,
@@ -878,9 +880,16 @@ impl Referendum {
     }
 
     pub fn enactable(&self, now: u64) -> bool {
-        now >= self
-            .decides_at()
+        now >= self.enactment_opens() && !self.enactment_expired(now)
+    }
+
+    pub fn enactment_opens(&self) -> u64 {
+        self.decides_at()
             .saturating_add(self.track.enactment_delay())
+    }
+
+    pub fn enactment_expired(&self, now: u64) -> bool {
+        now >= self.enactment_opens().saturating_add(ENACTMENT_WINDOW)
     }
 
     pub fn resolve(&mut self, now: u64, electorate_stake: u128) -> Status {

@@ -796,6 +796,7 @@ pub enum EnactError {
     NoCommittee,
     NotImplemented,
     Overflow,
+    Expired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3453,6 +3454,10 @@ impl Ledger {
         let referendum = self
             .gov_referendum(referendum_id)
             .ok_or(EnactError::Unknown)?;
+        if referendum.enactment_expired(now) {
+            self.clear_gov_action(referendum_id);
+            return Err(EnactError::Expired);
+        }
         if !referendum.enactable(now) {
             return Err(EnactError::NotApproved);
         }
