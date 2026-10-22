@@ -987,6 +987,14 @@ impl Driver {
                     self.assembler
                         .admit(*coded, source, |c| node.coded_auth_ok(selection, c))
                 };
+                for signed in self.assembler.take_observed() {
+                    self.node.observe_signed_proposal(
+                        signed.view,
+                        &signed.header_hash,
+                        &signed.commitment,
+                        &signed.auth,
+                    );
+                }
                 if self
                     .assembler
                     .is_pinned(relay.header.height(), relay.view, &relay.commitment)

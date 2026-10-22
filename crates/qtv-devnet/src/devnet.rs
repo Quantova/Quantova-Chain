@@ -544,6 +544,14 @@ impl<S: Read + Write> Devnet<S> {
                 node.coded_auth_ok(&selection, c)
             })
         };
+        for signed in self.assemblers[to].take_observed() {
+            self.nodes[to].observe_signed_proposal(
+                signed.view,
+                &signed.header_hash,
+                &signed.commitment,
+                &signed.auth,
+            );
+        }
         match outcome {
             Some(Ok(proposal)) => self.deliver_proposal(to, proposal, ceiling, active)?,
             Some(Err(_)) | None => {}

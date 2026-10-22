@@ -242,7 +242,18 @@ pub struct ProposalAssembler {
     round_height: u64,
     bytes: usize,
     max_bytes: usize,
+    observed: Vec<SignedCoded>,
 }
+
+#[derive(Clone)]
+pub struct SignedCoded {
+    pub view: u64,
+    pub header_hash: [u8; 32],
+    pub commitment: Commitment,
+    pub auth: Attestation,
+}
+
+const MAX_OBSERVED_AUTHS: usize = 256;
 
 impl Default for ProposalAssembler {
     fn default() -> Self {
@@ -273,7 +284,35 @@ impl ProposalAssembler {
             round_height: 0,
             bytes: 0,
             max_bytes: MAX_ASSEMBLER_BYTES,
+            observed: Vec::new(),
         }
+    }
+
+    pub fn take_observed(&mut self) -> Vec<SignedCoded> {
+        std::mem::take(&mut self.observed)
+    }
+
+    fn observe(&mut self, coded: &CodedProposal) {
+        if self.observed.len() < MAX_OBSERVED_AUTHS {
+            self.observed.push(SignedCoded {
+                view: coded.view,
+                header_hash: coded.header.hash(),
+                commitment: coded.commitment.clone(),
+                auth: coded.auth.clone(),
+            });
+        }
+    }
+
+    fn spend_token(&mut self, source: u64) -> bool {
+        let tokens = self
+            .prepin_tokens
+            .entry(source)
+            .or_insert(PREPIN_TOKENS_PER_TICK);
+        if *tokens == 0 {
+            return false;
+        }
+        *tokens -= 1;
+        true
     }
 
     #[cfg(test)]
@@ -336,7 +375,13 @@ impl ProposalAssembler {
         let auth_digest = crate::wire::attestation_digest(&coded.auth);
         match self.pinned.get(&slot) {
             Some((pinned, pinned_auth)) => {
-                if *pinned != coded.commitment || *pinned_auth != auth_digest {
+                if *pinned != coded.commitment {
+                    if self.spend_token(source) && verify_auth(&coded) {
+                        self.observe(&coded);
+                    }
+                    return None;
+                }
+                if *pinned_auth != auth_digest {
                     return None;
                 }
             }
@@ -344,17 +389,13 @@ impl ProposalAssembler {
                 if self.pinned.len() >= MAX_PINNED_SLOTS {
                     return None;
                 }
-                let tokens = self
-                    .prepin_tokens
-                    .entry(source)
-                    .or_insert(PREPIN_TOKENS_PER_TICK);
-                if *tokens == 0 {
+                if !self.spend_token(source) {
                     return None;
                 }
-                *tokens -= 1;
                 if !verify_auth(&coded) {
                     return None;
                 }
+                self.observe(&coded);
                 self.pinned
                     .insert(slot, (coded.commitment.clone(), auth_digest));
             }

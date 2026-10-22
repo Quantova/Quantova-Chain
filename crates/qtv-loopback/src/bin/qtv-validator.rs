@@ -108,6 +108,14 @@ impl Runtime {
                     self.assembler
                         .admit(*coded, from as u64, |c| node.coded_auth_ok(selection, c))
                 };
+                for signed in self.assembler.take_observed() {
+                    self.node.observe_signed_proposal(
+                        signed.view,
+                        &signed.header_hash,
+                        &signed.commitment,
+                        &signed.auth,
+                    );
+                }
                 if let Some(Ok(proposal)) = outcome {
                     let proposer = leader_for(selection, proposal.view);
                     let out = self.node.on_proposal(selection, proposer, proposal);

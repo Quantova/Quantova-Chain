@@ -70,9 +70,18 @@ fn a_leader_cannot_retract_a_view_the_node_has_already_prevoted() {
     assert_eq!(prevote.view, 0);
     assert_eq!(nodes[victim].staged_value(), Some(value_a));
 
+    let mut twin_config = config.clone();
+    for node in &mut twin_config.nodes {
+        node.store_dir = base.join(format!("twin-{}", node.id));
+    }
+    let mut twins = open_nodes(&twin_config);
+
     let params = nodes[leader0_idx].fee_params();
     let payment = transfer(&alice, &user(1).address(), 1_000, 0, &params);
-    nodes[leader0_idx].submit(payment).expect("the fee is paid");
+    nodes[leader0_idx]
+        .submit(payment.clone())
+        .expect("the fee is paid");
+    twins[leader0_idx].submit(payment).expect("the fee is paid");
 
     for driver in 0..nodes.len() {
         if driver == leader0_idx {
@@ -81,11 +90,18 @@ fn a_leader_cannot_retract_a_view_the_node_has_already_prevoted() {
         let record = nodes[driver]
             .make_view_change(0)
             .expect("a committee member can vote to change view");
-        nodes[leader0_idx].collect_view_change(&selection, record);
+        nodes[leader0_idx].collect_view_change(&selection, record.clone());
+        twins[leader0_idx].collect_view_change(&selection, record);
     }
-    let second = nodes[leader0_idx]
+    assert!(
+        nodes[leader0_idx]
+            .build_justified_proposal(&selection, 0)
+            .is_none(),
+        "an honest leader never signs a second proposal at a view it already proposed"
+    );
+    let second = twins[leader0_idx]
         .build_justified_proposal(&selection, 0)
-        .expect("the leader of view zero justifies a second proposal at the same view");
+        .expect("a second instance of the leader key justifies a second proposal at the same view");
     let value_b = header_value(&second.header.hash());
     assert_ne!(
         value_a, value_b,

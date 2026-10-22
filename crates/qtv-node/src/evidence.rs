@@ -308,6 +308,162 @@ impl PrevoteEquivocation {
     }
 }
 
+pub const PROPOSAL_DOMAIN: &[u8] = b"QTV-DEVNET-PROPOSAL-v2";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProposalShape {
+    pub header_hash: [u8; 32],
+    pub root: [u8; 32],
+    pub k: u64,
+    pub n: u64,
+    pub shard_len: u64,
+    pub data_len: u64,
+}
+
+pub fn proposal_block(height: u64, view: u64, shape: &ProposalShape) -> qtv_bft::block::Block {
+    let mut buf = Vec::with_capacity(PROPOSAL_DOMAIN.len() + 8 * 2 + 32 + 32 + 8 * 4);
+    buf.extend_from_slice(PROPOSAL_DOMAIN);
+    buf.extend_from_slice(&height.to_le_bytes());
+    buf.extend_from_slice(&view.to_le_bytes());
+    buf.extend_from_slice(&shape.header_hash);
+    buf.extend_from_slice(&shape.root);
+    buf.extend_from_slice(&shape.k.to_le_bytes());
+    buf.extend_from_slice(&shape.n.to_le_bytes());
+    buf.extend_from_slice(&shape.shard_len.to_le_bytes());
+    buf.extend_from_slice(&shape.data_len.to_le_bytes());
+    qtv_bft::block::Block::with_cost(
+        height,
+        qtv_bft::hash::digest_256(&buf),
+        qtv_bft::block::Parent::Genesis,
+        crate::consensus::VIEW_CHANGE_SUBJECT_COST,
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedProposal {
+    pub slot: u64,
+    pub committee: [u8; 32],
+    pub shape: ProposalShape,
+    pub sig: Vec<u8>,
+}
+
+impl SignedProposal {
+    fn verifies(
+        &self,
+        chain_id: ChainBinding,
+        pk: &[u8; PUBLIC_KEY_BYTES],
+        height: u64,
+        view: u64,
+    ) -> bool {
+        let Ok(sig) = <[u8; SIGNATURE_BYTES]>::try_from(self.sig.as_slice()) else {
+            return false;
+        };
+        let block = proposal_block(height, view, &self.shape);
+        let msg = attestation_message(
+            chain_id,
+            height,
+            self.slot,
+            view,
+            &self.committee,
+            &block.to_bytes(),
+        );
+        ml_dsa::verify(pk, &msg, &sig, ATTEST_CONTEXT)
+    }
+
+    fn put(&self, encoder: &mut Encoder) {
+        encoder.put_u64(self.slot);
+        encoder.put_bytes(&self.committee);
+        encoder.put_bytes(&self.shape.header_hash);
+        encoder.put_bytes(&self.shape.root);
+        encoder.put_u64(self.shape.k);
+        encoder.put_u64(self.shape.n);
+        encoder.put_u64(self.shape.shard_len);
+        encoder.put_u64(self.shape.data_len);
+        encoder.put_bytes(&self.sig);
+    }
+
+    fn get(decoder: &mut Decoder<'_>) -> Option<SignedProposal> {
+        let slot = decoder.get_u64().ok()?;
+        let committee: [u8; 32] = decoder.get_bytes().ok()?.try_into().ok()?;
+        let header_hash: [u8; 32] = decoder.get_bytes().ok()?.try_into().ok()?;
+        let root: [u8; 32] = decoder.get_bytes().ok()?.try_into().ok()?;
+        let k = decoder.get_u64().ok()?;
+        let n = decoder.get_u64().ok()?;
+        let shard_len = decoder.get_u64().ok()?;
+        let data_len = decoder.get_u64().ok()?;
+        let sig = decoder.get_bytes().ok()?.to_vec();
+        Some(SignedProposal {
+            slot,
+            committee,
+            shape: ProposalShape {
+                header_hash,
+                root,
+                k,
+                n,
+                shard_len,
+                data_len,
+            },
+            sig,
+        })
+    }
+}
+
+pub const PROPOSAL_EQUIVOCATION_TAG: &[u8] = b"QTV-PROPOSAL-EQUIVOCATION/1";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProposalEquivocation {
+    pub offender: String,
+    pub height: u64,
+    pub view: u64,
+    pub first: SignedProposal,
+    pub second: SignedProposal,
+}
+
+impl ProposalEquivocation {
+    pub fn attributes(&self, chain_id: impl Into<ChainBinding>, attest_pk: &[u8]) -> bool {
+        let chain_id: ChainBinding = chain_id.into();
+        if self.first.shape == self.second.shape {
+            return false;
+        }
+        let Ok(pk) = <[u8; PUBLIC_KEY_BYTES]>::try_from(attest_pk) else {
+            return false;
+        };
+        self.first.verifies(chain_id, &pk, self.height, self.view)
+            && self.second.verifies(chain_id, &pk, self.height, self.view)
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut encoder = Encoder::new();
+        encoder.put_bytes(PROPOSAL_EQUIVOCATION_TAG);
+        encoder.put_bytes(self.offender.as_bytes());
+        encoder.put_u64(self.height);
+        encoder.put_u64(self.view);
+        self.first.put(&mut encoder);
+        self.second.put(&mut encoder);
+        encoder.into_bytes()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<ProposalEquivocation> {
+        let mut decoder = Decoder::new(bytes);
+        if decoder.get_bytes().ok()? != PROPOSAL_EQUIVOCATION_TAG {
+            return None;
+        }
+        let offender = String::from_utf8(decoder.get_bytes().ok()?.to_vec()).ok()?;
+        let height = decoder.get_u64().ok()?;
+        let view = decoder.get_u64().ok()?;
+        let first = SignedProposal::get(&mut decoder)?;
+        let second = SignedProposal::get(&mut decoder)?;
+        decoder.finish().ok()?;
+        Some(ProposalEquivocation {
+            offender,
+            height,
+            view,
+            first,
+            second,
+        })
+    }
+}
+
 pub const DOUBLE_FINALITY_TAG: &[u8] = b"QTV-DOUBLE-FINALITY/1";
 
 pub const MAX_FINALITY_VOTES: usize = 512;

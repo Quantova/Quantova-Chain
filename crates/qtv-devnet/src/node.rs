@@ -16,7 +16,8 @@ use qtv_node::consensus::{
     FinalityStatus, Parent, Selection, ValidatorRegistration,
 };
 use qtv_node::evidence::{
-    DoubleFinality, Equivocation, EvidencePool, FinalityVote, PrevoteEquivocation, SignedPrevote,
+    DoubleFinality, Equivocation, EvidencePool, FinalityVote, PrevoteEquivocation,
+    ProposalEquivocation, ProposalShape, SignedPrevote, SignedProposal,
 };
 use qtv_node::fee::FeeParams;
 use qtv_node::ledger::{
@@ -380,6 +381,8 @@ pub struct DevNode {
     double_finality: Vec<DoubleFinality>,
     prevotes_seen: HashMap<(u64, View), SignedPrevote>,
     prevote_equivocations: Vec<PrevoteEquivocation>,
+    proposals_seen: HashMap<(u64, View), SignedProposal>,
+    proposal_equivocations: Vec<ProposalEquivocation>,
     tx_index: TxIndex,
     prevoted: std::collections::BTreeMap<View, [u8; 32]>,
     events_by_height: HashMap<Height, Vec<BlockEvent>>,
@@ -393,6 +396,7 @@ pub struct DevNode {
     pending_notes: Vec<RegisterNote>,
     sign_guard: Option<SignGuard>,
     prevote_guard: Option<PrevoteGuard>,
+    proposal_guard: Option<PrevoteGuard>,
     restart_hold: u8,
     store_lock: Option<std::fs::File>,
     lock_file: LockFile,
@@ -433,6 +437,7 @@ impl DevNode {
         let roster_archive = RosterArchive::open(node.store_dir.join("rosters.log"))?;
         let sign_guard = SignGuard::open(node.store_dir.join("sign.watermark"))?;
         let prevote_guard = PrevoteGuard::open(node.store_dir.join("prevote.watermark"))?;
+        let proposal_guard = PrevoteGuard::open(node.store_dir.join("proposal.watermark"))?;
         if let Some(head) = block_store.head_height() {
             if sign_guard.mark().is_none() || prevote_guard.mark().is_none() {
                 return Err(RoundError::WatermarkBehindBlocks { head });
@@ -517,6 +522,8 @@ impl DevNode {
             double_finality: Vec::new(),
             prevotes_seen: HashMap::new(),
             prevote_equivocations: Vec::new(),
+            proposals_seen: HashMap::new(),
+            proposal_equivocations: Vec::new(),
             tx_index,
             prevoted: std::collections::BTreeMap::new(),
             events_by_height: HashMap::new(),
@@ -530,6 +537,7 @@ impl DevNode {
             pending_notes: Vec::new(),
             sign_guard: Some(sign_guard),
             prevote_guard: Some(prevote_guard),
+            proposal_guard: Some(proposal_guard),
             restart_hold,
             store_lock: Some(store_lock),
             lock_file,
@@ -1290,10 +1298,15 @@ impl DevNode {
     }
 
     pub fn build_proposal(&mut self, selection: &Selection) -> Option<Proposal> {
-        self.build_proposal_at(selection, self.view)
+        self.build_proposal_at(selection, self.view, Vec::new())
     }
 
-    fn build_proposal_at(&mut self, selection: &Selection, view: View) -> Option<Proposal> {
+    fn build_proposal_at(
+        &mut self,
+        selection: &Selection,
+        view: View,
+        justification: Vec<ViewChange>,
+    ) -> Option<Proposal> {
         if self.restart_hold > 0 {
             return None;
         }
@@ -1308,6 +1321,7 @@ impl DevNode {
             .collect();
         candidates.extend(self.double_finality_evidence());
         candidates.extend(self.prevote_equivocation_evidence());
+        candidates.extend(self.proposal_equivocation_evidence());
         if self.registration_open(height) {
             for note in self.epoch_registration_notes() {
                 candidates.push(registration_transaction(&note, chain_id));
@@ -1369,18 +1383,18 @@ impl DevNode {
             justification: Vec::new(),
             pol: None,
         });
-        let auth = self.sign_proposal(view, &header, &included, &[])?;
+        let auth = self.sign_proposal(view, &header, &included, &justification)?;
         Some(Proposal {
             view,
             header,
             body: included,
-            justification: Vec::new(),
+            justification,
             auth,
         })
     }
 
     fn sign_proposal(
-        &self,
+        &mut self,
         view: View,
         header: &Header,
         body: &[Wrapper],
@@ -1397,6 +1411,10 @@ impl DevNode {
             },
         );
         let subject = proposal_subject(height, view, &header.hash(), &commitment);
+        let guard = self.proposal_guard.as_mut()?;
+        if !matches!(guard.try_prevote(height, view, &subject.val), Ok(true)) {
+            return None;
+        }
         self.consensus.own_attestation(
             height,
             self.slot(),
@@ -1407,7 +1425,7 @@ impl DevNode {
         )
     }
 
-    fn proposal_auth_ok(&self, selection: &Selection, proposal: &Proposal) -> bool {
+    fn proposal_auth_ok(&mut self, selection: &Selection, proposal: &Proposal) -> bool {
         let leader = leader_for(selection, proposal.view);
         let Some(member) = selection.commitment.member(leader) else {
             return false;
@@ -1434,12 +1452,74 @@ impl DevNode {
             &proposal.header.hash(),
             &commitment,
         );
-        if proposal.auth.block != subject {
+        if proposal.auth.block != subject
+            || !proposal
+                .auth
+                .signature_verifies(self.consensus.binding(), &member.attest_pk)
+        {
             return false;
         }
-        proposal
-            .auth
-            .signature_verifies(self.consensus.binding(), &member.attest_pk)
+        self.observe_signed_proposal(
+            proposal.view,
+            &proposal.header.hash(),
+            &commitment,
+            &proposal.auth,
+        );
+        true
+    }
+
+    pub fn observe_signed_proposal(
+        &mut self,
+        view: View,
+        header_hash: &[u8; 32],
+        commitment: &qtv_net::erasure::Commitment,
+        auth: &Attestation,
+    ) {
+        if auth.height != self.height {
+            return;
+        }
+        let signed = SignedProposal {
+            slot: auth.slot,
+            committee: auth.committee,
+            shape: proposal_shape(header_hash, commitment),
+            sig: auth.sig.to_vec(),
+        };
+        match self.proposals_seen.get(&(auth.from, view)) {
+            Some(first) if first.shape != signed.shape => {
+                let offender = self.validator_address(auth.from);
+                if offender.is_empty()
+                    || self.ledger.is_validator_banned(&offender)
+                    || self.proposal_equivocations.len() >= MAX_PREVOTE_EVIDENCE
+                    || self
+                        .proposal_equivocations
+                        .iter()
+                        .any(|e| e.offender == offender && e.height == auth.height)
+                {
+                    return;
+                }
+                self.proposal_equivocations.push(ProposalEquivocation {
+                    offender,
+                    height: auth.height,
+                    view,
+                    first: first.clone(),
+                    second: signed,
+                });
+            }
+            Some(_) => {}
+            None => {
+                if self.proposals_seen.len() < MAX_WATCHED_PREVOTES {
+                    self.proposals_seen.insert((auth.from, view), signed);
+                }
+            }
+        }
+    }
+
+    pub fn proposal_equivocation_evidence(&self) -> Vec<Wrapper> {
+        let chain_id = self.fee_params.chain_id;
+        self.proposal_equivocations
+            .iter()
+            .map(|evidence| evidence_call(evidence.encode(), chain_id))
+            .collect()
     }
 
     pub fn coded_auth_ok(&self, selection: &Selection, coded: &CodedProposal) -> bool {
@@ -1563,6 +1643,7 @@ impl DevNode {
     pub fn stop_signing(&mut self) {
         self.sign_guard = None;
         self.prevote_guard = None;
+        self.proposal_guard = None;
         self.store_lock = None;
     }
 
@@ -1784,6 +1865,7 @@ impl DevNode {
         self.attest_relayed.clear();
         self.prevotes.clear();
         self.prevotes_seen.clear();
+        self.proposals_seen.clear();
         self.future_props.clear();
         self.view_changes.clear();
         self.polka_rejects.clear();
@@ -2565,13 +2647,7 @@ impl DevNode {
                     auth,
                 }
             }
-            None => {
-                let mut proposal = self.build_proposal_at(selection, view)?;
-                proposal.auth =
-                    self.sign_proposal(view, &proposal.header, &proposal.body, &carried)?;
-                proposal.justification = carried.clone();
-                proposal
-            }
+            None => self.build_proposal_at(selection, view, carried.clone())?,
         };
         if let Some(staged) = self.staged.as_mut() {
             staged.justification = carried;
@@ -2833,6 +2909,11 @@ impl DevNode {
                 && !included.contains(&evidence_call(evidence.encode(), chain_id).id())
         });
         self.prevote_equivocations.retain(|evidence| {
+            evidence.height.saturating_add(EVIDENCE_WINDOW) > height
+                && !ledger.is_validator_banned(&evidence.offender)
+                && !included.contains(&evidence_call(evidence.encode(), chain_id).id())
+        });
+        self.proposal_equivocations.retain(|evidence| {
             evidence.height.saturating_add(EVIDENCE_WINDOW) > height
                 && !ledger.is_validator_banned(&evidence.offender)
                 && !included.contains(&evidence_call(evidence.encode(), chain_id).id())
@@ -3462,6 +3543,7 @@ impl DevNode {
         self.attest_relayed.clear();
         self.prevotes.clear();
         self.prevotes_seen.clear();
+        self.proposals_seen.clear();
         self.future_props.clear();
         self.view_changes.clear();
         self.polka_rejects.clear();
@@ -3586,29 +3668,27 @@ fn carried_justification(records: Vec<ViewChange>) -> Vec<ViewChange> {
         .collect()
 }
 
+fn proposal_shape(
+    header_hash: &[u8; 32],
+    commitment: &qtv_net::erasure::Commitment,
+) -> ProposalShape {
+    ProposalShape {
+        header_hash: *header_hash,
+        root: commitment.root,
+        k: commitment.k as u64,
+        n: commitment.n as u64,
+        shard_len: commitment.shard_len as u64,
+        data_len: commitment.data_len as u64,
+    }
+}
+
 fn proposal_subject(
     height: Height,
     view: View,
     header_hash: &[u8; 32],
     commitment: &qtv_net::erasure::Commitment,
 ) -> ConsensusBlock {
-    let mut buf = Vec::with_capacity(22 + 8 * 2 + 32 + 32 + 8 * 4);
-    buf.extend_from_slice(b"QTV-DEVNET-PROPOSAL-v2");
-    buf.extend_from_slice(&height.to_le_bytes());
-    buf.extend_from_slice(&view.to_le_bytes());
-    buf.extend_from_slice(header_hash);
-    buf.extend_from_slice(&commitment.root);
-    buf.extend_from_slice(&(commitment.k as u64).to_le_bytes());
-    buf.extend_from_slice(&(commitment.n as u64).to_le_bytes());
-    buf.extend_from_slice(&(commitment.shard_len as u64).to_le_bytes());
-    buf.extend_from_slice(&(commitment.data_len as u64).to_le_bytes());
-    let commitment = qtv_bft::hash::digest_256(&buf);
-    ConsensusBlock::with_cost(
-        height,
-        commitment,
-        Parent::Genesis,
-        qtv_node::consensus::VIEW_CHANGE_SUBJECT_COST,
-    )
+    qtv_node::evidence::proposal_block(height, view, &proposal_shape(header_hash, commitment))
 }
 
 fn prevote_subject(
