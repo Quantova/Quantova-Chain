@@ -42,11 +42,10 @@ fn crates_enabling_fixtures_normally() -> BTreeSet<String> {
 }
 
 #[test]
-fn only_the_simulation_harnesses_turn_on_the_test_fixtures() {
-    let expected: BTreeSet<String> = SIMULATION_CRATES.iter().map(|s| s.to_string()).collect();
+fn no_workspace_crate_turns_on_the_test_fixtures() {
     assert_eq!(
         crates_enabling_fixtures_normally(),
-        expected,
+        BTreeSet::new(),
         "a crate outside the simulation harnesses enables the deterministic id derived secrets \
          as a normal dependency. Cargo unifies features within a build graph, so that is how a \
          test only signing key reaches a shipped node binary"
@@ -54,18 +53,26 @@ fn only_the_simulation_harnesses_turn_on_the_test_fixtures() {
 }
 
 #[test]
-fn the_fixture_enabling_crates_are_excluded_from_the_default_build() {
+fn the_simulation_harnesses_live_in_their_own_workspace() {
     let manifest = fs::read_to_string(Path::new(WORKSPACE).join("Cargo.toml"))
         .expect("the workspace manifest is readable");
-    let defaults = manifest
-        .lines()
-        .find(|line| line.trim_start().starts_with("default-members"))
-        .expect("the workspace pins default-members, without it a plain build takes every member");
+    assert!(
+        manifest.contains("exclude = [\"harness\"]"),
+        "the harness workspace must stay excluded, or a workspace build unifies the fixture \
+         feature into the graph that produces the node"
+    );
     for name in SIMULATION_CRATES {
         assert!(
-            !defaults.contains(&format!("crates/{name}\"")),
-            "{name} enables the test fixtures and must stay out of default-members, or a plain \
-             cargo build pulls the fixture feature into the graph that produces the node"
+            !manifest.contains(&format!("\"crates/{name}\"")),
+            "{name} enables the test fixtures and must not be a member of the node workspace"
+        );
+        assert!(
+            Path::new(WORKSPACE)
+                .join("harness")
+                .join(name)
+                .join("Cargo.toml")
+                .exists(),
+            "{name} belongs in the separate harness workspace"
         );
     }
 }

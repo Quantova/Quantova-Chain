@@ -22,13 +22,13 @@ required-features = ["harness"]
 harness = []
 
 [dependencies]
-qtv-account = { path = "../qtv-account" }
-qtv-codec = { path = "../qtv-codec" }
-qtv-tx = { path = "../qtv-tx" }
-qtv-node = { path = "../qtv-node", features = ["test-fixtures"] }
+qtv-account = { path = "../../crates/qtv-account" }
+qtv-codec = { path = "../../crates/qtv-codec" }
+qtv-tx = { path = "../../crates/qtv-tx" }
+qtv-node = { path = "../../crates/qtv-node", features = ["test-fixtures"] }
 
-qtv-net = { path = "../qtv-net" }
-qtv-devnet = { path = "../qtv-devnet", features = ["test-fixtures"] }
+qtv-net = { path = "../../crates/qtv-net" }
+qtv-devnet = { path = "../../crates/qtv-devnet", features = ["test-fixtures"] }
 
 qtv-loopback = { path = "../qtv-loopback" }
 

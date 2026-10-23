@@ -132,35 +132,6 @@ name = "qtv-idfmt"
 version = "0.1.0"
 
 [[package]]
-name = "qtv-live"
-version = "0.1.0"
-dependencies = [
- "qtv-account",
- "qtv-bft",
- "qtv-codec",
- "qtv-devnet",
- "qtv-loopback",
- "qtv-node",
- "qtv-sampler",
- "qtv-tx",
-]
-
-[[package]]
-name = "qtv-loopback"
-version = "0.1.0"
-dependencies = [
- "qtv-account",
- "qtv-bft",
- "qtv-codec",
- "qtv-devnet",
- "qtv-net",
- "qtv-node",
- "qtv-sampler",
- "qtv-staking",
- "qtv-tx",
-]
-
-[[package]]
 name = "qtv-net"
 version = "0.1.0"
 dependencies = [
@@ -255,21 +226,6 @@ version = "0.2.0"
 source = "git+https://github.com/Quantova/QVM.git?rev=5634db731274589aec34601e53a5ea05fc252c4d#5634db731274589aec34601e53a5ea05fc252c4d"
 dependencies = [
  "qtv-crypto",
-]
-
-[[package]]
-name = "qtv-widearea"
-version = "0.1.0"
-dependencies = [
- "qtv-account",
- "qtv-bft",
- "qtv-codec",
- "qtv-devnet",
- "qtv-loopback",
- "qtv-net",
- "qtv-node",
- "qtv-sampler",
- "qtv-tx",
 ]
 
 [[package]]
