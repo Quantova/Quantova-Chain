@@ -14,6 +14,8 @@ use qtv_tx::{sign, Body, Wrapper};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+pub const BLOCK_TIME: u64 = 1_791_100_000;
+
 pub const GENESIS_TIME: u64 = 1_700_000_000_000;
 pub const ACCOUNT_SEED: [u8; 32] = [37u8; 32];
 pub const FUND: u64 = 1_000_000_000_000;

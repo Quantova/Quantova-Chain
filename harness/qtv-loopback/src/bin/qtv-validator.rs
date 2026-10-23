@@ -322,6 +322,7 @@ impl Runtime {
 }
 
 fn main() {
+    qtv_node::node::pin_block_time(qtv_loopback::BLOCK_TIME);
     let idx: usize = std::env::args()
         .nth(1)
         .and_then(|a| a.parse().ok())
@@ -456,6 +457,13 @@ fn main() {
         .map(|h| hex(h))
         .collect::<Vec<_>>()
         .join(",");
+    let stateroots = rt
+        .node
+        .chain()
+        .iter()
+        .map(|b| hex(b.header().q_root()))
+        .collect::<Vec<_>>()
+        .join(",");
     let perblock = per_block_ms
         .iter()
         .map(|ms| format!("{ms:.3}"))
@@ -464,7 +472,7 @@ fn main() {
     println!(
         "RESULT idx={idx} heights={heights} finalized_tx={finalized_tx} \
          consensus_ms={:.3} sign_ms={:.3} committee={committee} chainhash={} stall={} \
-         perblock={perblock} blockhashes={blockhashes}",
+         perblock={perblock} blockhashes={blockhashes} stateroots={stateroots}",
         consensus_wall.as_secs_f64() * 1000.0,
         sign_wall.as_secs_f64() * 1000.0,
         hex(&digest),

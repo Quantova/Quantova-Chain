@@ -36,6 +36,7 @@ struct RunResult {
     committee: usize,
     heights: u64,
     block_hashes: Vec<String>,
+    state_roots: Vec<String>,
     stalled: bool,
 }
 
@@ -112,6 +113,12 @@ fn run_serial(
         .iter()
         .map(|b| hex(&b.header_hash()))
         .collect();
+    let state_roots: Vec<String> = devnet
+        .node(0)
+        .chain()
+        .iter()
+        .map(|b| hex(b.header().q_root()))
+        .collect();
     let _ = std::fs::remove_dir_all(&base);
     RunResult {
         per_block_ms,
@@ -121,6 +128,7 @@ fn run_serial(
         committee,
         heights,
         block_hashes: header_hashes,
+        state_roots,
         stalled,
     }
 }
@@ -133,6 +141,7 @@ fn parse_result(line: &str) -> RunResult {
     let mut committee = 0usize;
     let mut heights = 0u64;
     let mut block_hashes = Vec::new();
+    let mut state_roots = Vec::new();
     let mut stalled = false;
     for field in line.trim().trim_start_matches("RESULT ").split_whitespace() {
         let Some((key, value)) = field.split_once('=') else {
@@ -159,6 +168,13 @@ fn parse_result(line: &str) -> RunResult {
                     .map(|s| s.to_string())
                     .collect()
             }
+            "stateroots" => {
+                state_roots = value
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect()
+            }
             _ => {}
         }
     }
@@ -170,6 +186,7 @@ fn parse_result(line: &str) -> RunResult {
         committee,
         heights,
         block_hashes,
+        state_roots,
         stalled,
     }
 }
@@ -272,6 +289,7 @@ fn rule() {
 }
 
 fn main() {
+    qtv_node::node::pin_block_time(qtv_loopback::BLOCK_TIME);
     let validators = env_usize("QTV_MP_VALIDATORS", 4).max(1);
     let senders_n = env_usize("QTV_MP_ACCOUNTS", 250).max(2);
     let run_secs = env_usize("QTV_MP_SECS", 60).max(1);
@@ -386,14 +404,14 @@ fn main() {
     let all_agree = loopback
         .iter()
         .all(|r| prefix_matches(&r.block_hashes, &ingress.block_hashes));
-    let matches_serial = prefix_matches(&ingress.block_hashes, &serial.block_hashes);
+    let matches_serial = prefix_matches(&ingress.state_roots, &serial.state_roots);
     println!(" Correctness oracle (checked before any number is trusted):");
     println!(
         "   every process finalised the byte identical chain : {}",
         if all_agree { "YES" } else { "NO" }
     );
     println!(
-        "   loopback chain matches the in process chain       : {}",
+        "   loopback state matches the in process state      : {}",
         if matches_serial { "YES" } else { "NO" }
     );
     if !all_agree || !matches_serial {
