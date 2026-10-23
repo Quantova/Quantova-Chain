@@ -755,7 +755,7 @@ fn contract_store_key(id: &[u8; 32]) -> Key {
     sha3::sha3_256(&input)
 }
 
-pub const CONTRACT_CONTEXT_BYTES: usize = 120;
+pub const CONTRACT_CONTEXT_BYTES: usize = 152;
 
 pub fn address_word(address: &str) -> Option<u64> {
     let id = address_id(address)?;
@@ -3007,6 +3007,7 @@ impl Ledger {
         memory[72..80].copy_from_slice(&chain_id.to_be_bytes());
         memory[80..88].copy_from_slice(&value.to_be_bytes());
         memory[88..120].copy_from_slice(&in_asset.unwrap_or([0u8; 32]));
+        memory[120..152].copy_from_slice(&self.chain_genesis_hash());
         let executed = {
             let trie = &self.trie;
             let owner = contract_id;
@@ -4871,7 +4872,7 @@ mod stake_state_tests {
     #[test]
     fn a_native_call_cannot_forge_the_paying_asset() {
         let mut prog = String::new();
-        for (slot, off) in [(0u64, 88u64), (1, 96), (2, 104), (3, 112), (4, 120)] {
+        for (slot, off) in [(0u64, 88u64), (1, 96), (2, 104), (3, 112), (4, 152)] {
             let key = 1024 + slot * 32;
             prog.push_str(&format!(
                 "LDI r3, {slot}\nLDI r2, {}\nMSTORE r2, r3\n\
@@ -5027,7 +5028,7 @@ mod stake_state_tests {
 
     fn asset_sender_container(selector: [u8; 4]) -> qtv_vm::container::Container {
         let code =
-            qtv_vm::asm::assemble("LDI r1, 120\nLDI r2, 64\nLDI r3, 40\nSEND r1, r2, r3\nHALT")
+            qtv_vm::asm::assemble("LDI r1, 152\nLDI r2, 64\nLDI r3, 40\nSEND r1, r2, r3\nHALT")
                 .expect("the program assembles");
         qtv_vm::container::Container::new(
             code,
@@ -5065,7 +5066,7 @@ mod stake_state_tests {
         l.set_asset_balance(&asset_a, &caller_id, 50);
         l.set_asset_balance(&asset_b, &contract_id, 100);
 
-        let mut payload = vec![0u8; 120];
+        let mut payload = vec![0u8; 152];
         payload.extend_from_slice(&issuer_b);
         payload.extend_from_slice(&caller_id);
 
@@ -5116,7 +5117,7 @@ mod stake_state_tests {
         l.set_asset_balance(&asset_a, &caller_id, 10);
         l.set_asset_balance(&asset_b, &contract_id, 100);
 
-        let mut payload = vec![0u8; 120];
+        let mut payload = vec![0u8; 152];
         payload.extend_from_slice(&issuer_b);
         payload.extend_from_slice(&caller_id);
 
@@ -5165,7 +5166,7 @@ mod stake_state_tests {
         let asset_b = asset_id_of(&issuer_b);
         l.set_asset_balance(&asset_b, &contract_id, 30);
 
-        let mut payload = vec![0u8; 120];
+        let mut payload = vec![0u8; 152];
         payload.extend_from_slice(&issuer_b);
         payload.extend_from_slice(&caller_id);
 
@@ -5193,7 +5194,7 @@ mod stake_state_tests {
         let issuer_a = [0xA1u8; 32];
         let asset_a = asset_id_of(&issuer_a);
 
-        let mut payload = vec![0u8; 120];
+        let mut payload = vec![0u8; 152];
         payload.extend_from_slice(&issuer_b);
         payload.extend_from_slice(&caller_id);
 
@@ -5216,7 +5217,7 @@ mod stake_state_tests {
     fn a_contract_mints_its_own_asset_to_a_holder_and_grows_supply() {
         let mint_selector: u64 = u32::from_be_bytes(*b"MINT") as u64;
         let code = qtv_vm::asm::assemble(&format!(
-            "LDI r1, 120\nLDI r2, 40\nLDI r3, {mint_selector}\nEMIT r1, r2, r3\nHALT"
+            "LDI r1, 152\nLDI r2, 40\nLDI r3, {mint_selector}\nEMIT r1, r2, r3\nHALT"
         ))
         .expect("the program assembles");
         let selector = [1u8, 2, 3, 4];
@@ -5242,7 +5243,7 @@ mod stake_state_tests {
 
         let caller = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
         let holder = [0xCCu8; 32];
-        let mut payload = vec![0u8; 120];
+        let mut payload = vec![0u8; 152];
         payload.extend_from_slice(&holder);
         payload.extend_from_slice(&40u64.to_be_bytes());
 
@@ -5256,7 +5257,7 @@ mod stake_state_tests {
     fn a_contracts_mint_can_only_ever_credit_its_own_asset() {
         let mint_selector: u64 = u32::from_be_bytes(*b"MINT") as u64;
         let code = qtv_vm::asm::assemble(&format!(
-            "LDI r1, 120\nLDI r2, 40\nLDI r3, {mint_selector}\nEMIT r1, r2, r3\nHALT"
+            "LDI r1, 152\nLDI r2, 40\nLDI r3, {mint_selector}\nEMIT r1, r2, r3\nHALT"
         ))
         .expect("the program assembles");
         let selector = [1u8, 2, 3, 4];
@@ -5281,7 +5282,7 @@ mod stake_state_tests {
         assert!(l.declare_mint_ceiling(&contract, 1_000));
         let caller = qtv_idfmt::render_address(&[9u8; 32]).unwrap();
 
-        let mut payload = vec![0u8; 120];
+        let mut payload = vec![0u8; 152];
         payload.extend_from_slice(&[0xCCu8; 32]);
         payload.extend_from_slice(&500u64.to_be_bytes());
         assert!(l.call_contract(&caller, &contract, selector, &payload, 0, 1_000_000, 0, None, 0));
