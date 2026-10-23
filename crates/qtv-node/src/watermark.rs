@@ -136,6 +136,7 @@ fn decode_mark(bytes: &[u8]) -> Option<(u64, u64, Option<[u8; 32]>)> {
 pub struct PrevoteGuard {
     path: PathBuf,
     mark: Option<(u64, u64, [u8; 32])>,
+    reserved: bool,
     _held: fs::File,
 }
 
@@ -160,6 +161,7 @@ impl PrevoteGuard {
         Ok(PrevoteGuard {
             path,
             mark,
+            reserved: false,
             _held: held,
         })
     }
@@ -192,7 +194,25 @@ impl PrevoteGuard {
         Ok(())
     }
 
+    pub fn reserve(&mut self, height: u64, view: u64) -> io::Result<bool> {
+        if self
+            .mark
+            .is_some_and(|(mh, mv, _)| (height, view) <= (mh, mv))
+        {
+            return Ok(false);
+        }
+        self.persist(height, view, &[0u8; 32])?;
+        self.mark = Some((height, view, [0u8; 32]));
+        self.reserved = true;
+        Ok(true)
+    }
+
     pub fn try_prevote(&mut self, height: u64, view: u64, value: &[u8; 32]) -> io::Result<bool> {
+        if self.reserved && self.mark == Some((height, view, [0u8; 32])) {
+            self.mark = Some((height, view, *value));
+            self.reserved = false;
+            return Ok(true);
+        }
         if !self.permits(height, view, value) {
             return Ok(false);
         }

@@ -1346,6 +1346,30 @@ impl DevNode {
             return None;
         }
         let height = self.height;
+        let reservation = self.proposal_guard.take();
+        let (header, included, guard) = std::thread::scope(|scope| {
+            let job = reservation.map(|mut guard| {
+                scope.spawn(move || {
+                    let _ = guard.reserve(height, view);
+                    guard
+                })
+            });
+            let (header, included) = self.stage_proposal(selection, view);
+            (header, included, job.and_then(|job| job.join().ok()))
+        });
+        self.proposal_guard = guard;
+        let auth = self.sign_proposal(view, &header, &included, &justification)?;
+        Some(Proposal {
+            view,
+            header,
+            body: included,
+            justification,
+            auth,
+        })
+    }
+
+    fn stage_proposal(&mut self, selection: &Selection, view: View) -> (Header, Vec<Wrapper>) {
+        let height = self.height;
         let proposer = self.validator_address(leader_for(selection, view));
         let chain_id = self.fee_params.chain_id;
         let mut candidates: Vec<Wrapper> = self
@@ -1419,14 +1443,7 @@ impl DevNode {
             justification: Vec::new(),
             pol: None,
         });
-        let auth = self.sign_proposal(view, &header, &included, &justification)?;
-        Some(Proposal {
-            view,
-            header,
-            body: included,
-            justification,
-            auth,
-        })
+        (header, included)
     }
 
     fn sign_proposal(
