@@ -257,14 +257,26 @@ impl Decode for Lock {
 pub struct Tally {
     pub aye_stake: u128,
     pub nay_stake: u128,
+    pub aye_weight: u128,
+    pub nay_weight: u128,
 }
 
 impl Tally {
-    pub fn record(&mut self, aye: bool, weight: u128) {
+    pub fn record(&mut self, aye: bool, stake: u128) {
+        self.record_weighted(aye, stake, stake);
+    }
+
+    pub fn record_conviction(&mut self, aye: bool, conviction: Conviction, stake: u64) {
+        self.record_weighted(aye, u128::from(stake), conviction.weight(stake));
+    }
+
+    fn record_weighted(&mut self, aye: bool, stake: u128, weight: u128) {
         if aye {
-            self.aye_stake = self.aye_stake.saturating_add(weight);
+            self.aye_stake = self.aye_stake.saturating_add(stake);
+            self.aye_weight = self.aye_weight.saturating_add(weight);
         } else {
-            self.nay_stake = self.nay_stake.saturating_add(weight);
+            self.nay_stake = self.nay_stake.saturating_add(stake);
+            self.nay_weight = self.nay_weight.saturating_add(weight);
         }
     }
 
@@ -279,6 +291,7 @@ impl Tally {
             && self.aye_stake.saturating_mul(BPS_DENOM)
                 >= electorate_stake.saturating_mul(threshold_bps)
             && self.aye_stake > self.nay_stake
+            && self.aye_weight > self.nay_weight
     }
 }
 
@@ -286,6 +299,8 @@ impl Encode for Tally {
     fn encode(&self, encoder: &mut Encoder) {
         encoder.put_u128(self.aye_stake);
         encoder.put_u128(self.nay_stake);
+        encoder.put_u128(self.aye_weight);
+        encoder.put_u128(self.nay_weight);
     }
 }
 
@@ -294,6 +309,8 @@ impl Decode for Tally {
         Ok(Tally {
             aye_stake: decoder.get_u128()?,
             nay_stake: decoder.get_u128()?,
+            aye_weight: decoder.get_u128()?,
+            nay_weight: decoder.get_u128()?,
         })
     }
 }
@@ -1605,6 +1622,13 @@ mod tests {
 mod approval_boundary_tests {
     use super::*;
 
+    fn raw(aye: u128, nay: u128) -> Tally {
+        let mut tally = Tally::default();
+        tally.record(true, aye);
+        tally.record(false, nay);
+        tally
+    }
+
     #[test]
     fn a_tally_exactly_on_the_threshold_passes_and_one_unit_under_does_not() {
         let electorate = 1_000_000u128;
@@ -1612,19 +1636,13 @@ mod approval_boundary_tests {
             let bps = track.threshold_bps();
             let needed = electorate * bps / BPS_DENOM;
 
-            let exact = Tally {
-                aye_stake: needed,
-                nay_stake: 0,
-            };
+            let exact = raw(needed, 0);
             assert!(
                 exact.approved(electorate, bps),
                 "{track:?} refused a tally sitting exactly on its {bps} bps threshold"
             );
 
-            let under = Tally {
-                aye_stake: needed - 1,
-                nay_stake: 0,
-            };
+            let under = raw(needed - 1, 0);
             assert!(
                 !under.approved(electorate, bps),
                 "{track:?} carried a tally one unit under its {bps} bps threshold"
@@ -1638,10 +1656,7 @@ mod approval_boundary_tests {
         let track = Track::ChainUpgrade;
         let floor = electorate * PARTICIPATION_FLOOR_BPS / BPS_DENOM;
 
-        let unanimous_but_quiet = Tally {
-            aye_stake: floor - 1,
-            nay_stake: 0,
-        };
+        let unanimous_but_quiet = raw(floor - 1, 0);
         assert!(
             !unanimous_but_quiet.approved(electorate, track.threshold_bps()),
             "a turnout under the participation floor carried a proposal, which is how a quiet \
@@ -1654,10 +1669,7 @@ mod approval_boundary_tests {
         let electorate = 1_000u128;
         let track = Track::ChainUpgrade;
         let half = electorate * track.threshold_bps() / BPS_DENOM;
-        let tied = Tally {
-            aye_stake: half,
-            nay_stake: half,
-        };
+        let tied = raw(half, half);
         assert!(
             !tied.approved(electorate, track.threshold_bps()),
             "an equal split must not carry, the ayes have to exceed the nays"
@@ -1667,10 +1679,7 @@ mod approval_boundary_tests {
     #[test]
     fn an_empty_electorate_never_carries() {
         for track in Track::all() {
-            let any = Tally {
-                aye_stake: u128::MAX,
-                nay_stake: 0,
-            };
+            let any = raw(u128::MAX, 0);
             assert!(
                 !any.approved(0, track.threshold_bps()),
                 "{track:?} carried against an empty electorate"
