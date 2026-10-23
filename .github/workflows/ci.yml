@@ -35,6 +35,12 @@ jobs:
       - name: test
         working-directory: Quantova-Chain
         run: cargo test --workspace --all-features --locked
+      - name: harness
+        working-directory: Quantova-Chain/harness
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-features --locked
       - name: test attributes
         working-directory: Quantova-Chain
         run: |
