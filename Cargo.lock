@@ -98,7 +98,6 @@ dependencies = [
  "qtv-node",
  "qtv-sampler",
  "qtv-staking",
- "qtv-state",
  "qtv-store",
  "qtv-tx",
  "qtv-wipe",
@@ -167,7 +166,6 @@ dependencies = [
  "qtv-account",
  "qtv-codec",
  "qtv-crypto",
- "qtv-governance",
  "qtv-idfmt",
  "qtv-node",
  "qtv-tx",
@@ -217,7 +215,6 @@ dependencies = [
  "qtv-codec",
  "qtv-crypto",
  "qtv-idfmt",
- "qtv-wipe",
 ]
 
 [[package]]

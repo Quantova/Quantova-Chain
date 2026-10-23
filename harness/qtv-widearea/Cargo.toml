@@ -22,8 +22,6 @@ required-features = ["harness"]
 harness = []
 
 [dependencies]
-qtv-account = { path = "../../crates/qtv-account" }
-qtv-codec = { path = "../../crates/qtv-codec" }
 qtv-tx = { path = "../../crates/qtv-tx" }
 qtv-node = { path = "../../crates/qtv-node", features = ["test-fixtures"] }
 
@@ -32,8 +30,6 @@ qtv-devnet = { path = "../../crates/qtv-devnet", features = ["test-fixtures"] }
 
 qtv-loopback = { path = "../qtv-loopback" }
 
-qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "1c0ae3504f9ba07e69d39e8df5fcbccf65248b12" }
-qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "1c0ae3504f9ba07e69d39e8df5fcbccf65248b12" }
 
 [lints]
 workspace = true

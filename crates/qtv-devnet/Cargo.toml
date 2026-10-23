@@ -18,7 +18,6 @@ qtv-codec = { path = "../qtv-codec" }
 qtv-account = { path = "../qtv-account" }
 qtv-tx = { path = "../qtv-tx" }
 qtv-block = { path = "../qtv-block" }
-qtv-state = { path = "../qtv-state" }
 qtv-node = { path = "../qtv-node" }
 qtv-governance = { path = "../qtv-governance" }
 qtv-staking = { path = "../qtv-staking" }

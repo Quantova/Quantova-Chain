@@ -18,7 +18,6 @@ qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "28c0fff8
 qtv-codec = { path = "../qtv-codec" }
 qtv-account = { path = "../qtv-account" }
 qtv-idfmt = { path = "../qtv-idfmt" }
-qtv-wipe = { path = "../qtv-wipe" }
 
 [lints]
 workspace = true
