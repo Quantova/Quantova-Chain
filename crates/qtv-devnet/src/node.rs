@@ -2905,8 +2905,12 @@ impl DevNode {
         bucket.insert(attestation.block.to_bytes())
     }
 
-    pub fn on_timeout(&mut self, view: View) -> bool {
+    pub fn release_restart_hold(&mut self) {
         self.restart_hold = self.restart_hold.saturating_sub(1);
+    }
+
+    pub fn on_timeout(&mut self, view: View) -> bool {
+        self.release_restart_hold();
         if self.view != view || self.staged.is_some() {
             return false;
         }

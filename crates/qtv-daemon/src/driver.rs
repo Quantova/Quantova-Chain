@@ -905,6 +905,7 @@ impl Driver {
     }
 
     fn on_view_timeout(&mut self, selection: &Selection) {
+        self.node.release_restart_hold();
         if let Some(note) = self.node.own_reveal_note() {
             self.broadcast(&Message::Reveal(Box::new(note)).encode());
         }
