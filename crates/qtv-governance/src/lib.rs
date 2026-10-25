@@ -978,6 +978,63 @@ impl Decode for Referendum {
     }
 }
 
+fn legacy_tally(decoder: &mut Decoder<'_>) -> Result<Tally, Error> {
+    let aye_stake = decoder.get_u128()?;
+    let nay_stake = decoder.get_u128()?;
+    Ok(Tally {
+        aye_stake,
+        nay_stake,
+        aye_weight: aye_stake,
+        nay_weight: nay_stake,
+    })
+}
+
+pub fn referendum_from_stored(bytes: &[u8]) -> Option<Referendum> {
+    if let Ok(referendum) = qtv_codec::from_bytes::<Referendum>(bytes) {
+        return Some(referendum);
+    }
+    let mut decoder = Decoder::new(bytes);
+    let id = decoder.get_u64().ok()?;
+    let track = Track::decode(&mut decoder).ok()?;
+    let proposer = Vec::<u8>::decode(&mut decoder).ok()?;
+    let deposit = decoder.get_u64().ok()?;
+    let submitted_at = decoder.get_u64().ok()?;
+    let tally = legacy_tally(&mut decoder).ok()?;
+    let status = Status::from_code(decoder.get_u8().ok()?)?;
+    let killed = decoder.get_u8().ok()? != 0;
+    decoder.finish().ok()?;
+    Some(Referendum {
+        id,
+        track,
+        proposer,
+        deposit,
+        submitted_at,
+        tally,
+        status,
+        killed,
+    })
+}
+
+pub fn receipt_from_stored(bytes: &[u8]) -> Option<EnactmentReceipt> {
+    if let Ok(receipt) = qtv_codec::from_bytes::<EnactmentReceipt>(bytes) {
+        return Some(receipt);
+    }
+    let mut decoder = Decoder::new(bytes);
+    let referendum = decoder.get_u64().ok()?;
+    let proposal_hash: [u8; 32] = decoder.get_bytes().ok()?.try_into().ok()?;
+    let scope: [u8; 32] = decoder.get_bytes().ok()?.try_into().ok()?;
+    let tally = legacy_tally(&mut decoder).ok()?;
+    let enacted_at = decoder.get_u64().ok()?;
+    decoder.finish().ok()?;
+    Some(EnactmentReceipt {
+        referendum,
+        proposal_hash,
+        scope,
+        tally,
+        enacted_at,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnactmentReceipt {
     pub referendum: u64,

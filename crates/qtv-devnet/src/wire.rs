@@ -841,9 +841,20 @@ pub fn lock_to_bytes(
 pub fn lock_from_bytes(
     bytes: &[u8],
 ) -> Result<(u64, Option<u64>, [u8; 32], LockedBlock, Certificate), DecodeError> {
+    lock_from_bytes_as(bytes, true).or_else(|_| lock_from_bytes_as(bytes, false))
+}
+
+fn lock_from_bytes_as(
+    bytes: &[u8],
+    with_pol: bool,
+) -> Result<(u64, Option<u64>, [u8; 32], LockedBlock, Certificate), DecodeError> {
     let mut decoder = Decoder::new(bytes);
     let view = decoder.get_u64()?;
-    let pol = get_pol(&mut decoder)?;
+    let pol = if with_pol {
+        get_pol(&mut decoder)?
+    } else {
+        None
+    };
     let value = get_value(&mut decoder)?;
     let header = Header::decode(&mut decoder)?;
     let count = decoder.get_u64()?;

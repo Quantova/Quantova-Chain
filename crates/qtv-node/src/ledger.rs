@@ -3256,7 +3256,7 @@ impl Ledger {
         self.trie
             .get(&gov_referendum_key(id))
             .filter(|bytes| !bytes.is_empty())
-            .map(|bytes| from_bytes(bytes).expect("state holds a canonical referendum"))
+            .and_then(|bytes| qtv_governance::referendum_from_stored(bytes))
     }
 
     pub fn gov_referenda(&self, limit: usize) -> Vec<Referendum> {
@@ -3317,7 +3317,7 @@ impl Ledger {
         self.trie
             .get(&gov_receipt_key(id))
             .filter(|bytes| !bytes.is_empty())
-            .map(|bytes| from_bytes(bytes).expect("state holds a canonical receipt"))
+            .and_then(|bytes| qtv_governance::receipt_from_stored(bytes))
     }
 
     fn set_gov_receipt(&mut self, id: u64, receipt: &EnactmentReceipt) {
