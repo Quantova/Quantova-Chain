@@ -2700,7 +2700,7 @@ impl Ledger {
         let ready = matches!(
             self.stake_bond(&id),
             Some(bond) if bond.exit_requested_at.is_none() && bond.can_request_exit(now_day)
-        );
+        ) && !self.exit_vote_locked(&id, now_day);
         if !ready {
             return false;
         }
@@ -4137,7 +4137,8 @@ impl Ledger {
         matches!(
             self.stake_bond(&id),
             Some(bond) if bond.exit_requested_at.is_none() && bond.can_request_exit(now_day)
-        ) && self.account(address).balance >= fee
+        ) && !self.exit_vote_locked(&id, now_day)
+            && self.account(address).balance >= fee
     }
 
     pub fn withdraw_admissible(&self, address: &str, fee: u64, now_day: u64) -> bool {
@@ -4261,6 +4262,11 @@ impl Ledger {
         taken
     }
 
+    fn exit_vote_locked(&self, id: &[u8; 32], now_day: u64) -> bool {
+        self.gov_lock(id)
+            .is_some_and(|lock| lock.amount > 0 && lock.until > now_day.saturating_mul(86_400))
+    }
+
     pub fn request_stake_exit(&mut self, address: &str, now_day: u64) -> bool {
         let id = match address_id(address) {
             Some(id) => id,
@@ -4270,10 +4276,7 @@ impl Ledger {
             Some(bond) => bond,
             None => return false,
         };
-        if self
-            .gov_lock(&id)
-            .is_some_and(|lock| lock.amount > 0 && lock.until > now_day.saturating_mul(86_400))
-        {
+        if self.exit_vote_locked(&id, now_day) {
             return false;
         }
         let height = self.execution_height();
