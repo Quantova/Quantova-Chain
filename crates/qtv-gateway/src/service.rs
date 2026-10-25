@@ -1278,6 +1278,7 @@ fn events(node: &DevNode, height: u64) -> Result<Json, ClientError> {
                 ("contract", Json::str(&event.contract)),
                 ("selector", Json::str(crate::json::to_hex(&event.selector))),
                 ("data", Json::str(crate::json::to_hex(&event.data))),
+                ("tx", Json::str(&event.tx)),
             ])
         })
         .collect();

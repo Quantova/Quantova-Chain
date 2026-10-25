@@ -1914,9 +1914,12 @@ fn execute_ordered_across(
             if sender_used.saturating_add(meter) > PER_SENDER_VM_METER.max(meter_ceiling(wrapper)) {
                 continue;
             }
-            if ledger
-                .apply_atomic(|l| dispatch_vm(l, wrapper, verified[index], fee_params, now_seconds))
-            {
+            ledger.set_current_tx(&wrapper.id());
+            let ran = ledger.apply_atomic(|l| {
+                dispatch_vm(l, wrapper, verified[index], fee_params, now_seconds)
+            });
+            ledger.set_current_tx("");
+            if ran {
                 let used = ledger.vm_meter_charge();
                 vm_meter = vm_meter.saturating_add(used);
                 *sender_vm_meter.entry(sender).or_insert(0) = sender_used.saturating_add(used);

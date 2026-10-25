@@ -1138,6 +1138,11 @@ impl Ledger {
         self.execution_height = height;
     }
 
+    pub fn set_current_tx(&mut self, id: &str) {
+        self.current_tx.clear();
+        self.current_tx.push_str(id);
+    }
+
     pub fn execution_height(&self) -> u64 {
         self.execution_height
     }
@@ -3220,6 +3225,7 @@ impl Ledger {
                             contract: contract.to_string(),
                             selector: *selector,
                             data: data.clone(),
+                            tx: self.current_tx.clone(),
                         });
                     }
                 }
@@ -4803,11 +4809,13 @@ mod stake_state_tests {
                 contract: "Q1EXAMPLE".to_string(),
                 selector: [0xDE, 0xAD, 0xBE, 0xEF],
                 data: vec![1, 2, 3, 4, 5],
+                tx: "Q1TX".to_string(),
             },
             BlockEvent {
                 contract: String::new(),
                 selector: [0, 0, 0, 0],
                 data: Vec::new(),
+                tx: String::new(),
             },
             BlockEvent::native([0x51, 0x58, 0x46, 0x52], vec![0xFF; 300]),
         ] {
@@ -9497,6 +9505,7 @@ pub struct BlockEvent {
     pub contract: String,
     pub selector: [u8; 4],
     pub data: Vec<u8>,
+    pub tx: String,
 }
 
 impl BlockEvent {
@@ -9505,6 +9514,7 @@ impl BlockEvent {
         encoder.put_bytes(self.contract.as_bytes());
         encoder.put_bytes(&self.selector);
         encoder.put_bytes(&self.data);
+        encoder.put_bytes(self.tx.as_bytes());
         encoder.into_bytes()
     }
 
@@ -9513,10 +9523,16 @@ impl BlockEvent {
         let contract = String::from_utf8(decoder.get_bytes().ok()?.to_vec()).ok()?;
         let selector = <[u8; 4]>::try_from(decoder.get_bytes().ok()?).ok()?;
         let data = decoder.get_bytes().ok()?.to_vec();
+        let tx = if decoder.remaining() > 0 {
+            String::from_utf8(decoder.get_bytes().ok()?.to_vec()).ok()?
+        } else {
+            String::new()
+        };
         Some(BlockEvent {
             contract,
             selector,
             data,
+            tx,
         })
     }
 
@@ -9525,6 +9541,7 @@ impl BlockEvent {
             contract: NATIVE_EVENT_SOURCE.to_string(),
             selector: kind,
             data,
+            tx: String::new(),
         }
     }
 }
@@ -10249,6 +10266,7 @@ pub struct Ledger {
     trie: Trie,
     block_events: Vec<BlockEvent>,
     side_events: Vec<SideEvent>,
+    current_tx: String,
     call_failure: Option<(qtv_vm::abort::Rule, u32)>,
     round_proposer: Option<String>,
     execution_height: u64,
@@ -10269,6 +10287,7 @@ impl Ledger {
             trie: Trie::new(),
             block_events: Vec::new(),
             side_events: Vec::new(),
+            current_tx: String::new(),
             call_failure: None,
             round_proposer: None,
             execution_height: 0,
@@ -10290,6 +10309,7 @@ impl Ledger {
             trie,
             block_events: Vec::new(),
             side_events: Vec::new(),
+            current_tx: String::new(),
             call_failure: None,
             round_proposer: None,
             execution_height: 0,
