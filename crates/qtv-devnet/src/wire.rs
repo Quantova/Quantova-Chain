@@ -89,6 +89,7 @@ pub struct ViewChange {
     pub att: Attestation,
     pub polka: Option<Certificate>,
     pub lock_pol: Option<u64>,
+    pub polka_digest: [u8; 32],
 }
 
 #[derive(Clone)]
@@ -557,6 +558,7 @@ fn encode_view_change(encoder: &mut Encoder, record: &ViewChange) {
         None => encoder.put_u8(0),
     }
     put_pol(encoder, record.lock_pol);
+    encoder.put_bytes(&record.polka_digest);
 }
 
 fn put_pol(encoder: &mut Encoder, pol: Option<u64>) {
@@ -664,6 +666,8 @@ fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeErr
         other => return Err(DecodeError::BadParent(other)),
     };
     let lock_pol = get_pol(decoder)?;
+    let digest = decoder.get_bytes()?;
+    let polka_digest: [u8; 32] = digest.try_into().map_err(|_| DecodeError::BadLength)?;
     Ok(ViewChange {
         height,
         target_view,
@@ -672,6 +676,7 @@ fn decode_view_change(decoder: &mut Decoder<'_>) -> Result<ViewChange, DecodeErr
         att,
         polka,
         lock_pol,
+        polka_digest,
     })
 }
 

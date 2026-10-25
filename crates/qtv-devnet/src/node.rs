@@ -2439,8 +2439,15 @@ impl DevNode {
             ),
             None => (0, [0u8; 32], false, None, None, None),
         };
-        let subject =
-            view_change_subject(self.height, target_view, lock_view, locked_value, has_lock);
+        let digest = polka_digest(polka.as_ref(), lock_pol);
+        let subject = view_change_subject(
+            self.height,
+            target_view,
+            lock_view,
+            locked_value,
+            has_lock,
+            digest,
+        );
         let committee = self.current_committee_digest();
         let att = self.consensus.own_attestation(
             self.height,
@@ -2458,6 +2465,7 @@ impl DevNode {
             att,
             polka,
             lock_pol,
+            polka_digest: digest,
         })
     }
 
@@ -2570,12 +2578,21 @@ impl DevNode {
         if has_lock && record.lock_view > record.target_view {
             return false;
         }
+        if record.polka.is_some()
+            && polka_digest(record.polka.as_ref(), record.lock_pol) != record.polka_digest
+        {
+            return false;
+        }
+        if !has_lock && record.polka_digest != [0u8; 32] {
+            return false;
+        }
         let subject = view_change_subject(
             record.height,
             record.target_view,
             lock_view,
             locked_value,
             has_lock,
+            record.polka_digest,
         );
         if record.att.height != record.height
             || record.att.slot != self.consensus.slot_for(record.height)
@@ -2607,7 +2624,9 @@ impl DevNode {
         if self.verify_view_change_polka(selection, record) {
             return true;
         }
-        *self.polka_rejects.entry(from).or_insert(0) += 1;
+        if record.polka.is_some() {
+            *self.polka_rejects.entry(from).or_insert(0) += 1;
+        }
         false
     }
 
@@ -3822,20 +3841,37 @@ fn prevote_subject(
     qtv_node::evidence::prevote_block(height, view, &value, pol)
 }
 
+fn polka_digest(polka: Option<&Certificate>, lock_pol: Option<u64>) -> [u8; 32] {
+    let Some(certificate) = polka else {
+        return [0u8; 32];
+    };
+    let mut buf = crate::wire::certificate_to_bytes(certificate);
+    match lock_pol {
+        Some(pol) => {
+            buf.push(1);
+            buf.extend_from_slice(&pol.to_le_bytes());
+        }
+        None => buf.push(0),
+    }
+    qtv_bft::hash::digest_256(&buf)
+}
+
 fn view_change_subject(
     height: Height,
     target_view: View,
     lock_view: View,
     locked_value: [u8; 32],
     has_lock: bool,
+    polka: [u8; 32],
 ) -> ConsensusBlock {
-    let mut buf = Vec::with_capacity(21 + 8 * 3 + 32 + 1);
-    buf.extend_from_slice(b"QTV-DEVNET-VIEWCHANGE");
+    let mut buf = Vec::with_capacity(22 + 8 * 3 + 32 + 1 + 32);
+    buf.extend_from_slice(b"QTV-DEVNET-VIEWCHANGE2");
     buf.extend_from_slice(&height.to_le_bytes());
     buf.extend_from_slice(&target_view.to_le_bytes());
     buf.extend_from_slice(&lock_view.to_le_bytes());
     buf.extend_from_slice(&locked_value);
     buf.push(has_lock as u8);
+    buf.extend_from_slice(&polka);
     let commitment = qtv_bft::hash::digest_256(&buf);
     ConsensusBlock::with_cost(
         height,

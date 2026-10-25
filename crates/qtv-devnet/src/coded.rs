@@ -1104,6 +1104,7 @@ mod tests {
             att,
             polka: None,
             lock_pol: None,
+            polka_digest: [0u8; 32],
         }]
     }
 
