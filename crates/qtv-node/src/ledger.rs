@@ -280,6 +280,8 @@ const CHAIN_GENESIS_TIME_TAG: &[u8] = b"qtv/chain/genesistime";
 const CHAIN_GENESIS_HASH_TAG: &[u8] = b"qtv/chain/genesishash";
 const BRIDGE_EPOCH_TAG: &[u8] = b"qtv/bridge/epoch";
 const BRIDGE_BURN_REF_DOMAIN: &[u8] = b"qtv/bridge/burn-ref/v2";
+
+const BRIDGE_MIGRATION_SCAN: u64 = 64;
 const BRIDGE_EXIT_SEEN_TAG: &[u8] = b"qtv/bridge/exitseen/";
 const BRIDGE_OUTSTANDING_TAG: &[u8] = b"qtv/bridge/outstanding/";
 const BRIDGE_EPOCHPAY_TAG: &[u8] = b"qtv/bridge/epochpay/";
@@ -1692,10 +1694,24 @@ impl Ledger {
 
     pub fn bridge_expire(&mut self, now: u64) {
         if let Some(record) = self.bridge_freeze() {
-            if now >= record.until {
+            if now >= record.until && !self.bridge_migration_pending(now) {
                 self.lift_bridge_freeze(now, FreezeLift::Slash);
             }
         }
+    }
+
+    fn bridge_migration_pending(&self, now: u64) -> bool {
+        let next = self.gov_next_id();
+        let first = next.saturating_sub(BRIDGE_MIGRATION_SCAN).max(1);
+        (first..next).any(|id| {
+            self.gov_referendum(id).is_some_and(|r| {
+                r.track == qtv_governance::Track::BridgeMigration
+                    && !r.killed
+                    && r.status != Status::Rejected
+                    && !r.enactment_expired(now)
+                    && self.gov_action(id).is_some()
+            })
+        })
     }
 
     fn lift_bridge_freeze(&mut self, now: u64, outcome: FreezeLift) {
