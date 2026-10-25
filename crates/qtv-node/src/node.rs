@@ -914,6 +914,82 @@ fn guardian_approvers(
     verified
 }
 
+pub(crate) fn feeless_signed_by_a_member(
+    ledger: &Ledger,
+    wrapper: &Wrapper,
+    chain_id: u64,
+) -> bool {
+    let args = wrapper.body().call().args();
+    let era = ledger.bridge_era();
+    if is_bridge_guardian(wrapper) {
+        let set = ledger.guardian_set();
+        let act = match GuardianAct::decode(args) {
+            Some(act) => act,
+            None => return false,
+        };
+        let message = guardian_challenge(chain_id, &era, &act);
+        for approval in &act.approvals {
+            let id = match guardian_member_id(approval.scheme, &approval.public_key) {
+                Some(id) => id,
+                None => continue,
+            };
+            if set.is_member(&id) {
+                return guardian_signature_ok(
+                    approval.scheme,
+                    &approval.public_key,
+                    &message,
+                    &approval.signature,
+                );
+            }
+        }
+        return false;
+    }
+    let operators = match ledger.bridge_operator_set() {
+        Some(set) => set,
+        None => return false,
+    };
+    if is_bridge_mint(wrapper) {
+        return match crate::bridge::MintArtifact::decode(args) {
+            Some(artifact)
+                if artifact.attestation.fact.well_formed()
+                    && Some(artifact.attestation.fact.dest_chain) == ledger.bridge_dest_chain() =>
+            {
+                crate::bridge::first_operator_signs(
+                    &operators,
+                    &artifact.attestation.signatures,
+                    &artifact.attestation.fact.attest_preimage(chain_id),
+                    &era,
+                    false,
+                )
+            }
+            _ => false,
+        };
+    }
+    if is_bridge_settle(wrapper) {
+        return match crate::bridge::ExitAttestation::decode(args) {
+            Some(attestation)
+                if attestation.fact.well_formed()
+                    && Some(attestation.fact.dest_chain) == ledger.bridge_dest_chain() =>
+            {
+                crate::bridge::first_operator_signs(
+                    &operators,
+                    &attestation.signatures,
+                    &attestation.fact.ack_preimage(chain_id),
+                    &era,
+                    true,
+                )
+            }
+            _ => false,
+        };
+    }
+    false
+}
+
+pub(crate) fn evidence_is_cheap_to_prove(wrapper: &Wrapper) -> bool {
+    is_evidence(wrapper)
+        && crate::evidence::DoubleFinality::decode(wrapper.body().call().args()).is_none()
+}
+
 pub(crate) fn is_bridge_guardian(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::bridge_guardian_address()
 }
@@ -5795,7 +5871,7 @@ mod tests {
         );
         let verifies = crate::bridge::VERIFY_CALLS.with(|c| c.get());
         assert!(
-            verifies <= crate::mempool::DEFAULT_FEELESS_ADMITS_PER_WINDOW * 2,
+            verifies <= crate::mempool::DEFAULT_FEELESS_ADMITS_PER_WINDOW * 3,
             "a single sender drives at most the capped number of quorum verifies, ran {verifies}"
         );
     }

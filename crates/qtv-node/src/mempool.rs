@@ -667,6 +667,35 @@ impl Mempool {
         *counter = counter.saturating_sub(1);
     }
 
+    fn feeless_attempt_gate(
+        &mut self,
+        wrapper: &Wrapper,
+        ledger: &Ledger,
+        chain_id: u64,
+        hint: Option<bool>,
+    ) -> Result<bool, Reject> {
+        if !self.feeless_has_room() {
+            return Err(Reject::RateLimited);
+        }
+        match hint {
+            Some(true) => return Ok(false),
+            Some(false) => return Err(Reject::BadCall),
+            None => {}
+        }
+        if crate::node::is_evidence(wrapper) {
+            if crate::node::evidence_is_cheap_to_prove(wrapper) {
+                return Ok(false);
+            }
+        } else if !crate::node::feeless_signed_by_a_member(ledger, wrapper, chain_id) {
+            return Err(Reject::BadCall);
+        }
+        if self.charge_feeless_attempt_for(wrapper) {
+            Ok(true)
+        } else {
+            Err(Reject::RateLimited)
+        }
+    }
+
     fn charge_feeless_attempt_for(&mut self, wrapper: &Wrapper) -> bool {
         let cap = self.feeless_attempts_cap;
         let counter = if crate::node::is_evidence(wrapper) {
@@ -889,34 +918,43 @@ impl Mempool {
                 return Err(Reject::BadCall);
             }
         } else if crate::node::is_evidence(&wrapper) {
-            if !self.charge_feeless_attempt_for(&wrapper) {
-                return Err(Reject::RateLimited);
-            }
-            if !crate::node::evidence_offender_is_slashable(&wrapper, ledger) {
+            if !crate::node::feeless_decodes(&wrapper)
+                || !crate::node::evidence_offender_is_slashable(&wrapper, ledger)
+            {
                 return Err(Reject::BadCall);
             }
+            let charged =
+                self.feeless_attempt_gate(&wrapper, ledger, fee_params.chain_id, feeless_hint)?;
             if !feeless_hint.unwrap_or_else(|| {
                 crate::node::evidence_admissible(fee_params.chain_id, &wrapper, ledger)
             }) {
                 return Err(Reject::BadCall);
             }
-            self.refund_feeless_attempt_for(&wrapper);
-        } else if crate::node::is_bridge_guardian(&wrapper) {
-            if !self.charge_feeless_attempt_for(&wrapper) {
-                return Err(Reject::RateLimited);
+            if charged {
+                self.refund_feeless_attempt_for(&wrapper);
             }
-            if !crate::node::guardian_act_is_current(ledger, &wrapper) {
+        } else if crate::node::is_bridge_guardian(&wrapper) {
+            if !crate::node::feeless_decodes(&wrapper)
+                || !crate::node::guardian_act_is_current(ledger, &wrapper)
+            {
                 return Err(Reject::BadCall);
             }
+            let charged =
+                self.feeless_attempt_gate(&wrapper, ledger, fee_params.chain_id, feeless_hint)?;
             if !feeless_hint.unwrap_or_else(|| {
                 crate::node::guardian_admissible(ledger, &wrapper, fee_params.chain_id)
             }) {
                 return Err(Reject::BadCall);
             }
-        } else if crate::node::is_bridge_mint(&wrapper) {
-            if !self.charge_feeless_attempt_for(&wrapper) {
-                return Err(Reject::RateLimited);
+            if charged {
+                self.refund_feeless_attempt_for(&wrapper);
             }
+        } else if crate::node::is_bridge_mint(&wrapper) {
+            if !crate::node::feeless_decodes(&wrapper) {
+                return Err(Reject::BadCall);
+            }
+            let charged =
+                self.feeless_attempt_gate(&wrapper, ledger, fee_params.chain_id, feeless_hint)?;
             if !feeless_hint.unwrap_or_else(|| {
                 crate::node::bridge_mint_admissible(
                     ledger,
@@ -927,14 +965,22 @@ impl Mempool {
             }) {
                 return Err(Reject::BadCall);
             }
-        } else if crate::node::is_bridge_settle(&wrapper) {
-            if !self.charge_feeless_attempt_for(&wrapper) {
-                return Err(Reject::RateLimited);
+            if charged {
+                self.refund_feeless_attempt_for(&wrapper);
             }
+        } else if crate::node::is_bridge_settle(&wrapper) {
+            if !crate::node::feeless_decodes(&wrapper) {
+                return Err(Reject::BadCall);
+            }
+            let charged =
+                self.feeless_attempt_gate(&wrapper, ledger, fee_params.chain_id, feeless_hint)?;
             if !feeless_hint.unwrap_or_else(|| {
                 crate::node::bridge_settle_admissible(ledger, &wrapper, fee_params.chain_id)
             }) {
                 return Err(Reject::BadCall);
+            }
+            if charged {
+                self.refund_feeless_attempt_for(&wrapper);
             }
         } else if crate::node::is_bridge_exit(&wrapper) {
             if self.has_pending_from_sender_nonce(wrapper.body().sender(), wrapper.body().nonce()) {
@@ -1048,13 +1094,18 @@ impl Mempool {
                     continue;
                 }
             }
-            if is_feeless(&wrapper)
-                && (!self.has_capacity(&wrapper)
+            let mut charged = false;
+            if is_feeless(&wrapper) {
+                if !self.has_capacity(&wrapper)
                     || !self.feeless_has_room()
                     || !crate::node::feeless_decodes(&wrapper)
-                    || !self.charge_feeless_attempt_for(&wrapper))
-            {
-                continue;
+                {
+                    continue;
+                }
+                match self.feeless_attempt_gate(&wrapper, ledger, fee_params.chain_id, None) {
+                    Ok(c) => charged = c,
+                    Err(_) => continue,
+                }
             }
             let admissible = if crate::node::is_vm_op(ledger, &wrapper) {
                 if !CONTRACTS_ENABLED {
@@ -1148,6 +1199,9 @@ impl Mempool {
             };
             if !admissible {
                 continue;
+            }
+            if charged {
+                self.refund_feeless_attempt_for(&wrapper);
             }
             if is_feeless(&wrapper) && !self.charge_feeless() {
                 continue;

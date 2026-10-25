@@ -176,7 +176,7 @@ impl Fact {
         digest
     }
 
-    fn well_formed(&self) -> bool {
+    pub(crate) fn well_formed(&self) -> bool {
         self.version == FACT_VERSION
             && self.source_chain != 0
             && self.dest_chain != 0
@@ -640,7 +640,7 @@ impl ExitFact {
         out
     }
 
-    fn well_formed(&self) -> bool {
+    pub(crate) fn well_formed(&self) -> bool {
         self.version == EXIT_FACT_VERSION
             && self.corridor != 0
             && self.dest_chain != 0
@@ -711,6 +711,35 @@ fn verify_exit_signature(
     #[cfg(test)]
     VERIFY_CALLS.with(|c| c.set(c.get() + 1));
     ml_dsa::verify(pk, message, sig, &exit_ack_context(era))
+}
+
+pub fn first_operator_signs(
+    set: &OperatorSet,
+    signatures: &[SignerSig],
+    message: &[u8],
+    era: &[u8; 32],
+    exit: bool,
+) -> bool {
+    for signer in signatures {
+        let public_key = match set.public_key(signer.operator_id) {
+            Some(key) => key,
+            None => continue,
+        };
+        let pk: &[u8; PUBLIC_KEY_BYTES] = match public_key.try_into() {
+            Ok(pk) => pk,
+            Err(_) => return false,
+        };
+        let sig: &[u8; SIGNATURE_BYTES] = match signer.signature.as_slice().try_into() {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
+        return if exit {
+            verify_exit_signature(pk, message, sig, era)
+        } else {
+            verify_signature(pk, message, sig, era)
+        };
+    }
+    false
 }
 
 pub fn exit_quorum_attests(
