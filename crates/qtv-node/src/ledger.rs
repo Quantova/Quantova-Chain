@@ -2969,29 +2969,30 @@ impl Ledger {
         in_asset: Option<[u8; 32]>,
         chain_id: u64,
     ) -> bool {
+        self.call_failure = None;
         let contract_id = match address_id(contract) {
             Some(id) => id,
-            None => return false,
+            None => return self.fail(qtv_vm::abort::Rule::NoContract),
         };
         let code = match self.contract_code(&contract_id) {
             Some(code) => code,
-            None => return false,
+            None => return self.fail(qtv_vm::abort::Rule::NoContract),
         };
         let caller_id = match address_id(caller) {
             Some(id) => id,
-            None => return false,
+            None => return self.fail(qtv_vm::abort::Rule::Unknown),
         };
         let in_asset_id = in_asset.map(|issuer| asset_id_of(&issuer));
         if value > 0 {
             match in_asset_id {
                 None => {
                     if self.balance(caller) < value {
-                        return false;
+                        return self.fail(qtv_vm::abort::Rule::ValueExceedsBalance);
                     }
                 }
                 Some(asset) => {
                     if self.asset_balance(&asset, &caller_id) < u128::from(value) {
-                        return false;
+                        return self.fail(qtv_vm::abort::Rule::ValueExceedsBalance);
                     }
                 }
             }
@@ -3037,11 +3038,11 @@ impl Ledger {
                         if to.len() == 32 {
                             let target = match id_bytes_to_address(to) {
                                 Some(address) => address,
-                                None => return false,
+                                None => return self.fail(qtv_vm::abort::Rule::TransferRejected),
                             };
                             native_sent = match native_sent.checked_add(*amount) {
                                 Some(sum) => sum,
-                                None => return false,
+                                None => return self.fail(qtv_vm::abort::Rule::TransferRejected),
                             };
                             native_credits.push((target, *amount));
                         } else if to.len() == 64 {
@@ -3054,21 +3055,21 @@ impl Ledger {
                             let running = asset_sent.entry(asset).or_insert(0);
                             *running = match running.checked_add(moved) {
                                 Some(sum) => sum,
-                                None => return false,
+                                None => return self.fail(qtv_vm::abort::Rule::TransferRejected),
                             };
                             asset_credits.push((asset, holder, moved));
                         } else {
-                            return false;
+                            return self.fail(qtv_vm::abort::Rule::TransferRejected);
                         }
                     }
                 }
                 let native_in = if in_asset_id.is_none() { value } else { 0 };
                 let native_funded = match self.balance(contract).checked_add(native_in) {
                     Some(funded) => funded,
-                    None => return false,
+                    None => return self.fail(qtv_vm::abort::Rule::TransferRejected),
                 };
                 if native_funded < native_sent {
-                    return false;
+                    return self.fail(qtv_vm::abort::Rule::InsufficientFunds);
                 }
                 for (asset, sent) in &asset_sent {
                     let asset_in = match in_asset_id {
@@ -3080,10 +3081,10 @@ impl Ledger {
                         .checked_add(asset_in)
                     {
                         Some(funded) => funded,
-                        None => return false,
+                        None => return self.fail(qtv_vm::abort::Rule::TransferRejected),
                     };
                     if funded < *sent {
-                        return false;
+                        return self.fail(qtv_vm::abort::Rule::AssetTooLow);
                     }
                 }
                 let mut projected_credit: std::collections::BTreeMap<([u8; 16], [u8; 32]), u128> =
@@ -3094,7 +3095,7 @@ impl Ledger {
                         .or_insert_with(|| self.asset_balance(asset, holder));
                     match slot.checked_add(*amount) {
                         Some(sum) => *slot = sum,
-                        None => return false,
+                        None => return self.fail(qtv_vm::abort::Rule::TransferRejected),
                     }
                 }
                 if value > 0 {
@@ -3109,16 +3110,16 @@ impl Ledger {
                                 .checked_add(u128::from(value))
                                 .is_none()
                             {
-                                return false;
+                                return self.fail(qtv_vm::abort::Rule::TransferRejected);
                             }
                             if self.asset_issuer_is_stopped(&asset) {
-                                return false;
+                                return self.fail(qtv_vm::abort::Rule::AssetStopped);
                             }
                             if !self.debit_asset(&asset, &caller_id, u128::from(value)) {
-                                return false;
+                                return self.fail(qtv_vm::abort::Rule::ValueExceedsBalance);
                             }
                             if !self.credit_asset(&asset, &contract_id, u128::from(value)) {
-                                return false;
+                                return self.fail(qtv_vm::abort::Rule::TransferRejected);
                             }
                         }
                     }
@@ -3138,16 +3139,16 @@ impl Ledger {
                         .checked_add(*amount)
                         .is_none()
                     {
-                        return false;
+                        return self.fail(qtv_vm::abort::Rule::TransferRejected);
                     }
                     if self.asset_issuer_is_stopped(asset) {
-                        return false;
+                        return self.fail(qtv_vm::abort::Rule::AssetStopped);
                     }
                     if !self.debit_asset(asset, &contract_id, *amount) {
-                        return false;
+                        return self.fail(qtv_vm::abort::Rule::AssetTooLow);
                     }
                     if !self.credit_asset(asset, holder, *amount) {
-                        return false;
+                        return self.fail(qtv_vm::abort::Rule::TransferRejected);
                     }
                 }
                 for effect in &outcome.effects {
@@ -3158,7 +3159,7 @@ impl Ledger {
                             let amount = u64::from_be_bytes(data[32..40].try_into().unwrap());
                             if !self.mint_within_ceiling(&contract_id, &holder, u128::from(amount))
                             {
-                                return false;
+                                return self.fail(qtv_vm::abort::Rule::MintCeiling);
                             }
                             continue;
                         }
@@ -3174,7 +3175,12 @@ impl Ledger {
                 }
                 true
             }
-            Err(_) => false,
+            Err(_) => {
+                let (rule, line) = crate::execution::take_call_failure()
+                    .unwrap_or((qtv_vm::abort::Rule::Unknown, 0));
+                self.call_failure = Some((rule, line));
+                false
+            }
         }
     }
 
@@ -4670,6 +4676,13 @@ mod stake_state_tests {
                 amount: 80,
                 burn_ref: [4u8; 32],
             },
+            SideEvent::CallFailed {
+                tx: "QTX1".to_string(),
+                contract: "Q1C".to_string(),
+                selector: [1, 2, 3, 4],
+                rule: 8,
+                line: 21,
+            },
         ];
 
         for event in &all {
@@ -4710,7 +4723,8 @@ mod stake_state_tests {
                 | SideEvent::BridgeMint { .. }
                 | SideEvent::BridgeBurn { .. }
                 | SideEvent::BridgeSettle { .. }
-                | SideEvent::BridgeSlash { .. } => {}
+                | SideEvent::BridgeSlash { .. }
+                | SideEvent::CallFailed { .. } => {}
             }
         }
 
@@ -9568,6 +9582,13 @@ pub enum SideEvent {
         amount: u128,
         burn_ref: [u8; 32],
     },
+    CallFailed {
+        tx: String,
+        contract: String,
+        selector: [u8; 4],
+        rule: u16,
+        line: u32,
+    },
 }
 
 impl SideEvent {
@@ -9604,6 +9625,7 @@ impl SideEvent {
             SideEvent::BridgeBurn { .. } => "bridge_burn",
             SideEvent::BridgeSettle { .. } => "bridge_settle",
             SideEvent::BridgeSlash { .. } => "bridge_slash",
+            SideEvent::CallFailed { .. } => "call_failed",
         }
     }
 }
@@ -9905,6 +9927,20 @@ impl SideEvent {
                 e.put_u128(*amount);
                 e.put_bytes(burn_ref);
             }
+            SideEvent::CallFailed {
+                tx,
+                contract,
+                selector,
+                rule,
+                line,
+            } => {
+                e.put_tag(32);
+                put_text(&mut e, tx);
+                put_text(&mut e, contract);
+                e.put_bytes(selector);
+                e.put_u32(u32::from(*rule));
+                e.put_u32(*line);
+            }
         }
         e.into_bytes()
     }
@@ -10054,6 +10090,13 @@ impl SideEvent {
                 amount: d.get_u128().ok()?,
                 burn_ref: get_word32(&mut d)?,
             },
+            32 => SideEvent::CallFailed {
+                tx: get_text(&mut d)?,
+                contract: get_text(&mut d)?,
+                selector: <[u8; 4]>::try_from(d.get_bytes().ok()?).ok()?,
+                rule: u16::try_from(d.get_u32().ok()?).ok()?,
+                line: d.get_u32().ok()?,
+            },
             _ => return None,
         };
         d.finish().ok()?;
@@ -10115,6 +10158,7 @@ pub struct Ledger {
     trie: Trie,
     block_events: Vec<BlockEvent>,
     side_events: Vec<SideEvent>,
+    call_failure: Option<(qtv_vm::abort::Rule, u32)>,
     round_proposer: Option<String>,
     execution_height: u64,
     execution_time: u64,
@@ -10134,6 +10178,7 @@ impl Ledger {
             trie: Trie::new(),
             block_events: Vec::new(),
             side_events: Vec::new(),
+            call_failure: None,
             round_proposer: None,
             execution_height: 0,
             execution_time: 0,
@@ -10154,6 +10199,7 @@ impl Ledger {
             trie,
             block_events: Vec::new(),
             side_events: Vec::new(),
+            call_failure: None,
             round_proposer: None,
             execution_height: 0,
             execution_time: 0,
@@ -10286,6 +10332,32 @@ impl Ledger {
 
     pub fn side_events(&self) -> &[SideEvent] {
         &self.side_events
+    }
+
+    fn fail(&mut self, rule: qtv_vm::abort::Rule) -> bool {
+        self.call_failure = Some((rule, 0));
+        false
+    }
+
+    pub fn take_call_failure(&mut self) -> Option<(qtv_vm::abort::Rule, u32)> {
+        self.call_failure.take()
+    }
+
+    pub(crate) fn note_call_failed(
+        &mut self,
+        tx: &str,
+        contract: &str,
+        selector: [u8; 4],
+        rule: qtv_vm::abort::Rule,
+        line: u32,
+    ) {
+        self.record_side_event(SideEvent::CallFailed {
+            tx: tx.to_string(),
+            contract: contract.to_string(),
+            selector,
+            rule: rule.code(),
+            line,
+        });
     }
 
     fn record_side_event(&mut self, event: SideEvent) {

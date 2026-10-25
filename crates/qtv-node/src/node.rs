@@ -1595,7 +1595,7 @@ fn dispatch_vm(
     if legacy {
         ledger.collect_fee(network_fee);
     }
-    run_vm(
+    let failed = run_vm(
         ledger,
         &sender,
         &target,
@@ -1608,6 +1608,9 @@ fn dispatch_vm(
         now_seconds,
         legacy,
     );
+    if let Some((rule, line, contract, selector)) = failed {
+        ledger.note_call_failed(&wrapper.id(), &contract, selector, rule, line);
+    }
     let deployed = deployed_to
         .as_deref()
         .is_some_and(|address| ledger.is_contract(address));
@@ -1643,17 +1646,20 @@ fn run_vm(
     fee_params: &FeeParams,
     now_seconds: u64,
     legacy: bool,
-) {
+) -> Option<(qtv_vm::abort::Rule, u32, String, [u8; 4])> {
+    use qtv_vm::abort::Rule;
     let sender = sender.to_string();
     let target = target.to_string();
     let args = args.to_vec();
+    let genesis_selector = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
     if target == crate::ledger::vm_deploy_address() {
+        let predicted = crate::ledger::contract_address(&sender, nonce).unwrap_or_default();
         let (mint_ceiling, framed) = split_mint_ceiling(&args);
         let (container, params) = split_deploy_args(framed);
         let deploy_cost = crate::execution::deploy_meter_cost(container.len());
         if deploy_cost > meter {
             ledger.arm_vm_meter(meter);
-            return;
+            return Some((Rule::OutOfMeter, 0, predicted, genesis_selector));
         }
         ledger.arm_vm_meter_deploy(deploy_cost);
         let mainnet = fee_params.chain_id == qtv_tx::MAINNET_CHAIN_ID;
@@ -1685,12 +1691,19 @@ fn run_vm(
             if declares_genesis && !genesis_ok {
                 ledger.clear_contract_code(&contract);
                 ledger.arm_vm_meter(meter);
+                let (rule, line) = ledger
+                    .take_call_failure()
+                    .unwrap_or((Rule::BlockStateLimit, 0));
+                return Some((rule, line, contract, genesis_selector));
             }
+            None
+        } else {
+            Some((Rule::DeployRejected, 0, predicted, genesis_selector))
         }
     } else if args.len() >= 4 {
         let selector = [args[0], args[1], args[2], args[3]];
-        if selector != qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE) {
-            let _call_ok = ledger.apply_atomic(|l| {
+        if selector != genesis_selector {
+            let call_ok = ledger.apply_atomic(|l| {
                 l.call_contract(
                     &sender,
                     &target,
@@ -1703,7 +1716,19 @@ fn run_vm(
                     fee_params.chain_id,
                 )
             });
+            if call_ok {
+                None
+            } else {
+                let (rule, line) = ledger
+                    .take_call_failure()
+                    .unwrap_or((Rule::BlockStateLimit, 0));
+                Some((rule, line, target, selector))
+            }
+        } else {
+            Some((Rule::GenesisCall, 0, target, selector))
         }
+    } else {
+        Some((Rule::UnknownEntry, 0, target, [0u8; 4]))
     }
 }
 

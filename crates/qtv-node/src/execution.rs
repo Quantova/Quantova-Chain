@@ -3,9 +3,60 @@
 
 use qtv_codec::{Decoder, Encoder};
 use qtv_tx::Call;
+use qtv_vm::abort::Rule;
 use qtv_vm::asm::assemble;
 use qtv_vm::interp::{Fault, Interpreter, SystemProgram};
+use std::cell::Cell;
 use std::sync::OnceLock;
+
+thread_local! {
+    static LAST_FAILURE: Cell<Option<(Rule, u32)>> = const { Cell::new(None) };
+}
+
+pub fn take_call_failure() -> Option<(Rule, u32)> {
+    LAST_FAILURE.with(|f| f.take())
+}
+
+fn note_failure(rule: Rule, line: u32) {
+    LAST_FAILURE.with(|f| f.set(Some((rule, line))));
+}
+
+fn explain_fault(
+    container: &qtv_vm::container::Container,
+    selector: [u8; qtv_vm::container::SELECTOR_BYTES],
+    loader: &dyn Fn(&[u8; 32]) -> u64,
+    memory: &[u8],
+    vm_limit: u64,
+    fault: &Fault,
+) -> (Rule, u32) {
+    if matches!(fault, Fault::DivByZero) {
+        if let Some(code) = qtv_vm::abort::halting_stubs(&container.code) {
+            let patched = qtv_vm::container::Container::new(
+                code,
+                container.consts.clone(),
+                container.entries.clone(),
+            );
+            let genesis = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
+            let opened = if selector == genesis {
+                Interpreter::for_genesis(&patched, vm_limit)
+            } else {
+                Interpreter::for_entry(&patched, selector, vm_limit)
+            };
+            if let Ok(interpreter) = opened {
+                if let Ok(out) = interpreter
+                    .with_storage_loader(loader)
+                    .with_memory(memory)
+                    .run()
+                {
+                    if let Some(found) = qtv_vm::abort::reason_in(&out.regs) {
+                        return found;
+                    }
+                }
+            }
+        }
+    }
+    (qtv_vm::abort::rule_of_fault(fault), 0)
+}
 
 const SENDER_SLOT: u64 = 0;
 const RECIPIENT_SLOT: u64 = 1;
@@ -385,14 +436,20 @@ pub fn execute_contract_call_lazy(
     memory: &[u8],
     meter_limit: u64,
 ) -> Result<ContractOutcome, ExecError> {
+    LAST_FAILURE.with(|f| f.set(None));
     let access_cost = (container_bytes.len() as u64).saturating_mul(CODE_ACCESS_BYTE_METER);
-    let vm_limit = meter_limit
-        .checked_sub(access_cost)
-        .ok_or(ExecError::MeterExhausted)?;
-    let container = decode_container(container_bytes).ok_or(ExecError::BadContainer)?;
-    container
-        .entry_offset(&selector)
-        .ok_or(ExecError::BadContainer)?;
+    let Some(vm_limit) = meter_limit.checked_sub(access_cost) else {
+        note_failure(Rule::OutOfMeter, 0);
+        return Err(ExecError::MeterExhausted);
+    };
+    let Some(container) = decode_container(container_bytes) else {
+        note_failure(Rule::ContractFault, 0);
+        return Err(ExecError::BadContainer);
+    };
+    if container.entry_offset(&selector).is_none() {
+        note_failure(Rule::UnknownEntry, 0);
+        return Err(ExecError::BadContainer);
+    }
     let genesis = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
     let opened = if selector == genesis {
         Interpreter::for_genesis(&container, vm_limit)
@@ -400,8 +457,14 @@ pub fn execute_contract_call_lazy(
         Interpreter::for_entry(&container, selector, vm_limit)
     };
     let interpreter = opened.map_err(|fault| match fault {
-        Fault::OutOfMeter => ExecError::MeterExhausted,
-        _ => ExecError::BadContainer,
+        Fault::OutOfMeter => {
+            note_failure(Rule::OutOfMeter, 0);
+            ExecError::MeterExhausted
+        }
+        other => {
+            note_failure(qtv_vm::abort::rule_of_fault(&other), 0);
+            ExecError::BadContainer
+        }
     })?;
     let affordable_touches = vm_limit / SLOT_ACCESS_METER;
     let touches = std::cell::Cell::new(0u64);
@@ -414,16 +477,28 @@ pub fn execute_contract_call_lazy(
         touches.set(touches.get().saturating_add(1));
         loader(key)
     };
-    let outcome = interpreter
+    let ran = interpreter
         .with_storage_loader(&metered_loader)
         .with_memory(memory)
-        .run()
-        .map_err(|fault| match fault {
-            Fault::Overflow => ExecError::InsufficientFunds,
-            Fault::OutOfMeter => ExecError::MeterExhausted,
-            other => ExecError::Vm(other),
-        })?;
+        .run();
+    let outcome = match ran {
+        Ok(outcome) => outcome,
+        Err(fault) => {
+            let (rule, line) = if beyond_budget.get() {
+                (Rule::OutOfMeter, 0)
+            } else {
+                explain_fault(&container, selector, loader, memory, vm_limit, &fault)
+            };
+            note_failure(rule, line);
+            return Err(match fault {
+                Fault::Overflow => ExecError::InsufficientFunds,
+                Fault::OutOfMeter => ExecError::MeterExhausted,
+                other => ExecError::Vm(other),
+            });
+        }
+    };
     if beyond_budget.get() {
+        note_failure(Rule::OutOfMeter, 0);
         return Err(ExecError::MeterExhausted);
     }
     let touched = outcome.storage.len() as u64 + outcome.fetched as u64;
@@ -432,6 +507,7 @@ pub fn execute_contract_call_lazy(
         .saturating_add(access_cost)
         .saturating_add(touched.saturating_mul(SLOT_ACCESS_METER));
     if meter_used > meter_limit {
+        note_failure(Rule::OutOfMeter, 0);
         return Err(ExecError::MeterExhausted);
     }
     Ok(ContractOutcome {

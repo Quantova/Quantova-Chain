@@ -1205,6 +1205,13 @@ fn transaction_found(node: &DevNode, tx_id: &str) -> Json {
                 .filter(|wrapper| position.is_none() || wrapper.id() == tx_id);
             if let Some(wrapper) = wrapper {
                 fields.extend(tx_fields(node, wrapper, true));
+                match call_failure(node, height, tx_id) {
+                    Some(error) => {
+                        fields.push(("outcome", Json::str("failed")));
+                        fields.push(("error", error));
+                    }
+                    None => fields.push(("outcome", Json::str("success"))),
+                }
             }
         }
         object(fields)
@@ -1553,8 +1560,52 @@ fn side_event_json(index: u64, event: &SideEvent) -> Json {
             fields.push(("asset_id", Json::str(crate::json::to_hex(asset_id))));
             fields.push(("burn_ref", Json::str(crate::json::to_hex(burn_ref))));
         }
+        SideEvent::CallFailed {
+            tx,
+            contract,
+            selector,
+            rule,
+            line,
+        } => {
+            set(&mut fields, "target", Json::str(contract.clone()));
+            set(&mut fields, "ref", Json::Int(u64::from(*rule)));
+            set(&mut fields, "aux", Json::Int(u64::from(*line)));
+            fields.push(("tx_id", Json::str(tx.clone())));
+            fields.push(("selector", Json::str(crate::json::to_hex(selector))));
+            fields.push(("error", failure_json(*rule, *line, selector)));
+        }
     }
     object(fields)
+}
+
+fn failure_json(rule: u16, line: u32, selector: &[u8; 4]) -> Json {
+    let rule = qtv_vm::abort::Rule::from_code(rule);
+    let mut fields = vec![
+        ("code", Json::str(rule.name())),
+        ("rule", Json::Int(u64::from(rule.code()))),
+        ("title", Json::str(rule.title())),
+        ("message", Json::str(rule.help())),
+        ("selector", Json::str(crate::json::to_hex(selector))),
+    ];
+    if line > 0 {
+        fields.push(("line", Json::Int(u64::from(line))));
+    }
+    object(fields)
+}
+
+fn call_failure(node: &DevNode, height: u64, tx_id: &str) -> Option<Json> {
+    node.side_events_at(height)
+        .iter()
+        .find_map(|event| match event {
+            SideEvent::CallFailed {
+                tx,
+                selector,
+                rule,
+                line,
+                ..
+            } if tx == tx_id => Some(failure_json(*rule, *line, selector)),
+            _ => None,
+        })
 }
 
 fn container(ledger: &Ledger, address: &str) -> Result<Json, ClientError> {
