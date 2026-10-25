@@ -18,7 +18,7 @@ qtv-tx = { path = "../qtv-tx" }
 qtv-codec = { path = "../qtv-codec" }
 qtv-block = { path = "../qtv-block" }
 qtv-idfmt = { path = "../qtv-idfmt" }
-qtv-vm = { git = "https://github.com/Quantova/QVM.git", rev = "7bd36280b8af636f5391584b21679ad270a1a870" }
+qtv-vm = { git = "https://github.com/Quantova/QVM.git", rev = "dd69b022d48b8dbfb36b8d26110d15b160fccff6" }
 
 qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "223e012417d804d2e953445c38c2b87d0bff6b34" }
 
