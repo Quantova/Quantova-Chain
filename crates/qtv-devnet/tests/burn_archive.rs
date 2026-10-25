@@ -30,6 +30,7 @@ fn burn_event(
 ) -> BlockEvent {
     let burn_ref = bridge_burn_ref(
         chain_id,
+        &[0u8; 32],
         asset_id,
         holder,
         amount,

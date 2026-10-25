@@ -279,7 +279,7 @@ const BRIDGE_COSMOS_ANCHOR_TAG: &[u8] = b"qtv/bridge/cosmosanchor/";
 const CHAIN_GENESIS_TIME_TAG: &[u8] = b"qtv/chain/genesistime";
 const CHAIN_GENESIS_HASH_TAG: &[u8] = b"qtv/chain/genesishash";
 const BRIDGE_EPOCH_TAG: &[u8] = b"qtv/bridge/epoch";
-const BRIDGE_BURN_REF_DOMAIN: &[u8] = b"qtv/bridge/burn-ref/v1";
+const BRIDGE_BURN_REF_DOMAIN: &[u8] = b"qtv/bridge/burn-ref/v2";
 const BRIDGE_EXIT_SEEN_TAG: &[u8] = b"qtv/bridge/exitseen/";
 const BRIDGE_OUTSTANDING_TAG: &[u8] = b"qtv/bridge/outstanding/";
 const BRIDGE_EPOCHPAY_TAG: &[u8] = b"qtv/bridge/epochpay/";
@@ -403,8 +403,10 @@ fn bridge_epochpay_global_key(epoch: u64) -> Key {
     sha3::sha3_256(&input)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn bridge_burn_ref(
     chain_id: u64,
+    genesis: &[u8; 32],
     asset_id: &[u8; 16],
     holder: &[u8; 32],
     amount: u128,
@@ -415,6 +417,7 @@ pub fn bridge_burn_ref(
     let mut encoder = Encoder::new();
     encoder.put_bytes(BRIDGE_BURN_REF_DOMAIN);
     encoder.put_u64(chain_id);
+    encoder.put_bytes(genesis);
     encoder.put_bytes(asset_id);
     encoder.put_bytes(holder);
     encoder.put_u128(amount);
@@ -2217,6 +2220,7 @@ impl Ledger {
         let event_index = self.block_events.len() as u64;
         let burn_ref = bridge_burn_ref(
             chain_id,
+            &self.chain_genesis_hash(),
             asset_id,
             holder,
             amount,
@@ -8396,6 +8400,7 @@ mod stake_state_tests {
 
         let burn_ref = bridge_burn_ref(
             chain_id,
+            &l.chain_genesis_hash(),
             &asset,
             &holder,
             400,
@@ -8460,6 +8465,7 @@ mod stake_state_tests {
         assert!(l.bridge_burn(&asset, &holder, 400, &destination, chain_id, 7));
         let settle_ref = bridge_burn_ref(
             chain_id,
+            &l.chain_genesis_hash(),
             &asset,
             &holder,
             400,
@@ -8527,8 +8533,16 @@ mod stake_state_tests {
         let slash_index = l.block_events().len() as u64;
         let pre_supply = l.bridged_supply(&asset);
         assert!(l.bridge_burn(&asset, &holder, 200, &destination, chain_id, 8));
-        let slash_ref =
-            bridge_burn_ref(chain_id, &asset, &holder, 200, &destination, 8, slash_index);
+        let slash_ref = bridge_burn_ref(
+            chain_id,
+            &l.chain_genesis_hash(),
+            &asset,
+            &holder,
+            200,
+            &destination,
+            8,
+            slash_index,
+        );
         assert_eq!(l.bridged_supply(&asset), pre_supply - 200);
 
         let wrong_holder = crate::bridge::ExitFact {
@@ -9281,13 +9295,29 @@ mod stake_state_tests {
         );
         assert_eq!(
             first.7,
-            bridge_burn_ref(first.4, &first.0, &first.1, first.2, &first.3, first.5, first.6),
+            bridge_burn_ref(
+                first.4,
+                &l.chain_genesis_hash(),
+                &first.0,
+                &first.1,
+                first.2,
+                &first.3,
+                first.5,
+                first.6
+            ),
             "the first ref recomputes from its leaf fields"
         );
         assert_eq!(
             second.7,
             bridge_burn_ref(
-                second.4, &second.0, &second.1, second.2, &second.3, second.5, second.6
+                second.4,
+                &l.chain_genesis_hash(),
+                &second.0,
+                &second.1,
+                second.2,
+                &second.3,
+                second.5,
+                second.6,
             ),
             "the second ref recomputes from its leaf fields"
         );
@@ -9302,7 +9332,16 @@ mod stake_state_tests {
         );
         assert_eq!(
             third.7,
-            bridge_burn_ref(third.4, &third.0, &third.1, third.2, &third.3, third.5, third.6),
+            bridge_burn_ref(
+                third.4,
+                &l.chain_genesis_hash(),
+                &third.0,
+                &third.1,
+                third.2,
+                &third.3,
+                third.5,
+                third.6
+            ),
             "the later ref recomputes from its leaf fields"
         );
     }
