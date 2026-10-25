@@ -677,6 +677,7 @@ pub fn bridge_settle_address() -> String {
 }
 
 const VM_CODE_TAG: &[u8] = b"qtv/vm/code/";
+const VM_CONTEXT_VERSION_TAG: &[u8] = b"qtv/vm/ctxver/";
 const VM_STORE_TAG: &[u8] = b"qtv/vm/store/";
 const VM_SLOT_TAG: &[u8] = b"qtv/vm/slot/";
 const SLOT_PREFIX_BYTES: usize = 8;
@@ -760,7 +761,18 @@ fn contract_store_key(id: &[u8; 32]) -> Key {
     sha3::sha3_256(&input)
 }
 
+fn contract_context_version_key(id: &[u8; 32]) -> Key {
+    let mut input = Vec::with_capacity(VM_CONTEXT_VERSION_TAG.len() + id.len());
+    input.extend_from_slice(VM_CONTEXT_VERSION_TAG);
+    input.extend_from_slice(id);
+    sha3::sha3_256(&input)
+}
+
 pub const CONTRACT_CONTEXT_BYTES: usize = 152;
+
+pub const LEGACY_CONTRACT_CONTEXT_BYTES: usize = 120;
+
+const CONTRACT_CONTEXT_VERSION: u64 = 2;
 
 pub fn address_word(address: &str) -> Option<u64> {
     let id = address_id(address)?;
@@ -2816,12 +2828,28 @@ impl Ledger {
 
     pub fn set_contract_code(&mut self, id: &[u8; 32], code: &[u8]) {
         self.write_leaf(contract_code_key(id), code.to_vec());
+        self.write_leaf(
+            contract_context_version_key(id),
+            to_bytes(&CONTRACT_CONTEXT_VERSION),
+        );
     }
 
     pub fn clear_contract_code(&mut self, address: &str) {
         if let Some(id) = address_id(address) {
             self.erase_leaf(&contract_code_key(&id));
+            self.erase_leaf(&contract_context_version_key(&id));
             self.erase_leaf(&asset_mint_ceiling_key(&asset_id_of(&id)));
+        }
+    }
+
+    fn contract_context_bytes(&self, id: &[u8; 32]) -> usize {
+        match self.trie.get(&contract_context_version_key(id)) {
+            Some(bytes)
+                if from_bytes::<u64>(bytes).is_ok_and(|v| v >= CONTRACT_CONTEXT_VERSION) =>
+            {
+                CONTRACT_CONTEXT_BYTES
+            }
+            _ => LEGACY_CONTRACT_CONTEXT_BYTES,
         }
     }
 
@@ -3020,10 +3048,10 @@ impl Ledger {
                 }
             }
         }
-        let mut memory = vec![0u8; user_memory.len().max(CONTRACT_CONTEXT_BYTES)];
-        if user_memory.len() > CONTRACT_CONTEXT_BYTES {
-            memory[CONTRACT_CONTEXT_BYTES..user_memory.len()]
-                .copy_from_slice(&user_memory[CONTRACT_CONTEXT_BYTES..]);
+        let context_bytes = self.contract_context_bytes(&contract_id);
+        let mut memory = vec![0u8; user_memory.len().max(context_bytes)];
+        if user_memory.len() > context_bytes {
+            memory[context_bytes..user_memory.len()].copy_from_slice(&user_memory[context_bytes..]);
         }
         memory[0..32].copy_from_slice(&caller_id);
         memory[32..64].copy_from_slice(&contract_id);
@@ -3031,7 +3059,9 @@ impl Ledger {
         memory[72..80].copy_from_slice(&chain_id.to_be_bytes());
         memory[80..88].copy_from_slice(&value.to_be_bytes());
         memory[88..120].copy_from_slice(&in_asset.unwrap_or([0u8; 32]));
-        memory[120..152].copy_from_slice(&self.chain_genesis_hash());
+        if context_bytes >= CONTRACT_CONTEXT_BYTES {
+            memory[120..152].copy_from_slice(&self.chain_genesis_hash());
+        }
         let executed = {
             let trie = &self.trie;
             let owner = contract_id;
