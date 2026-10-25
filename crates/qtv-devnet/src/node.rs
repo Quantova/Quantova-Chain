@@ -151,6 +151,8 @@ const MAX_PREVOTE_EVIDENCE: usize = 256;
 
 const MAX_WATCHED_PREVOTES: usize = 4_096;
 
+const WATCH_VIEW_WINDOW: View = 64;
+
 fn proposal_weight(proposal: &Proposal) -> usize {
     proposal
         .body
@@ -1529,7 +1531,7 @@ impl DevNode {
             }
             Some(_) => {}
             None => {
-                if self.proposals_seen.len() < MAX_WATCHED_PREVOTES {
+                if watch_room(&mut self.proposals_seen, auth.from, view, self.view) {
                     self.proposals_seen.insert((auth.from, view), signed);
                 }
             }
@@ -2205,7 +2207,7 @@ impl DevNode {
             }
             Some(_) => {}
             None => {
-                if self.prevotes_seen.len() < MAX_WATCHED_PREVOTES {
+                if watch_room(&mut self.prevotes_seen, att.from, att.view, self.view) {
                     self.prevotes_seen.insert((att.from, att.view), signed);
                 }
             }
@@ -3854,6 +3856,48 @@ fn polka_digest(polka: Option<&Certificate>, lock_pol: Option<u64>) -> [u8; 32] 
         None => buf.push(0),
     }
     qtv_bft::hash::digest_256(&buf)
+}
+
+fn watch_room<T>(seen: &mut HashMap<(u64, View), T>, from: u64, view: View, current: View) -> bool {
+    if view > current.saturating_add(WATCH_VIEW_WINDOW) {
+        return false;
+    }
+    let own: Vec<View> = seen
+        .keys()
+        .filter(|(sender, _)| *sender == from)
+        .map(|(_, v)| *v)
+        .collect();
+    if own.len() >= MAX_ATTESTATIONS_PER_SENDER {
+        match own.iter().min() {
+            Some(&oldest) if oldest < view => {
+                seen.remove(&(from, oldest));
+            }
+            _ => return false,
+        }
+    }
+    if seen.len() >= MAX_WATCHED_PREVOTES {
+        let mut counts: HashMap<u64, usize> = HashMap::new();
+        for (sender, _) in seen.keys() {
+            *counts.entry(*sender).or_insert(0) += 1;
+        }
+        let heaviest = counts
+            .into_iter()
+            .max_by_key(|(sender, count)| (*count, *sender))
+            .map(|(sender, _)| sender);
+        let victim = heaviest.and_then(|sender| {
+            seen.keys()
+                .filter(|(s, _)| *s == sender)
+                .min_by_key(|(_, v)| *v)
+                .copied()
+        });
+        match victim {
+            Some(key) => {
+                seen.remove(&key);
+            }
+            None => return false,
+        }
+    }
+    true
 }
 
 fn view_change_subject(
