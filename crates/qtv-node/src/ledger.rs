@@ -2570,7 +2570,7 @@ impl Ledger {
             .filter(|id| !self.is_stake_banned(id) && !self.is_gov_blacklisted(id))
             .filter_map(|id| {
                 self.stake_bond(id)
-                    .map(|bond| bond.amount_in_epoch(epoch, len))
+                    .map(|bond| bond.weight_in_epoch(epoch, len))
             })
             .sum()
     }
@@ -2583,9 +2583,12 @@ impl Ledger {
             return 0;
         }
         let stake = match self.stake_bond(id) {
-            Some(bond) => bond.amount_in_epoch(self.current_epoch(), self.heights_per_epoch),
+            Some(bond) => bond.weight_in_epoch(self.current_epoch(), self.heights_per_epoch),
             None => return 0,
         };
+        if stake == 0 {
+            return 0;
+        }
         if self
             .stake_rewards(id)
             .tranches
