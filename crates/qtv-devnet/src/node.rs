@@ -67,32 +67,6 @@ pub fn node_peer_id(id: u64) -> PeerId {
     p2p_peer_id(&qtv_node::keys::fixture_secret(id))
 }
 
-fn seeded_leader(selection: &Selection, parent_state: &[u8; 32], height: Height) -> Option<u64> {
-    let members = &selection.commitment.members;
-    let total: u128 = members
-        .iter()
-        .map(|m| u128::from(m.stake))
-        .fold(0u128, u128::saturating_add);
-    if total == 0 {
-        return None;
-    }
-    let mut input = Vec::with_capacity(16 + 8 + 32);
-    input.extend_from_slice(b"QTV-LEADER-SEED1");
-    input.extend_from_slice(&height.to_le_bytes());
-    input.extend_from_slice(parent_state);
-    let mut out = [0u8; 16];
-    qtv_crypto::sha3::shake256(&input, &mut out);
-    let mut position = u128::from_le_bytes(out) % total;
-    for member in members {
-        let weight = u128::from(member.stake);
-        if position < weight {
-            return Some(member.id);
-        }
-        position -= weight;
-    }
-    None
-}
-
 pub fn leader_for(selection: &Selection, view: View) -> u64 {
     let members = &selection.members;
     if members.is_empty() {
@@ -1308,15 +1282,10 @@ impl DevNode {
         if let Some(selection) = self.selection_cache.borrow().as_ref() {
             return Ok(selection.clone());
         }
-        let mut selection = self
+        let selection = self
             .consensus
             .select(&self.beacon, self.slot(), &self.reveals)
             .ok_or(RoundError::NoCommittee)?;
-        if selection.mode == qtv_sampler::sortition::DrawMode::Full {
-            if let Some(leader) = seeded_leader(&selection, &self.ledger.q_root(), self.height) {
-                selection.leader = leader;
-            }
-        }
         *self.selection_cache.borrow_mut() = Some(selection.clone());
         Ok(selection)
     }
