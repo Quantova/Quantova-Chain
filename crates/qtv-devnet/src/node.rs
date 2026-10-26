@@ -2750,6 +2750,22 @@ impl DevNode {
         self.justification_verified.insert(digest);
     }
 
+    fn locked_body_for(&self, header_hash: &[u8; 32]) -> Option<Vec<Wrapper>> {
+        for record in &self.view_changes {
+            if let Some(block) = &record.locked {
+                if !block.body.is_empty() && &block.header.hash() == header_hash {
+                    return Some(block.body.clone());
+                }
+            }
+        }
+        if let Some(lock) = &self.lock {
+            if !lock.block.body.is_empty() && &lock.block.header.hash() == header_hash {
+                return Some(lock.block.body.clone());
+            }
+        }
+        None
+    }
+
     pub fn build_justified_proposal(
         &mut self,
         selection: &Selection,
@@ -2765,7 +2781,12 @@ impl DevNode {
         });
         let carried = carried_justification(records);
         let proposal = match bound {
-            Some((_, locked)) => {
+            Some((_, mut locked)) => {
+                if locked.body.is_empty() {
+                    if let Some(body) = self.locked_body_for(&locked.header.hash()) {
+                        locked.body = body;
+                    }
+                }
                 self.stage_from(&locked.header, &locked.body, view, pol)
                     .ok()?;
                 let auth = self.sign_proposal(view, &locked.header, &locked.body, &carried)?;
