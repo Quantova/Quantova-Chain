@@ -682,11 +682,9 @@ impl Mempool {
             Some(false) => return Err(Reject::BadCall),
             None => {}
         }
-        if crate::node::is_evidence(wrapper) {
-            if crate::node::evidence_is_cheap_to_prove(wrapper) {
-                return Ok(false);
-            }
-        } else if !crate::node::feeless_signed_by_a_member(ledger, wrapper, chain_id) {
+        if !crate::node::is_evidence(wrapper)
+            && !crate::node::feeless_signed_by_a_member(ledger, wrapper, chain_id)
+        {
             return Err(Reject::BadCall);
         }
         if self.charge_feeless_attempt_for(wrapper) {

@@ -985,11 +985,6 @@ pub(crate) fn feeless_signed_by_a_member(
     false
 }
 
-pub(crate) fn evidence_is_cheap_to_prove(wrapper: &Wrapper) -> bool {
-    is_evidence(wrapper)
-        && crate::evidence::DoubleFinality::decode(wrapper.body().call().args()).is_none()
-}
-
 pub(crate) fn is_bridge_guardian(wrapper: &Wrapper) -> bool {
     wrapper.body().call().target() == crate::ledger::bridge_guardian_address()
 }
