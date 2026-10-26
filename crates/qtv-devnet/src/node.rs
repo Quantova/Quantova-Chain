@@ -3890,7 +3890,7 @@ fn watch_room<T>(seen: &mut HashMap<(u64, View), T>, from: u64, view: View, curr
         .collect();
     if own.len() >= MAX_ATTESTATIONS_PER_SENDER {
         match own.iter().min() {
-            Some(&oldest) if oldest < view => {
+            Some(&oldest) if oldest < view && oldest > current => {
                 seen.remove(&(from, oldest));
             }
             _ => return false,
@@ -3907,7 +3907,7 @@ fn watch_room<T>(seen: &mut HashMap<(u64, View), T>, from: u64, view: View, curr
             .map(|(sender, _)| sender);
         let victim = heaviest.and_then(|sender| {
             seen.keys()
-                .filter(|(s, _)| *s == sender)
+                .filter(|(s, v)| *s == sender && *v > current)
                 .min_by_key(|(_, v)| *v)
                 .copied()
         });
