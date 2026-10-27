@@ -30,6 +30,16 @@ pub(crate) fn genesis_registration_binding(chain_id: &str) -> qtv_attest::ChainB
     qtv_attest::ChainBinding::new(chain_binding(chain_id), [0u8; 32])
 }
 
+pub(crate) const GOVERNANCE_ERA_DOMAIN: &[u8] = b"QUANTOVA/GOVERNANCE-ERA/v1";
+
+pub(crate) fn governance_era(chain_binding: u64, genesis_time: u64) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(GOVERNANCE_ERA_DOMAIN.len() + 8 + 8);
+    buf.extend_from_slice(GOVERNANCE_ERA_DOMAIN);
+    buf.extend_from_slice(&chain_binding.to_le_bytes());
+    buf.extend_from_slice(&genesis_time.to_le_bytes());
+    sha3::sha3_256(&buf)
+}
+
 pub(crate) const MAX_GENESIS_SLOTS: u64 = 1 << 16;
 
 pub(crate) const MIN_GENESIS_SLOTS: u64 = 4;
@@ -346,7 +356,7 @@ impl GenesisFile {
             if (threshold as usize) > operators.len() {
                 return Err("genesis bridge_threshold exceeds the committee size".to_string());
             }
-            if (threshold as usize) * 3 < operators.len() * 2 {
+            if (threshold as usize) * 3 <= operators.len() * 2 {
                 return Err(
                     "genesis bridge_threshold is below the two thirds BFT safety ratio".to_string(),
                 );
@@ -362,7 +372,7 @@ impl GenesisFile {
             bridge_dest_chain,
             bridge_operators,
             bridged_assets: bridged,
-            bridge_era: None,
+            bridge_era: Some(governance_era(chain_binding, genesis_time)),
             bridge_exit_max_amount,
         };
         let hash = genesis_hash(&chain_id, &message, slots, &genesis);
@@ -1106,5 +1116,90 @@ mod tests {
         );
         let outcome = load_text("starkzero", text);
         assert!(outcome.is_ok(), "{:?}", outcome.err());
+    }
+
+    fn bridge_operator_line(id: u32, seed: u8, chain_id: &str) -> String {
+        let (pk, sk) = qtv_crypto::ml_dsa::keygen(&[seed; 32]);
+        let binding = chain_binding(chain_id);
+        let challenge = qtv_node::bridge::operator_pop_challenge(id, &pk, binding);
+        let pop =
+            qtv_crypto::ml_dsa::sign(&sk, &challenge, qtv_node::bridge::POP_DOMAIN, &[0u8; 32])
+                .expect("the operator signs its proof of possession");
+        format!(
+            "bridge_operator = {} {} {}\n",
+            id,
+            crate::util::hex(&pk),
+            crate::util::hex(&pop)
+        )
+    }
+
+    #[test]
+    fn a_genesis_bridge_committee_at_a_bare_two_thirds_threshold_is_refused() {
+        let chain = "Q-dev-net-9";
+        let operators = format!(
+            "{}{}{}",
+            bridge_operator_line(1, 71, chain),
+            bridge_operator_line(2, 72, chain),
+            bridge_operator_line(3, 73, chain),
+        );
+        let bare = format!(
+            "{}{}bridge_threshold = 2\n",
+            three_validator_preamble(),
+            operators
+        );
+        let err = load_text("bridge-bare", bare)
+            .err()
+            .expect("a bare two thirds bridge committee is refused");
+        assert!(err.contains("two thirds BFT safety ratio"), "{err}");
+
+        let strict = format!(
+            "{}{}bridge_threshold = 3\n",
+            three_validator_preamble(),
+            operators
+        );
+        let outcome = load_text("bridge-strict", strict);
+        assert!(
+            outcome.is_ok(),
+            "a strict supermajority bridge committee loads {:?}",
+            outcome.err()
+        );
+    }
+
+    fn preamble_with_time(genesis_time: u64) -> String {
+        let mut text = format!(
+            "chain_id = Q-dev-net-9\ngenesis_time = {genesis_time}\nfee_transfer_micro_usd = 500\n\
+             fee_rate_micro_usd_per_qtov = 1000000\nfee_native_unit = 1000000\n\
+             fee_max_native = 1000\n"
+        );
+        for id in 1..=5u64 {
+            let v = validator(id, 2_000);
+            text.push_str(&format!(
+                "validator = {}\n",
+                validator_line(&v, &v.bond_address)
+            ));
+        }
+        text
+    }
+
+    #[test]
+    fn the_genesis_seats_a_nonzero_governance_era_unique_to_the_instance() {
+        let a = load_text("gov-era-a", preamble_with_time(1)).expect("genesis a loads");
+        let b = load_text("gov-era-b", preamble_with_time(2)).expect("genesis b loads");
+        let era_a = a
+            .genesis
+            .bridge_era
+            .expect("genesis a seats a governance era");
+        let era_b = b
+            .genesis
+            .bridge_era
+            .expect("genesis b seats a governance era");
+        assert_ne!(
+            era_a, [0u8; 32],
+            "the governance era is not the replayable zero era"
+        );
+        assert_ne!(
+            era_a, era_b,
+            "two genesis instances seat distinct governance eras so a guardian approval cannot replay across them"
+        );
     }
 }
