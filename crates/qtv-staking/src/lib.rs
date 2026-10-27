@@ -32,6 +32,41 @@ pub const BPS_DENOM: u128 = 10_000;
 
 pub const SLASH_ATTRIBUTABLE_BPS: u128 = 10_000;
 
+pub const REWARD_ANCHOR_USD_PER_QTOV: u64 = 3_000;
+
+pub const REWARD_BLOCKS_TIER_TOP: u64 = 250_000_000;
+
+pub const REWARD_BLOCKS_TIER_HIGH: u64 = 200_000_000;
+
+pub const REWARD_BLOCKS_TIER_MID: u64 = 150_000_000;
+
+pub const REWARD_USD_TIER_TOP: u64 = 100_000;
+
+pub const REWARD_USD_TIER_HIGH: u64 = 80_000;
+
+pub const REWARD_USD_TIER_MID: u64 = 50_000;
+
+pub const REWARD_USD_TIER_LOW_CAP: u64 = 30_000;
+
+pub fn reward_usd_to_quon(usd: u64) -> u64 {
+    ((usd as u128) * NATIVE_UNIT / (REWARD_ANCHOR_USD_PER_QTOV as u128)) as u64
+}
+
+pub fn validator_reward(blocks_completed: u64) -> u64 {
+    let usd = if blocks_completed >= REWARD_BLOCKS_TIER_TOP {
+        REWARD_USD_TIER_TOP
+    } else if blocks_completed >= REWARD_BLOCKS_TIER_HIGH {
+        REWARD_USD_TIER_HIGH
+    } else if blocks_completed >= REWARD_BLOCKS_TIER_MID {
+        REWARD_USD_TIER_MID
+    } else {
+        let ramp = (blocks_completed as u128) * (REWARD_USD_TIER_LOW_CAP as u128)
+            / (REWARD_BLOCKS_TIER_MID as u128);
+        (ramp as u64).min(REWARD_USD_TIER_LOW_CAP)
+    };
+    reward_usd_to_quon(usd)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Session {
     Low,
@@ -477,6 +512,25 @@ impl Decode for SessionMeter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_validator_reward_is_block_tiered_usd_anchored_and_capped() {
+        assert_eq!(reward_usd_to_quon(100_000), 33_333_333);
+        assert_eq!(validator_reward(250_000_000), 33_333_333);
+        assert_eq!(validator_reward(250_000_000), reward_usd_to_quon(100_000));
+        assert_eq!(validator_reward(300_000_000), reward_usd_to_quon(100_000));
+        assert_eq!(validator_reward(u64::MAX), reward_usd_to_quon(100_000));
+        assert_eq!(validator_reward(200_000_000), reward_usd_to_quon(80_000));
+        assert_eq!(validator_reward(150_000_000), reward_usd_to_quon(50_000));
+        assert!(validator_reward(149_999_999) <= reward_usd_to_quon(30_000));
+        assert!(validator_reward(149_999_999) >= reward_usd_to_quon(29_000));
+        assert_eq!(validator_reward(75_000_000), reward_usd_to_quon(15_000));
+        assert_eq!(validator_reward(0), 0);
+        assert!(
+            validator_reward(u64::MAX) <= reward_usd_to_quon(100_000),
+            "the reward never exceeds the anchored one hundred thousand dollar cap"
+        );
+    }
 
     #[test]
     fn a_slash_scales_against_the_basis_point_denominator() {
