@@ -3900,7 +3900,7 @@ impl Ledger {
                 if (rotation.threshold as usize) > operators.len() {
                     return Err(EnactError::BadValue);
                 }
-                if (rotation.threshold as usize) * 3 < operators.len() * 2 {
+                if (rotation.threshold as usize) * 3 <= operators.len() * 2 {
                     return Err(EnactError::BadValue);
                 }
                 let committee_size = operators.len() as u32;
@@ -7937,7 +7937,7 @@ mod stake_state_tests {
                 operator_claim(2, 1),
                 operator_claim(3, 2),
             ],
-            threshold: 2,
+            threshold: 3,
         };
         let rotate = l
             .gov_propose(
@@ -7958,7 +7958,7 @@ mod stake_state_tests {
         l.gov_enact(rotate, 18 * 86_400 + 3, TEST_CHAIN).unwrap();
         let set = l.bridge_operator_set().unwrap();
         assert_eq!(set.operators.len(), 3);
-        assert_eq!(set.threshold, 2);
+        assert_eq!(set.threshold, 3);
         assert!(set.revoked.is_empty());
 
         let revoke = l
@@ -8100,6 +8100,85 @@ mod stake_state_tests {
         assert!(
             l.bridge_operator_set().is_none(),
             "the sub supermajority rotation left the bridge inert"
+        );
+    }
+
+    #[test]
+    fn a_committee_rotation_refuses_a_bare_two_thirds_threshold() {
+        let mut l = Ledger::new();
+        l.seed_validator_bond(&gov_addr(97), 10_000 * 1_000_000);
+        let proposer = gov_addr(96);
+        fund(&mut l, &proposer, 4_000_000 * 1_000_000);
+        let voter = gov_addr(97);
+        fund(&mut l, &voter, 30_000 * 1_000_000);
+
+        let bare = qtv_governance::CommitteeRotation {
+            operators: vec![
+                operator_claim(1, 0),
+                operator_claim(2, 1),
+                operator_claim(3, 2),
+            ],
+            threshold: 2,
+        };
+        let weak = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::CommitteeRotate { rotation: bare },
+                0,
+            )
+            .unwrap();
+        l.gov_vote(
+            &voter,
+            weak,
+            true,
+            qtv_governance::Conviction::Liquid,
+            8_000 * 1_000_000,
+            0,
+        );
+        assert_eq!(
+            l.gov_enact(weak, 12 * 86_400 + 1, TEST_CHAIN),
+            Err(EnactError::BadValue),
+            "an exactly two thirds threshold on a multiple of three committee is refused"
+        );
+        assert!(
+            l.bridge_operator_set().is_none(),
+            "the bare two thirds rotation left the bridge inert"
+        );
+
+        let strict = qtv_governance::CommitteeRotation {
+            operators: vec![
+                operator_claim(1, 0),
+                operator_claim(2, 1),
+                operator_claim(3, 2),
+            ],
+            threshold: 3,
+        };
+        let firm = l
+            .gov_propose(
+                &proposer,
+                qtv_governance::Track::BridgeMigration,
+                qtv_governance::Action::CommitteeRotate { rotation: strict },
+                5 * 86_400 + 2,
+            )
+            .unwrap();
+        l.gov_vote(
+            &voter,
+            firm,
+            true,
+            qtv_governance::Conviction::Liquid,
+            8_000 * 1_000_000,
+            5 * 86_400 + 2,
+        );
+        assert_eq!(
+            l.gov_enact(firm, 18 * 86_400 + 3, TEST_CHAIN),
+            Ok(()),
+            "a strict supermajority above two thirds is accepted"
+        );
+        assert_eq!(
+            l.bridge_operator_set().map(|set| set.threshold),
+            Some(3),
+            "the strict rotation seeded the committee"
         );
     }
 
