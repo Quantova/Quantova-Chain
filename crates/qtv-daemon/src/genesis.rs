@@ -308,7 +308,7 @@ impl GenesisFile {
                  a one time tree that size exhausts memory before the node reaches a peer"
             ));
         }
-        enforce_no_capture(&validators, &accounts)?;
+        enforce_no_capture(&validators, &accounts, chain_id.starts_with("Q-dev-net"))?;
 
         let guardians = if guardian_members.is_empty() {
             GuardianSet::default()
@@ -397,6 +397,7 @@ fn reaches_fault_threshold(holding: u128, total: u128) -> bool {
 fn enforce_no_capture(
     validators: &[ValidatorSpec],
     accounts: &[GenesisAccount],
+    allow_single_bootstrap: bool,
 ) -> Result<(), String> {
     let mut ids = HashSet::new();
     let mut bonds = HashSet::new();
@@ -444,7 +445,7 @@ fn enforce_no_capture(
             ));
         }
     }
-    if validators.len() >= 2 {
+    if !allow_single_bootstrap || validators.len() >= 2 {
         let total_stake: u128 = validators.iter().map(|v| v.stake as u128).sum();
         for v in validators {
             if reaches_fault_threshold(v.stake as u128, total_stake) {
@@ -465,7 +466,7 @@ fn enforce_no_capture(
         }
     }
 
-    if accounts.len() >= 2 {
+    if !allow_single_bootstrap || accounts.len() >= 2 {
         let total_balance: u128 = accounts.iter().map(|a| a.balance as u128).sum();
         for a in accounts {
             if reaches_fault_threshold(a.balance as u128, total_balance) {
@@ -877,7 +878,7 @@ mod tests {
             account(4, 100),
         ];
         assert!(
-            enforce_no_capture(&validators, &accounts).is_ok(),
+            enforce_no_capture(&validators, &accounts, false).is_ok(),
             "a spread where every share sits strictly under a third clears the cap"
         );
     }
@@ -887,8 +888,27 @@ mod tests {
         let validators = vec![validator(1, 2_000)];
         let accounts = vec![account(1, 1_000_000_000_000)];
         assert!(
-            enforce_no_capture(&validators, &accounts).is_ok(),
+            enforce_no_capture(&validators, &accounts, true).is_ok(),
             "a lone bootstrap validator and faucet has no committee to capture from"
+        );
+    }
+
+    #[test]
+    fn a_single_account_holding_everything_is_rejected_off_dev_net() {
+        let validators = vec![
+            validator(1, 2_000),
+            validator(2, 2_000),
+            validator(3, 2_000),
+            validator(4, 2_000),
+        ];
+        let accounts = vec![account(1, 1_000_000_000_000)];
+        let err = enforce_no_capture(&validators, &accounts, false)
+            .expect_err("a lone account holding the whole supply must be rejected off a dev net");
+        assert!(err.contains("account qtv1account1"), "{err}");
+        assert!(err.contains("fault threshold"), "{err}");
+        assert!(
+            enforce_no_capture(&validators, &accounts, true).is_ok(),
+            "the same lone account clears the cap under the dev net bootstrap exception"
         );
     }
 
@@ -904,7 +924,7 @@ mod tests {
             validator(4, 2_000),
             validator(5, 2_000),
         ];
-        let err = enforce_no_capture(&set, &[account(1, 100)])
+        let err = enforce_no_capture(&set, &[account(1, 100)], false)
             .expect_err("cloned key material must be rejected");
         assert!(
             err.contains("reuses"),
@@ -919,7 +939,7 @@ mod tests {
             validator(2, 2_000),
             validator(3, 2_000),
         ];
-        let err = enforce_no_capture(&validators, &[])
+        let err = enforce_no_capture(&validators, &[], false)
             .expect_err("a share at exactly a third is rejected");
         assert!(err.contains("validator 1"), "{err}");
         assert!(err.contains("fault threshold"), "{err}");
@@ -933,8 +953,8 @@ mod tests {
             validator(3, 2_000),
             validator(4, 9_000),
         ];
-        let err =
-            enforce_no_capture(&validators, &[]).expect_err("the whale validator is rejected");
+        let err = enforce_no_capture(&validators, &[], false)
+            .expect_err("the whale validator is rejected");
         assert!(err.contains("validator 4"), "{err}");
     }
 
@@ -942,7 +962,7 @@ mod tests {
     fn two_equal_validators_each_at_half_are_rejected() {
         let validators = vec![validator(1, 2_000), validator(2, 2_000)];
         assert!(
-            enforce_no_capture(&validators, &[]).is_err(),
+            enforce_no_capture(&validators, &[], false).is_err(),
             "half the stake is at or above the fault threshold"
         );
     }
@@ -956,8 +976,8 @@ mod tests {
             validator(3, 2_000),
             validator(4, 2_000),
         ];
-        let err =
-            enforce_no_capture(&validators, &accounts).expect_err("the whale account is rejected");
+        let err = enforce_no_capture(&validators, &accounts, false)
+            .expect_err("the whale account is rejected");
         assert!(err.contains("account qtv1account2"), "{err}");
     }
 
