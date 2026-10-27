@@ -564,7 +564,7 @@ impl LockViolation {
             || self
                 .prevote
                 .pol
-                .is_some_and(|pol| pol >= self.precommit.view)
+                .is_some_and(|pol| pol > self.precommit.view)
         {
             return false;
         }
@@ -1441,5 +1441,75 @@ mod tests {
             genuine.attributes(CHAIN_ID, attester.attest_public_key()),
             "a genuine same signed view double vote attributes and is slashable"
         );
+    }
+
+    #[test]
+    fn a_prevote_citing_its_own_lock_round_attributes_at_the_equal_boundary() {
+        let (attester, address) = attester();
+        let beacon = Beacon::genesis();
+        let height = 1u64;
+        let slot = 1u64;
+        let committee = [0u8; 32];
+
+        let precommit_view = 2u64;
+        let precommit_value = [1u8; 32];
+        let precommit_block =
+            qtv_bft::block::Block::with_cost(height, precommit_value, Parent::Genesis, 7);
+        let precommit_att = attester
+            .attest(
+                CHAIN_ID,
+                height,
+                slot,
+                precommit_view,
+                committee,
+                precommit_block,
+                &beacon,
+            )
+            .expect("the attester holds a credential for this slot");
+        let precommit = SignedPrecommit {
+            view: precommit_view,
+            slot,
+            committee,
+            value: precommit_value,
+            parent: None,
+            cost: 7,
+            sig: precommit_att.sig.to_vec(),
+        };
+
+        let prevote_view = 5u64;
+        let prevote_value = [2u8; 32];
+        let pol = Some(precommit_view);
+        let prevote_block = prevote_block(height, prevote_view, &prevote_value, pol);
+        let prevote_att = attester
+            .attest(
+                CHAIN_ID,
+                height,
+                slot,
+                prevote_view,
+                committee,
+                prevote_block,
+                &beacon,
+            )
+            .expect("the attester holds a credential for this slot");
+        let prevote = SignedPrevote {
+            slot,
+            committee,
+            value: prevote_value,
+            pol,
+            sig: prevote_att.sig.to_vec(),
+        };
+
+        let violation = LockViolation {
+            offender: address,
+            height,
+            precommit,
+            prevote_view,
+            prevote,
+        };
+        assert!(
+            violation.attributes(CHAIN_ID, attester.attest_public_key()),
+            "a prevote whose proof of lock equals its own precommit view is an unjustified unlock and must slash"
+        );
+        assert_eq!(LockViolation::decode(&violation.encode()), Some(violation));
     }
 }
