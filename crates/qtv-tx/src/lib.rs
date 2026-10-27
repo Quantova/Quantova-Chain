@@ -366,7 +366,7 @@ pub fn verify(wrapper: &Wrapper, public_key: &[u8], genesis: &[u8; 32]) -> bool 
                 Ok(signature) => signature,
                 Err(_) => return false,
             };
-            ml_dsa::verify(public_key, &digest, signature, DOMAIN_TX)
+            ml_dsa::verify_strict(public_key, &digest, signature, DOMAIN_TX)
         }
         SCHEME_HASH => {
             let public_key: &[u8; slh_dsa::PUBLIC_KEY_BYTES] = match public_key.try_into() {
