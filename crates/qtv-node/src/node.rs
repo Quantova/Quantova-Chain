@@ -4585,6 +4585,7 @@ mod tests {
         ledger.credit_supply(700_000 * 1_000_000);
         ledger.seed_validator_bond(&validator.address(), 2_000 * 1_000_000);
         ledger.set_stake_mainnet_start(0);
+        ledger.set_execution_height(qtv_staking::REWARD_PERIOD_BLOCKS);
         ledger.set_stake_price(70 * 1_000_000);
         ledger.accrue_reward(&validator.address(), 400);
 

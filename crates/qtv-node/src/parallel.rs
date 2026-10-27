@@ -819,6 +819,7 @@ mod tests {
         base.seed_validator_bond(&validator, 2_000 * 1_000_000);
         base.seed_validator_set(&[[60u8; 32]]);
         base.set_stake_mainnet_start(0);
+        base.set_execution_height(qtv_staking::REWARD_PERIOD_BLOCKS);
         base.set_stake_price(70 * 1_000_000);
 
         let block: Vec<Wrapper> = (0..12)

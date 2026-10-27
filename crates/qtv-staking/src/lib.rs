@@ -48,6 +48,8 @@ pub const REWARD_USD_TIER_MID: u64 = 50_000;
 
 pub const REWARD_USD_TIER_LOW_CAP: u64 = 30_000;
 
+pub const REWARD_PERIOD_BLOCKS: u64 = REWARD_BLOCKS_TIER_TOP;
+
 pub fn reward_usd_to_quon(usd: u64) -> u64 {
     ((usd as u128) * NATIVE_UNIT / (REWARD_ANCHOR_USD_PER_QTOV as u128)) as u64
 }

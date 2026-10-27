@@ -156,6 +156,8 @@ fn stake_rewards_key(id: &[u8; 32]) -> Key {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RewardBook {
     pub tranches: Vec<qtv_staking::RewardTranche>,
+    pub period_anchor: u64,
+    pub paid_in_period: u64,
 }
 
 impl Encode for RewardBook {
@@ -164,6 +166,8 @@ impl Encode for RewardBook {
         for tranche in &self.tranches {
             tranche.encode(encoder);
         }
+        self.period_anchor.encode(encoder);
+        self.paid_in_period.encode(encoder);
     }
 }
 
@@ -174,7 +178,13 @@ impl Decode for RewardBook {
         for _ in 0..count {
             tranches.push(qtv_staking::RewardTranche::decode(decoder)?);
         }
-        Ok(RewardBook { tranches })
+        let period_anchor = u64::decode(decoder)?;
+        let paid_in_period = u64::decode(decoder)?;
+        Ok(RewardBook {
+            tranches,
+            period_anchor,
+            paid_in_period,
+        })
     }
 }
 
@@ -2612,18 +2622,18 @@ impl Ledger {
             .sum()
     }
 
-    fn accrue_reward_by_id(&mut self, id: &[u8; 32], now_day: u64, denom: u64) -> u64 {
+    fn accrue_reward_by_id(&mut self, id: &[u8; 32], now_day: u64, _denom: u64) -> u64 {
         if qtv_staking::in_blackout(now_day, self.stake_mainnet_start()) {
             return 0;
         }
         if self.is_stake_banned(id) || self.is_gov_blacklisted(id) {
             return 0;
         }
-        let stake = match self.stake_bond(id) {
-            Some(bond) => bond.weight_in_epoch(self.current_epoch(), self.heights_per_epoch),
+        let bond = match self.stake_bond(id) {
+            Some(bond) => bond,
             None => return 0,
         };
-        if stake == 0 {
+        if bond.weight_in_epoch(self.current_epoch(), self.heights_per_epoch) == 0 {
             return 0;
         }
         if self
@@ -2634,10 +2644,21 @@ impl Ledger {
         {
             return 0;
         }
-        let paid = qtv_staking::session_reward(stake, denom, self.total_supply());
+        let height = self.execution_height();
+        let mut book = self.stake_rewards(id);
+        let anchor = book.period_anchor.max(bond.raised_at_height);
+        if book.period_anchor != anchor {
+            book.period_anchor = anchor;
+            book.paid_in_period = 0;
+        }
+        let blocks = height.saturating_sub(book.period_anchor);
+        let entitled = qtv_staking::validator_reward(blocks);
+        let paid = entitled.saturating_sub(book.paid_in_period);
         if paid == 0 {
+            self.set_stake_rewards(id, &book);
             return 0;
         }
+        book.paid_in_period = book.paid_in_period.saturating_add(paid);
         let from_pool = paid.min(self.stake_pool());
         if from_pool > 0 {
             self.set_stake_pool(self.stake_pool() - from_pool);
@@ -2645,12 +2666,15 @@ impl Ledger {
         if paid > from_pool {
             self.credit_supply(paid - from_pool);
         }
-        let mut book = self.stake_rewards(id);
         book.tranches.push(qtv_staking::RewardTranche {
             earned_day: now_day,
             amount: paid,
             claimed: 0,
         });
+        if blocks >= qtv_staking::REWARD_PERIOD_BLOCKS {
+            book.period_anchor = height;
+            book.paid_in_period = 0;
+        }
         self.set_stake_rewards(id, &book);
         if let Some(address) = id_bytes_to_address(id) {
             self.record_reward_event(&address, paid);
@@ -4449,6 +4473,7 @@ mod stake_state_tests {
                 l.seed_validator_bond(&ao, 30_000 * 1_000_000);
             }
             l.set_stake_mainnet_start(0);
+            l.set_execution_height(qtv_staking::REWARD_PERIOD_BLOCKS);
             l.settle_session(400, 1);
             l.stake_rewards_outstanding(&v1)
         };
@@ -6948,7 +6973,8 @@ mod stake_state_tests {
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000);
 
         l.set_stake_mainnet_start(0);
-        let emission = qtv_staking::session_emission(2_000 * 1_000_000, l.total_supply());
+        l.set_execution_height(qtv_staking::REWARD_PERIOD_BLOCKS);
+        let emission = qtv_staking::validator_reward(qtv_staking::REWARD_PERIOD_BLOCKS);
         assert_eq!(l.accrue_reward(&addr, 400), emission);
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000 - emission);
 
@@ -6969,6 +6995,7 @@ mod stake_state_tests {
         l.credit_supply(700_000 * 1_000_000);
         l.seed_validator_bond(&addr, 2_000 * 1_000_000);
         l.set_stake_mainnet_start(0);
+        l.set_execution_height(qtv_staking::REWARD_PERIOD_BLOCKS);
         l.set_gov_blacklisted(&id);
         assert_eq!(l.accrue_reward(&addr, 400), 0);
         assert_eq!(l.stake_pool(), 700_000 * 1_000_000);
@@ -6982,7 +7009,8 @@ mod stake_state_tests {
         l.credit_supply(700_000 * 1_000_000);
         l.seed_validator_bond(&addr, 2_000 * 1_000_000);
         l.set_stake_mainnet_start(0);
-        let emission = qtv_staking::session_emission(2_000 * 1_000_000, l.total_supply());
+        l.set_execution_height(qtv_staking::REWARD_PERIOD_BLOCKS);
+        let emission = qtv_staking::validator_reward(qtv_staking::REWARD_PERIOD_BLOCKS);
         assert_eq!(l.accrue_reward(&addr, 400), emission);
 
         assert_eq!(l.balance(&addr), 0);
@@ -7132,7 +7160,8 @@ mod stake_state_tests {
         l.credit_supply(700_000 * 1_000_000);
         l.seed_validator_bond(&addr, 2_000 * 1_000_000);
         l.set_stake_mainnet_start(0);
-        let emission = qtv_staking::session_emission(2_000 * 1_000_000, l.total_supply());
+        l.set_execution_height(qtv_staking::REWARD_PERIOD_BLOCKS);
+        let emission = qtv_staking::validator_reward(qtv_staking::REWARD_PERIOD_BLOCKS);
         assert_eq!(l.accrue_reward(&addr, 400), emission);
         assert_eq!(l.claimable_reward(&addr, 400 + 365), emission);
         l.slash_stake(&addr, qtv_staking::Fault::Attributable);
@@ -7151,7 +7180,8 @@ mod stake_state_tests {
         l.credit_supply(700_000 * 1_000_000);
         l.seed_validator_bond(&addr, 2_000 * 1_000_000);
         l.set_stake_mainnet_start(0);
-        let owed = qtv_staking::session_emission(2_000 * 1_000_000, l.total_supply());
+        l.set_execution_height(qtv_staking::REWARD_PERIOD_BLOCKS);
+        let owed = qtv_staking::validator_reward(qtv_staking::REWARD_PERIOD_BLOCKS);
         let supply_before = l.total_supply();
 
         let first = l.accrue_reward(&addr, 400);
@@ -7167,6 +7197,7 @@ mod stake_state_tests {
             "only the part the pot could not cover is minted"
         );
 
+        l.set_execution_height(2 * qtv_staking::REWARD_PERIOD_BLOCKS);
         let second = l.accrue_reward(&addr, 400 + qtv_staking::SESSION_DAYS);
         assert_eq!(
             second, owed,
@@ -7245,6 +7276,7 @@ mod stake_state_tests {
         );
 
         l.set_stake_mainnet_start(0);
+        l.set_execution_height(qtv_staking::REWARD_PERIOD_BLOCKS);
         let paid = l.accrue_reward(&bob, 400);
         assert!(
             paid > 0,
@@ -7268,7 +7300,7 @@ mod stake_state_tests {
     fn a_slash_disposes_the_forfeited_reward_and_conserves_supply() {
         let pool = 700_000 * 1_000_000;
         let bond = 2_000 * 1_000_000;
-        let emission = qtv_staking::session_emission(bond, pool + bond);
+        let emission = qtv_staking::validator_reward(qtv_staking::REWARD_PERIOD_BLOCKS);
 
         let mut burn = Ledger::new();
         let v1 = qtv_idfmt::render_address(&[19u8; 32]).unwrap();
@@ -7276,6 +7308,7 @@ mod stake_state_tests {
         burn.seed_stake_pool(pool);
         burn.seed_validator_bond(&v1, bond);
         burn.set_stake_mainnet_start(0);
+        burn.set_execution_height(qtv_staking::REWARD_PERIOD_BLOCKS);
         assert_eq!(burn.accrue_reward(&v1, 400), emission);
         let supply_before = burn.total_supply();
         assert!(burn.slash_validator(&v1));
@@ -7291,6 +7324,7 @@ mod stake_state_tests {
         treasury.seed_stake_pool(pool);
         treasury.seed_validator_bond(&v2, bond);
         treasury.set_stake_mainnet_start(0);
+        treasury.set_execution_height(qtv_staking::REWARD_PERIOD_BLOCKS);
         assert_eq!(treasury.accrue_reward(&v2, 400), emission);
         let supply_held = treasury.total_supply();
         assert_eq!(
@@ -7310,6 +7344,40 @@ mod stake_state_tests {
     }
 
     #[test]
+    fn the_validator_reward_is_block_tiered_and_independent_of_supply() {
+        let seed = |supply: u64, tag: u8, height: u64| {
+            let mut l = Ledger::new();
+            let addr = qtv_idfmt::render_address(&[tag; 32]).unwrap();
+            l.seed_stake_pool(700_000 * 1_000_000);
+            l.credit_supply(supply);
+            l.seed_validator_bond(&addr, 2_000 * 1_000_000);
+            l.set_stake_mainnet_start(0);
+            l.set_execution_height(height);
+            l.accrue_reward(&addr, 400)
+        };
+        let mid = seed(700_000 * 1_000_000, 51, qtv_staking::REWARD_BLOCKS_TIER_MID);
+        assert_eq!(
+            mid,
+            qtv_staking::reward_usd_to_quon(50_000),
+            "a validator that completed the mid tier of blocks earns the fifty thousand dollar tier"
+        );
+        assert_eq!(
+            seed(
+                50_000_000 * 1_000_000,
+                52,
+                qtv_staking::REWARD_BLOCKS_TIER_MID
+            ),
+            mid,
+            "the same block count earns the same reward no matter the total supply"
+        );
+        assert_eq!(
+            seed(700_000 * 1_000_000, 53, qtv_staking::REWARD_PERIOD_BLOCKS),
+            qtv_staking::reward_usd_to_quon(100_000),
+            "a full period earns the one hundred thousand dollar cap and never more"
+        );
+    }
+
+    #[test]
     fn a_gov_blacklisted_validator_cannot_claim_accrued_rewards() {
         let mut l = Ledger::new();
         let addr = qtv_idfmt::render_address(&[17u8; 32]).unwrap();
@@ -7318,10 +7386,11 @@ mod stake_state_tests {
         l.credit_supply(700_000 * 1_000_000);
         l.seed_validator_bond(&addr, 2_000 * 1_000_000);
         l.set_stake_mainnet_start(0);
+        l.set_execution_height(qtv_staking::REWARD_PERIOD_BLOCKS);
         l.accrue_reward(&addr, 400);
         assert_eq!(
             l.claimable_reward(&addr, 400 + 365),
-            qtv_staking::session_emission(2_000 * 1_000_000, l.total_supply())
+            qtv_staking::validator_reward(qtv_staking::REWARD_PERIOD_BLOCKS)
         );
         l.set_gov_blacklisted(&id);
         assert_eq!(l.claimable_reward(&addr, 400 + 365), 0);
@@ -7345,6 +7414,7 @@ mod stake_state_tests {
         assert_eq!(l.claimable_reward(&v, 1_000), 0);
 
         l.set_stake_mainnet_start(0);
+        l.set_execution_height(qtv_staking::REWARD_PERIOD_BLOCKS);
         l.set_stake_price(70 * 1_000_000);
 
         l.settle_session(182, 5);
@@ -7354,12 +7424,11 @@ mod stake_state_tests {
         l.settle_session(546, 5);
         assert_eq!(
             l.stake_pool(),
-            700_000 * 1_000_000
-                - qtv_staking::session_emission(2_000 * 1_000_000, l.total_supply())
+            700_000 * 1_000_000 - qtv_staking::validator_reward(qtv_staking::REWARD_PERIOD_BLOCKS)
         );
         assert_eq!(
             l.claimable_reward(&v, 546 + 365),
-            qtv_staking::session_emission(2_000 * 1_000_000, l.total_supply())
+            qtv_staking::validator_reward(qtv_staking::REWARD_PERIOD_BLOCKS)
         );
     }
 
@@ -9158,6 +9227,7 @@ mod stake_state_tests {
         fund(&mut l, &addr, 10_000 * 1_000_000);
         assert!(l.bond_with_fee(&addr, 2_000 * 1_000_000, 0, 0));
         l.set_stake_mainnet_start(0);
+        l.set_execution_height(qtv_staking::REWARD_PERIOD_BLOCKS);
         l.set_stake_price(1);
         l.set_stake_pool(1_000_000 * 1_000_000);
         l.credit_supply(1_000_000 * 1_000_000);
