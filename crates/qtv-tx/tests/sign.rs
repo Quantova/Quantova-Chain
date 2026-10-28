@@ -288,7 +288,7 @@ fn the_chain_id_follows_the_display_string_hash() {
         qtv_tx::MAINNET_CHAIN_ID
     );
     assert_eq!(qtv_tx::LOCAL_CHAIN_NAME, "Q-dev-net-1");
-    assert_eq!(qtv_tx::TESTNET_CHAIN_NAME, "Test-Net-0-1");
+    assert_eq!(qtv_tx::TESTNET_CHAIN_NAME, "Q-TestNet-1");
     assert_eq!(qtv_tx::MAINNET_CHAIN_NAME, "Q-main-net-1");
 }
 
