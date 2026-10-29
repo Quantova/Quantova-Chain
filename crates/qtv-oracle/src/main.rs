@@ -5,13 +5,14 @@ use std::env;
 use std::fs;
 
 use qtv_account::{address_for_key, derive};
-use qtv_codec::to_bytes;
+use qtv_codec::{to_bytes, Encoder};
 use qtv_crypto::ml_dsa::{self, PUBLIC_KEY_BYTES, SECRET_KEY_BYTES, SIGNATURE_BYTES};
+use qtv_crypto::sha3;
 use qtv_node::bridge::{
     attest_context, operator_pop_challenge, operator_pop_ok, quorum_attests, Attestation,
     Direction, Fact, MintArtifact, OperatorSet, SignerSig, FACT_VERSION, POP_DOMAIN,
 };
-use qtv_node::ledger::bridge_mint_address;
+use qtv_node::ledger::{bridge_guardian_address, bridge_mint_address};
 use qtv_tx::{try_sign, Body, Call};
 use qtv_wipe::Zeroizing;
 
@@ -565,6 +566,173 @@ fn guardian_keygen(a: &[String]) {
     eprintln!("wrote {prefix}.gsecret + {prefix}.gpub  (member_id {mid})");
 }
 
+const GUARDIAN_DOMAIN: &[u8] = b"QUANTOVA/Q/BRIDGE-GUARDIAN/v1";
+const GUARDIAN_UNFREEZE: u8 = 0;
+const GUARDIAN_FREEZE: u8 = 1;
+const GUARDIAN_TRANSFER_METER: u64 = 1_210;
+
+fn guardian_challenge_bytes(
+    chain_id: u64,
+    era: &[u8; 32],
+    op: u8,
+    bound: u64,
+    targets: &[[u8; 32]],
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut m = Vec::new();
+    m.extend_from_slice(&chain_id.to_le_bytes());
+    m.extend_from_slice(era);
+    m.push(op);
+    m.extend_from_slice(&bound.to_le_bytes());
+    m.extend_from_slice(&(targets.len() as u32).to_le_bytes());
+    for t in targets {
+        m.extend_from_slice(t);
+    }
+    m.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    m.extend_from_slice(payload);
+    m
+}
+
+fn guardian_act_bytes(
+    op: u8,
+    bound: u64,
+    targets: &[[u8; 32]],
+    approvals: &[(u8, Vec<u8>, Vec<u8>)],
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_u8(op);
+    e.put_u64(bound);
+    e.put_u32(targets.len() as u32);
+    for t in targets {
+        e.put_bytes(t);
+    }
+    e.put_u32(approvals.len() as u32);
+    for (scheme, pk, sig) in approvals {
+        e.put_u8(*scheme);
+        e.put_bytes(pk);
+        e.put_bytes(sig);
+    }
+    e.put_bytes(payload);
+    e.into_bytes()
+}
+
+fn guardian_verify(a: &[String]) {
+    if a.is_empty() {
+        fail("guardian-verify <guardian_seed_file> [more ...]");
+    }
+    for path in a {
+        let seed = read_seed(path);
+        let (pk, _sk) = ml_dsa::keygen(&seed);
+        println!("{path} keygen       {}", guardian_member_id_hex(&pk));
+        for index in 0u64..3 {
+            let acct = derive(&seed, index);
+            println!(
+                "{path} derive[{index}]    {}",
+                guardian_member_id_hex(acct.public_key())
+            );
+        }
+    }
+}
+
+fn governance_era_cmd(a: &[String]) {
+    if a.len() != 2 {
+        fail("governance-era <chain_id_name> <genesis_time>");
+    }
+    let binding = qtv_tx::chain_id_from_name(&a[0]);
+    let genesis_time: u64 = arg(&a[1], "genesis_time");
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"QUANTOVA/GOVERNANCE-ERA/v1");
+    buf.extend_from_slice(&binding.to_le_bytes());
+    buf.extend_from_slice(&genesis_time.to_le_bytes());
+    let era = sha3::sha3_256(&buf);
+    eprintln!("chain_binding {binding}");
+    println!("{}", hexs(&era));
+}
+
+fn guardian_approval(seed_path: &str, message: &[u8]) -> (u8, Vec<u8>, Vec<u8>) {
+    let master = read_seed(seed_path);
+    let acct = derive(&master, 0);
+    let (pk, sk) = ml_dsa::keygen(acct.seed());
+    let sig = ml_dsa::sign(&sk, message, GUARDIAN_DOMAIN, &[0u8; 32])
+        .unwrap_or_else(|| fail("signing the guardian act"));
+    if !ml_dsa::verify(&pk, message, &sig, GUARDIAN_DOMAIN) {
+        fail("the guardian signature does not self verify");
+    }
+    eprintln!("approval from member {}", guardian_member_id_hex(&pk));
+    (1u8, pk.to_vec(), sig.to_vec())
+}
+
+fn guardian_args(a: &[String], op: u8) {
+    if a.len() < 6 {
+        fail("<chain_id> <era_hex> <bound> <target_address> <guardian_seed_file> <guardian_seed_file> [more ...]");
+    }
+    let chain_id: u64 = arg(&a[0], "chain_id");
+    let era: [u8; 32] = fixed(&a[1], "era");
+    let bound: u64 = arg(&a[2], "bound");
+    let payload_vec = qtv_idfmt::parse_address(&a[3])
+        .unwrap_or_else(|_| fail("the target address does not parse"));
+    let target: [u8; 32] = payload_vec
+        .as_slice()
+        .try_into()
+        .unwrap_or_else(|_| fail("the target address is not a 32 byte account id"));
+    let targets = vec![target];
+    let payload: Vec<u8> = Vec::new();
+    let message = guardian_challenge_bytes(chain_id, &era, op, bound, &targets, &payload);
+    let approvals: Vec<(u8, Vec<u8>, Vec<u8>)> = a[4..]
+        .iter()
+        .map(|p| guardian_approval(p, &message))
+        .collect();
+    let args = guardian_act_bytes(op, bound, &targets, &approvals, &payload);
+    eprintln!("guardian_address {}", bridge_guardian_address());
+    eprintln!("meter {GUARDIAN_TRANSFER_METER}");
+    println!("{}", hexs(&args));
+}
+
+fn guardian_act(a: &[String], op: u8) {
+    if a.len() < 10 {
+        fail("<chain_id> <era_hex> <genesis_hex> <bound> <target_address> <relayer_seed_file> <relayer_index> <relayer_nonce> <fee> <guardian_seed_file> [more guardian seeds ...]");
+    }
+    let chain_id: u64 = arg(&a[0], "chain_id");
+    let era: [u8; 32] = fixed(&a[1], "era");
+    let genesis: [u8; 32] = fixed(&a[2], "genesis");
+    let bound: u64 = arg(&a[3], "bound");
+    let payload_vec = qtv_idfmt::parse_address(&a[4])
+        .unwrap_or_else(|_| fail("the target address does not parse"));
+    let target: [u8; 32] = payload_vec
+        .as_slice()
+        .try_into()
+        .unwrap_or_else(|_| fail("the target address is not a 32 byte account id"));
+    let targets = vec![target];
+    let relayer_seed = read_seed(&a[5]);
+    let relayer_index: u64 = arg(&a[6], "relayer_index");
+    let tx_nonce: u64 = arg(&a[7], "relayer_nonce");
+    let fee: u128 = arg(&a[8], "fee");
+    let payload: Vec<u8> = Vec::new();
+    let message = guardian_challenge_bytes(chain_id, &era, op, bound, &targets, &payload);
+    let mut approvals: Vec<(u8, Vec<u8>, Vec<u8>)> = Vec::new();
+    for path in &a[9..] {
+        approvals.push(guardian_approval(path, &message));
+    }
+    let args = guardian_act_bytes(op, bound, &targets, &approvals, &payload);
+    let relayer = derive(&relayer_seed, relayer_index);
+    let call = Call::new(bridge_guardian_address(), args);
+    let body = Body::with_context(
+        relayer.address(),
+        tx_nonce,
+        GUARDIAN_TRANSFER_METER,
+        fee,
+        call,
+        0,
+        chain_id,
+    );
+    let Some(wrapper) = try_sign(&relayer, &body, &genesis) else {
+        fail("the relayer address does not parse");
+    };
+    eprintln!("relayer {} nonce {tx_nonce}", relayer.address());
+    println!("{}", hexs(&to_bytes(&wrapper)));
+}
+
 fn main() {
     let argv: Vec<String> = env::args().skip(1).collect();
     match argv.first().map(String::as_str) {
@@ -574,7 +742,13 @@ fn main() {
         Some("mint") => mint(&argv[1..]),
         Some("check") => check(&argv[1..]),
         Some("guardian-keygen") => guardian_keygen(&argv[1..]),
-        _ => fail("usage: qtv-oracle <keygen|committee|attest|mint|check|guardian-keygen> ..."),
+        Some("guardian-verify") => guardian_verify(&argv[1..]),
+        Some("governance-era") => governance_era_cmd(&argv[1..]),
+        Some("guardian-freeze") => guardian_act(&argv[1..], GUARDIAN_FREEZE),
+        Some("guardian-unfreeze") => guardian_act(&argv[1..], GUARDIAN_UNFREEZE),
+        Some("guardian-freeze-args") => guardian_args(&argv[1..], GUARDIAN_FREEZE),
+        Some("guardian-unfreeze-args") => guardian_args(&argv[1..], GUARDIAN_UNFREEZE),
+        _ => fail("usage: qtv-oracle <keygen|committee|attest|mint|check|guardian-keygen|guardian-verify|guardian-freeze|guardian-unfreeze> ..."),
     }
 }
 
