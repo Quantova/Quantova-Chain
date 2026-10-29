@@ -232,7 +232,7 @@ fn start_verify_pool() -> (SyncSender<VerifyJob>, Receiver<VerifyDone>) {
 use crate::mesh::Mesh;
 use crate::util::{hex, log};
 
-const TICK: Duration = Duration::from_millis(20);
+const TICK: Duration = Duration::from_millis(5);
 
 const VIEW_BACKOFF_CAP: u32 = 3;
 
