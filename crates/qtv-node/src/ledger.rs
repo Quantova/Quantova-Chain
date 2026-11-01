@@ -2908,11 +2908,12 @@ impl Ledger {
         holder: &[u8; 32],
         amount: u128,
     ) -> bool {
+        let ceiling = self.mint_ceiling(contract_id);
         let issued = self.asset_supply(&asset_id_of(contract_id));
-        if issued
-            .checked_add(amount)
-            .is_none_or(|total| total > self.mint_ceiling(contract_id))
-        {
+        let Some(total) = issued.checked_add(amount) else {
+            return false;
+        };
+        if ceiling != 0 && total > ceiling {
             return false;
         }
         self.mint_asset(contract_id, holder, amount)
