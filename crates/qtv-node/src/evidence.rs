@@ -142,7 +142,7 @@ impl Equivocation {
     }
 }
 
-pub const PREVOTE_DOMAIN: &[u8] = b"QTV-DEVNET-PREVOTE";
+pub const PREVOTE_DOMAIN: &[u8] = b"QTV-CONSENSUS-PREVOTE";
 
 pub fn prevote_block(
     height: u64,
@@ -308,7 +308,7 @@ impl PrevoteEquivocation {
     }
 }
 
-pub const PROPOSAL_DOMAIN: &[u8] = b"QTV-DEVNET-PROPOSAL-v2";
+pub const PROPOSAL_DOMAIN: &[u8] = b"QTV-CONSENSUS-PROPOSAL-v2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProposalShape {
