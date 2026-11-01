@@ -20,7 +20,7 @@ qtv-block = { path = "../qtv-block" }
 qtv-idfmt = { path = "../qtv-idfmt" }
 qtv-vm = { git = "https://github.com/Quantova/QVM.git", rev = "7137396ef4c6367d7df8872bb482738a5203fb57" }
 
-qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "f00f4cf53e38a1c818dcf716d92897eebb3b31c2" }
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "26cf4bf0dceee67cb2868b3f2afe1089ac69bc57" }
 
 [dev-dependencies]
 qtv-devnet = { path = "../qtv-devnet", features = ["test-fixtures"] }

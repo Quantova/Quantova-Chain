@@ -21,8 +21,8 @@ qtv-node = { path = "../../crates/qtv-node", features = ["test-fixtures"] }
 
 qtv-devnet = { path = "../../crates/qtv-devnet", features = ["test-fixtures"] }
 
-qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "f00f4cf53e38a1c818dcf716d92897eebb3b31c2" }
-qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "f00f4cf53e38a1c818dcf716d92897eebb3b31c2" }
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "26cf4bf0dceee67cb2868b3f2afe1089ac69bc57" }
+qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "26cf4bf0dceee67cb2868b3f2afe1089ac69bc57" }
 
 [lints]
 workspace = true
