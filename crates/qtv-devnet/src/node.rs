@@ -439,13 +439,16 @@ impl DevNode {
         let state_store = StateStore::open_with_floor(node.store_dir.join("state.log"), floor)?;
         let burn_archive = BurnArchive::open(node.store_dir.join("burns.log"))?;
         let roster_archive = RosterArchive::open(node.store_dir.join("rosters.log"))?;
-        let sign_guard = SignGuard::open(node.store_dir.join("sign.watermark"))?;
-        let prevote_guard = PrevoteGuard::open(node.store_dir.join("prevote.watermark"))?;
-        let proposal_guard = PrevoteGuard::open(node.store_dir.join("proposal.watermark"))?;
+        let mut sign_guard = SignGuard::open(node.store_dir.join("sign.watermark"))?;
+        let mut prevote_guard = PrevoteGuard::open(node.store_dir.join("prevote.watermark"))?;
+        let mut proposal_guard = PrevoteGuard::open(node.store_dir.join("proposal.watermark"))?;
         if let Some(head) = block_store.head_height() {
             if sign_guard.mark().is_none() || prevote_guard.mark().is_none() {
                 return Err(RoundError::WatermarkBehindBlocks { head });
             }
+            sign_guard.raise_to(head)?;
+            prevote_guard.raise_to(head)?;
+            proposal_guard.raise_to(head)?;
         }
         let lock_file = LockFile::open(node.store_dir.join("lock.state"));
 
