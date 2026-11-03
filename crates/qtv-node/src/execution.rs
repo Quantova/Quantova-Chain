@@ -29,6 +29,7 @@ fn explain_fault(
     vm_limit: u64,
     fault: &Fault,
 ) -> (Rule, u32) {
+    const DIAGNOSTIC_METER: u64 = 1_000_000;
     if matches!(fault, Fault::DivByZero) {
         if let Some(code) = qtv_vm::abort::halting_stubs(&container.code) {
             let patched = qtv_vm::container::Container::new(
@@ -36,11 +37,12 @@ fn explain_fault(
                 container.consts.clone(),
                 container.entries.clone(),
             );
+            let diag_limit = vm_limit.min(DIAGNOSTIC_METER);
             let genesis = qtv_vm::container::selector(qtv_vm::container::GENESIS_SIGNATURE);
             let opened = if selector == genesis {
-                Interpreter::for_genesis(&patched, vm_limit)
+                Interpreter::for_genesis(&patched, diag_limit)
             } else {
-                Interpreter::for_entry(&patched, selector, vm_limit)
+                Interpreter::for_entry(&patched, selector, diag_limit)
             };
             if let Ok(interpreter) = opened {
                 if let Ok(out) = interpreter
