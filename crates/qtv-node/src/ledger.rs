@@ -178,8 +178,8 @@ impl Decode for RewardBook {
         for _ in 0..count {
             tranches.push(qtv_staking::RewardTranche::decode(decoder)?);
         }
-        let period_anchor = u64::decode(decoder)?;
-        let paid_in_period = u64::decode(decoder)?;
+        let period_anchor = u64::decode(decoder).unwrap_or(0);
+        let paid_in_period = u64::decode(decoder).unwrap_or(0);
         Ok(RewardBook {
             tranches,
             period_anchor,
@@ -2578,7 +2578,7 @@ impl Ledger {
         self.trie
             .get(&stake_rewards_key(id))
             .filter(|bytes| !bytes.is_empty())
-            .map(|bytes| from_bytes(bytes).expect("state holds a canonical reward book"))
+            .map(|bytes| from_bytes(bytes).unwrap_or_default())
             .unwrap_or_default()
     }
 
