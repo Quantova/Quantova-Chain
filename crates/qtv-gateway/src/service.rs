@@ -940,7 +940,6 @@ fn chain_params(ledger: &Ledger) -> Json {
                     "max_session_emission_bps",
                     Json::Int(qtv_staking::MAX_SESSION_EMISSION_BPS),
                 ),
-                ("gov_mint_max_bps", Json::Int(qtv_staking::GOV_MINT_MAX_BPS)),
                 ("session_days", Json::Int(qtv_staking::SESSION_DAYS)),
                 ("high_session_tx", Json::Int(qtv_staking::HIGH_SESSION_TX)),
                 (

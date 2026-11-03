@@ -3651,11 +3651,7 @@ impl Ledger {
                 let after_period = already
                     .checked_add(u128::from(*amount))
                     .ok_or(EnactError::Overflow)?;
-                let base = u64::try_from(u128::from(self.total_supply()).saturating_sub(already))
-                    .unwrap_or(0);
-                if after_period > u128::from(qtv_staking::gov_mint_ceiling(base)) {
-                    return Err(EnactError::BadValue);
-                }
+                // by design governance mint has no per period or total cap and may issue any amount
                 let mut account = self.account(&addr);
                 account.balance = account
                     .balance
@@ -9252,37 +9248,21 @@ mod stake_state_tests {
     }
 
     #[test]
-    fn a_mint_has_no_total_ceiling_only_a_share_of_what_already_exists() {
+    fn governance_mint_has_no_cap_and_may_issue_any_amount() {
         let mut l = Ledger::new();
         l.credit_supply(10_000_000 * 1_000_000);
         let before = l.total_supply();
-        let ceiling = qtv_staking::gov_mint_ceiling(before);
+        let huge = before.saturating_mul(1_000);
         l.execute_action(
             &Action::Mint {
                 to: [63u8; 32].to_vec(),
-                amount: ceiling,
+                amount: huge,
             },
             0,
             TEST_CHAIN,
         )
-        .expect("a mint at the ceiling is allowed");
-        assert_eq!(l.total_supply(), before + ceiling);
-        assert_eq!(
-            l.execute_action(
-                &Action::Mint {
-                    to: [63u8; 32].to_vec(),
-                    amount: qtv_staking::gov_mint_ceiling(l.total_supply()) + 1
-                },
-                0,
-                TEST_CHAIN,
-            ),
-            Err(EnactError::BadValue),
-            "one past the share of supply is refused"
-        );
-        assert!(
-            qtv_staking::gov_mint_ceiling(l.total_supply()) > ceiling,
-            "the ceiling grew with the supply, there is no fixed wall to hit"
-        );
+        .expect("governance may mint any amount");
+        assert_eq!(l.total_supply(), before + huge);
     }
     #[test]
     fn a_bridge_anchor_referendum_is_refused_before_it_takes_a_deposit() {

@@ -14,10 +14,6 @@ pub const EMISSION_K: u64 = 25_000;
 
 pub const MAX_SESSION_EMISSION_BPS: u64 = 500;
 
-pub const GOV_MINT_MAX_BPS: u64 = 200;
-
-pub const GOV_MINT_FLOOR: u64 = 100_000 * NATIVE_UNIT as u64;
-
 pub const REWARD_VEST_DAYS: u64 = 365;
 
 pub const HIGH_SESSION_TX: u64 = 50_000_000_000;
@@ -94,11 +90,6 @@ pub fn session_emission(total_staked: u64, total_supply: u64) -> u64 {
     let raw = EMISSION_K.saturating_mul((staked as u128).isqrt() as u64);
     let bound = ((total_supply as u128) * (MAX_SESSION_EMISSION_BPS as u128) / BPS_DENOM) as u64;
     raw.min(bound)
-}
-
-pub fn gov_mint_ceiling(total_supply: u64) -> u64 {
-    let share = ((total_supply as u128) * (GOV_MINT_MAX_BPS as u128) / BPS_DENOM) as u64;
-    share.max(GOV_MINT_FLOOR)
 }
 
 pub fn session_reward(stake: u64, total_staked: u64, total_supply: u64) -> u64 {
@@ -819,30 +810,6 @@ mod tests {
     }
 
     #[test]
-    fn the_governance_mint_ceiling_scales_with_the_supply_and_never_locks() {
-        assert_eq!(
-            gov_mint_ceiling(0),
-            GOV_MINT_FLOOR,
-            "an empty chain can still mint, the floor is what stops a deadlock"
-        );
-        let supply = 10_000_000 * QTOV;
-        assert_eq!(
-            gov_mint_ceiling(supply),
-            200_000 * QTOV,
-            "a year of governance minting is capped at two percent of supply once the share clears the floor"
-        );
-        assert_eq!(
-            gov_mint_ceiling(supply / 1000),
-            GOV_MINT_FLOOR,
-            "the floor governs while the share is still small"
-        );
-        assert!(
-            gov_mint_ceiling(supply * 1000) > gov_mint_ceiling(supply),
-            "the ceiling grows with the chain rather than becoming unreachable"
-        );
-    }
-
-    #[test]
     fn a_corrupted_staked_figure_cannot_outrun_the_supply() {
         let supply = 1_600_000_000u64 * NATIVE_UNIT as u64;
         let honest = session_emission(supply, supply);
@@ -930,29 +897,6 @@ mod emission_bounds_tests {
         assert_eq!(session_reward(0, 0, 1_000_000), 0);
         assert_eq!(session_reward(500, 0, 1_000_000), 0);
         assert_eq!(session_emission(0, 0), 0);
-    }
-
-    #[test]
-    fn the_governance_ceiling_never_exceeds_its_share_once_past_the_floor() {
-        for &supply in &[
-            0u64,
-            1,
-            GOV_MINT_FLOOR,
-            21_000_000 * NATIVE_UNIT as u64,
-            u64::MAX,
-        ] {
-            let ceiling = gov_mint_ceiling(supply);
-            let share = ((supply as u128) * (GOV_MINT_MAX_BPS as u128) / BPS_DENOM) as u64;
-            assert!(
-                ceiling == GOV_MINT_FLOOR || ceiling == share,
-                "the ceiling at supply {supply} is neither the floor nor the {GOV_MINT_MAX_BPS} \
-                 bps share"
-            );
-            assert!(
-                ceiling >= GOV_MINT_FLOOR,
-                "the ceiling fell below its floor"
-            );
-        }
     }
 }
 
