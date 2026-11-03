@@ -172,24 +172,26 @@ pub fn equivocation_offenders(
     roster: &[ValidatorRegistration],
 ) -> Vec<u64> {
     let chain_id: ChainBinding = chain_id.into();
+    let verified: Vec<&Attestation> = attestations
+        .iter()
+        .filter(|att| {
+            att.block.cost != VIEW_CHANGE_SUBJECT_COST
+                && roster
+                    .iter()
+                    .find(|r| r.id == att.from)
+                    .is_some_and(|reg| att.signature_verifies(chain_id, &reg.attest_pk))
+        })
+        .collect();
     let mut flagged: Vec<u64> = Vec::new();
-    for (index, first) in attestations.iter().enumerate() {
-        for second in &attestations[index + 1..] {
+    for (index, first) in verified.iter().enumerate() {
+        for second in &verified[index + 1..] {
             if first.from == second.from
                 && first.height == second.height
                 && first.view == second.view
                 && first.block != second.block
-                && first.block.cost != VIEW_CHANGE_SUBJECT_COST
-                && second.block.cost != VIEW_CHANGE_SUBJECT_COST
                 && !flagged.contains(&first.from)
             {
-                if let Some(registration) = roster.iter().find(|r| r.id == first.from) {
-                    if first.signature_verifies(chain_id, &registration.attest_pk)
-                        && second.signature_verifies(chain_id, &registration.attest_pk)
-                    {
-                        flagged.push(first.from);
-                    }
-                }
+                flagged.push(first.from);
             }
         }
     }
