@@ -7,7 +7,7 @@ set -euo pipefail
 QCORE="${QCORE:-qcore}"
 QUANTOVAD="${QUANTOVAD:-quantovad}"
 OUT="${OUT:-./testnet-live}"
-CHAIN_ID="${CHAIN_ID:-Q-testNet-1.0}"
+CHAIN_ID="${CHAIN_ID:-Q-testNet-1.1}"
 FAUCET_TQTOV="${FAUCET_TQTOV:-1000000}"
 STAKE="${STAKE:-2000}"
 RPC="${RPC:-127.0.0.1:8645}"

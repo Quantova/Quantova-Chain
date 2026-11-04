@@ -18,7 +18,7 @@ pub const DOMAIN_TX: &[u8] = b"quantova.transaction.v1";
 
 pub const LOCAL_CHAIN_NAME: &str = "Q-dev-net-1";
 
-pub const TESTNET_CHAIN_NAME: &str = "Q-testNet-1.0";
+pub const TESTNET_CHAIN_NAME: &str = "Q-testNet-1.1";
 
 pub const MAINNET_CHAIN_NAME: &str = "Q-main-net-1";
 
@@ -29,6 +29,7 @@ pub const RETIRED_CHAIN_NAMES: &[&str] = &[
     "Q-test-net-0001",
     "Test-Net-0-1",
     "Q-TestNet-1",
+    "Q-testNet-1.0",
 ];
 
 pub fn chain_name_is_retired(name: &str) -> bool {
@@ -37,7 +38,7 @@ pub fn chain_name_is_retired(name: &str) -> bool {
 
 pub const LOCAL_CHAIN_ID: u64 = 13749533161254861464;
 
-pub const TESTNET_CHAIN_ID: u64 = 8770332490016010042;
+pub const TESTNET_CHAIN_ID: u64 = 49882562325403262;
 
 pub const MAINNET_CHAIN_ID: u64 = 5296651311193914109;
 
