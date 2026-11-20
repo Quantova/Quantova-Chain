@@ -96,8 +96,6 @@ pub struct StateStore {
     committed_height: Option<u64>,
 }
 
-const HOLDER_FRESH: std::time::Duration = std::time::Duration::from_secs(30);
-
 fn holder_path(path: &Path) -> PathBuf {
     let mut p = path.to_path_buf().into_os_string();
     p.push(".holder");
@@ -106,12 +104,6 @@ fn holder_path(path: &Path) -> PathBuf {
 
 fn another_process_is_live(path: &Path) -> bool {
     let holder = holder_path(path);
-    let Ok(meta) = std::fs::metadata(&holder) else {
-        return false;
-    };
-    let Ok(modified) = meta.modified() else {
-        return false;
-    };
     let Ok(text) = std::fs::read_to_string(&holder) else {
         return false;
     };
@@ -121,13 +113,7 @@ fn another_process_is_live(path: &Path) -> bool {
     if pid == std::process::id() {
         return false;
     }
-    if process_is_alive(pid) {
-        return true;
-    }
-    std::time::SystemTime::now()
-        .duration_since(modified)
-        .map(|age| age < HOLDER_FRESH)
-        .unwrap_or(false)
+    process_is_alive(pid)
 }
 
 #[cfg(unix)]

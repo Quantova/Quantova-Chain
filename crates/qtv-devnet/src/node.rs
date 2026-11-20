@@ -377,6 +377,7 @@ pub struct DevNode {
     frozen_for: Option<Height>,
     served_blocks: RefCell<std::collections::VecDeque<(Height, std::sync::Arc<ServedBlock>)>>,
     served_budget: std::cell::Cell<(std::time::Instant, usize)>,
+    rpc_budget: std::cell::Cell<(std::time::Instant, usize)>,
     peer_served_budgets: RefCell<std::collections::HashMap<u64, (std::time::Instant, usize)>>,
     served_saturated: std::cell::Cell<bool>,
     chain: Vec<FinalizedBlock>,
@@ -523,6 +524,7 @@ impl DevNode {
             frozen_for: None,
             served_blocks: RefCell::new(std::collections::VecDeque::new()),
             served_budget: std::cell::Cell::new((std::time::Instant::now(), 0)),
+            rpc_budget: std::cell::Cell::new((std::time::Instant::now(), 0)),
             peer_served_budgets: RefCell::new(std::collections::HashMap::new()),
             served_saturated: std::cell::Cell::new(false),
             chain: Vec::new(),
@@ -1589,6 +1591,14 @@ impl DevNode {
             return false;
         }
         auth.signature_verifies(self.consensus.binding(), &member.attest_pk)
+            && auth.is_entitled_in(
+                self.consensus.draw_mode(),
+                &member.root,
+                &self.beacon,
+                member.weight,
+                selection.commitment.total_weight,
+                selection.commitment.budget,
+            )
     }
 
     pub fn accept_proposal(
@@ -2049,9 +2059,12 @@ impl DevNode {
         selection: &Selection,
         records: &[ViewChange],
     ) -> Result<Option<(View, LockedBlock)>, ()> {
+        let has_body = |block: &LockedBlock| -> bool {
+            !block.body.is_empty() || self.locked_body_for(&block.header.hash()).is_some()
+        };
         let Some(top) = records
             .iter()
-            .filter(|record| record.locked.is_some())
+            .filter(|record| record.locked.as_ref().is_some_and(|b| has_body(b)))
             .map(|record| record.lock_view)
             .max()
         else {
@@ -2063,7 +2076,7 @@ impl DevNode {
             let Some(block) = &record.locked else {
                 continue;
             };
-            if record.lock_view != top {
+            if record.lock_view != top || !has_body(block) {
                 continue;
             }
             let locked_value = header_value(&block.header.hash());
@@ -2078,7 +2091,13 @@ impl DevNode {
             if improves && locked_body_fits(block) {
                 if let Some(polka) = &record.polka {
                     if self.polka_backs(selection, top, record.lock_pol, block, polka) {
-                        backed = Some(block.clone());
+                        let mut chosen = block.clone();
+                        if chosen.body.is_empty() {
+                            if let Some(body) = self.locked_body_for(&chosen.header.hash()) {
+                                chosen.body = body;
+                            }
+                        }
+                        backed = Some(chosen);
                     }
                 }
             }
@@ -3426,7 +3445,7 @@ impl DevNode {
             return hit;
         }
         let bytes = self.block_store.block_by_height(height)?;
-        if !self.charge_served(bytes.len()) {
+        if !self.charge_rpc(bytes.len()) {
             return None;
         }
         let block = crate::wire::chain_block_from_bytes(&bytes).ok()?;
@@ -3435,6 +3454,10 @@ impl DevNode {
 
     fn charge_served(&self, bytes: usize) -> bool {
         self.charge_budget(&self.served_budget, bytes)
+    }
+
+    fn charge_rpc(&self, bytes: usize) -> bool {
+        self.charge_budget(&self.rpc_budget, bytes)
     }
 
     fn charge_peer_served(&self, peer: u64, bytes: usize) -> bool {
@@ -3501,7 +3524,7 @@ impl DevNode {
             return hit;
         }
         let bytes = self.block_store.block_by_hash(&hash)?;
-        if !self.charge_served(bytes.len()) {
+        if !self.charge_rpc(bytes.len()) {
             return None;
         }
         let block = crate::wire::chain_block_from_bytes(&bytes).ok()?;
@@ -3553,7 +3576,7 @@ impl DevNode {
             .events_at(height)
             .map(|leaves| {
                 let bytes = leaves.iter().map(|leaf| leaf.len()).sum();
-                if !self.charge_served(bytes) {
+                if !self.charge_rpc(bytes) {
                     return Vec::new();
                 }
                 leaves
@@ -3572,7 +3595,7 @@ impl DevNode {
             .events_at(height)
             .map(|leaves| {
                 let bytes = leaves.iter().map(|leaf| leaf.len()).sum();
-                if !self.charge_served(bytes) {
+                if !self.charge_rpc(bytes) {
                     return Vec::new();
                 }
                 leaves
@@ -3593,7 +3616,7 @@ impl DevNode {
         let payload = qtv_idfmt::parse_block(id).ok()?;
         let hash: [u8; 32] = payload.try_into().ok()?;
         let bytes = self.block_store.block_by_hash(&hash)?;
-        if !self.charge_served(bytes.len()) {
+        if !self.charge_rpc(bytes.len()) {
             return None;
         }
         crate::wire::chain_block_from_bytes(&bytes).ok()
@@ -3619,7 +3642,12 @@ impl DevNode {
             if !blocks.is_empty() && served.saturating_add(bytes.len()) > MAX_SERVE_BYTES {
                 break;
             }
-            if !self.charge_peer_served(peer, bytes.len()) || !self.charge_served(bytes.len()) {
+            let charged = if peer == LOCAL_SERVE_PEER {
+                self.charge_rpc(bytes.len())
+            } else {
+                self.charge_peer_served(peer, bytes.len()) && self.charge_served(bytes.len())
+            };
+            if !charged {
                 break;
             }
             match crate::wire::chain_block_from_bytes(&bytes) {

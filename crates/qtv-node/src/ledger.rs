@@ -10474,6 +10474,13 @@ impl Ledger {
         self.block_fresh_leaves
     }
 
+    pub fn would_reject_at_fresh_leaf_ceiling(&self) -> bool {
+        self.journal.is_none()
+            && self
+                .fresh_leaf_ceiling
+                .is_some_and(|ceiling| self.block_fresh_leaves >= ceiling)
+    }
+
     pub fn clear_block_fresh_leaves(&mut self) {
         self.block_fresh_leaves = 0;
     }
@@ -10528,7 +10535,7 @@ impl Ledger {
         if self.journal.is_none()
             && self
                 .fresh_leaf_ceiling
-                .is_some_and(|ceiling| self.block_fresh_leaves > ceiling)
+                .is_some_and(|ceiling| self.block_fresh_leaves >= ceiling)
         {
             return false;
         }
