@@ -564,7 +564,7 @@ impl LockViolation {
             || self
                 .prevote
                 .pol
-                .is_some_and(|pol| pol > self.precommit.view)
+                .is_some_and(|pol| pol >= self.precommit.view)
         {
             return false;
         }
@@ -1444,7 +1444,7 @@ mod tests {
     }
 
     #[test]
-    fn a_prevote_citing_its_own_lock_round_attributes_at_the_equal_boundary() {
+    fn a_prevote_citing_its_own_lock_round_is_a_valid_unlock_not_a_violation() {
         let (attester, address) = attester();
         let beacon = Beacon::genesis();
         let height = 1u64;
@@ -1507,8 +1507,8 @@ mod tests {
             prevote,
         };
         assert!(
-            violation.attributes(CHAIN_ID, attester.attest_public_key()),
-            "a prevote whose proof of lock equals its own precommit view is an unjustified unlock and must slash"
+            !violation.attributes(CHAIN_ID, attester.attest_public_key()),
+            "a prevote whose proof of lock equals its own precommit view is the unlock the node's own rule allows (pol >= lock.view), so an honest validator must not be slashable for it"
         );
         assert_eq!(LockViolation::decode(&violation.encode()), Some(violation));
     }

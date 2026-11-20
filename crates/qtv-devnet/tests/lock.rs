@@ -219,19 +219,35 @@ fn a_justified_proposal_carries_one_polka_and_no_locked_bodies_and_is_bound_by_i
         .build_justified_proposal(&selection, 2)
         .expect("a quorum justifies a proposal");
     assert_eq!(header_value(&justified.header.hash()), value_a);
-    assert!(justified
+    let binding: Vec<_> = justified
         .justification
         .iter()
-        .filter_map(|r| r.locked.as_ref())
-        .all(|locked| locked.body.is_empty()));
+        .filter(|r| r.polka.is_some())
+        .collect();
+    assert_eq!(binding.len(), 1, "the binding lock's polka is carried once");
     assert_eq!(
+        binding[0]
+            .locked
+            .as_ref()
+            .map(|b| header_value(&b.header.hash())),
+        Some(value_a),
+        "the carried polka binds value_a"
+    );
+    assert!(
+        binding[0]
+            .locked
+            .as_ref()
+            .is_some_and(|b| !b.body.is_empty()),
+        "the binding lock carries its body so it travels with the proposal"
+    );
+    assert!(
         justified
             .justification
             .iter()
-            .filter(|r| r.polka.is_some())
-            .count(),
-        1,
-        "the binding lock's polka is carried once"
+            .filter(|r| r.polka.is_none())
+            .filter_map(|r| r.locked.as_ref())
+            .all(|locked| locked.body.is_empty()),
+        "every non-binding lock record is stripped"
     );
     assert_eq!(
         nodes[follower].justification_bound(&selection, &justified.justification),

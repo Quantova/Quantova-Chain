@@ -1618,6 +1618,7 @@ fn dispatch_vm(
     signature_ok: bool,
     fee_params: &FeeParams,
     now_seconds: u64,
+    block_limited: bool,
 ) -> bool {
     let sender = wrapper.body().sender().to_string();
     if ledger.is_blacklisted(&sender) {
@@ -1666,19 +1667,29 @@ fn dispatch_vm(
     if legacy {
         ledger.collect_fee(network_fee);
     }
-    let failed = run_vm(
-        ledger,
-        &sender,
-        &target,
-        &args,
-        nonce,
-        meter,
-        value,
-        in_asset,
-        fee_params,
-        now_seconds,
-        legacy,
-    );
+    let failed = if block_limited {
+        ledger.arm_vm_meter(0);
+        Some((
+            qtv_vm::abort::Rule::BlockStateLimit,
+            0,
+            target.clone(),
+            [0u8; 4],
+        ))
+    } else {
+        run_vm(
+            ledger,
+            &sender,
+            &target,
+            &args,
+            nonce,
+            meter,
+            value,
+            in_asset,
+            fee_params,
+            now_seconds,
+            legacy,
+        )
+    };
     if let Some((rule, line, contract, selector)) = failed {
         ledger.note_call_failed(&wrapper.id(), &contract, selector, rule, line);
     }
@@ -1914,7 +1925,9 @@ fn execute_ordered_across(
             }
             ledger.set_current_tx(&wrapper.id());
             let ran = ledger.apply_atomic(|l| {
-                dispatch_vm(l, wrapper, verified[index], fee_params, now_seconds)
+                dispatch_vm(l, wrapper, verified[index], fee_params, now_seconds, false)
+            }) || ledger.apply_atomic(|l| {
+                dispatch_vm(l, wrapper, verified[index], fee_params, now_seconds, true)
             });
             ledger.set_current_tx("");
             let used = ledger.vm_meter_charge();

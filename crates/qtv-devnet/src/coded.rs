@@ -270,7 +270,7 @@ struct Pending {
     pieces: Vec<(Shard, ShardProof)>,
     overhead: usize,
     auth: Attestation,
-    auth_digest: [u8; 32],
+    subject: [u8; 32],
 }
 
 impl ProposalAssembler {
@@ -372,16 +372,16 @@ impl ProposalAssembler {
         self.prune(prune_floor);
 
         let slot = (height, coded.view);
-        let auth_digest = crate::wire::attestation_digest(&coded.auth);
+        let subject = coded.header.hash();
         match self.pinned.get(&slot) {
-            Some((pinned, pinned_auth)) => {
+            Some((pinned, pinned_subject)) => {
                 if *pinned != coded.commitment {
                     if self.spend_token(source) && verify_auth(&coded) {
                         self.observe(&coded);
                     }
                     return None;
                 }
-                if *pinned_auth != auth_digest {
+                if *pinned_subject != subject {
                     return None;
                 }
             }
@@ -397,7 +397,7 @@ impl ProposalAssembler {
                 }
                 self.observe(&coded);
                 self.pinned
-                    .insert(slot, (coded.commitment.clone(), auth_digest));
+                    .insert(slot, (coded.commitment.clone(), subject));
             }
         }
 
@@ -424,13 +424,13 @@ impl ProposalAssembler {
                     pieces: Vec::new(),
                     overhead,
                     auth,
-                    auth_digest,
+                    subject,
                 }
             });
             if entry.commitment != commitment {
                 return None;
             }
-            if entry.auth_digest != auth_digest {
+            if entry.subject != subject {
                 return None;
             }
             if entry.pieces.iter().any(|(s, _)| s.index == shard.index) {
@@ -905,36 +905,27 @@ mod tests {
     }
 
     #[test]
-    fn the_assembler_refuses_a_shard_whose_auth_differs_from_the_first() {
+    fn the_assembler_pins_on_the_subject_not_the_signature() {
         let proposal = sample_proposal(48, 0);
         let shards = code_proposal(&proposal).expect("code the proposal");
         let k = shards[0].commitment.k;
+        let n = shards[0].commitment.n;
         assert!(k > 1, "the proposal needs several shards");
 
         let mut assembler = ProposalAssembler::new();
-        assert!(
-            assembler
-                .admit(shards[0].clone(), GLOBAL_SOURCE, |_| true)
-                .is_none(),
-            "one shard does not complete a k>1 proposal"
-        );
-
-        let mut swapped = shards[1].clone();
-        swapped.auth.from ^= 1;
-        assert!(
-            assembler.admit(swapped, GLOBAL_SOURCE, |_| true).is_none(),
-            "a shard whose auth was changed is refused and cannot occupy the slot"
-        );
-
-        let mut outcome = None;
-        for shard in shards.iter().skip(1).take(k).cloned() {
-            if let Some(result) = assembler.admit(shard, GLOBAL_SOURCE, |_| true) {
-                outcome = Some(result);
+        let mut rebuilt = None;
+        for (fed, mut coded) in shards.iter().skip(n - k).cloned().enumerate() {
+            if fed % 2 == 1 {
+                coded.auth.from ^= 1;
+                coded.auth.sig[0] ^= 0xff;
+            }
+            if let Some(result) = assembler.admit(coded, GLOBAL_SOURCE, |_| true) {
+                rebuilt = Some(result.expect("k verified shards reconstruct"));
             }
         }
-        let rebuilt = outcome
-            .expect("the genuine shards still complete")
-            .expect("reassembly succeeds");
+        let rebuilt = rebuilt.expect(
+            "re-signed pieces over the same subject must count so no honest node is pinned out",
+        );
         same_proposal(&rebuilt, &proposal);
     }
 

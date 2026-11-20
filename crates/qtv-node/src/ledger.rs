@@ -10535,7 +10535,7 @@ impl Ledger {
         if self.journal.is_none()
             && self
                 .fresh_leaf_ceiling
-                .is_some_and(|ceiling| self.block_fresh_leaves >= ceiling)
+                .is_some_and(|ceiling| self.block_fresh_leaves > ceiling)
         {
             return false;
         }

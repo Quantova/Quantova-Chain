@@ -141,6 +141,10 @@ fn locked_body_fits(block: &LockedBlock) -> bool {
             && transaction_root(&block.body) == *block.header.transaction_root())
 }
 
+fn lock_body_present(block: &LockedBlock) -> bool {
+    transaction_root(&block.body) == *block.header.transaction_root()
+}
+
 fn body_bytes(body: &[Wrapper]) -> usize {
     body.iter()
         .map(|wrapper| to_bytes(wrapper).len())
@@ -2059,12 +2063,9 @@ impl DevNode {
         selection: &Selection,
         records: &[ViewChange],
     ) -> Result<Option<(View, LockedBlock)>, ()> {
-        let has_body = |block: &LockedBlock| -> bool {
-            !block.body.is_empty() || self.locked_body_for(&block.header.hash()).is_some()
-        };
         let Some(top) = records
             .iter()
-            .filter(|record| record.locked.as_ref().is_some_and(|b| has_body(b)))
+            .filter(|record| record.locked.as_ref().is_some_and(lock_body_present))
             .map(|record| record.lock_view)
             .max()
         else {
@@ -2076,7 +2077,7 @@ impl DevNode {
             let Some(block) = &record.locked else {
                 continue;
             };
-            if record.lock_view != top || !has_body(block) {
+            if record.lock_view != top || !lock_body_present(block) {
                 continue;
             }
             let locked_value = header_value(&block.header.hash());
@@ -2091,13 +2092,7 @@ impl DevNode {
             if improves && locked_body_fits(block) {
                 if let Some(polka) = &record.polka {
                     if self.polka_backs(selection, top, record.lock_pol, block, polka) {
-                        let mut chosen = block.clone();
-                        if chosen.body.is_empty() {
-                            if let Some(body) = self.locked_body_for(&chosen.header.hash()) {
-                                chosen.body = body;
-                            }
-                        }
-                        backed = Some(chosen);
+                        backed = Some(block.clone());
                     }
                 }
             }
@@ -2554,15 +2549,29 @@ impl DevNode {
             return;
         }
         let mut record = record;
+        let incoming_view = record.target_view;
+        let incoming_from = record.att.from;
         if let Some(block) = record.locked.as_mut() {
             let hash = block.header.hash();
-            let held = self.view_changes.iter().any(|r| {
-                r.att.from == record.att.from
-                    && r.locked
-                        .as_ref()
-                        .is_some_and(|held| !held.body.is_empty() && held.header.hash() == hash)
-            });
-            if held {
+            let mut kept_elsewhere = false;
+            for held in self.view_changes.iter_mut() {
+                if held.att.from != incoming_from {
+                    continue;
+                }
+                let held_view = held.target_view;
+                let Some(held_block) = held.locked.as_mut() else {
+                    continue;
+                };
+                if held_block.body.is_empty() || held_block.header.hash() != hash {
+                    continue;
+                }
+                if held_view >= incoming_view {
+                    kept_elsewhere = true;
+                } else {
+                    held_block.body = Vec::new();
+                }
+            }
+            if kept_elsewhere {
                 block.body = Vec::new();
             }
         }
@@ -3887,18 +3896,21 @@ fn view_sync_blocking(expected: u64, members: usize, tau: u64) -> usize {
 fn carried_justification(records: Vec<ViewChange>) -> Vec<ViewChange> {
     let top = records
         .iter()
-        .filter(|record| record.locked.is_some())
+        .filter(|record| record.locked.as_ref().is_some_and(lock_body_present))
         .map(|record| record.lock_view)
         .max();
     let mut backed = false;
     records
         .into_iter()
         .map(|mut record| {
+            let binds = Some(record.lock_view) == top
+                && record.polka.is_some()
+                && record.locked.as_ref().is_some_and(lock_body_present);
             if let Some(locked) = record.locked.as_mut() {
-                locked.body = Vec::new();
-                if Some(record.lock_view) == top && !backed && record.polka.is_some() {
+                if binds && !backed {
                     backed = true;
                 } else {
+                    locked.body = Vec::new();
                     record.polka = None;
                 }
             }
