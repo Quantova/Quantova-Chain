@@ -2870,6 +2870,7 @@ impl DevNode {
         let view = view.min(MAX_VIEW);
         if view > self.view {
             self.view = view;
+            self.release_restart_hold();
         }
     }
 
@@ -3002,7 +3003,10 @@ impl DevNode {
         }
         let attestations = self.round_atts.clone();
         match self.finalize(selection, &attestations) {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                self.release_restart_hold();
+                Ok(true)
+            }
             Err(RoundError::NotFinalized) => {
                 if self.fatal.is_none() {
                     self.finalize_failed_at = Some(attempt);
