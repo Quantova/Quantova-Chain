@@ -25,9 +25,9 @@ qtv-net = { path = "../qtv-net" }
 qtv-wipe = { path = "../qtv-wipe" }
 qtv-store = { path = "../qtv-store" }
 qtv-crypto = { git = "https://github.com/Quantova/Q-Crypto.git", rev = "38f41dede65ed1918e89402c61b711defe16ae26" }
-qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "fb9297cde5e447226bc590af47eeb9340d554ca1" }
-qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "fb9297cde5e447226bc590af47eeb9340d554ca1" }
-qtv-attest = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "fb9297cde5e447226bc590af47eeb9340d554ca1" }
+qtv-bft = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "72213272ef5249f933b05e6c8b72f2d8748595cf" }
+qtv-sampler = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "72213272ef5249f933b05e6c8b72f2d8748595cf" }
+qtv-attest = { git = "https://github.com/Quantova/QRC-CONSENSUS.git", rev = "72213272ef5249f933b05e6c8b72f2d8748595cf" }
 
 [dev-dependencies]
 qtv-devnet = { path = ".", features = ["test-fixtures"] }
