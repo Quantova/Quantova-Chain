@@ -1550,6 +1550,14 @@ impl DevNode {
     }
 
     pub fn coded_auth_ok(&self, selection: &Selection, coded: &CodedProposal) -> bool {
+        let floor = if coded.header.height() == self.height {
+            self.view
+        } else {
+            0
+        };
+        if coded.view > floor.saturating_add(ATTESTATION_VIEW_LOOKAHEAD) {
+            return false;
+        }
         self.header_auth_ok(
             selection,
             coded.view,
@@ -2478,6 +2486,8 @@ impl DevNode {
         if record.height != self.height {
             return;
         }
+        let current = self.view;
+        self.view_changes.retain(|r| r.target_view >= current);
         let held = self
             .view_changes
             .iter()
@@ -2754,6 +2764,11 @@ impl DevNode {
     }
 
     fn locked_body_for(&self, header_hash: &[u8; 32]) -> Option<Vec<Wrapper>> {
+        if let Some(staged) = &self.staged {
+            if !staged.body.is_empty() && &staged.header.hash() == header_hash {
+                return Some(staged.body.clone());
+            }
+        }
         for record in &self.view_changes {
             if let Some(block) = &record.locked {
                 if !block.body.is_empty() && &block.header.hash() == header_hash {
