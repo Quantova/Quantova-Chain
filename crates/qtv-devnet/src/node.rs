@@ -94,6 +94,8 @@ const TX_POSITION_BITS: u32 = 24;
 const TX_POSITION_UNKNOWN: u64 = (1 << TX_POSITION_BITS) - 1;
 const SERVED_BLOCK_CACHE: usize = 32;
 const SERVED_DECODE_BYTES_PER_SEC: usize = 16 * 1024 * 1024;
+const PEER_SERVE_BYTES_PER_SEC: usize = SERVED_DECODE_BYTES_PER_SEC / 2;
+pub(crate) const LOCAL_SERVE_PEER: u64 = u64::MAX;
 
 pub struct ServedBlock {
     pub block: ChainBlock,
@@ -375,7 +377,7 @@ pub struct DevNode {
     frozen_for: Option<Height>,
     served_blocks: RefCell<std::collections::VecDeque<(Height, std::sync::Arc<ServedBlock>)>>,
     served_budget: std::cell::Cell<(std::time::Instant, usize)>,
-    peer_served_budget: std::cell::Cell<(std::time::Instant, usize)>,
+    peer_served_budgets: RefCell<std::collections::HashMap<u64, (std::time::Instant, usize)>>,
     served_saturated: std::cell::Cell<bool>,
     chain: Vec<FinalizedBlock>,
     slashed: Vec<u64>,
@@ -521,7 +523,7 @@ impl DevNode {
             frozen_for: None,
             served_blocks: RefCell::new(std::collections::VecDeque::new()),
             served_budget: std::cell::Cell::new((std::time::Instant::now(), 0)),
-            peer_served_budget: std::cell::Cell::new((std::time::Instant::now(), 0)),
+            peer_served_budgets: RefCell::new(std::collections::HashMap::new()),
             served_saturated: std::cell::Cell::new(false),
             chain: Vec::new(),
             slashed: Vec::new(),
@@ -3431,8 +3433,28 @@ impl DevNode {
         self.charge_budget(&self.served_budget, bytes)
     }
 
-    fn charge_peer_served(&self, bytes: usize) -> bool {
-        self.charge_budget(&self.peer_served_budget, bytes)
+    fn charge_peer_served(&self, peer: u64, bytes: usize) -> bool {
+        if peer == LOCAL_SERVE_PEER {
+            return true;
+        }
+        let now = std::time::Instant::now();
+        let mut budgets = self.peer_served_budgets.borrow_mut();
+        budgets.retain(|_, (since, _)| now.duration_since(*since).as_secs() == 0);
+        let (mut since, mut spent) = budgets.get(&peer).copied().unwrap_or((now, 0));
+        let windows = now.duration_since(since).as_secs();
+        if windows > 0 {
+            let repaid = usize::try_from(windows)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(PEER_SERVE_BYTES_PER_SEC);
+            since = now;
+            spent = spent.saturating_sub(repaid);
+        }
+        if spent > 0 && spent.saturating_add(bytes) > PEER_SERVE_BYTES_PER_SEC {
+            self.served_saturated.set(true);
+            return false;
+        }
+        budgets.insert(peer, (since, spent.saturating_add(bytes)));
+        true
     }
 
     fn charge_budget(
@@ -3558,7 +3580,9 @@ impl DevNode {
     }
 
     pub fn block_at_height(&self, height: Height) -> Option<ChainBlock> {
-        self.serve_blocks(height, height).into_iter().next()
+        self.serve_blocks(LOCAL_SERVE_PEER, height, height)
+            .into_iter()
+            .next()
     }
 
     pub fn block_by_id(&self, id: &str) -> Option<ChainBlock> {
@@ -3579,7 +3603,7 @@ impl DevNode {
         self.height
     }
 
-    pub fn serve_blocks(&self, from: Height, to: Height) -> Vec<ChainBlock> {
+    pub fn serve_blocks(&self, peer: u64, from: Height, to: Height) -> Vec<ChainBlock> {
         let ceiling = serve_ceiling(from, to);
         let mut blocks = Vec::new();
         let mut height = from;
@@ -3591,7 +3615,7 @@ impl DevNode {
             if !blocks.is_empty() && served.saturating_add(bytes.len()) > MAX_SERVE_BYTES {
                 break;
             }
-            if !self.charge_peer_served(bytes.len()) {
+            if !self.charge_peer_served(peer, bytes.len()) || !self.charge_served(bytes.len()) {
                 break;
             }
             match crate::wire::chain_block_from_bytes(&bytes) {
@@ -3747,6 +3771,7 @@ impl DevNode {
         if let Some(guard) = self.prevote_guard.as_mut() {
             guard.raise_to(synced).map_err(|_| SyncError::Io)?;
         }
+        self.release_restart_hold();
         Ok(())
     }
 }

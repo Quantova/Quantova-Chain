@@ -15,7 +15,9 @@ use crate::coded::{code_proposal, ProposalAssembler};
 use crate::config::DevnetConfig;
 use crate::discovery::{PeerEntry, PeerTable};
 use crate::network::Network;
-use crate::node::{leader_for, p2p_identity, DevNode, Height, RoundError, SyncError, View};
+use crate::node::{
+    leader_for, p2p_identity, DevNode, Height, RoundError, SyncError, View, LOCAL_SERVE_PEER,
+};
 use crate::overlay::{ring_lattice, Seen};
 use crate::transport::{connect_duplex_pair, Mesh};
 use crate::wire::{gossip_id, CodedProposal, Message, Proposal, RegisterNote, RevealNote};
@@ -315,7 +317,7 @@ impl<S> Devnet<S> {
     }
 
     pub fn served_blocks(&self, index: usize, from: Height, to: Height) -> Vec<ChainBlock> {
-        self.nodes[index].serve_blocks(from, to)
+        self.nodes[index].serve_blocks(LOCAL_SERVE_PEER, from, to)
     }
 
     pub fn apply_synced(&mut self, index: usize, block: ChainBlock) -> Result<(), SyncError> {
@@ -710,7 +712,7 @@ impl<S: Read + Write> Devnet<S> {
                     Ok(Message::GetBlocks { from, to }) => (from, to),
                     _ => continue,
                 };
-                let blocks = self.nodes[j].serve_blocks(from, to);
+                let blocks = self.nodes[j].serve_blocks(LOCAL_SERVE_PEER, from, to);
                 let response = Message::Blocks(blocks).encode();
                 self.mesh.send(j, i, &response)?;
                 let served = self.mesh.recv_one(i, j)?;

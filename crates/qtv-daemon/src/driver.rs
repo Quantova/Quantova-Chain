@@ -1096,7 +1096,7 @@ impl Driver {
         match message {
             Message::Tx(transaction) => self.verify_gossiped(transaction),
             Message::GetBlocks { from, to } => {
-                let blocks = self.node.serve_blocks(from, to);
+                let blocks = self.node.serve_blocks(source, from, to);
                 if !blocks.is_empty() {
                     let reply = Message::Blocks(blocks).encode();
                     self.send_one(source as usize, &reply);
