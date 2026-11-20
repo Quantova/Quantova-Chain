@@ -10525,6 +10525,13 @@ impl Ledger {
     where
         F: FnOnce(&mut Ledger) -> bool,
     {
+        if self.journal.is_none()
+            && self
+                .fresh_leaf_ceiling
+                .is_some_and(|ceiling| self.block_fresh_leaves > ceiling)
+        {
+            return false;
+        }
         let events_mark = self.block_events.len();
         let side_mark = self.side_events.len();
         let leaves_mark = self.block_fresh_leaves;

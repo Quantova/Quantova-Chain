@@ -2940,7 +2940,7 @@ impl DevNode {
 
     pub fn on_timeout(&mut self, view: View) -> bool {
         self.release_restart_hold();
-        if self.view != view || self.staged.is_some() {
+        if self.view != view || (self.staged.is_some() && self.lock.is_some()) {
             return false;
         }
         self.view = self.view.saturating_add(1).min(MAX_VIEW);
