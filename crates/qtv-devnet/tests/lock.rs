@@ -237,8 +237,12 @@ fn a_justified_proposal_carries_one_polka_and_no_locked_bodies_and_is_bound_by_i
         binding[0]
             .locked
             .as_ref()
-            .is_some_and(|b| !b.body.is_empty()),
-        "the binding lock carries its body so it travels with the proposal"
+            .is_some_and(|b| b.body.is_empty()),
+        "the binding lock body is stripped so the coded proposal carries the body once"
+    );
+    assert!(
+        !justified.body.is_empty(),
+        "the body travels in the proposal body"
     );
     assert!(
         justified

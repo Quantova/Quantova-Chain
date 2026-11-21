@@ -1445,6 +1445,9 @@ impl DevNode {
                 data_len: 0,
             },
         );
+        if !crate::coded::commitment_in_bounds(&commitment) {
+            return None;
+        }
         let subject = proposal_subject(height, view, &header.hash(), &commitment);
         let guard = self.proposal_guard.as_mut()?;
         if !matches!(guard.try_prevote(height, view, &subject.val), Ok(true)) {
@@ -2007,7 +2010,7 @@ impl DevNode {
         if view < self.view {
             return Vec::new();
         }
-        let Some(records) = self.valid_justification(selection, &proposal.justification, view)
+        let Some(mut records) = self.valid_justification(selection, &proposal.justification, view)
         else {
             return Vec::new();
         };
@@ -2018,6 +2021,13 @@ impl DevNode {
             .is_some_and(|already| *already != proposed_value)
         {
             return Vec::new();
+        }
+        for record in records.iter_mut() {
+            if let Some(locked) = record.locked.as_mut() {
+                if locked.body.is_empty() && locked.header.hash() == proposal.header.hash() {
+                    locked.body = proposal.body.clone();
+                }
+            }
         }
         let Ok(high) = self.justified_lock(selection, &records) else {
             return Vec::new();
@@ -2063,9 +2073,12 @@ impl DevNode {
         selection: &Selection,
         records: &[ViewChange],
     ) -> Result<Option<(View, LockedBlock)>, ()> {
+        let has_body = |block: &LockedBlock| -> bool {
+            lock_body_present(block) || self.locked_body_for(&block.header.hash()).is_some()
+        };
         let Some(top) = records
             .iter()
-            .filter(|record| record.locked.as_ref().is_some_and(lock_body_present))
+            .filter(|record| record.locked.as_ref().is_some_and(|b| has_body(b)))
             .map(|record| record.lock_view)
             .max()
         else {
@@ -2077,7 +2090,7 @@ impl DevNode {
             let Some(block) = &record.locked else {
                 continue;
             };
-            if record.lock_view != top || !lock_body_present(block) {
+            if record.lock_view != top || !has_body(block) {
                 continue;
             }
             let locked_value = header_value(&block.header.hash());
@@ -2092,7 +2105,13 @@ impl DevNode {
             if improves && locked_body_fits(block) {
                 if let Some(polka) = &record.polka {
                     if self.polka_backs(selection, top, record.lock_pol, block, polka) {
-                        backed = Some(block.clone());
+                        let mut chosen = block.clone();
+                        if chosen.body.is_empty() {
+                            if let Some(body) = self.locked_body_for(&chosen.header.hash()) {
+                                chosen.body = body;
+                            }
+                        }
+                        backed = Some(chosen);
                     }
                 }
             }
@@ -2738,6 +2757,10 @@ impl DevNode {
             seen.push(record.att.from);
             valid.push(record.clone());
         }
+        let signers: Vec<u64> = valid.iter().map(|record| record.att.from).collect();
+        if !stake_quorum(selection, &signers) {
+            return (None, verifications);
+        }
         let backed_top = valid
             .iter()
             .filter(|record| record.polka.is_some())
@@ -2755,13 +2778,7 @@ impl DevNode {
             }),
             _ => true,
         });
-        let signers: Vec<u64> = valid.iter().map(|record| record.att.from).collect();
-        let out = if stake_quorum(selection, &signers) {
-            Some(valid)
-        } else {
-            None
-        };
-        (out, verifications)
+        (Some(valid), verifications)
     }
 
     #[cfg(any(test, feature = "test-fixtures"))]
@@ -3909,6 +3926,7 @@ fn carried_justification(records: Vec<ViewChange>) -> Vec<ViewChange> {
             if let Some(locked) = record.locked.as_mut() {
                 if binds && !backed {
                     backed = true;
+                    locked.body = Vec::new();
                 } else {
                     locked.body = Vec::new();
                     record.polka = None;
