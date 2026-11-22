@@ -77,7 +77,6 @@ dependencies = [
  "qtv-idfmt",
  "qtv-net",
  "qtv-node",
- "qtv-store",
  "qtv-tx",
  "qtv-wipe",
 ]
