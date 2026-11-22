@@ -77,6 +77,7 @@ fn main() {
     let outcome = match Command::parse() {
         Ok(Command::Run { config }) => run(&config),
         Ok(Command::Register(args)) => register(args),
+        Ok(Command::Prune { config, keep }) => prune(&config, keep),
         Err(reason) => Err(reason),
     };
     if let Err(reason) = outcome {
@@ -460,6 +461,24 @@ fn spawn_stop_watcher(path: PathBuf, stopped: Arc<AtomicBool>) {
 enum Command {
     Run { config: PathBuf },
     Register(RegisterArgs),
+    Prune { config: PathBuf, keep: usize },
+}
+
+fn prune(config_path: &Path, keep: usize) -> Result<(), String> {
+    let settings = config::NodeSettings::load(config_path)?;
+    let blocks = settings.store_dir.join("blocks.log");
+    util::log(&format!(
+        "pruning {} keeping the last {keep} blocks",
+        blocks.display()
+    ));
+    let (head, kept) = qtv_store::BlockStore::prune_keeping_last(&blocks, keep)
+        .map_err(|e| format!("prune failed: {e}"))?;
+    util::log(&format!(
+        "pruned, head {} kept {kept} blocks",
+        head.map(|h| h.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    ));
+    Ok(())
 }
 
 struct RegisterArgs {
@@ -481,6 +500,27 @@ impl Command {
         let first = args.next();
         if first.as_deref() == Some("register") {
             return Ok(Command::Register(RegisterArgs::parse(args)?));
+        }
+        if first.as_deref() == Some("prune") {
+            let mut config: Option<PathBuf> = None;
+            let mut keep: Option<usize> = None;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--config" => config = Some(PathBuf::from(need(&mut args, "--config")?)),
+                    "--keep" => {
+                        keep = Some(
+                            need(&mut args, "--keep")?
+                                .parse()
+                                .map_err(|_| "--keep needs a number".to_string())?,
+                        )
+                    }
+                    other => return Err(format!("unknown prune argument '{other}'. {USAGE}")),
+                }
+            }
+            return Ok(Command::Prune {
+                config: config.ok_or("prune needs --config <path>")?,
+                keep: keep.ok_or("prune needs --keep <blocks>")?,
+            });
         }
         let mut config: Option<PathBuf> = None;
         let mut current = first;

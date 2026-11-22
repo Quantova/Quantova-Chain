@@ -168,6 +168,47 @@ impl BlockStore {
         Ok(())
     }
 
+    pub fn prune_keeping_last(
+        path: impl AsRef<Path>,
+        keep: usize,
+    ) -> io::Result<(Option<u64>, usize)> {
+        let path = path.as_ref();
+        let src = BlockStore::open(path)?;
+        let total = src.heights.len();
+        if keep >= total {
+            return Ok((src.head_height, total));
+        }
+        let from = total - keep;
+        let tmp = path.with_extension("prune-tmp");
+        let _ = std::fs::remove_file(&tmp);
+        {
+            let mut dst = Log::open_scanned_strict(&tmp, |_, _, _| true)?;
+            for index in from..total {
+                let payload = src.log.read_payload(src.starts[index], src.lens[index])?;
+                dst.append(&payload)?;
+            }
+            dst.sync()?;
+        }
+        let verify = BlockStore::open(&tmp)?;
+        if verify.head_height != src.head_height || verify.heights.len() != keep {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(io::Error::other(
+                "pruned block log did not verify, leaving the original untouched",
+            ));
+        }
+        drop(verify);
+        drop(src);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup = path.with_extension(format!("prebak-{stamp}"));
+        std::fs::rename(path, &backup)?;
+        std::fs::rename(&tmp, path)?;
+        let reopened = BlockStore::open(path)?;
+        Ok((reopened.head_height, reopened.heights.len()))
+    }
+
     pub fn block_by_height(&self, height: u64) -> Option<Vec<u8>> {
         let index = self.heights.binary_search(&height).ok()?;
         self.read_block(index)

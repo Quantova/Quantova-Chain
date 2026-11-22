@@ -425,17 +425,18 @@ pub fn build_mesh(
 
     acceptor.join().expect("the acceptor thread joins");
 
+    let (down_tx, down_rx) = mpsc::sync_channel::<usize>(REJOIN_QUEUE);
     spawn_readers(
         &accepted_rx,
         up_peers,
         inbound_tx.clone(),
         Arc::clone(&queued_bytes),
         genesis_hash,
+        down_tx.clone(),
     );
 
     let (rejoined_tx, rejoined_rx) =
         mpsc::sync_channel::<(usize, Channel<TcpStream>)>(REJOIN_QUEUE);
-    let (down_tx, down_rx) = mpsc::sync_channel::<usize>(REJOIN_QUEUE);
     spawn_late_acceptor(
         late_listener,
         idx,
@@ -558,7 +559,7 @@ fn spawn_late_acceptor(
             let live_w = Arc::clone(&live);
             let queued_w = Arc::clone(&queued);
             let bar_w = bar.clone();
-            let _ = thread::Builder::new().spawn(move || {
+            let spawned = thread::Builder::new().spawn(move || {
                 let handshake = {
                     let _ip_guard = IpGuard(per_ip_w, slot_key);
                     let _guard = InflightGuard(inflight_w);
@@ -605,6 +606,17 @@ fn spawn_late_acceptor(
                     generation,
                 );
             });
+            if spawned.is_err() {
+                inflight.fetch_sub(1, Ordering::Relaxed);
+                if let Ok(mut map) = per_ip.lock() {
+                    if let Some(slot) = map.get_mut(&slot_key) {
+                        *slot = slot.saturating_sub(1);
+                        if *slot == 0 {
+                            map.remove(&slot_key);
+                        }
+                    }
+                }
+            }
         }
     });
 }
@@ -671,7 +683,7 @@ fn spawn_redialer(
             let tx = rejoined_tx.clone();
             let dialling_w = Arc::clone(&dialling);
             let last_connect_w = Arc::clone(&last_connect);
-            let _ = thread::Builder::new().spawn(move || {
+            let spawned = thread::Builder::new().spawn(move || {
                 if let Ok(seen) = last_connect_w.lock() {
                     if let Some(at) = seen.get(&q) {
                         let since = at.elapsed();
@@ -697,6 +709,11 @@ fn spawn_redialer(
                     d.remove(&q);
                 }
             });
+            if spawned.is_err() {
+                if let Ok(mut d) = dialling.lock() {
+                    d.remove(&q);
+                }
+            }
         }
     });
 }
@@ -827,6 +844,7 @@ fn spawn_readers(
     inbound_tx: SyncSender<(usize, Vec<u8>)>,
     queued: Arc<InboundBudget>,
     genesis_hash: [u8; 32],
+    down: SyncSender<usize>,
 ) {
     for _ in 0..up_peers {
         let Ok((from, channel)) = accepted_rx.recv() else {
@@ -834,8 +852,11 @@ fn spawn_readers(
         };
         let out = inbound_tx.clone();
         let queued = Arc::clone(&queued);
-        let _ = thread::Builder::new()
+        let spawned = thread::Builder::new()
             .spawn(move || read_peer(from, channel, out, queued, genesis_hash));
+        if spawned.is_err() {
+            let _ = down.try_send(from);
+        }
     }
 }
 

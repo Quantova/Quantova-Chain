@@ -24,6 +24,7 @@ qtv-tx = { path = "../qtv-tx" }
 qtv-governance = { path = "../qtv-governance" }
 
 qtv-block = { path = "../qtv-block" }
+qtv-store = { path = "../qtv-store" }
 
 qtv-net = { path = "../qtv-net" }
 
