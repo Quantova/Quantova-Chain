@@ -58,6 +58,9 @@ const FRAGMENT_FINAL: u8 = 0;
 const FRAGMENT_MORE: u8 = 1;
 const FRAGMENT_PAYLOAD: usize = crate::record::MAX_RECORD_PLAINTEXT - 1;
 
+pub const ASSEMBLY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_FRAGMENTS: usize = MAX_MESSAGE / FRAGMENT_PAYLOAD + 2;
+
 impl<S: Read + Write> Channel<S> {
     pub fn send(&mut self, message: &[u8]) -> Result<()> {
         if message.len() > MAX_MESSAGE {
@@ -82,9 +85,16 @@ impl<S: Read + Write> Channel<S> {
     }
 
     pub fn recv(&mut self) -> Result<Vec<u8>> {
+        let start = std::time::Instant::now();
+        let mut fragments: usize = 0;
         loop {
             let record = self.opener.open(&mut self.stream)?;
             let (&flag, payload) = record.split_first().ok_or(crate::Error::BadFragment)?;
+            fragments += 1;
+            if fragments > MAX_FRAGMENTS || start.elapsed() > ASSEMBLY_DEADLINE {
+                self.partial = Vec::new();
+                return Err(crate::Error::MessageTooLarge);
+            }
             if self.partial.len() + payload.len() > MAX_MESSAGE {
                 self.partial = Vec::new();
                 return Err(crate::Error::MessageTooLarge);

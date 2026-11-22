@@ -434,13 +434,24 @@ pub fn serve(
             let requests = requests.clone();
             let limiter = limiter.clone();
             let throttle_limiter = limiter.clone();
-            thread::spawn(move || {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _ =
-                        handle_connection(stream, requests, throttle_limiter, loopback_only, ip);
-                }));
-                limiter.release(ip);
+            let spawn = thread::Builder::new().spawn({
+                let limiter = limiter.clone();
+                move || {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _ = handle_connection(
+                            stream,
+                            requests,
+                            throttle_limiter,
+                            loopback_only,
+                            ip,
+                        );
+                    }));
+                    limiter.release(ip);
+                }
             });
+            if spawn.is_err() {
+                limiter.release(ip);
+            }
         }
     });
 }

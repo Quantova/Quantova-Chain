@@ -558,7 +558,7 @@ fn spawn_late_acceptor(
             let live_w = Arc::clone(&live);
             let queued_w = Arc::clone(&queued);
             let bar_w = bar.clone();
-            thread::spawn(move || {
+            let _ = thread::Builder::new().spawn(move || {
                 let handshake = {
                     let _ip_guard = IpGuard(per_ip_w, slot_key);
                     let _guard = InflightGuard(inflight_w);
@@ -671,7 +671,7 @@ fn spawn_redialer(
             let tx = rejoined_tx.clone();
             let dialling_w = Arc::clone(&dialling);
             let last_connect_w = Arc::clone(&last_connect);
-            thread::spawn(move || {
+            let _ = thread::Builder::new().spawn(move || {
                 if let Ok(seen) = last_connect_w.lock() {
                     if let Some(at) = seen.get(&q) {
                         let since = at.elapsed();
@@ -834,7 +834,8 @@ fn spawn_readers(
         };
         let out = inbound_tx.clone();
         let queued = Arc::clone(&queued);
-        thread::spawn(move || read_peer(from, channel, out, queued, genesis_hash));
+        let _ = thread::Builder::new()
+            .spawn(move || read_peer(from, channel, out, queued, genesis_hash));
     }
 }
 
